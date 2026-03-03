@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PQMsg Android Demo</string>
+    <string name="setup_title">Setup</string>
+    <string name="chat_title">Chat</string>
+    <string name="hint_server">Server URL</string>
+    <string name="hint_user">User ID</string>
+    <string name="hint_device">Device ID</string>
+    <string name="hint_suite">Suite (ml-kem-768 or kyber768)</string>
+    <string name="hint_peer">Peer User ID</string>
+    <string name="hint_message">Message</string>
+    <string name="button_generate">Generate Identity Keys</string>
+    <string name="button_register">Register User</string>
+    <string name="button_publish">Publish Prekeys</string>
+    <string name="button_open_chat">Open Chat</string>
+    <string name="button_fetch_bundle">Fetch Peer Bundle</string>
+    <string name="button_send">Send Encrypted</string>
+    <string name="button_poll">Poll Inbox</string>
+    <string name="button_back_setup">Back To Setup</string>
+    <string name="status_ready">Ready</string>
+    <string name="chat_log_empty">No messages yet</string>
+</resources>

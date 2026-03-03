@@ -1,0 +1,29 @@
+[package]
+name = "pqmsg-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pqmsg-core = { path = ".." }
+
+[[bin]]
+name = "fuzz_tlv_decode"
+path = "fuzz_targets/fuzz_tlv_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_wire_decode"
+path = "fuzz_targets/fuzz_wire_decode.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

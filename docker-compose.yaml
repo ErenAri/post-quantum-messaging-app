@@ -1,0 +1,17 @@
+services:
+  pqmsg-server:
+    image: rust:1.82
+    working_dir: /workspace
+    command: cargo run -p pqmsg-server
+    ports:
+      - "8080:8080"
+    environment:
+      PQMSG_BIND: "0.0.0.0:8080"
+      PQMSG_DATABASE_URL: "sqlite:///data/pqmsg-server.db"
+      RUST_LOG: "pqmsg_server=info"
+    volumes:
+      - ./:/workspace
+      - pqmsg_sqlite:/data
+
+volumes:
+  pqmsg_sqlite:

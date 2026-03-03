@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+.idea
+.vscode
+*.db
+*.db-shm
+*.db-wal
+mobile/android/.gradle
+mobile/android/local.properties
+mobile/android/app/build
+mobile/android/app/src/main/jniLibs
