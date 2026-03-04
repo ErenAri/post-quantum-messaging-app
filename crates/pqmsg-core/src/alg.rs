@@ -21,16 +21,11 @@ impl VersionedAlgorithmId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
 pub enum KemAlgorithm {
+    #[default]
     MlKem768,
     Kyber768Alias,
-}
-
-impl Default for KemAlgorithm {
-    fn default() -> Self {
-        Self::MlKem768
-    }
 }
 
 impl KemAlgorithm {
@@ -53,15 +48,10 @@ impl KemAlgorithm {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
 pub enum DhAlgorithm {
+    #[default]
     X25519,
-}
-
-impl Default for DhAlgorithm {
-    fn default() -> Self {
-        Self::X25519
-    }
 }
 
 impl DhAlgorithm {
@@ -72,15 +62,10 @@ impl DhAlgorithm {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
 pub enum KdfAlgorithm {
+    #[default]
     HkdfSha256,
-}
-
-impl Default for KdfAlgorithm {
-    fn default() -> Self {
-        Self::HkdfSha256
-    }
 }
 
 impl KdfAlgorithm {
@@ -91,15 +76,10 @@ impl KdfAlgorithm {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
 pub enum AeadAlgorithm {
+    #[default]
     ChaCha20Poly1305,
-}
-
-impl Default for AeadAlgorithm {
-    fn default() -> Self {
-        Self::ChaCha20Poly1305
-    }
 }
 
 impl AeadAlgorithm {
@@ -110,15 +90,10 @@ impl AeadAlgorithm {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
 pub enum SignatureAlgorithm {
+    #[default]
     External,
-}
-
-impl Default for SignatureAlgorithm {
-    fn default() -> Self {
-        Self::External
-    }
 }
 
 impl SignatureAlgorithm {
@@ -177,6 +152,32 @@ impl AlgorithmSuite {
             _ => Err(CoreError::UnsupportedAlgorithm("suite.id")),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct RuntimeCryptoProfile {
+    pub protocol_version: u16,
+    pub suite_id: u16,
+    pub kem: KemAlgorithm,
+    pub dh: DhAlgorithm,
+    pub kdf: KdfAlgorithm,
+    pub aead: AeadAlgorithm,
+    pub signature: SignatureAlgorithm,
+    pub pq_oqs_enabled: bool,
+}
+
+pub fn runtime_crypto_profile() -> Result<RuntimeCryptoProfile, CoreError> {
+    let suite = AlgorithmSuite::default();
+    Ok(RuntimeCryptoProfile {
+        protocol_version: PROTOCOL_VERSION_V1,
+        suite_id: suite.suite_id()?,
+        kem: suite.kem,
+        dh: suite.dh,
+        kdf: suite.kdf,
+        aead: suite.aead,
+        signature: suite.signature,
+        pq_oqs_enabled: cfg!(feature = "pq-oqs"),
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -2,43 +2,59 @@
 
 ## 1. Scope
 
-This document describes the HTTP/JSON interface exposed by `pqmsg-server` under base path `/v1`.
+This document specifies the HTTP/JSON interface for `pqmsg-server` under `/v1`.  
+The service is intentionally minimal and stores only public key material plus opaque ciphertext blobs.
 
 - Content type: `application/json`
 - Error type: `application/problem+json`
-- Body size limit: approximately `1 MB`
+- Request body limit: `1,048,576` bytes
 
-## 2. Service Flow
+## 2. Service Lifecycle
 
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant S as pqmsg-server
+    participant S as Server
     C->>S: POST /users/register
     C->>S: POST /users/{id}/prekeys
     C->>S: GET /users/{peer}/bundle
-    C->>S: POST /relay/{recipient}
+    C->>S: POST /relay/{peer}
     C->>S: GET /inbox/{id}?since=n
 ```
 
-## 3. Endpoint Definitions
+## 3. Identity and Prekey Security Semantics
 
-### 3.1 Register User
+```mermaid
+flowchart TD
+    A[First registration] --> B[Identity bound to user_id]
+    B --> C[Subsequent register with changed key => 409 Conflict]
+    D[Prekey upload] --> E[Server reconstructs SPK/PQSPK signature transcripts]
+    E --> F[Ed25519 verify under registered identity_sig_pub]
+    F --> G[Accept only valid ownership proof]
+```
+
+- `user_id` identity bindings are immutable after first successful registration.
+- Re-registration with changed identity material is rejected (`409 Conflict`).
+- Prekey signatures are verified using Ed25519 before persistence.
+
+## 4. Endpoint Definitions
+
+### 4.1 Register User
 
 `POST /v1/users/register`
 
-Request body:
+Request:
 
 ```json
 {
   "user_id": "alice",
-  "identity_x25519_pub": "base64...",
-  "identity_sig_pub": "base64...",
+  "identity_x25519_pub": "base64(32 bytes)",
+  "identity_sig_pub": "base64(32-byte Ed25519 public key)",
   "device_id": "alice-device-1"
 }
 ```
 
-Response body:
+Success response:
 
 ```json
 {
@@ -48,40 +64,45 @@ Response body:
 }
 ```
 
-### 3.2 Publish Prekeys
+Conflict response (`identity_x25519_pub`, `identity_sig_pub`, or `device_id` changed for existing `user_id`):
+
+```json
+{
+  "type": "about:blank",
+  "title": "Conflict",
+  "status": 409,
+  "detail": "user_id is already registered with an immutable identity"
+}
+```
+
+### 4.2 Publish Prekeys
 
 `POST /v1/users/{user_id}/prekeys`
 
-Request body:
+Request:
 
 ```json
 {
-  "signed_prekey_x25519_pub": "base64...",
-  "sig_over_spk": "base64...",
-  "pq_signed_prekey_pub_mlkem768": "base64...",
-  "sig_over_pqspk": "base64...",
-  "one_time_prekeys_x25519": ["base64..."],
-  "one_time_prekeys_mlkem768": ["base64..."]
+  "signed_prekey_x25519_pub": "base64(32 bytes)",
+  "sig_over_spk": "base64(64-byte Ed25519 signature)",
+  "pq_signed_prekey_pub_mlkem768": "base64(variable)",
+  "sig_over_pqspk": "base64(64-byte Ed25519 signature)",
+  "one_time_prekeys_x25519": ["base64(32 bytes)"],
+  "one_time_prekeys_mlkem768": ["base64(variable)"]
 }
 ```
 
-Response body:
+The server verifies:
 
-```json
-{
-  "user_id": "alice",
-  "device_id": "alice-device-1",
-  "uploaded_one_time_prekeys_x25519": 1,
-  "uploaded_one_time_prekeys_mlkem768": 1,
-  "updated_at": "2026-03-04T12:00:00Z"
-}
-```
+1. `sig_over_spk` over protocol transcript for `SPK`,
+2. `sig_over_pqspk` over protocol transcript for `PQSPK`,
+3. both under registered `identity_sig_pub`.
 
-### 3.3 Fetch Bundle
+### 4.3 Fetch Bundle
 
 `GET /v1/users/{user_id}/bundle`
 
-Response body:
+Response:
 
 ```json
 {
@@ -93,42 +114,33 @@ Response body:
   "sig_over_spk": "base64...",
   "pq_signed_prekey_pub_mlkem768": "base64...",
   "sig_over_pqspk": "base64...",
-  "one_time_prekey_x25519": "base64...",
-  "one_time_prekey_mlkem768": "base64...",
+  "one_time_prekey_x25519": "base64 or null",
+  "one_time_prekey_mlkem768": "base64 or null",
   "bundle_generated_at": "2026-03-04T12:00:00Z"
 }
 ```
 
-One-time fields may be `null` if exhausted.
-
-### 3.4 Relay Message
+### 4.4 Relay Message
 
 `POST /v1/relay/{recipient_user_id}`
 
-Request body:
+Request:
 
 ```json
 {
   "sender_user_id": "alice",
   "device_id": "alice-device-1",
-  "message_bytes_base64": "base64..."
+  "message_bytes_base64": "base64(ciphertext bytes)"
 }
 ```
 
-Response body:
+The payload is treated as opaque and persisted without server-side plaintext processing.
 
-```json
-{
-  "message_id": 42,
-  "received_at": "2026-03-04T12:00:00Z"
-}
-```
-
-### 3.5 Poll Inbox
+### 4.5 Poll Inbox
 
 `GET /v1/inbox/{user_id}?since=<message_id>`
 
-Response body:
+Response:
 
 ```json
 {
@@ -137,31 +149,21 @@ Response body:
     {
       "message_id": 42,
       "sender_user_id": "bob",
-      "message_bytes_base64": "base64...",
+      "message_bytes_base64": "base64(...)",
       "received_at": "2026-03-04T12:00:00Z"
     }
   ]
 }
 ```
 
-## 4. Validation and Limits
+## 5. Validation and Limits
 
-- request body maximum: `1,048,576` bytes,
-- decoded relay payload maximum: `1,000,000` bytes,
-- one-time prekey list maximum: `256` entries per family,
-- endpoint rate limiting via in-memory token bucket.
+- one-time prekey family maximum: `256` entries each,
+- relay decoded blob maximum: `1,000,000` bytes,
+- inbox page maximum: `200` messages,
+- endpoint-level in-memory token bucket rate limiting.
 
-## 5. Error Semantics
+## 6. Transport Requirement
 
-Errors use problem JSON:
-
-```json
-{
-  "type": "about:blank",
-  "title": "Bad Request",
-  "status": 400,
-  "detail": "identity_x25519_pub decoded length must be between 32 and 32"
-}
-```
-
-No plaintext message body is processed at the server beyond opaque blob validation and persistence.
+Plain HTTP is acceptable only for local demonstration.  
+Operational deployments must terminate TLS and should enforce certificate pinning at clients.

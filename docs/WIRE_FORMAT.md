@@ -1,18 +1,16 @@
 # WIRE_FORMAT
 
-## 1. Encoding Model
+## 1. TLV Encoding
 
-All binary wire structures use TLV framing:
+All binary messages use length-delimited TLV encoding:
 
-- `Type`: `u16` big-endian,
-- `Length`: `u16` big-endian,
-- `Value`: `Length` bytes.
+- `Type`: `u16` big-endian
+- `Length`: `u16` big-endian
+- `Value`: `Length` bytes
 
-Unknown critical tags are rejected by strict decoders.
+Strict decoders reject unknown critical tags and duplicate critical tags.
 
-## 2. WireMessage Schema (v1)
-
-`WireMessage` is used by the session ratchet channel.
+## 2. Session WireMessage (v1)
 
 | Tag (effective) | Field | Type |
 |---|---|---|
@@ -25,49 +23,45 @@ Unknown critical tags are rejected by strict decoders.
 | `0x9007` | `aead_nonce` | 12-byte nonce |
 | `0x9008` | `ciphertext` | byte string |
 
-## 3. Initial Handshake Message (v1)
+## 3. Handshake InitialMessage (v1)
 
-The initial PQXDH-style message includes:
+The initial handshake message carries:
 
-- protocol version,
-- suite identifier,
-- sender/recipient identifiers,
-- initiator identity public key,
-- initiator ephemeral public key,
-- PQ ciphertext,
-- AEAD nonce and ciphertext.
+1. protocol version,
+2. suite identifier,
+3. sender/recipient identifiers,
+4. initiator identity and ephemeral X25519 public keys,
+5. PQ KEM ciphertext,
+6. AEAD nonce and ciphertext.
 
-## 4. Associated Data Binding
-
-The implementation binds version and suite identifiers into associated data.
+## 4. AEAD Associated Data Binding
 
 ```mermaid
 flowchart TD
-    A[Protocol version] --> AD[AEAD Associated Data]
-    B[Suite ID] --> AD
-    C[Identity context or external AD] --> AD
+    A[version] --> AD[Authenticated Associated Data]
+    B[suite_id] --> AD
+    C[sender_dh_pub] --> AD
+    D[msg_num] --> AD
+    E[prev_chain_len] --> AD
+    F[pq_step_ct when present] --> AD
+    G[external application AD] --> AD
 ```
 
-Handshake AD additionally includes both identity public keys.  
-Session AD includes external caller-provided AD bytes.
+Handshake AD also includes initiator and responder identity public keys.
 
-## 5. Parsing Requirements
+## 5. Integrity and Downgrade Properties
+
+- `version` and `suite_id` are cryptographically bound by AEAD.
+- Session decryption rejects suite mismatch relative to established state.
+- Ratchet header metadata, including optional `pq_step_ct`, is authenticated through AD.
+
+This prevents unauthenticated metadata mutation that could otherwise induce ratchet divergence.
+
+## 6. Parser Requirements
 
 A conforming decoder MUST:
 
 1. reject truncated headers and over-declared lengths,
-2. reject duplicate critical tags in strict mode,
-3. reject unknown critical tags in strict mode,
-4. require all mandatory fields for each message class.
-
-A decoder SHOULD be panic-free on untrusted input.
-
-## 6. Downgrade-Relevant Rules
-
-- `version` and `suite_id` are authenticated through associated data.
-- session decryption rejects wire messages with suite mismatch against established state.
-- unknown suite identifiers are rejected during handshake receive.
-
-## 7. Implementation Note
-
-The current code uses critical-tag encoding with the high bit set, yielding effective wire tags in the `0x9xxx` range for `WireMessage`.
+2. reject unknown critical TLV types in strict mode,
+3. reject duplicate critical fields in strict mode,
+4. return typed errors without panic on adversarial input.

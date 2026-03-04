@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn fuzz_like_invalid_inputs_rejected() {
         let known = [critical_type(0x0001)];
-        let invalid_inputs = vec![
+        let invalid_inputs = [
             vec![],
             vec![0x80, 0x01, 0x00],
             vec![0x80, 0x01, 0x00, 0x02, 0xaa],

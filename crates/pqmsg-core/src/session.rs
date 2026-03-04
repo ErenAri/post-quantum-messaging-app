@@ -18,6 +18,10 @@ const INFO_INITIATOR_RECV: &[u8] = b"pqmsg-session-initiator-recv";
 const AD_TAG_PROTOCOL_VERSION: u16 = critical_type(0x1101);
 const AD_TAG_SUITE_ID: u16 = critical_type(0x1102);
 const AD_TAG_EXTERNAL_AD: u16 = critical_type(0x1103);
+const AD_TAG_SENDER_DH_PUB: u16 = critical_type(0x1104);
+const AD_TAG_MSG_NUM: u16 = critical_type(0x1105);
+const AD_TAG_PREV_CHAIN_LEN: u16 = critical_type(0x1106);
+const AD_TAG_PQ_STEP_CT: u16 = critical_type(0x1107);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionRole {
@@ -197,9 +201,6 @@ impl SessionState {
 
     pub fn encrypt(&mut self, message: &[u8], ad: &[u8]) -> Result<Vec<u8>, CoreError> {
         let (msg_num, mut message_key) = self.sending_chain.next_message_key()?;
-        let mut rng = OsRng;
-        let associated_data = session_associated_data(self.version, self.suite_id, ad)?;
-        let envelope = encrypt_with_rng(&message_key, message, &associated_data, &mut rng)?;
         #[cfg(feature = "pq_ratchet")]
         let mut pq_step_ct = None;
         #[cfg(not(feature = "pq_ratchet"))]
@@ -213,12 +214,26 @@ impl SessionState {
             }
         }
 
+        let sender_dh_pub = self.local_dh.public.0;
+        let prev_chain_len = self.prev_chain_len;
+        let associated_data = session_associated_data(
+            self.version,
+            self.suite_id,
+            &sender_dh_pub,
+            msg_num,
+            prev_chain_len,
+            pq_step_ct.as_deref(),
+            ad,
+        )?;
+        let mut rng = OsRng;
+        let envelope = encrypt_with_rng(&message_key, message, &associated_data, &mut rng)?;
+
         let wire = WireMessage {
             version: self.version,
             suite_id: self.suite_id,
-            sender_dh_pub: self.local_dh.public.0,
+            sender_dh_pub,
             msg_num,
-            prev_chain_len: self.prev_chain_len,
+            prev_chain_len,
             pq_step_ct,
             aead_nonce: envelope.nonce,
             ciphertext: envelope.ciphertext,
@@ -260,7 +275,15 @@ impl SessionState {
         let envelope = CiphertextEnvelope {
             nonce: wire.aead_nonce,
             ciphertext: wire.ciphertext,
-            aad: session_associated_data(wire.version, wire.suite_id, ad)?,
+            aad: session_associated_data(
+                wire.version,
+                wire.suite_id,
+                &wire.sender_dh_pub,
+                wire.msg_num,
+                wire.prev_chain_len,
+                wire.pq_step_ct.as_deref(),
+                ad,
+            )?,
         };
         let plaintext = decrypt(&message_key, &envelope)?;
         message_key.zeroize();
@@ -309,9 +332,13 @@ impl SessionState {
 fn session_associated_data(
     version: u16,
     suite_id: u16,
+    sender_dh_pub: &[u8; 32],
+    msg_num: u32,
+    prev_chain_len: u32,
+    pq_step_ct: Option<&[u8]>,
     external_ad: &[u8],
 ) -> Result<Vec<u8>, CoreError> {
-    encode(&[
+    let mut records = vec![
         TlvRecord {
             ty: AD_TAG_PROTOCOL_VERSION,
             value: version.to_be_bytes().to_vec(),
@@ -321,10 +348,29 @@ fn session_associated_data(
             value: suite_id.to_be_bytes().to_vec(),
         },
         TlvRecord {
+            ty: AD_TAG_SENDER_DH_PUB,
+            value: sender_dh_pub.to_vec(),
+        },
+        TlvRecord {
+            ty: AD_TAG_MSG_NUM,
+            value: msg_num.to_be_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: AD_TAG_PREV_CHAIN_LEN,
+            value: prev_chain_len.to_be_bytes().to_vec(),
+        },
+        TlvRecord {
             ty: AD_TAG_EXTERNAL_AD,
             value: external_ad.to_vec(),
         },
-    ])
+    ];
+    if let Some(pq_step_ct) = pq_step_ct {
+        records.push(TlvRecord {
+            ty: AD_TAG_PQ_STEP_CT,
+            value: pq_step_ct.to_vec(),
+        });
+    }
+    encode(&records)
 }
 
 #[cfg(test)]
@@ -620,5 +666,46 @@ mod tests {
         let wire3 = bob.encrypt(b"b1", ad).expect("encrypt b1");
         let plain3 = alice.decrypt(&wire3, ad).expect("decrypt b1");
         assert_eq!(plain3, b"b1");
+    }
+
+    #[cfg(feature = "pq_ratchet")]
+    #[test]
+    fn tampered_pq_step_ciphertext_is_rejected() {
+        let (mut alice, mut bob) = setup_sessions(32);
+        let ad = b"session-ad";
+        let mut rng = OsRng;
+        let mut alice_pq = [0u8; 32];
+        let mut bob_pq = [0u8; 32];
+        rng.fill_bytes(&mut alice_pq);
+        rng.fill_bytes(&mut bob_pq);
+
+        alice.enable_pq_ratchet(
+            PqRatchetState {
+                interval: 1,
+                local_public_key: alice_pq.to_vec(),
+                local_secret_key: SecretBytes::from(alice_pq.to_vec()),
+                remote_public_key: bob_pq.to_vec(),
+            },
+            Box::new(MockKem),
+        );
+        bob.enable_pq_ratchet(
+            PqRatchetState {
+                interval: 1,
+                local_public_key: bob_pq.to_vec(),
+                local_secret_key: SecretBytes::from(bob_pq.to_vec()),
+                remote_public_key: alice_pq.to_vec(),
+            },
+            Box::new(MockKem),
+        );
+
+        let wire = alice.encrypt(b"payload", ad).expect("encrypt");
+        let mut parsed = WireMessage::decode(&wire).expect("decode");
+        let mut pq_step_ct = parsed.pq_step_ct.take().expect("pq step present");
+        pq_step_ct[0] ^= 0x01;
+        parsed.pq_step_ct = Some(pq_step_ct);
+        let tampered = parsed.encode().expect("encode");
+
+        let result = bob.decrypt(&tampered, ad);
+        assert!(matches!(result, Err(CoreError::AeadOperation)));
     }
 }

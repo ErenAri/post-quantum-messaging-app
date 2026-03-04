@@ -1,32 +1,40 @@
 # ANDROID
 
-## 1. Purpose
+## 1. Objective
 
-This document defines the reproducible Android build and demonstration workflow for the Rust-backed mobile prototype.
+This document defines a reproducible Android demonstration workflow in which transport remains Kotlin-native while cryptographic operations are executed in Rust via UniFFI.
 
 ## 2. Architecture
 
 ```mermaid
 flowchart LR
-    UI[Kotlin UI] --> NET[Retrofit/OkHttp transport]
+    UI[Kotlin Setup/Chat UI] --> NET[Retrofit + OkHttp]
     UI --> UNI[UniFFI Kotlin bindings]
     UNI --> SO[libpqmsg_android.so]
     SO --> CORE[pqmsg-core]
     NET --> SRV[pqmsg-server]
 ```
 
-Cryptography and session logic execute in Rust.  
-The Android layer performs transport orchestration and view-state management.
+## 3. Rust FFI Surface
 
-## 3. Prerequisites
+The Rust bridge exports functions for:
 
-- Android Studio with SDK 34 components,
-- Android NDK installed via SDK manager,
+- identity and prekey generation,
+- prekey payload construction,
+- bundle parsing,
+- handshake/session creation,
+- message encryption/decryption,
+- active crypto profile inspection (`active_crypto_profile`, `require_pq_backend_enabled`).
+
+## 4. Prerequisites
+
+- Android Studio (SDK 34 tooling),
+- Android NDK installed from SDK manager,
 - Rust toolchain,
 - `cargo-ndk`,
 - Gradle wrapper from `mobile/android`.
 
-## 4. Environment Setup (PowerShell)
+## 5. Environment Setup (PowerShell)
 
 ```powershell
 $env:ANDROID_HOME="$env:LOCALAPPDATA\Android\Sdk"
@@ -35,23 +43,23 @@ rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-and
 cargo install cargo-ndk
 ```
 
-## 5. Build Rust Artifacts
+## 6. Build Commands
 
 From repository root:
 
 ```powershell
-cargo build -p pqmsg-android
+cargo build -p pqmsg-android --features pqmsg-core/pq-oqs
 cargo run -p pqmsg-android --bin uniffi-bindgen -- generate --library target/debug/pqmsg_android.dll --language kotlin --out-dir mobile/android/app/build/generated/uniffi/kotlin
-cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o mobile/android/app/src/main/jniLibs build -p pqmsg-android --release
+cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o mobile/android/app/src/main/jniLibs build -p pqmsg-android --release --features pqmsg-core/pq-oqs
 ```
 
-Expected shared libraries:
+Expected shared objects:
 
 - `mobile/android/app/src/main/jniLibs/arm64-v8a/libpqmsg_android.so`
 - `mobile/android/app/src/main/jniLibs/armeabi-v7a/libpqmsg_android.so`
 - `mobile/android/app/src/main/jniLibs/x86_64/libpqmsg_android.so`
 
-## 6. Build APK
+## 7. Build APK
 
 From `mobile/android`:
 
@@ -59,17 +67,19 @@ From `mobile/android`:
 .\gradlew.bat assembleDebug
 ```
 
-Artifact:
+APK output:
 
 - `mobile/android/app/build/outputs/apk/debug/app-debug.apk`
 
-## 7. Emulator Demonstration Procedure
+## 8. Emulator Demonstration
 
 1. Start server: `cargo run -p pqmsg-server`
-2. Open emulator A and emulator B.
-3. Configure both clients with server URL `http://10.0.2.2:8080`.
-4. On each device: generate keys, register user, publish prekeys.
-5. In Chat view: fetch peer bundle and send encrypted message.
-6. On recipient: poll inbox and verify Rust-side decryption output.
+2. Launch two emulators (Alice, Bob).
+3. On each client: generate keys, register, publish prekeys.
+4. Alice fetches Bob bundle and sends encrypted message.
+5. Bob polls inbox and decrypts.
 
-This process demonstrates Alice/Bob end-to-end encrypted exchange over the prototype relay.
+## 9. Transport Security Requirement
+
+The emulator URL form `http://10.0.2.2:...` is strictly demo-only.  
+Operational deployments MUST use HTTPS and SHOULD enforce certificate pinning in OkHttp.

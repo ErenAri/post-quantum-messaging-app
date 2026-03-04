@@ -1,126 +1,106 @@
 # SPEC
 
-## 1. Document Scope
+## 1. Scope and Terminology
 
-This document specifies the current protocol behavior of the `pqmsg` prototype at an implementation-oriented level.  
-Normative language follows RFC 2119 conventions (`MUST`, `SHOULD`, `MAY`) where relevant.
+This document specifies the implemented `pqmsg` prototype semantics at protocol level.  
+Normative terms (`MUST`, `SHOULD`, `MAY`) follow RFC 2119 intent.
 
-## 2. Design Objectives
+## 2. Protocol Objective
 
-The protocol aims to:
+The design targets a verifiable baseline for hybrid post-quantum asynchronous messaging:
 
-1. provide confidentiality against passive and active network observers,
-2. maintain explicit cryptographic suite identification,
-3. support incremental post-quantum integration,
-4. fail closed on parsing and suite/version inconsistencies.
+1. hybrid handshake confidentiality against passive archival adversaries,
+2. authenticated prekey bundle consumption,
+3. explicit downgrade checks via version and suite binding,
+4. strict parse failure for malformed or ambiguous wire material.
 
-The protocol does not currently target anonymity, metadata minimization, or production-grade multi-device synchronization.
-
-## 3. Protocol Overview
+## 3. Handshake Construction
 
 ```mermaid
 sequenceDiagram
     participant A as Alice
     participant S as Server
     participant B as Bob
-    A->>S: Fetch Bob bundle
+    A->>S: GET /v1/users/{bob}/bundle
     S-->>A: IK_B, SPK_B, PQSPK_B, signatures
-    A->>A: Verify signatures
-    A->>A: EK_A + KEM encapsulation to PQSPK_B
+    A->>A: Verify bundle signatures
+    A->>A: EK_A + encapsulate(PQSPK_B)
     A->>A: SK = HKDF(DH1 || DH2 || DH3 || ss_pq)
     A->>S: Relay InitialMessage
     B->>S: Poll inbox
     S-->>B: InitialMessage
-    B->>B: KEM decapsulation + DH recomputation
-    B->>B: Derive SK and decrypt payload
+    B->>B: decapsulate + DH recompute + decrypt
 ```
 
-## 4. Algorithm Suites
+The key schedule is:
 
-The implementation currently defines two suite identifiers:
+- `DH1 = DH(IK_A, SPK_B)`
+- `DH2 = DH(EK_A, IK_B)`
+- `DH3 = DH(EK_A, SPK_B)`
+- `SK = HKDF-SHA256(DH1 || DH2 || DH3 || ss_pq)`
+
+## 4. Suite Registry
+
+The implementation recognizes:
 
 - `suite_id = 1`: ML-KEM-768 + X25519 + HKDF-SHA256 + ChaCha20Poly1305
 - `suite_id = 2`: Kyber768 alias + X25519 + HKDF-SHA256 + ChaCha20Poly1305
 
-Protocol version is fixed to `v1` in the current prototype.
+Protocol version is currently `v1`.
 
-## 5. Handshake Construction
+## 5. Session Model
 
-### 5.1 Bob Bundle
-
-Bob publishes:
-
-- `IK_B` (X25519 identity public key),
-- `SPK_B` (signed prekey public key),
-- `PQSPK_B` (PQ signed prekey public key),
-- signatures over `SPK_B` and `PQSPK_B` under bundle signature key.
-
-### 5.2 Alice Initiation
-
-Alice performs:
-
-1. signature verification on Bob bundle,
-2. generation of ephemeral `EK_A`,
-3. PQ encapsulation to `PQSPK_B` producing `(pq_ct, ss_pq)`,
-4. derivation:
-   - `DH1 = DH(IK_A, SPK_B)`
-   - `DH2 = DH(EK_A, IK_B)`
-   - `DH3 = DH(EK_A, SPK_B)`
-   - `SK = HKDF(DH1 || DH2 || DH3 || ss_pq)`
-
-Associated data for handshake encryption includes:
-
-- protocol version,
-- suite identifier,
-- initiator identity key,
-- responder identity key.
-
-### 5.3 Bob Reception
-
-Bob decapsulates `pq_ct`, recomputes the DH terms, re-derives `SK`, and decrypts the payload.  
-Messages with unknown protocol version or unknown suite identifier are rejected.
-
-## 6. Session and Ratchet Model
-
-`SessionState` is derived from handshake output and maintains:
+`SessionState` maintains:
 
 - root key,
 - sending and receiving chain states,
-- local and remote ratchet DH keys,
-- bounded skipped-message-key cache.
+- local/remote DH ratchet keys,
+- bounded skipped-message-key cache,
+- optional sparse PQ ratchet state.
 
-The current ratchet model is intentionally minimal:
+The implementation is intentionally minimal and is not a complete Signal clone.
 
-- symmetric-key chain advancement per message,
-- DH ratchet on sender key changes,
-- optional sparse PQ ratchet hook under feature flag.
+## 6. Authentication and Identity Rules
 
-## 7. Downgrade Resistance Requirements
+Server-side directory behavior is defined as:
 
-The implementation enforces:
+1. `user_id` identity binding is immutable after first successful registration,
+2. prekey uploads are accepted only when Ed25519 signatures over `SPK` and `PQSPK` transcripts verify under registered `identity_sig_pub`.
 
-1. suite and protocol version binding in handshake associated data,
-2. suite and protocol version binding in session associated data,
-3. rejection of wire messages whose `suite_id` differs from established session state,
-4. strict suite identifier decoding at handshake receive path.
+## 7. Ratchet Metadata Authentication
 
-## 8. Error and Parsing Semantics
+Session AEAD associated data MUST include:
 
-All parser entry points operate on length-delimited data and return typed errors.  
+1. protocol version,
+2. suite id,
+3. sender ratchet DH public key,
+4. message number,
+5. previous chain length,
+6. optional `pq_step_ct`,
+7. external caller AD.
+
+This requirement ensures ratchet header mutation is rejected at AEAD verification time.
+
+## 8. Downgrade Resistance
+
+A compliant implementation MUST:
+
+1. authenticate `version` and `suite_id`,
+2. reject unknown suites at decode/dispatch,
+3. reject per-message suite mismatch once session state is established.
+
+## 9. Parsing and Error Semantics
+
+All parser entry points are length-delimited and fallible.  
+Critical unknown TLV tags and duplicate critical tags are rejected in strict mode.
+
 No parser path should panic on adversarial input.
 
-## 9. Validation Status
+## 10. Verification Artifacts
 
-Current verification artifacts include:
+Current verification set:
 
-- handshake and session unit tests,
-- deterministic handshake KAT test vector (seeded RNG),
-- parser and wire fuzz targets (`fuzz_tlv_decode`, `fuzz_wire_decode`),
-- server API integration tests.
-
-## 10. Open Items
-
-- formal multi-device semantics,
-- signature algorithm productionization,
-- replay and transcript-binding refinements,
-- long-term interoperability vector suite.
+- unit tests for handshake/session success and tamper failure paths,
+- deterministic handshake KAT transcript,
+- fuzz targets for TLV and wire decoding,
+- integration tests for server endpoint behavior and input validation.

@@ -230,6 +230,7 @@ pub fn associated_data(
     ])
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn alice_initiate<R: RngCore + CryptoRng, V: SignatureVerifier, K: KemProvider>(
     rng: &mut R,
     verifier: &V,

@@ -2,25 +2,28 @@ use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use clap::{Parser, Subcommand, ValueEnum};
-use pqmsg_core::alg::{AlgorithmSuite, KemAlgorithm};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use pqmsg_core::alg::{
+    runtime_crypto_profile, AlgorithmSuite, KemAlgorithm,
+    SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+    SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+};
 use pqmsg_core::dh::{DhKeyPair, DhPublicKey};
 use pqmsg_core::handshake::{
     alice_initiate, bob_receive, pq_signed_prekey_signature_message,
     signed_prekey_signature_message, InitialMessage, SignatureVerifier,
 };
-use pqmsg_core::kem::{KemEncapsulation, KemProvider};
+use pqmsg_core::kem::MlKem768;
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
 use pqmsg_core::session::{SessionRole, SessionSnapshot, SessionState};
 use pqmsg_core::CoreError;
 use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::{CryptoRng, RngCore};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
-use zeroize::Zeroizing;
 
 const DEFAULT_STATE_DIR: &str = "./state";
 const DEFAULT_KEYS_DIR: &str = "./devkeys";
@@ -189,61 +192,95 @@ struct InboxMessage {
     message_bytes_base64: String,
 }
 
-struct DemoSignatureVerifier;
-struct DemoKem;
+struct Ed25519SignatureVerifier;
 
-impl SignatureVerifier for DemoSignatureVerifier {
+impl SignatureVerifier for Ed25519SignatureVerifier {
     fn verify(&self, public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), CoreError> {
-        let expected = demo_signature(public_key, message);
-        if expected == signature {
-            Ok(())
-        } else {
-            Err(CoreError::SignatureVerificationFailed)
-        }
+        let public_key: [u8; 32] = public_key
+            .try_into()
+            .map_err(|_| CoreError::InvalidLength {
+                field: "signature.public_key",
+                expected: 32,
+                actual: public_key.len(),
+            })?;
+        let signature: [u8; 64] = signature.try_into().map_err(|_| CoreError::InvalidLength {
+            field: "signature.signature",
+            expected: 64,
+            actual: signature.len(),
+        })?;
+        let verifier = VerifyingKey::from_bytes(&public_key)
+            .map_err(|_| CoreError::SignatureVerificationFailed)?;
+        let signature = Signature::from_bytes(&signature);
+        verifier
+            .verify(message, &signature)
+            .map_err(|_| CoreError::SignatureVerificationFailed)
     }
 }
 
-impl KemProvider for DemoKem {
-    fn encapsulate(&self, recipient_public_key: &[u8]) -> Result<KemEncapsulation, CoreError> {
-        if recipient_public_key.len() != 32 {
-            return Err(CoreError::InvalidLength {
-                field: "demo_kem.public_key",
-                expected: 32,
-                actual: recipient_public_key.len(),
-            });
-        }
-        let ciphertext = hash3(b"ct", recipient_public_key, b"");
-        let shared_secret = hash3(b"ss", recipient_public_key, &ciphertext);
-        Ok(KemEncapsulation {
-            ciphertext,
-            shared_secret: Zeroizing::new(shared_secret),
-        })
+fn suite_to_kem_algorithm(suite: SuiteFlag) -> KemAlgorithm {
+    match suite {
+        SuiteFlag::MlKem768 => KemAlgorithm::MlKem768,
+        SuiteFlag::Kyber768 => KemAlgorithm::Kyber768Alias,
     }
+}
 
-    fn decapsulate(
-        &self,
-        recipient_secret_key: &[u8],
-        ciphertext: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>, CoreError> {
-        if recipient_secret_key.len() != 32 {
-            return Err(CoreError::InvalidLength {
-                field: "demo_kem.secret_key",
-                expected: 32,
-                actual: recipient_secret_key.len(),
-            });
-        }
-        Ok(Zeroizing::new(hash3(
-            b"ss",
-            recipient_secret_key,
-            ciphertext,
-        )))
+fn suite_from_suite_id(suite_id: u16) -> Result<SuiteFlag> {
+    match suite_id {
+        SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305 => Ok(SuiteFlag::MlKem768),
+        SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305 => Ok(SuiteFlag::Kyber768),
+        _ => Err(anyhow!("unsupported suite_id '{}'", suite_id)),
     }
+}
+
+fn build_kem_for_suite(suite: SuiteFlag) -> Result<MlKem768> {
+    MlKem768::new(suite_to_kem_algorithm(suite))
+        .map_err(|err| anyhow!("failed to initialize KEM for suite '{suite:?}': {err}"))
+}
+
+fn decode_signing_key_b64(field: &'static str, value: &str) -> Result<SigningKey> {
+    let bytes = decode_b64(field, value)?;
+    let actual_len = bytes.len();
+    let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+        anyhow!(
+            "field '{}' must decode to 32 bytes (got {})",
+            field,
+            actual_len
+        )
+    })?;
+    Ok(SigningKey::from_bytes(&bytes))
+}
+
+fn generate_signing_key<R: RngCore + CryptoRng>(rng: &mut R) -> SigningKey {
+    SigningKey::generate(rng)
+}
+
+fn build_signature_payload(signing_key: &SigningKey, message: &[u8]) -> String {
+    B64.encode(signing_key.sign(message).to_bytes())
+}
+
+fn print_runtime_crypto_profile() -> Result<()> {
+    let profile = runtime_crypto_profile()?;
+    println!(
+        "active_suite: protocol_v{} suite_id={} kem={:?} dh={:?} kdf={:?} aead={:?} pq_oqs={}",
+        profile.protocol_version,
+        profile.suite_id,
+        profile.kem,
+        profile.dh,
+        profile.kdf,
+        profile.aead,
+        profile.pq_oqs_enabled
+    );
+    if !profile.pq_oqs_enabled {
+        return Err(anyhow!("pq-oqs backend is disabled"));
+    }
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let client = Client::new();
+    print_runtime_crypto_profile()?;
 
     match cli.command {
         Commands::Keygen {
@@ -258,7 +295,7 @@ async fn main() -> Result<()> {
                 device_id.unwrap_or_else(|| format!("{user}-device-1")),
                 suite,
                 one_time_count,
-            );
+            )?;
             write_json_file(&out, &keys)?;
             println!("wrote keys: {}", out.display());
         }
@@ -338,16 +375,13 @@ fn generate_user_keys(
     device_id: String,
     suite: SuiteFlag,
     one_time_count: usize,
-) -> UserKeysFile {
+) -> Result<UserKeysFile> {
     let mut rng = OsRng;
     let identity = IdentityKeyPair::generate(format!("{user}-ik"), &mut rng);
     let signed_prekey = OneTimePreKey::generate(format!("{user}-spk"), &mut rng);
-
-    let mut identity_sig = [0u8; 32];
-    rng.fill_bytes(&mut identity_sig);
-
-    let mut pq_signed_prekey = [0u8; 32];
-    rng.fill_bytes(&mut pq_signed_prekey);
+    let identity_sig = generate_signing_key(&mut rng);
+    let kem = build_kem_for_suite(suite)?;
+    let pq_signed_prekey = kem.keypair()?;
 
     let mut one_time_x25519 = Vec::with_capacity(one_time_count);
     let mut one_time_mlkem = Vec::with_capacity(one_time_count);
@@ -360,31 +394,30 @@ fn generate_user_keys(
             secret_b64: B64.encode(key.secret_key.as_slice()),
         });
 
-        let mut pq_key = [0u8; 32];
-        rng.fill_bytes(&mut pq_key);
+        let pq_key = kem.keypair()?;
         one_time_mlkem.push(OneTimeKeyRecord {
             key_id: format!("{user}-otk-pq-{idx}"),
-            public_b64: B64.encode(pq_key),
-            secret_b64: B64.encode(pq_key),
+            public_b64: B64.encode(pq_key.public_key),
+            secret_b64: B64.encode(pq_key.secret_key.as_slice()),
         });
     }
 
-    UserKeysFile {
+    Ok(UserKeysFile {
         version: 1,
         user_id: user.to_string(),
         device_id,
         suite,
         identity_x25519_pub_b64: B64.encode(identity.public_key.0),
         identity_x25519_secret_b64: B64.encode(identity.secret_key.as_slice()),
-        identity_sig_pub_b64: B64.encode(identity_sig),
-        identity_sig_secret_b64: B64.encode(identity_sig),
+        identity_sig_pub_b64: B64.encode(identity_sig.verifying_key().to_bytes()),
+        identity_sig_secret_b64: B64.encode(identity_sig.to_bytes()),
         signed_prekey_x25519_pub_b64: B64.encode(signed_prekey.public_key.0),
         signed_prekey_x25519_secret_b64: B64.encode(signed_prekey.secret_key.as_slice()),
-        pq_signed_prekey_pub_b64: B64.encode(pq_signed_prekey),
-        pq_signed_prekey_secret_b64: B64.encode(pq_signed_prekey),
+        pq_signed_prekey_pub_b64: B64.encode(pq_signed_prekey.public_key),
+        pq_signed_prekey_secret_b64: B64.encode(pq_signed_prekey.secret_key.as_slice()),
         one_time_prekeys_x25519: one_time_x25519,
         one_time_prekeys_mlkem768: one_time_mlkem,
-    }
+    })
 }
 
 async fn register_user(client: &Client, server: &str, keys: &UserKeysFile) -> Result<()> {
@@ -405,16 +438,23 @@ async fn publish_prekeys(client: &Client, server: &str, keys: &UserKeysFile) -> 
         &keys.signed_prekey_x25519_pub_b64,
     )?;
     let pq_spk_pub = decode_b64("pq_signed_prekey_pub_b64", &keys.pq_signed_prekey_pub_b64)?;
-    let sig_pub = decode_b64("identity_sig_pub_b64", &keys.identity_sig_pub_b64)?;
+    let signing_key =
+        decode_signing_key_b64("identity_sig_secret_b64", &keys.identity_sig_secret_b64)?;
+    let expected_pub = B64.encode(signing_key.verifying_key().to_bytes());
+    if expected_pub != keys.identity_sig_pub_b64 {
+        return Err(anyhow!(
+            "identity_sig_pub_b64 does not match identity_sig_secret_b64"
+        ));
+    }
 
     let spk_msg = signed_prekey_signature_message(1, &DhPublicKey(spk_pub))?;
     let pq_msg = pq_signed_prekey_signature_message(1, &pq_spk_pub)?;
 
     let req = PublishPrekeysRequest {
         signed_prekey_x25519_pub: keys.signed_prekey_x25519_pub_b64.clone(),
-        sig_over_spk: B64.encode(demo_signature(&sig_pub, &spk_msg)),
+        sig_over_spk: build_signature_payload(&signing_key, &spk_msg),
         pq_signed_prekey_pub_mlkem768: keys.pq_signed_prekey_pub_b64.clone(),
-        sig_over_pqspk: B64.encode(demo_signature(&sig_pub, &pq_msg)),
+        sig_over_pqspk: build_signature_payload(&signing_key, &pq_msg),
         one_time_prekeys_x25519: keys
             .one_time_prekeys_x25519
             .iter()
@@ -475,8 +515,8 @@ async fn send_message_flow(
     let bundle = fetch_bundle(client, server, to).await?;
     let prekey_bundle = bundle_to_core(&bundle, sender_keys.suite)?;
     let identity = to_identity_keypair(sender_keys)?;
-    let kem = DemoKem;
-    let verifier = DemoSignatureVerifier;
+    let kem = build_kem_for_suite(sender_keys.suite)?;
+    let verifier = Ed25519SignatureVerifier;
 
     let initiator = alice_initiate(
         &mut OsRng,
@@ -548,7 +588,8 @@ async fn poll_inbox_flow(
 
         let mut handled = false;
         if let Ok(initial) = InitialMessage::decode(&bytes) {
-            let kem = DemoKem;
+            let suite = suite_from_suite_id(initial.suite_id)?;
+            let kem = build_kem_for_suite(suite)?;
             let identity = to_identity_keypair(keys)?;
             let spk = to_signed_prekey(keys)?;
             let pqspk = to_pq_signed_prekey(keys)?;
@@ -575,7 +616,7 @@ async fn poll_inbox_flow(
                     version: 1,
                     user_id: keys.user_id.clone(),
                     peer_user_id: sender.clone(),
-                    suite: keys.suite,
+                    suite,
                     snapshot: session.snapshot(),
                     passphrase_kdf_hint: None,
                 },
@@ -583,35 +624,33 @@ async fn poll_inbox_flow(
             handled = true;
         }
 
-        if !handled {
-            if session_path.exists() {
-                let mut session = load_session(&session_path)?;
-                match session.decrypt(&bytes, &ad) {
-                    Ok(plaintext) => {
-                        let text = String::from_utf8(plaintext.clone())
-                            .unwrap_or_else(|_| format!("<{} bytes binary>", plaintext.len()));
-                        println!("[{}] {}", sender, text);
-                        save_session(
-                            &session_path,
-                            SessionFile {
-                                version: 1,
-                                user_id: keys.user_id.clone(),
-                                peer_user_id: sender.clone(),
-                                suite: keys.suite,
-                                snapshot: session.snapshot(),
-                                passphrase_kdf_hint: None,
-                            },
-                        )?;
-                    }
-                    Err(err) => {
-                        eprintln!(
-                            "[{}] failed to decrypt message {}: {}",
-                            sender, item.message_id, err
-                        );
-                    }
+        if !handled && session_path.exists() {
+            let mut session = load_session(&session_path)?;
+            match session.decrypt(&bytes, &ad) {
+                Ok(plaintext) => {
+                    let text = String::from_utf8(plaintext.clone())
+                        .unwrap_or_else(|_| format!("<{} bytes binary>", plaintext.len()));
+                    println!("[{}] {}", sender, text);
+                    save_session(
+                        &session_path,
+                        SessionFile {
+                            version: 1,
+                            user_id: keys.user_id.clone(),
+                            peer_user_id: sender.clone(),
+                            suite: keys.suite,
+                            snapshot: session.snapshot(),
+                            passphrase_kdf_hint: None,
+                        },
+                    )?;
                 }
-                handled = true;
+                Err(err) => {
+                    eprintln!(
+                        "[{}] failed to decrypt message {}: {}",
+                        sender, item.message_id, err
+                    );
+                }
             }
+            handled = true;
         }
 
         if !handled {
@@ -629,10 +668,9 @@ async fn poll_inbox_flow(
 }
 
 fn bundle_to_core(bundle: &BundleResponse, suite: SuiteFlag) -> Result<PreKeyBundle> {
-    let mut core_suite = AlgorithmSuite::default();
-    core_suite.kem = match suite {
-        SuiteFlag::MlKem768 => KemAlgorithm::MlKem768,
-        SuiteFlag::Kyber768 => KemAlgorithm::Kyber768Alias,
+    let core_suite = AlgorithmSuite {
+        kem: suite_to_kem_algorithm(suite),
+        ..AlgorithmSuite::default()
     };
 
     let mut out = PreKeyBundle::new(
@@ -844,21 +882,6 @@ fn decode_b64_32(field: &'static str, value: &str) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-fn demo_signature(pub_or_secret: &[u8], message: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(pub_or_secret);
-    hasher.update(message);
-    hasher.finalize().to_vec()
-}
-
-fn hash3(a: &[u8], b: &[u8], c: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(a);
-    hasher.update(b);
-    hasher.update(c);
-    hasher.finalize().to_vec()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,14 +929,22 @@ mod tests {
 
     #[test]
     fn mocked_flow_handshake_then_session_roundtrip() {
+        if let Ok(profile) = runtime_crypto_profile() {
+            if !profile.pq_oqs_enabled {
+                return;
+            }
+        }
+
         let alice_keys = generate_user_keys(
             "alice",
             "alice-device-1".to_string(),
             SuiteFlag::MlKem768,
             4,
-        );
+        )
+        .expect("alice keys");
         let bob_keys =
-            generate_user_keys("bob", "bob-device-1".to_string(), SuiteFlag::MlKem768, 4);
+            generate_user_keys("bob", "bob-device-1".to_string(), SuiteFlag::MlKem768, 4)
+                .expect("bob keys");
 
         let bundle = {
             let spk_pub = decode_b64_32(
@@ -928,6 +959,11 @@ mod tests {
             .expect("pq pub");
             let sig_pub = decode_b64("identity_sig_pub_b64", &bob_keys.identity_sig_pub_b64)
                 .expect("sig pub");
+            let sig_sk = decode_signing_key_b64(
+                "identity_sig_secret_b64",
+                &bob_keys.identity_sig_secret_b64,
+            )
+            .expect("sig sk");
             let spk_msg =
                 signed_prekey_signature_message(1, &DhPublicKey(spk_pub)).expect("spk msg");
             let pq_msg = pq_signed_prekey_signature_message(1, &pq_pub).expect("pq msg");
@@ -940,8 +976,8 @@ mod tests {
                 ),
                 DhPublicKey(spk_pub),
                 pq_pub,
-                demo_signature(&sig_pub, &spk_msg),
-                demo_signature(&sig_pub, &pq_msg),
+                sig_sk.sign(&spk_msg).to_bytes().to_vec(),
+                sig_sk.sign(&pq_msg).to_bytes().to_vec(),
                 sig_pub,
             );
             out.suite.kem = KemAlgorithm::MlKem768;
@@ -949,8 +985,8 @@ mod tests {
         };
 
         let alice_identity = to_identity_keypair(&alice_keys).expect("alice identity");
-        let kem = DemoKem;
-        let verifier = DemoSignatureVerifier;
+        let kem = build_kem_for_suite(SuiteFlag::MlKem768).expect("kem");
+        let verifier = Ed25519SignatureVerifier;
         let initial = alice_initiate(
             &mut OsRng,
             &verifier,

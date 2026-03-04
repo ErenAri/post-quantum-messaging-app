@@ -6,6 +6,10 @@ use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::Utc;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use pqmsg_core::alg::PROTOCOL_VERSION_V1;
+use pqmsg_core::dh::DhPublicKey;
+use pqmsg_core::handshake::{pq_signed_prekey_signature_message, signed_prekey_signature_message};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
@@ -16,10 +20,8 @@ const MAX_BODY_BYTES: usize = 1_048_576;
 const MAX_USER_ID_LEN: usize = 128;
 const MAX_DEVICE_ID_LEN: usize = 128;
 const X25519_KEY_LEN: usize = 32;
-const MIN_SIG_PUB_LEN: usize = 16;
-const MAX_SIG_PUB_LEN: usize = 4096;
-const MIN_SIG_LEN: usize = 16;
-const MAX_SIG_LEN: usize = 8192;
+const SIG_PUB_KEY_LEN: usize = 32;
+const SIG_LEN: usize = 64;
 const MIN_PQ_KEY_LEN: usize = 32;
 const MAX_PQ_KEY_LEN: usize = 4096;
 const MAX_ONE_TIME_KEYS: usize = 256;
@@ -115,6 +117,14 @@ impl AppError {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,
             title: "Too Many Requests",
+            detail: detail.into(),
+        }
+    }
+
+    fn conflict(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            title: "Conflict",
             detail: detail.into(),
         }
     }
@@ -281,27 +291,63 @@ async fn register_user(
     let identity_sig = decode_base64_range(
         "identity_sig_pub",
         &request.identity_sig_pub,
-        MIN_SIG_PUB_LEN,
-        MAX_SIG_PUB_LEN,
+        SIG_PUB_KEY_LEN,
+        SIG_PUB_KEY_LEN,
     )?;
+    validate_ed25519_public_key(&identity_sig)?;
 
     let now = Utc::now().to_rfc3339();
-    sqlx::query(
+    let insert_result = sqlx::query(
         "INSERT INTO users (user_id, identity_x25519_pub, identity_sig_pub, device_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-         ON CONFLICT(user_id) DO UPDATE SET
-           identity_x25519_pub = excluded.identity_x25519_pub,
-           identity_sig_pub = excluded.identity_sig_pub,
-           device_id = excluded.device_id,
-           updated_at = excluded.updated_at",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
     )
     .bind(&request.user_id)
-    .bind(identity_x25519)
-    .bind(identity_sig)
+    .bind(&identity_x25519)
+    .bind(&identity_sig)
     .bind(&request.device_id)
     .bind(&now)
     .execute(&state.pool)
-    .await?;
+    .await;
+
+    match insert_result {
+        Ok(_) => {}
+        Err(sqlx::Error::Database(db_error)) if db_error.is_unique_violation() => {
+            let existing = sqlx::query(
+                "SELECT identity_x25519_pub, identity_sig_pub, device_id, created_at
+                 FROM users
+                 WHERE user_id = ?1",
+            )
+            .bind(&request.user_id)
+            .fetch_optional(&state.pool)
+            .await?;
+            let Some(existing) = existing else {
+                return Err(AppError::internal(
+                    "unique constraint raced with missing user row",
+                ));
+            };
+
+            let existing_identity_x25519: Vec<u8> = existing.try_get("identity_x25519_pub")?;
+            let existing_identity_sig: Vec<u8> = existing.try_get("identity_sig_pub")?;
+            let existing_device_id: String = existing.try_get("device_id")?;
+            let existing_created_at: String = existing.try_get("created_at")?;
+
+            if existing_identity_x25519 != identity_x25519
+                || existing_identity_sig != identity_sig
+                || existing_device_id != request.device_id
+            {
+                return Err(AppError::conflict(
+                    "user_id is already registered with an immutable identity",
+                ));
+            }
+
+            return Ok(Json(RegisterUserResponse {
+                user_id: request.user_id,
+                device_id: existing_device_id,
+                registered_at: existing_created_at,
+            }));
+        }
+        Err(error) => return Err(error.into()),
+    }
 
     Ok(Json(RegisterUserResponse {
         user_id: request.user_id,
@@ -331,24 +377,16 @@ async fn publish_prekeys(
         &request.signed_prekey_x25519_pub,
         X25519_KEY_LEN,
     )?;
-    let sig_over_spk = decode_base64_range(
-        "sig_over_spk",
-        &request.sig_over_spk,
-        MIN_SIG_LEN,
-        MAX_SIG_LEN,
-    )?;
+    let sig_over_spk =
+        decode_base64_range("sig_over_spk", &request.sig_over_spk, SIG_LEN, SIG_LEN)?;
     let pq_signed_prekey = decode_base64_range(
         "pq_signed_prekey_pub_mlkem768",
         &request.pq_signed_prekey_pub_mlkem768,
         MIN_PQ_KEY_LEN,
         MAX_PQ_KEY_LEN,
     )?;
-    let sig_over_pqspk = decode_base64_range(
-        "sig_over_pqspk",
-        &request.sig_over_pqspk,
-        MIN_SIG_LEN,
-        MAX_SIG_LEN,
-    )?;
+    let sig_over_pqspk =
+        decode_base64_range("sig_over_pqspk", &request.sig_over_pqspk, SIG_LEN, SIG_LEN)?;
 
     let mut one_time_x = Vec::with_capacity(request.one_time_prekeys_x25519.len());
     for key in &request.one_time_prekeys_x25519 {
@@ -667,7 +705,7 @@ fn decode_base64_range(
     if value.is_empty() {
         return Err(AppError::bad_request(format!("{field} cannot be empty")));
     }
-    let max_encoded = ((max_len + 2) / 3) * 4 + 8;
+    let max_encoded = max_len.div_ceil(3) * 4 + 8;
     if value.len() > max_encoded {
         return Err(AppError::bad_request(format!("{field} is too large")));
     }
@@ -682,12 +720,52 @@ fn decode_base64_range(
     Ok(decoded)
 }
 
+fn validate_ed25519_public_key(identity_sig_pub: &[u8]) -> Result<(), AppError> {
+    let key_bytes: [u8; SIG_PUB_KEY_LEN] = identity_sig_pub
+        .try_into()
+        .map_err(|_| AppError::bad_request("identity_sig_pub must be 32 bytes"))?;
+    VerifyingKey::from_bytes(&key_bytes)
+        .map_err(|_| AppError::bad_request("identity_sig_pub is not a valid Ed25519 public key"))?;
+    Ok(())
+}
+
 fn maybe_verify_prekey_signatures(
-    _identity_sig_pub: &[u8],
-    _signed_prekey_x25519_pub: &[u8],
-    _sig_over_spk: &[u8],
-    _pq_signed_prekey_pub_mlkem768: &[u8],
-    _sig_over_pqspk: &[u8],
+    identity_sig_pub: &[u8],
+    signed_prekey_x25519_pub: &[u8],
+    sig_over_spk: &[u8],
+    pq_signed_prekey_pub_mlkem768: &[u8],
+    sig_over_pqspk: &[u8],
 ) -> Result<(), AppError> {
+    let identity_sig_pub: [u8; SIG_PUB_KEY_LEN] = identity_sig_pub
+        .try_into()
+        .map_err(|_| AppError::bad_request("identity_sig_pub must be 32 bytes"))?;
+    let verifier = VerifyingKey::from_bytes(&identity_sig_pub)
+        .map_err(|_| AppError::bad_request("identity_sig_pub is not a valid Ed25519 public key"))?;
+
+    let spk_pub: [u8; X25519_KEY_LEN] = signed_prekey_x25519_pub
+        .try_into()
+        .map_err(|_| AppError::bad_request("signed_prekey_x25519_pub must be 32 bytes"))?;
+    let spk_signature: [u8; SIG_LEN] = sig_over_spk
+        .try_into()
+        .map_err(|_| AppError::bad_request("sig_over_spk must be 64 bytes"))?;
+    let spk_message =
+        signed_prekey_signature_message(PROTOCOL_VERSION_V1, &DhPublicKey(spk_pub))
+            .map_err(|_| AppError::bad_request("failed to build SPK signature transcript"))?;
+    let spk_signature = Signature::from_bytes(&spk_signature);
+    verifier
+        .verify(&spk_message, &spk_signature)
+        .map_err(|_| AppError::bad_request("sig_over_spk verification failed"))?;
+
+    let pq_signature: [u8; SIG_LEN] = sig_over_pqspk
+        .try_into()
+        .map_err(|_| AppError::bad_request("sig_over_pqspk must be 64 bytes"))?;
+    let pq_message =
+        pq_signed_prekey_signature_message(PROTOCOL_VERSION_V1, pq_signed_prekey_pub_mlkem768)
+            .map_err(|_| AppError::bad_request("failed to build PQSPK signature transcript"))?;
+    let pq_signature = Signature::from_bytes(&pq_signature);
+    verifier
+        .verify(&pq_message, &pq_signature)
+        .map_err(|_| AppError::bad_request("sig_over_pqspk verification failed"))?;
+
     Ok(())
 }

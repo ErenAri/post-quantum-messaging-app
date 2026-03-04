@@ -2,21 +2,24 @@
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use pqmsg_core::alg::{AlgorithmSuite, KemAlgorithm};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use pqmsg_core::alg::{
+    runtime_crypto_profile, AlgorithmSuite, KemAlgorithm,
+    SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+    SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+};
 use pqmsg_core::dh::{DhKeyPair, DhPublicKey};
 use pqmsg_core::handshake::{
     alice_initiate, bob_receive, pq_signed_prekey_signature_message,
     signed_prekey_signature_message, InitialMessage, SignatureVerifier,
 };
-use pqmsg_core::kem::{KemEncapsulation, KemProvider};
+use pqmsg_core::kem::MlKem768;
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
 use pqmsg_core::session::{SessionRole, SessionSnapshot, SessionState};
 use pqmsg_core::CoreError;
 use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
 
 const MAX_ONE_TIME_PREKEYS: u32 = 256;
 
@@ -134,55 +137,113 @@ pub enum PqmsgAndroidError {
     OperationFailed { reason: String },
 }
 
-struct DemoSignatureVerifier;
-struct DemoKem;
+struct Ed25519SignatureVerifier;
 
-impl SignatureVerifier for DemoSignatureVerifier {
+impl SignatureVerifier for Ed25519SignatureVerifier {
     fn verify(&self, public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), CoreError> {
-        let expected = demo_signature(public_key, message);
-        if expected == signature {
-            Ok(())
-        } else {
-            Err(CoreError::SignatureVerificationFailed)
-        }
+        let public_key: [u8; 32] = public_key
+            .try_into()
+            .map_err(|_| CoreError::InvalidLength {
+                field: "signature.public_key",
+                expected: 32,
+                actual: public_key.len(),
+            })?;
+        let signature: [u8; 64] = signature.try_into().map_err(|_| CoreError::InvalidLength {
+            field: "signature.signature",
+            expected: 64,
+            actual: signature.len(),
+        })?;
+        let verifier = VerifyingKey::from_bytes(&public_key)
+            .map_err(|_| CoreError::SignatureVerificationFailed)?;
+        let signature = Signature::from_bytes(&signature);
+        verifier
+            .verify(message, &signature)
+            .map_err(|_| CoreError::SignatureVerificationFailed)
     }
 }
 
-impl KemProvider for DemoKem {
-    fn encapsulate(&self, recipient_public_key: &[u8]) -> Result<KemEncapsulation, CoreError> {
-        if recipient_public_key.len() != 32 {
-            return Err(CoreError::InvalidLength {
-                field: "demo_kem.public_key",
-                expected: 32,
-                actual: recipient_public_key.len(),
-            });
-        }
-        let ciphertext = hash3(b"ct", recipient_public_key, b"");
-        let shared_secret = hash3(b"ss", recipient_public_key, &ciphertext);
-        Ok(KemEncapsulation {
-            ciphertext,
-            shared_secret: Zeroizing::new(shared_secret),
-        })
+fn suite_to_kem_algorithm(suite: Suite) -> KemAlgorithm {
+    match suite {
+        Suite::MlKem768 => KemAlgorithm::MlKem768,
+        Suite::Kyber768 => KemAlgorithm::Kyber768Alias,
     }
+}
 
-    fn decapsulate(
-        &self,
-        recipient_secret_key: &[u8],
-        ciphertext: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>, CoreError> {
-        if recipient_secret_key.len() != 32 {
-            return Err(CoreError::InvalidLength {
-                field: "demo_kem.secret_key",
-                expected: 32,
-                actual: recipient_secret_key.len(),
-            });
-        }
-        Ok(Zeroizing::new(hash3(
-            b"ss",
-            recipient_secret_key,
-            ciphertext,
-        )))
+fn suite_from_suite_id(suite_id: u16) -> Result<Suite, PqmsgAndroidError> {
+    match suite_id {
+        SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305 => Ok(Suite::MlKem768),
+        SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305 => Ok(Suite::Kyber768),
+        _ => Err(operation_failed(format!(
+            "unsupported suite_id '{}'",
+            suite_id
+        ))),
     }
+}
+
+fn build_kem_for_suite(suite: Suite) -> Result<MlKem768, PqmsgAndroidError> {
+    MlKem768::new(suite_to_kem_algorithm(suite))
+        .map_err(|error| operation_failed(error.to_string()))
+}
+
+fn generate_signing_key<R: RngCore + CryptoRng>(rng: &mut R) -> SigningKey {
+    SigningKey::generate(rng)
+}
+
+fn decode_signing_key_b64(
+    field: &'static str,
+    value: &str,
+) -> Result<SigningKey, PqmsgAndroidError> {
+    let bytes = decode_b64(field, value)?;
+    let actual_len = bytes.len();
+    let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+        invalid_input(format!(
+            "field '{field}' must decode to 32 bytes (got {})",
+            actual_len
+        ))
+    })?;
+    Ok(SigningKey::from_bytes(&bytes))
+}
+
+fn build_signature_payload(signing_key: &SigningKey, message: &[u8]) -> String {
+    B64.encode(signing_key.sign(message).to_bytes())
+}
+
+#[uniffi::export]
+pub fn active_crypto_profile() -> Result<String, PqmsgAndroidError> {
+    let profile = runtime_crypto_profile()?;
+    serde_json::to_string_pretty(&profile).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn require_pq_backend_enabled() -> Result<(), PqmsgAndroidError> {
+    let profile = runtime_crypto_profile()?;
+    if profile.pq_oqs_enabled {
+        Ok(())
+    } else {
+        Err(operation_failed("pq-oqs backend is disabled"))
+    }
+}
+
+#[uniffi::export]
+pub fn suite_id_from_suite(suite: Suite) -> Result<u16, PqmsgAndroidError> {
+    let config = AlgorithmSuite {
+        kem: suite_to_kem_algorithm(suite),
+        ..AlgorithmSuite::default()
+    };
+    config.suite_id().map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn suite_from_suite_id_json(suite_id: u16) -> Result<String, PqmsgAndroidError> {
+    let suite = suite_from_suite_id(suite_id)?;
+    serde_json::to_string(&suite).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn verify_identity_sig_keypair(keys_json: String) -> Result<bool, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    let signing = decode_signing_key_b64("identity_sig_secret_b64", &keys.identity_sig_secret_b64)?;
+    Ok(B64.encode(signing.verifying_key().to_bytes()) == keys.identity_sig_pub_b64)
 }
 
 #[uniffi::export]
@@ -207,12 +268,9 @@ pub fn generate_identity_keys(
     let mut rng = OsRng;
     let identity = IdentityKeyPair::generate(format!("{user_id}-ik"), &mut rng);
     let signed_prekey = OneTimePreKey::generate(format!("{user_id}-spk"), &mut rng);
-
-    let mut identity_sig = [0u8; 32];
-    rng.fill_bytes(&mut identity_sig);
-
-    let mut pq_signed_prekey = [0u8; 32];
-    rng.fill_bytes(&mut pq_signed_prekey);
+    let identity_sig = generate_signing_key(&mut rng);
+    let kem = build_kem_for_suite(suite)?;
+    let pq_signed_prekey = kem.keypair()?;
 
     let mut one_time_x25519 = Vec::with_capacity(one_time_count as usize);
     let mut one_time_mlkem = Vec::with_capacity(one_time_count as usize);
@@ -225,12 +283,11 @@ pub fn generate_identity_keys(
             secret_b64: B64.encode(key.secret_key.as_slice()),
         });
 
-        let mut pq_key = [0u8; 32];
-        rng.fill_bytes(&mut pq_key);
+        let pq_key = kem.keypair()?;
         one_time_mlkem.push(OneTimeKeyRecord {
             key_id: format!("{user_id}-otk-pq-{idx}"),
-            public_b64: B64.encode(pq_key),
-            secret_b64: B64.encode(pq_key),
+            public_b64: B64.encode(pq_key.public_key),
+            secret_b64: B64.encode(pq_key.secret_key.as_slice()),
         });
     }
 
@@ -241,12 +298,12 @@ pub fn generate_identity_keys(
         suite,
         identity_x25519_pub_b64: B64.encode(identity.public_key.0),
         identity_x25519_secret_b64: B64.encode(identity.secret_key.as_slice()),
-        identity_sig_pub_b64: B64.encode(identity_sig),
-        identity_sig_secret_b64: B64.encode(identity_sig),
+        identity_sig_pub_b64: B64.encode(identity_sig.verifying_key().to_bytes()),
+        identity_sig_secret_b64: B64.encode(identity_sig.to_bytes()),
         signed_prekey_x25519_pub_b64: B64.encode(signed_prekey.public_key.0),
         signed_prekey_x25519_secret_b64: B64.encode(signed_prekey.secret_key.as_slice()),
-        pq_signed_prekey_pub_b64: B64.encode(pq_signed_prekey),
-        pq_signed_prekey_secret_b64: B64.encode(pq_signed_prekey),
+        pq_signed_prekey_pub_b64: B64.encode(pq_signed_prekey.public_key),
+        pq_signed_prekey_secret_b64: B64.encode(pq_signed_prekey.secret_key.as_slice()),
         one_time_prekeys_x25519: one_time_x25519,
         one_time_prekeys_mlkem768: one_time_mlkem,
     };
@@ -285,16 +342,22 @@ pub fn build_publish_prekeys_payload(
         &keys.signed_prekey_x25519_pub_b64,
     )?;
     let pq_spk_pub = decode_b64("pq_signed_prekey_pub_b64", &keys.pq_signed_prekey_pub_b64)?;
-    let sig_pub = decode_b64("identity_sig_pub_b64", &keys.identity_sig_pub_b64)?;
+    let signing_key =
+        decode_signing_key_b64("identity_sig_secret_b64", &keys.identity_sig_secret_b64)?;
+    if B64.encode(signing_key.verifying_key().to_bytes()) != keys.identity_sig_pub_b64 {
+        return Err(invalid_input(
+            "identity_sig_pub_b64 does not match identity_sig_secret_b64",
+        ));
+    }
 
     let spk_msg = signed_prekey_signature_message(1, &DhPublicKey(spk_pub))?;
     let pq_msg = pq_signed_prekey_signature_message(1, &pq_spk_pub)?;
 
     Ok(PublishPrekeysPayload {
         signed_prekey_x25519_pub: keys.signed_prekey_x25519_pub_b64,
-        sig_over_spk: B64.encode(demo_signature(&sig_pub, &spk_msg)),
+        sig_over_spk: build_signature_payload(&signing_key, &spk_msg),
         pq_signed_prekey_pub_mlkem768: keys.pq_signed_prekey_pub_b64,
-        sig_over_pqspk: B64.encode(demo_signature(&sig_pub, &pq_msg)),
+        sig_over_pqspk: build_signature_payload(&signing_key, &pq_msg),
         one_time_prekeys_x25519: keys
             .one_time_prekeys_x25519
             .into_iter()
@@ -346,8 +409,8 @@ pub fn initiate_session_and_encrypt(
 
     let prekey_bundle = bundle_to_core(&peer_bundle, keys.suite)?;
     let identity = to_identity_keypair(&keys)?;
-    let kem = DemoKem;
-    let verifier = DemoSignatureVerifier;
+    let kem = build_kem_for_suite(keys.suite)?;
+    let verifier = Ed25519SignatureVerifier;
     let initiator = alice_initiate(
         &mut OsRng,
         &verifier,
@@ -457,7 +520,8 @@ pub fn decrypt_message(
             )));
         }
 
-        let kem = DemoKem;
+        let suite = suite_from_suite_id(initial.suite_id)?;
+        let kem = build_kem_for_suite(suite)?;
         let identity = to_identity_keypair(&keys)?;
         let signed_prekey = to_signed_prekey(&keys)?;
         let pq_signed_prekey = to_pq_signed_prekey(&keys)?;
@@ -478,7 +542,7 @@ pub fn decrypt_message(
             version: 1,
             user_id: recipient_user_id,
             peer_user_id: sender_user_id,
-            suite: keys.suite,
+            suite,
             snapshot: session.snapshot(),
         };
         let plaintext_base64 = B64.encode(&responder.plaintext);
@@ -574,10 +638,9 @@ fn to_pq_signed_prekey(keys: &UserKeysFile) -> Result<KEMPreKey, PqmsgAndroidErr
 }
 
 fn bundle_to_core(bundle: &ServerBundle, suite: Suite) -> Result<PreKeyBundle, PqmsgAndroidError> {
-    let mut core_suite = AlgorithmSuite::default();
-    core_suite.kem = match suite {
-        Suite::MlKem768 => KemAlgorithm::MlKem768,
-        Suite::Kyber768 => KemAlgorithm::Kyber768Alias,
+    let core_suite = AlgorithmSuite {
+        kem: suite_to_kem_algorithm(suite),
+        ..AlgorithmSuite::default()
     };
 
     let mut out = PreKeyBundle::new(
@@ -645,21 +708,6 @@ fn operation_failed(message: impl Into<String>) -> PqmsgAndroidError {
     PqmsgAndroidError::OperationFailed {
         reason: message.into(),
     }
-}
-
-fn demo_signature(pub_or_secret: &[u8], message: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(pub_or_secret);
-    hasher.update(message);
-    hasher.finalize().to_vec()
-}
-
-fn hash3(a: &[u8], b: &[u8], c: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(a);
-    hasher.update(b);
-    hasher.update(c);
-    hasher.finalize().to_vec()
 }
 
 impl From<CoreError> for PqmsgAndroidError {

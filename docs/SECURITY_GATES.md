@@ -2,48 +2,56 @@
 
 ## 1. Intent
 
-This document defines the minimum security quality gates for continued development.  
-The objective is to preserve defensible baseline security properties without introducing excessive process overhead.
+This document defines minimum security quality gates for ongoing development and review.
 
 ## 2. Constant-Time Dependency Policy
 
-1. Secret-dependent cryptographic operations MUST rely on vetted library primitives.
-2. Core cryptographic arithmetic MUST NOT be implemented ad hoc in project code.
-3. New cryptographic dependencies MUST document constant-time and side-channel assumptions before merge.
+1. Secret-dependent arithmetic MUST be delegated to vetted libraries.
+2. Project code MUST NOT introduce ad hoc cryptographic primitives.
+3. New cryptographic dependencies MUST document side-channel assumptions.
 
 ## 3. Zeroization Policy
 
-1. Shared secrets and key-derivation intermediates MUST be stored in zeroizing containers where practical.
-2. Temporary buffers holding key material MUST be wiped after use.
-3. New secret-bearing structures SHOULD use `SecretBytes`, `Zeroizing`, or equivalent safe wrappers.
+1. Shared secrets and KDF intermediates SHOULD use zeroizing containers.
+2. Temporary key buffers MUST be wiped after use where feasible.
+3. Secret-bearing structures SHOULD use `SecretBytes`/`Zeroizing` patterns.
 
 ## 4. Parsing Policy
 
-1. Parsing of wire inputs MUST be length-delimited and fallible.
-2. Strict decoders MUST reject unknown critical TLV tags.
+1. All wire parsing MUST be length-delimited and fallible.
+2. Strict decoders MUST reject unknown critical TLV types.
 3. Strict decoders MUST reject duplicate critical fields.
-4. Parser code MUST avoid panic paths on untrusted input.
+4. Parser entry points MUST be panic-free on adversarial input.
 
-## 5. Test Policy
+## 5. Identity and Directory Policy
+
+1. Server identity bindings for `user_id` MUST be immutable after first registration unless authenticated rotation protocol exists.
+2. Prekey uploads MUST include ownership proof under registered identity signature keys.
+3. Signature verification stubs are prohibited outside explicit test harnesses.
+
+## 6. PQ Backend Gate Policy
 
 ```mermaid
-flowchart TD
-    U[Unit tests] --> G[Security gate]
-    K[KAT tests] --> G
-    F[Fuzz targets] --> G
-    I[Integration tests] --> G
+flowchart LR
+    B[Build profile] --> R[Runtime profile check]
+    R -->|pq_oqs_enabled=true| OK[Operational mode]
+    R -->|pq_oqs_enabled=false| FAIL[Fail closed for client operations]
 ```
 
-Required layers:
+Client applications MUST expose the active crypto profile and fail closed when PQ backend support is unavailable.
+
+## 7. Test Policy
+
+Required coverage:
 
 - unit tests for success and tamper/failure paths,
-- deterministic KAT coverage for at least one handshake transcript,
-- fuzz coverage for parser-facing entry points,
-- integration tests for server-side input handling and relay behavior.
+- deterministic handshake KAT vector,
+- fuzz targets for parser-facing decode entry points,
+- server integration tests for input validation and directory behavior.
 
-## 6. CI Policy
+## 8. CI Policy
 
-- stable CI path: `fmt`, `clippy`, `test`,
-- optional nightly/manual path: short-duration fuzz smoke execution.
+- stable path: `fmt`, `clippy`, `test`,
+- optional nightly/manual path: fuzz smoke.
 
-A change that weakens these controls requires explicit review rationale.
+A change that weakens these controls requires explicit security rationale.

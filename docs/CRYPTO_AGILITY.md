@@ -35,7 +35,18 @@ The implementation rejects:
 
 This behavior is intentional to prevent permissive downgrade paths.
 
-## 5. Migration Strategy (Prototype Guidance)
+## 5. Runtime Profile Exposure
+
+`pqmsg-core` exposes a runtime crypto profile with:
+
+- protocol version,
+- effective default suite,
+- algorithm components,
+- PQ backend availability flag (`pq_oqs_enabled`).
+
+Client front-ends use this profile to enforce fail-closed startup behavior when PQ backend support is unavailable.
+
+## 6. Migration Strategy (Prototype Guidance)
 
 A migration SHOULD proceed through:
 
@@ -43,7 +54,7 @@ A migration SHOULD proceed through:
 2. deterministic preference ordering at client side,
 3. telemetry and interoperability validation prior to deprecating legacy suites.
 
-## 6. Validation Requirements
+## 7. Validation Requirements
 
 Any new suite introduction MUST include:
 

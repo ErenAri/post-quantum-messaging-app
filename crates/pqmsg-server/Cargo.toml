@@ -10,6 +10,8 @@ anyhow.workspace = true
 axum.workspace = true
 base64.workspace = true
 chrono.workspace = true
+ed25519-dalek.workspace = true
+pqmsg-core = { path = "../pqmsg-core" }
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
