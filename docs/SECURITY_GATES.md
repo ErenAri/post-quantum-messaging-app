@@ -15,6 +15,7 @@ This document defines minimum security quality gates for ongoing development and
 1. Shared secrets and KDF intermediates SHOULD use zeroizing containers.
 2. Temporary key buffers MUST be wiped after use where feasible.
 3. Secret-bearing structures SHOULD use `SecretBytes`/`Zeroizing` patterns.
+4. Client-side key/session persistence SHOULD default to encrypted-at-rest storage.
 
 ## 4. Parsing Policy
 
@@ -22,12 +23,16 @@ This document defines minimum security quality gates for ongoing development and
 2. Strict decoders MUST reject unknown critical TLV types.
 3. Strict decoders MUST reject duplicate critical fields.
 4. Parser entry points MUST be panic-free on adversarial input.
+5. Cross-client associated-data construction MUST be canonical and shared from `pqmsg-core`.
 
 ## 5. Identity and Directory Policy
 
 1. Server identity bindings for `user_id` MUST be immutable after first registration unless authenticated rotation protocol exists.
 2. Prekey uploads MUST include ownership proof under registered identity signature keys.
 3. Signature verification stubs are prohibited outside explicit test harnesses.
+4. Identity rotation MUST require challenge-based proof from both current and new identity signing keys.
+5. Clients MUST pin peer identity fingerprints and require explicit trust decisions on key changes.
+6. Relay/inbox transport endpoints MUST enforce authenticated user/device request signatures with replay resistance.
 
 ## 6. PQ Backend Gate Policy
 

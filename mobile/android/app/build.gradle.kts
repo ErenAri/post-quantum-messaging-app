@@ -6,7 +6,7 @@ plugins {
 }
 
 val repoRoot = rootProject.rootDir.resolve("../..").canonicalFile
-val generatedUniFFIDir = layout.buildDirectory.dir("generated/uniffi/kotlin")
+val generatedUniFFIDir = file("$buildDir/generated/uniffi/kotlin")
 
 android {
     namespace = "com.pqmsg.demo"
@@ -18,13 +18,18 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+        buildConfigField("String", "TLS_PIN_SHA256", "\"\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
+        debug {
+            buildConfigField("boolean", "ALLOW_CLEARTEXT_DEMO", "true")
+        }
         release {
             isMinifyEnabled = false
+            buildConfigField("boolean", "ALLOW_CLEARTEXT_DEMO", "false")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -44,6 +49,9 @@ android {
             jniLibs.srcDir("src/main/jniLibs")
         }
     }
+    buildFeatures {
+        buildConfig = true
+    }
 }
 
 val hostLibName = when {
@@ -62,7 +70,7 @@ tasks.register<Exec>("generateUniFFIBindings") {
     dependsOn("buildRustHostLibrary")
     workingDir = repoRoot
     doFirst {
-        generatedUniFFIDir.get().asFile.mkdirs()
+        generatedUniFFIDir.mkdirs()
     }
     commandLine(
         "cargo",
@@ -78,7 +86,7 @@ tasks.register<Exec>("generateUniFFIBindings") {
         "--language",
         "kotlin",
         "--out-dir",
-        generatedUniFFIDir.get().asFile.absolutePath
+        generatedUniFFIDir.absolutePath
     )
 }
 
@@ -89,6 +97,7 @@ tasks.named("preBuild").configure {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
     implementation("com.squareup.retrofit2:retrofit:2.11.0")
@@ -97,4 +106,7 @@ dependencies {
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("net.java.dev.jna:jna:5.14.0@aar")
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
 }

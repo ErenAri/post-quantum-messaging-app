@@ -2,6 +2,7 @@
 
 mod error;
 
+pub mod ad;
 pub mod aead;
 pub mod alg;
 pub mod dh;

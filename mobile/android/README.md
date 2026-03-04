@@ -1,6 +1,6 @@
 # Android Demo
 
-Thin demo client that uses:
+Guided demo client that uses:
 
 - Retrofit/OkHttp for server transport
 - Rust `libpqmsg_android.so` for cryptography via UniFFI
@@ -8,10 +8,8 @@ Thin demo client that uses:
 
 ## Flows
 
-- Generate identity keys in Rust
-- Register user and publish prekeys
-- Fetch peer bundle
-- Send encrypted handshake/session messages
-- Poll inbox and decrypt in Rust
+- Setup wizard with ordered steps: generate keys, register, publish prekeys, verify server
+- Chat flow: fetch peer bundle, send encrypted handshake/session messages, poll and decrypt
+- Two-level error surfacing: concise action hint with optional technical details
 
 Detailed Android build steps are in [`docs/ANDROID.md`](../../docs/ANDROID.md).

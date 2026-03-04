@@ -49,6 +49,8 @@ flowchart TD
 
 Handshake AD also includes initiator and responder identity public keys.
 
+For session traffic, external AD is constructed via the shared `pqmsg-core::ad::conversation_associated_data` function to maintain cross-client interoperability.
+
 ## 5. Integrity and Downgrade Properties
 
 - `version` and `suite_id` are cryptographically bound by AEAD.

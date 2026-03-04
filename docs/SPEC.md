@@ -66,6 +66,7 @@ Server-side directory behavior is defined as:
 
 1. `user_id` identity binding is immutable after first successful registration,
 2. prekey uploads are accepted only when Ed25519 signatures over `SPK` and `PQSPK` transcripts verify under registered `identity_sig_pub`.
+3. relay/inbox/identity-log access requires Ed25519-signed transport auth headers bound to registered `user_id` and `device_id`.
 
 ## 7. Ratchet Metadata Authentication
 
@@ -77,7 +78,7 @@ Session AEAD associated data MUST include:
 4. message number,
 5. previous chain length,
 6. optional `pq_step_ct`,
-7. external caller AD.
+7. external caller AD derived from shared `pqmsg-core` conversation-associated-data construction.
 
 This requirement ensures ratchet header mutation is rejected at AEAD verification time.
 

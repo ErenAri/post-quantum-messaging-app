@@ -11,6 +11,13 @@
         android:text="@string/chat_title"
         android:textSize="24sp" />
 
+    <TextView
+        android:id="@+id/textChatMeta"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/chat_meta_default" />
+
     <EditText
         android:id="@+id/editChatServer"
         android:layout_width="match_parent"
@@ -70,6 +77,32 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
         android:text="@string/button_back_setup" />
+
+    <TextView
+        android:id="@+id/textErrorSummaryChat"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:textColor="#B00020"
+        android:visibility="gone" />
+
+    <Button
+        android:id="@+id/buttonToggleErrorDetailsChat"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="@string/button_show_error_details"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/textErrorDetailsChat"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:background="#F1F1F1"
+        android:padding="8dp"
+        android:textIsSelectable="true"
+        android:visibility="gone" />
 
     <TextView
         android:id="@+id/textChatLog"

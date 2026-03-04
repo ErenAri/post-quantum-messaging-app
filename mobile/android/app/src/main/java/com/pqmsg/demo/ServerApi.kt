@@ -1,11 +1,15 @@
 package com.pqmsg.demo
 
 import okhttp3.OkHttpClient
+import okhttp3.CertificatePinner
 import okhttp3.logging.HttpLoggingInterceptor
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import retrofit2.Retrofit
+import retrofit2.Response
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.GET
+import retrofit2.http.HeaderMap
 import retrofit2.http.POST
 import retrofit2.http.Path
 import retrofit2.http.Query
@@ -51,6 +55,8 @@ data class BundleResponse(
     val sig_over_pqspk: String,
     val one_time_prekey_x25519: String?,
     val one_time_prekey_mlkem768: String?,
+    val identity_key_version: Int?,
+    val identity_fingerprint_sha256: String?,
     val bundle_generated_at: String,
 )
 
@@ -78,6 +84,9 @@ data class InboxResponse(
 )
 
 interface PqmsgApi {
+    @GET("/")
+    suspend fun pingRoot(): Response<Unit>
+
     @POST("/v1/users/register")
     suspend fun registerUser(@Body request: RegisterUserRequest): RegisterUserResponse
 
@@ -93,36 +102,93 @@ interface PqmsgApi {
     @POST("/v1/relay/{recipient_user_id}")
     suspend fun relay(
         @Path("recipient_user_id") recipientUserId: String,
+        @HeaderMap headers: Map<String, String>,
         @Body request: RelayRequest,
     ): RelayResponse
 
     @GET("/v1/inbox/{user_id}")
     suspend fun inbox(
         @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
         @Query("since") since: Long,
     ): InboxResponse
 }
 
 object ApiClientFactory {
     fun create(serverUrl: String): PqmsgApi {
-        val normalized = normalizeBaseUrl(serverUrl)
+        val policy = resolveTransportPolicy(
+            serverUrl,
+            BuildConfig.ALLOW_CLEARTEXT_DEMO,
+            BuildConfig.TLS_PIN_SHA256,
+        )
         val logging = HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.BASIC
         }
-        val client = OkHttpClient.Builder()
+        val baseUrl = policy.baseUrl.toHttpUrl()
+        val clientBuilder = OkHttpClient.Builder()
             .addInterceptor(logging)
-            .build()
+        val certificatePin = policy.certificatePin
+        if (certificatePin != null) {
+            clientBuilder.certificatePinner(
+                CertificatePinner.Builder()
+                    .add(baseUrl.host, certificatePin)
+                    .build()
+            )
+        }
+        val client = clientBuilder.build()
         return Retrofit.Builder()
-            .baseUrl(normalized)
+            .baseUrl(policy.baseUrl)
             .addConverterFactory(GsonConverterFactory.create())
             .client(client)
             .build()
             .create(PqmsgApi::class.java)
     }
 
-    private fun normalizeBaseUrl(base: String): String {
+    data class TransportPolicy(
+        val baseUrl: String,
+        val certificatePin: String?,
+    )
+
+    internal fun resolveTransportPolicy(
+        base: String,
+        allowCleartextDemo: Boolean,
+        tlsPinSha256: String,
+    ): TransportPolicy {
+        val normalized = normalizeBaseUrl(base)
+        val url = normalized.toHttpUrl()
+        return when (url.scheme) {
+            "http" -> {
+                require(allowCleartextDemo && isLocalDemoHost(url.host)) {
+                    "HTTP transport is only allowed for local demo hosts in debug mode"
+                }
+                TransportPolicy(baseUrl = normalized, certificatePin = null)
+            }
+
+            "https" -> {
+                val pin = tlsPinSha256.trim()
+                require(pin.isNotBlank()) { "HTTPS requires BuildConfig.TLS_PIN_SHA256" }
+                require(pin.startsWith("sha256/")) {
+                    "TLS pin must start with 'sha256/'"
+                }
+                TransportPolicy(baseUrl = normalized, certificatePin = pin)
+            }
+
+            else -> error("unsupported URL scheme '${url.scheme}'")
+        }
+    }
+
+    internal fun normalizeBaseUrl(base: String): String {
         val trimmed = base.trim()
         require(trimmed.isNotBlank()) { "server URL is empty" }
-        return if (trimmed.endsWith("/")) trimmed else "$trimmed/"
+        val normalized = if (trimmed.endsWith("/")) trimmed else "$trimmed/"
+        val url = normalized.toHttpUrl()
+        require(url.scheme == "http" || url.scheme == "https") {
+            "server URL must use http or https"
+        }
+        return normalized
+    }
+
+    internal fun isLocalDemoHost(host: String): Boolean {
+        return host == "10.0.2.2" || host == "127.0.0.1" || host == "localhost"
     }
 }

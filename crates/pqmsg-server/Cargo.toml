@@ -8,12 +8,17 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
 pqmsg-core = { path = "../pqmsg-core" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
+uuid.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true

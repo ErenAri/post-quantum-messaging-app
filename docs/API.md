@@ -18,9 +18,22 @@ sequenceDiagram
     C->>S: POST /users/register
     C->>S: POST /users/{id}/prekeys
     C->>S: GET /users/{peer}/bundle
+    C->>S: POST /users/{id}/rotate/init
+    C->>S: POST /users/{id}/rotate/confirm
+    C->>S: GET /users/{id}/identity-log
     C->>S: POST /relay/{peer}
     C->>S: GET /inbox/{id}?since=n
 ```
+
+## 2.1 Security Profile Configuration
+
+Server startup is controlled by environment variables:
+
+- `PQMSG_SECURITY_PROFILE`: `research` | `high_assurance` | `nss_aligned` (default: `research`)
+- `PQMSG_TLS_CERT_PATH`: PEM certificate path
+- `PQMSG_TLS_KEY_PATH`: PEM private key path
+
+In `high_assurance` and `nss_aligned`, server startup fails unless both TLS paths are provided.
 
 ## 3. Identity and Prekey Security Semantics
 
@@ -36,6 +49,24 @@ flowchart TD
 - `user_id` identity bindings are immutable after first successful registration.
 - Re-registration with changed identity material is rejected (`409 Conflict`).
 - Prekey signatures are verified using Ed25519 before persistence.
+
+## 3.1 Authenticated Transport Headers
+
+The following endpoints require request authentication headers:
+
+- `GET /v1/users/{user_id}/identity-log`
+- `POST /v1/relay/{recipient_user_id}`
+- `GET /v1/inbox/{user_id}`
+
+Required headers:
+
+- `x-pqmsg-auth-user`
+- `x-pqmsg-auth-device`
+- `x-pqmsg-auth-timestamp` (unix seconds)
+- `x-pqmsg-auth-nonce` (single-use)
+- `x-pqmsg-auth-signature` (`base64(64-byte Ed25519 signature)`)
+
+The server verifies signatures under registered `identity_sig_pub`, enforces device binding, applies timestamp skew checks, and rejects nonce replay.
 
 ## 4. Endpoint Definitions
 
@@ -116,13 +147,110 @@ Response:
   "sig_over_pqspk": "base64...",
   "one_time_prekey_x25519": "base64 or null",
   "one_time_prekey_mlkem768": "base64 or null",
+  "identity_key_version": 1,
+  "identity_fingerprint_sha256": "hex(sha256(identity_x25519_pub))",
   "bundle_generated_at": "2026-03-04T12:00:00Z"
 }
 ```
 
-### 4.4 Relay Message
+### 4.4 Initiate Identity Rotation
+
+`POST /v1/users/{user_id}/rotate/init`
+
+Request:
+
+```json
+{
+  "new_identity_x25519_pub": "base64(32 bytes)",
+  "new_identity_sig_pub": "base64(32-byte Ed25519 public key)",
+  "new_device_id": "alice-device-2"
+}
+```
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "challenge_id": "uuid-v4",
+  "challenge_nonce": "base64(32 bytes)",
+  "expires_at": "2026-03-04T12:10:00Z"
+}
+```
+
+### 4.5 Confirm Identity Rotation
+
+`POST /v1/users/{user_id}/rotate/confirm`
+
+Request:
+
+```json
+{
+  "challenge_id": "uuid-v4",
+  "sig_by_current_identity": "base64(64-byte Ed25519 signature)",
+  "sig_by_new_identity": "base64(64-byte Ed25519 signature)"
+}
+```
+
+The signatures are computed over a server-defined rotation transcript containing:
+
+1. `user_id`,
+2. `challenge_id`,
+3. `challenge_nonce`,
+4. `new_identity_x25519_pub`,
+5. `new_identity_sig_pub`,
+6. `new_device_id`.
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "identity_key_version": 2,
+  "identity_fingerprint_sha256": "hex(sha256(new_identity_x25519_pub))",
+  "rotated_at": "2026-03-04T12:01:00Z"
+}
+```
+
+### 4.6 Identity Event Log
+
+`GET /v1/users/{user_id}/identity-log`
+
+Requires authenticated transport headers (Section 3.1).
+
+Identity-log auth signature transcript fields:
+
+1. endpoint label (`identity-log`),
+2. auth user id,
+3. auth device id,
+4. auth timestamp,
+5. auth nonce,
+6. target user id.
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "events": [
+    {
+      "version": 2,
+      "identity_x25519_pub": "base64...",
+      "identity_sig_pub": "base64...",
+      "device_id": "alice-device-2",
+      "event_type": "rotation",
+      "changed_at": "2026-03-04T12:01:00Z",
+      "identity_fingerprint_sha256": "hex..."
+    }
+  ]
+}
+```
+
+### 4.7 Relay Message
 
 `POST /v1/relay/{recipient_user_id}`
+
+Requires authenticated transport headers (Section 3.1).
 
 Request:
 
@@ -136,9 +264,31 @@ Request:
 
 The payload is treated as opaque and persisted without server-side plaintext processing.
 
-### 4.5 Poll Inbox
+Relay auth signature transcript fields:
+
+1. endpoint label (`relay`),
+2. auth user id,
+3. auth device id,
+4. auth timestamp,
+5. auth nonce,
+6. recipient user id,
+7. decoded relay message blob bytes.
+
+### 4.8 Poll Inbox
 
 `GET /v1/inbox/{user_id}?since=<message_id>`
+
+Requires authenticated transport headers (Section 3.1).
+
+Inbox auth signature transcript fields:
+
+1. endpoint label (`inbox`),
+2. auth user id,
+3. auth device id,
+4. auth timestamp,
+5. auth nonce,
+6. target user id,
+7. `since` value.
 
 Response:
 
@@ -153,6 +303,19 @@ Response:
       "received_at": "2026-03-04T12:00:00Z"
     }
   ]
+}
+```
+
+### 4.9 Health
+
+`GET /health`
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "security_profile": "research"
 }
 ```
 

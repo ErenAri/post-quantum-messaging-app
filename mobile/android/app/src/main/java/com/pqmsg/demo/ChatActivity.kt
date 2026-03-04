@@ -1,18 +1,27 @@
 package com.pqmsg.demo
 
 import android.os.Bundle
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
-import uniffi.pqmsg_android.PqmsgAndroidException
+import kotlinx.coroutines.suspendCancellableCoroutine
+import uniffi.pqmsg_android.RequestAuthHeaders
+import uniffi.pqmsg_android.buildInboxAuthHeaders
+import uniffi.pqmsg_android.buildRelayAuthHeaders
 import uniffi.pqmsg_android.ServerBundle
 import uniffi.pqmsg_android.decryptMessage
 import uniffi.pqmsg_android.encryptWithSession
 import uniffi.pqmsg_android.initiateSessionAndEncrypt
 import uniffi.pqmsg_android.loadUserProfile
+import java.security.MessageDigest
+import java.util.Base64
+import kotlin.coroutines.resume
 
 class ChatActivity : AppCompatActivity() {
     private lateinit var store: LocalStateStore
@@ -20,8 +29,16 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var userInput: EditText
     private lateinit var peerInput: EditText
     private lateinit var messageInput: EditText
+    private lateinit var fetchBundleButton: Button
+    private lateinit var sendButton: Button
+    private lateinit var pollButton: Button
     private lateinit var chatLog: TextView
+    private lateinit var chatMeta: TextView
+    private lateinit var errorSummaryText: TextView
+    private lateinit var errorDetailsText: TextView
+    private lateinit var errorToggleButton: Button
     private var latestBundle: BundleResponse? = null
+    private var errorExpanded = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -32,42 +49,55 @@ class ChatActivity : AppCompatActivity() {
         userInput = findViewById(R.id.editChatUser)
         peerInput = findViewById(R.id.editChatPeer)
         messageInput = findViewById(R.id.editMessage)
+        fetchBundleButton = findViewById(R.id.buttonFetchBundle)
+        sendButton = findViewById(R.id.buttonSend)
+        pollButton = findViewById(R.id.buttonPoll)
         chatLog = findViewById(R.id.textChatLog)
+        chatMeta = findViewById(R.id.textChatMeta)
+        errorSummaryText = findViewById(R.id.textErrorSummaryChat)
+        errorDetailsText = findViewById(R.id.textErrorDetailsChat)
+        errorToggleButton = findViewById(R.id.buttonToggleErrorDetailsChat)
 
         val setup = store.loadSetup()
         serverInput.setText(intent.getStringExtra("server") ?: setup.serverUrl)
         userInput.setText(intent.getStringExtra("user") ?: setup.userId)
         peerInput.setText(intent.getStringExtra("peer") ?: setup.peerUserId)
 
-        findViewById<Button>(R.id.buttonFetchBundle).setOnClickListener {
+        configureInputObservers()
+        configureErrorToggle()
+        refreshMeta()
+        syncActionAvailability()
+
+        fetchBundleButton.setOnClickListener {
             lifecycleScope.launch {
-                runCatching {
+                runAction("Fetch peer bundle") {
                     val api = ApiClientFactory.create(serverInput.text.toString())
                     val peer = peerInput.text.toString().trim()
+                    require(peer.isNotBlank()) { "peer user id is empty" }
                     latestBundle = api.getBundle(peer)
+                    val me = userInput.text.toString().trim()
+                    store.writeBundleFetchedAt(me, peer, latestBundle!!.bundle_generated_at)
+                    refreshMeta()
                     appendLog("bundle fetched for $peer")
-                }.onFailure {
-                    appendLog("bundle fetch failed: ${formatError(it)}")
+                    "Bundle fetched for $peer"
                 }
             }
         }
 
-        findViewById<Button>(R.id.buttonSend).setOnClickListener {
+        sendButton.setOnClickListener {
             lifecycleScope.launch {
-                runCatching {
+                runAction("Send message") {
                     sendMessageFlow()
-                }.onFailure {
-                    appendLog("send failed: ${formatError(it)}")
+                    "Encrypted message sent"
                 }
             }
         }
 
-        findViewById<Button>(R.id.buttonPoll).setOnClickListener {
+        pollButton.setOnClickListener {
             lifecycleScope.launch {
-                runCatching {
+                runAction("Poll inbox") {
                     pollFlow()
-                }.onFailure {
-                    appendLog("poll failed: ${formatError(it)}")
+                    "Inbox polling completed"
                 }
             }
         }
@@ -77,11 +107,49 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
+    private fun configureInputObservers() {
+        serverInput.doAfterTextChanged { syncActionAvailability() }
+        userInput.doAfterTextChanged {
+            syncActionAvailability()
+            refreshMeta()
+        }
+        peerInput.doAfterTextChanged {
+            syncActionAvailability()
+            refreshMeta()
+        }
+        messageInput.doAfterTextChanged { syncActionAvailability() }
+    }
+
+    private fun configureErrorToggle() {
+        errorToggleButton.setOnClickListener {
+            errorExpanded = !errorExpanded
+            refreshErrorDetailsVisibility()
+        }
+        renderError(null)
+    }
+
+    private suspend fun runAction(action: String, block: suspend () -> String) {
+        runCatching {
+            block()
+        }.onSuccess {
+            renderError(null)
+            appendLog(it)
+        }.onFailure {
+            val mapped = UiErrorMapper.fromThrowable(it, action)
+            renderError(mapped)
+            appendLog("${action.lowercase()} failed")
+        }
+        syncActionAvailability()
+    }
+
     private suspend fun sendMessageFlow() {
         val server = serverInput.text.toString().trim()
         val fromUser = userInput.text.toString().trim()
         val peerUser = peerInput.text.toString().trim()
         val text = messageInput.text.toString()
+        require(server.isNotBlank()) { "server URL is empty" }
+        require(fromUser.isNotBlank()) { "user id is empty" }
+        require(peerUser.isNotBlank()) { "peer user id is empty" }
         require(text.isNotBlank()) { "message is empty" }
 
         val keysJson = store.readKeys(fromUser) ?: error("missing keys for $fromUser")
@@ -91,6 +159,7 @@ class ChatActivity : AppCompatActivity() {
 
         val sendResult = if (existingSession.isNullOrBlank()) {
             val fetched = latestBundle ?: api.getBundle(peerUser).also { latestBundle = it }
+            enforceIdentityPin(fromUser, peerUser, fetched)
             initiateSessionAndEncrypt(
                 keysJson = keysJson,
                 fromUserId = fromUser,
@@ -111,6 +180,12 @@ class ChatActivity : AppCompatActivity() {
         store.writeSession(fromUser, peerUser, sendResult.sessionJson)
         val relay = api.relay(
             recipientUserId = peerUser,
+            headers = buildRelayAuthHeaders(
+                keysJson = keysJson,
+                senderUserId = fromUser,
+                recipientUserId = peerUser,
+                messageBytesBase64 = sendResult.messageBytesBase64,
+            ).toHeaderMap(),
             request = RelayRequest(
                 sender_user_id = profile.userId,
                 device_id = profile.deviceId,
@@ -119,15 +194,137 @@ class ChatActivity : AppCompatActivity() {
         )
         appendLog("me->$peerUser: $text [message_id=${relay.message_id}]")
         messageInput.setText("")
+        syncActionAvailability()
+    }
+
+    private suspend fun enforceIdentityPin(localUser: String, peerUser: String, bundle: BundleResponse) {
+        val observedFingerprint = bundleIdentityFingerprint(bundle)
+        val observedVersion = bundle.identity_key_version ?: 1
+        val observedSigPub = bundle.identity_sig_pub
+        val observedAt = bundle.bundle_generated_at
+        val existing = store.readIdentityPin(localUser, peerUser)
+        if (existing == null) {
+            store.writeIdentityPin(
+                localUser,
+                peerUser,
+                IdentityPin(
+                    fingerprintSha256 = observedFingerprint,
+                    identityKeyVersion = observedVersion,
+                    identitySigPub = observedSigPub,
+                    observedAt = observedAt,
+                ),
+            )
+            appendLog("pinned identity for $peerUser")
+            return
+        }
+
+        if (existing.fingerprintSha256 == observedFingerprint) {
+            if (existing.identityKeyVersion != observedVersion || existing.identitySigPub != observedSigPub) {
+                store.writeIdentityPin(
+                    localUser,
+                    peerUser,
+                    IdentityPin(
+                        fingerprintSha256 = observedFingerprint,
+                        identityKeyVersion = observedVersion,
+                        identitySigPub = observedSigPub,
+                        observedAt = observedAt,
+                    ),
+                )
+            }
+            return
+        }
+
+        val accepted = confirmIdentityKeyChange(peerUser, existing, observedFingerprint, observedVersion)
+        if (!accepted) {
+            error("identity key changed for $peerUser; send blocked")
+        }
+        store.writeIdentityPin(
+            localUser,
+            peerUser,
+            IdentityPin(
+                fingerprintSha256 = observedFingerprint,
+                identityKeyVersion = observedVersion,
+                identitySigPub = observedSigPub,
+                observedAt = observedAt,
+            ),
+        )
+        appendLog("accepted identity update for $peerUser")
+    }
+
+    private suspend fun confirmIdentityKeyChange(
+        peerUser: String,
+        existing: IdentityPin,
+        observedFingerprint: String,
+        observedVersion: Int,
+    ): Boolean {
+        return suspendCancellableCoroutine { continuation ->
+            val message = buildString {
+                append("Identity key changed for ")
+                append(peerUser)
+                append(".\n\nOld fingerprint: ")
+                append(existing.fingerprintSha256)
+                append(" (v")
+                append(existing.identityKeyVersion)
+                append(")\nNew fingerprint: ")
+                append(observedFingerprint)
+                append(" (v")
+                append(observedVersion)
+                append(")\n\nTrust new key?")
+            }
+            val dialog = AlertDialog.Builder(this)
+                .setTitle("Security warning")
+                .setMessage(message)
+                .setCancelable(false)
+                .setNegativeButton("Cancel") { _, _ ->
+                    if (continuation.isActive) {
+                        continuation.resume(false)
+                    }
+                }
+                .setPositiveButton("Trust new key") { _, _ ->
+                    if (continuation.isActive) {
+                        continuation.resume(true)
+                    }
+                }
+                .create()
+            dialog.setOnDismissListener {
+                if (continuation.isActive) {
+                    continuation.resume(false)
+                }
+            }
+            dialog.show()
+            continuation.invokeOnCancellation {
+                dialog.dismiss()
+            }
+        }
+    }
+
+    private fun bundleIdentityFingerprint(bundle: BundleResponse): String {
+        val fromServer = bundle.identity_fingerprint_sha256?.trim()?.lowercase()
+        if (!fromServer.isNullOrEmpty()) {
+            return fromServer
+        }
+        val identityKey = Base64.getDecoder().decode(bundle.identity_x25519_pub)
+        val digest = MessageDigest.getInstance("SHA-256").digest(identityKey)
+        return digest.joinToString("") { "%02x".format(it) }
     }
 
     private suspend fun pollFlow() {
         val server = serverInput.text.toString().trim()
         val user = userInput.text.toString().trim()
+        require(server.isNotBlank()) { "server URL is empty" }
+        require(user.isNotBlank()) { "user id is empty" }
         val keysJson = store.readKeys(user) ?: error("missing keys for $user")
         val api = ApiClientFactory.create(server)
         var cursor = store.readCursor(user)
-        val inbox = api.inbox(user, cursor)
+        val inbox = api.inbox(
+            user,
+            buildInboxAuthHeaders(
+                keysJson = keysJson,
+                userId = user,
+                since = cursor,
+            ).toHeaderMap(),
+            cursor,
+        )
 
         if (inbox.messages.isEmpty()) {
             appendLog("inbox empty")
@@ -147,12 +344,46 @@ class ChatActivity : AppCompatActivity() {
                 store.writeSession(user, item.sender_user_id, result.sessionJson)
                 appendLog("${item.sender_user_id}: ${result.plaintextUtf8}")
             }.onFailure {
-                appendLog("decrypt failed for ${item.sender_user_id}: ${formatError(it)}")
+                val mapped = UiErrorMapper.fromThrowable(it, "Decrypt message")
+                renderError(mapped)
+                appendLog("decrypt failed for ${item.sender_user_id}")
             }
             cursor = maxOf(cursor, item.message_id)
         }
 
         store.writeCursor(user, cursor)
+        refreshMeta()
+    }
+
+    private fun refreshMeta() {
+        val user = userInput.text.toString().trim()
+        val peer = peerInput.text.toString().trim()
+        val cursor = if (user.isBlank()) 0L else store.readCursor(user)
+        val bundleFetched = if (user.isBlank() || peer.isBlank()) null else store.readBundleFetchedAt(user, peer)
+        val bundleLine = if (bundleFetched.isNullOrBlank()) {
+            "Last bundle fetch: none"
+        } else {
+            "Last bundle fetch: $bundleFetched"
+        }
+        chatMeta.text = "Cursor: $cursor\n$bundleLine"
+    }
+
+    private fun syncActionAvailability() {
+        val server = serverInput.text.toString().trim()
+        val user = userInput.text.toString().trim()
+        val peer = peerInput.text.toString().trim()
+        val message = messageInput.text.toString()
+        val keysReady = hasKeys(user)
+        fetchBundleButton.isEnabled = server.isNotBlank() && peer.isNotBlank()
+        sendButton.isEnabled = server.isNotBlank() && user.isNotBlank() && peer.isNotBlank() && message.isNotBlank() && keysReady
+        pollButton.isEnabled = server.isNotBlank() && user.isNotBlank() && keysReady
+    }
+
+    private fun hasKeys(userId: String): Boolean {
+        if (userId.isBlank()) {
+            return false
+        }
+        return !store.readKeys(userId).isNullOrBlank()
     }
 
     private fun appendLog(line: String) {
@@ -161,6 +392,34 @@ class ChatActivity : AppCompatActivity() {
             line
         } else {
             "$previous\n$line"
+        }
+    }
+
+    private fun renderError(error: UiError?) {
+        if (error == null) {
+            errorSummaryText.text = ""
+            errorDetailsText.text = ""
+            errorSummaryText.visibility = View.GONE
+            errorDetailsText.visibility = View.GONE
+            errorToggleButton.visibility = View.GONE
+            errorExpanded = false
+            return
+        }
+        errorSummaryText.text = "${error.headline}\n${error.actionHint}"
+        errorDetailsText.text = error.technicalDetails
+        errorSummaryText.visibility = View.VISIBLE
+        errorToggleButton.visibility = View.VISIBLE
+        errorExpanded = false
+        refreshErrorDetailsVisibility()
+    }
+
+    private fun refreshErrorDetailsVisibility() {
+        if (errorExpanded) {
+            errorDetailsText.visibility = View.VISIBLE
+            errorToggleButton.text = "Hide technical details"
+        } else {
+            errorDetailsText.visibility = View.GONE
+            errorToggleButton.text = "Show technical details"
         }
     }
 
@@ -178,11 +437,13 @@ class ChatActivity : AppCompatActivity() {
         )
     }
 
-    private fun formatError(error: Throwable): String {
-        return when (error) {
-            is PqmsgAndroidException.InvalidInput -> "invalid input: ${error.message}"
-            is PqmsgAndroidException.OperationFailed -> "operation failed: ${error.message}"
-            else -> error.message ?: error.javaClass.simpleName
-        }
+    private fun RequestAuthHeaders.toHeaderMap(): Map<String, String> {
+        return mapOf(
+            "x-pqmsg-auth-user" to authUser,
+            "x-pqmsg-auth-device" to authDevice,
+            "x-pqmsg-auth-timestamp" to authTimestamp,
+            "x-pqmsg-auth-nonce" to authNonce,
+            "x-pqmsg-auth-signature" to authSignature,
+        )
     }
 }

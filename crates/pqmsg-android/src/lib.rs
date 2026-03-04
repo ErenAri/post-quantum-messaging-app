@@ -3,6 +3,7 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use pqmsg_core::ad::conversation_associated_data;
 use pqmsg_core::alg::{
     runtime_crypto_profile, AlgorithmSuite, KemAlgorithm,
     SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
@@ -16,12 +17,22 @@ use pqmsg_core::handshake::{
 use pqmsg_core::kem::MlKem768;
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
 use pqmsg_core::session::{SessionRole, SessionSnapshot, SessionState};
+use pqmsg_core::tlv::{critical_type, encode, TlvRecord};
 use pqmsg_core::CoreError;
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_ONE_TIME_PREKEYS: u32 = 256;
+const AUTH_TAG_ENDPOINT: u16 = critical_type(0x3201);
+const AUTH_TAG_USER_ID: u16 = critical_type(0x3202);
+const AUTH_TAG_DEVICE_ID: u16 = critical_type(0x3203);
+const AUTH_TAG_TIMESTAMP: u16 = critical_type(0x3204);
+const AUTH_TAG_NONCE: u16 = critical_type(0x3205);
+const AUTH_TAG_RECIPIENT_ID: u16 = critical_type(0x3206);
+const AUTH_TAG_SINCE: u16 = critical_type(0x3207);
+const AUTH_TAG_MESSAGE_BLOB: u16 = critical_type(0x3208);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, uniffi::Enum)]
 pub enum Suite {
@@ -101,6 +112,15 @@ pub struct PublishPrekeysPayload {
     pub one_time_prekeys_mlkem768: Vec<String>,
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RequestAuthHeaders {
+    pub auth_user: String,
+    pub auth_device: String,
+    pub auth_timestamp: String,
+    pub auth_nonce: String,
+    pub auth_signature: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
 pub struct ServerBundle {
     pub user_id: String,
@@ -162,6 +182,19 @@ impl SignatureVerifier for Ed25519SignatureVerifier {
     }
 }
 
+struct AndroidKemKeyPair {
+    public_key: Vec<u8>,
+    secret_key: Vec<u8>,
+}
+
+fn kem_keypair(kem: &MlKem768) -> Result<AndroidKemKeyPair, PqmsgAndroidError> {
+    let pair = kem.keypair()?;
+    Ok(AndroidKemKeyPair {
+        public_key: pair.public_key,
+        secret_key: pair.secret_key.as_slice().to_vec(),
+    })
+}
+
 fn suite_to_kem_algorithm(suite: Suite) -> KemAlgorithm {
     match suite {
         Suite::MlKem768 => KemAlgorithm::MlKem768,
@@ -182,7 +215,7 @@ fn suite_from_suite_id(suite_id: u16) -> Result<Suite, PqmsgAndroidError> {
 
 fn build_kem_for_suite(suite: Suite) -> Result<MlKem768, PqmsgAndroidError> {
     MlKem768::new(suite_to_kem_algorithm(suite))
-        .map_err(|error| operation_failed(error.to_string()))
+        .map_err(|_| operation_failed("pq-oqs backend is disabled"))
 }
 
 fn generate_signing_key<R: RngCore + CryptoRng>(rng: &mut R) -> SigningKey {
@@ -206,6 +239,56 @@ fn decode_signing_key_b64(
 
 fn build_signature_payload(signing_key: &SigningKey, message: &[u8]) -> String {
     B64.encode(signing_key.sign(message).to_bytes())
+}
+
+fn auth_signing_key_for_user(keys: &UserKeysFile) -> Result<SigningKey, PqmsgAndroidError> {
+    let signing_key =
+        decode_signing_key_b64("identity_sig_secret_b64", &keys.identity_sig_secret_b64)?;
+    Ok(signing_key)
+}
+
+fn auth_timestamp() -> Result<i64, PqmsgAndroidError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| operation_failed("system time is before UNIX epoch"))?;
+    i64::try_from(duration.as_secs()).map_err(|_| operation_failed("system time overflow"))
+}
+
+fn auth_nonce() -> String {
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    B64.encode(bytes)
+}
+
+fn auth_common_records(
+    endpoint: &'static str,
+    user_id: &str,
+    device_id: &str,
+    timestamp: i64,
+    nonce: &str,
+) -> Vec<TlvRecord> {
+    vec![
+        TlvRecord {
+            ty: AUTH_TAG_ENDPOINT,
+            value: endpoint.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: AUTH_TAG_USER_ID,
+            value: user_id.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: AUTH_TAG_DEVICE_ID,
+            value: device_id.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: AUTH_TAG_TIMESTAMP,
+            value: timestamp.to_be_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: AUTH_TAG_NONCE,
+            value: nonce.as_bytes().to_vec(),
+        },
+    ]
 }
 
 #[uniffi::export]
@@ -270,7 +353,7 @@ pub fn generate_identity_keys(
     let signed_prekey = OneTimePreKey::generate(format!("{user_id}-spk"), &mut rng);
     let identity_sig = generate_signing_key(&mut rng);
     let kem = build_kem_for_suite(suite)?;
-    let pq_signed_prekey = kem.keypair()?;
+    let pq_signed_prekey = kem_keypair(&kem)?;
 
     let mut one_time_x25519 = Vec::with_capacity(one_time_count as usize);
     let mut one_time_mlkem = Vec::with_capacity(one_time_count as usize);
@@ -283,11 +366,11 @@ pub fn generate_identity_keys(
             secret_b64: B64.encode(key.secret_key.as_slice()),
         });
 
-        let pq_key = kem.keypair()?;
+        let pq_key = kem_keypair(&kem)?;
         one_time_mlkem.push(OneTimeKeyRecord {
             key_id: format!("{user_id}-otk-pq-{idx}"),
             public_b64: B64.encode(pq_key.public_key),
-            secret_b64: B64.encode(pq_key.secret_key.as_slice()),
+            secret_b64: B64.encode(pq_key.secret_key),
         });
     }
 
@@ -303,7 +386,7 @@ pub fn generate_identity_keys(
         signed_prekey_x25519_pub_b64: B64.encode(signed_prekey.public_key.0),
         signed_prekey_x25519_secret_b64: B64.encode(signed_prekey.secret_key.as_slice()),
         pq_signed_prekey_pub_b64: B64.encode(pq_signed_prekey.public_key),
-        pq_signed_prekey_secret_b64: B64.encode(pq_signed_prekey.secret_key.as_slice()),
+        pq_signed_prekey_secret_b64: B64.encode(pq_signed_prekey.secret_key),
         one_time_prekeys_x25519: one_time_x25519,
         one_time_prekeys_mlkem768: one_time_mlkem,
     };
@@ -384,6 +467,83 @@ pub fn parse_bundle_json(bundle_json: String) -> Result<ServerBundle, PqmsgAndro
         sig_over_pqspk: bundle.sig_over_pqspk,
         one_time_prekey_x25519: bundle.one_time_prekey_x25519,
         one_time_prekey_mlkem768: bundle.one_time_prekey_mlkem768,
+    })
+}
+
+#[uniffi::export]
+pub fn build_relay_auth_headers(
+    keys_json: String,
+    sender_user_id: String,
+    recipient_user_id: String,
+    message_bytes_base64: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != sender_user_id {
+        return Err(invalid_input(format!(
+            "sender_user_id '{}' does not match keys user '{}'",
+            sender_user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let message_blob = decode_b64("message_bytes_base64", &message_bytes_base64)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("relay", &sender_user_id, &keys.device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: recipient_user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_MESSAGE_BLOB,
+        value: message_blob,
+    });
+    let transcript =
+        encode(&records).map_err(|_| operation_failed("failed to encode relay auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: sender_user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_inbox_auth_headers(
+    keys_json: String,
+    user_id: String,
+    since: i64,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("inbox", &user_id, &keys.device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_SINCE,
+        value: since.to_be_bytes().to_vec(),
+    });
+    let transcript =
+        encode(&records).map_err(|_| operation_failed("failed to encode inbox auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
     })
 }
 
@@ -478,7 +638,7 @@ pub fn encrypt_with_session(
     }
 
     let mut session = SessionState::from_snapshot(session_file.snapshot.clone());
-    let ad = make_ad(&sender_user_id, &peer_user_id);
+    let ad = make_ad(&sender_user_id, &peer_user_id)?;
     let wire = session.encrypt(plaintext_utf8.as_bytes(), &ad)?;
     session_file.snapshot = session.snapshot();
 
@@ -576,7 +736,7 @@ pub fn decrypt_message(
     }
 
     let mut session = SessionState::from_snapshot(session_file.snapshot.clone());
-    let ad = make_ad(&sender_user_id, &recipient_user_id);
+    let ad = make_ad(&sender_user_id, &recipient_user_id)?;
     let plaintext = session.decrypt(&message_bytes, &ad)?;
     session_file.snapshot = session.snapshot();
     let plaintext_base64 = B64.encode(&plaintext);
@@ -676,8 +836,8 @@ fn bundle_to_core(bundle: &ServerBundle, suite: Suite) -> Result<PreKeyBundle, P
     Ok(out)
 }
 
-fn make_ad(sender: &str, recipient: &str) -> Vec<u8> {
-    format!("pqmsg-android-ad:v1:{sender}:{recipient}").into_bytes()
+fn make_ad(sender: &str, recipient: &str) -> Result<Vec<u8>, PqmsgAndroidError> {
+    conversation_associated_data(sender, recipient).map_err(Into::into)
 }
 
 fn decode_b64(field: &'static str, value: &str) -> Result<Vec<u8>, PqmsgAndroidError> {

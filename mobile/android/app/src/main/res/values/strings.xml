@@ -12,11 +12,21 @@
     <string name="button_generate">Generate Identity Keys</string>
     <string name="button_register">Register User</string>
     <string name="button_publish">Publish Prekeys</string>
+    <string name="button_verify_server">Verify Server</string>
     <string name="button_open_chat">Open Chat</string>
+    <string name="button_preset_alice">Preset Alice</string>
+    <string name="button_preset_bob">Preset Bob</string>
     <string name="button_fetch_bundle">Fetch Peer Bundle</string>
     <string name="button_send">Send Encrypted</string>
     <string name="button_poll">Poll Inbox</string>
     <string name="button_back_setup">Back To Setup</string>
+    <string name="button_show_error_details">Show technical details</string>
+    <string name="setup_crypto_profile_loading">Crypto profile: checking...</string>
+    <string name="setup_step_keys_pending">1) Generate keys: pending</string>
+    <string name="setup_step_register_pending">2) Register user: pending</string>
+    <string name="setup_step_publish_pending">3) Publish prekeys: pending</string>
+    <string name="setup_step_verify_pending">4) Verify server: pending</string>
+    <string name="chat_meta_default">Cursor: 0&#10;Last bundle fetch: none</string>
     <string name="status_ready">Ready</string>
     <string name="chat_log_empty">No messages yet</string>
 </resources>

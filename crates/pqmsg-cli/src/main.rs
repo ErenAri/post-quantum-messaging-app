@@ -1,10 +1,14 @@
 use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use chacha20poly1305::aead::{Aead, Payload};
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 use clap::{Parser, Subcommand, ValueEnum};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use hkdf::Hkdf;
+use pqmsg_core::ad::conversation_associated_data;
 use pqmsg_core::alg::{
-    runtime_crypto_profile, AlgorithmSuite, KemAlgorithm,
+    enforce_runtime_security_profile, AlgorithmSuite, KemAlgorithm, SecurityProfile,
     SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
     SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305,
 };
@@ -16,18 +20,45 @@ use pqmsg_core::handshake::{
 use pqmsg_core::kem::MlKem768;
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
 use pqmsg_core::session::{SessionRole, SessionSnapshot, SessionState};
+use pqmsg_core::tlv::{critical_type, encode, TlvRecord};
 use pqmsg_core::CoreError;
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_STATE_DIR: &str = "./state";
 const DEFAULT_KEYS_DIR: &str = "./devkeys";
 const DEFAULT_ONE_TIME_PREKEYS: usize = 16;
+const AUTH_HEADER_USER: &str = "x-pqmsg-auth-user";
+const AUTH_HEADER_DEVICE: &str = "x-pqmsg-auth-device";
+const AUTH_HEADER_TIMESTAMP: &str = "x-pqmsg-auth-timestamp";
+const AUTH_HEADER_NONCE: &str = "x-pqmsg-auth-nonce";
+const AUTH_HEADER_SIGNATURE: &str = "x-pqmsg-auth-signature";
+const AUTH_TAG_ENDPOINT: u16 = critical_type(0x3201);
+const AUTH_TAG_USER_ID: u16 = critical_type(0x3202);
+const AUTH_TAG_DEVICE_ID: u16 = critical_type(0x3203);
+const AUTH_TAG_TIMESTAMP: u16 = critical_type(0x3204);
+const AUTH_TAG_NONCE: u16 = critical_type(0x3205);
+const AUTH_TAG_RECIPIENT_ID: u16 = critical_type(0x3206);
+const AUTH_TAG_SINCE: u16 = critical_type(0x3207);
+const AUTH_TAG_MESSAGE_BLOB: u16 = critical_type(0x3208);
+const STORAGE_SEALED_KIND: &str = "pqmsg-cli-sealed";
+const STORAGE_SEALED_VERSION: u16 = 1;
+const STORAGE_SALT_BYTES: usize = 16;
+const STORAGE_NONCE_BYTES: usize = 12;
+const STORAGE_AAD: &[u8] = b"pqmsg-cli-storage-v1";
+const ENV_STATE_PASSPHRASE: &str = "PQMSG_STATE_PASSPHRASE";
+
+static STORAGE_POLICY: OnceLock<StoragePolicy> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum, Serialize, Deserialize)]
 enum SuiteFlag {
@@ -37,6 +68,16 @@ enum SuiteFlag {
     Kyber768,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+enum SecurityProfileFlag {
+    #[value(name = "research")]
+    Research,
+    #[value(name = "high-assurance")]
+    HighAssurance,
+    #[value(name = "nss-aligned")]
+    NssAligned,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "pqmsg-cli")]
 struct Cli {
@@ -44,6 +85,12 @@ struct Cli {
     server: String,
     #[arg(long, global = true, default_value = DEFAULT_STATE_DIR)]
     state_dir: PathBuf,
+    #[arg(long, global = true, value_enum, default_value = "high-assurance")]
+    security_profile: SecurityProfileFlag,
+    #[arg(long, global = true)]
+    state_passphrase: Option<String>,
+    #[arg(long, global = true, default_value_t = false)]
+    allow_plaintext_state: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -87,6 +134,8 @@ enum Commands {
         keys: Option<PathBuf>,
         #[arg(long, value_enum)]
         suite: Option<SuiteFlag>,
+        #[arg(long, default_value_t = false)]
+        accept_key_change: bool,
     },
     Poll {
         #[arg(long)]
@@ -131,6 +180,21 @@ struct SessionFile {
     passphrase_kdf_hint: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct StoragePolicy {
+    passphrase: Option<String>,
+    allow_plaintext: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SealedFile {
+    kind: String,
+    version: u16,
+    salt_b64: String,
+    nonce_b64: String,
+    ciphertext_b64: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct InboxCursor {
     since_message_id: i64,
@@ -147,6 +211,9 @@ struct BundleResponse {
     sig_over_pqspk: String,
     one_time_prekey_x25519: Option<String>,
     one_time_prekey_mlkem768: Option<String>,
+    identity_key_version: Option<u32>,
+    identity_fingerprint_sha256: Option<String>,
+    bundle_generated_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -192,6 +259,27 @@ struct InboxMessage {
     message_bytes_base64: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IdentityPinEntry {
+    identity_fingerprint_sha256: String,
+    identity_key_version: u32,
+    identity_sig_pub: String,
+    observed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IdentityPinsFile {
+    version: u16,
+    user_id: String,
+    peers: HashMap<String, IdentityPinEntry>,
+}
+
+#[derive(Clone, Copy)]
+struct SendOptions {
+    security_profile: SecurityProfile,
+    accept_key_change: bool,
+}
+
 struct Ed25519SignatureVerifier;
 
 impl SignatureVerifier for Ed25519SignatureVerifier {
@@ -221,6 +309,21 @@ fn suite_to_kem_algorithm(suite: SuiteFlag) -> KemAlgorithm {
     match suite {
         SuiteFlag::MlKem768 => KemAlgorithm::MlKem768,
         SuiteFlag::Kyber768 => KemAlgorithm::Kyber768Alias,
+    }
+}
+
+fn suite_to_suite_id(suite: SuiteFlag) -> u16 {
+    match suite {
+        SuiteFlag::MlKem768 => SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+        SuiteFlag::Kyber768 => SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+    }
+}
+
+fn security_profile_from_flag(flag: SecurityProfileFlag) -> SecurityProfile {
+    match flag {
+        SecurityProfileFlag::Research => SecurityProfile::Research,
+        SecurityProfileFlag::HighAssurance => SecurityProfile::HighAssurance,
+        SecurityProfileFlag::NssAligned => SecurityProfile::NssAligned,
     }
 }
 
@@ -258,10 +361,20 @@ fn build_signature_payload(signing_key: &SigningKey, message: &[u8]) -> String {
     B64.encode(signing_key.sign(message).to_bytes())
 }
 
-fn print_runtime_crypto_profile() -> Result<()> {
-    let profile = runtime_crypto_profile()?;
+fn auth_signing_key_for_user(keys: &UserKeysFile) -> Result<SigningKey> {
+    let signing_key =
+        decode_signing_key_b64("identity_sig_secret_b64", &keys.identity_sig_secret_b64)?;
+    Ok(signing_key)
+}
+
+fn print_runtime_crypto_profile(
+    security_profile: SecurityProfile,
+    suite_id: Option<u16>,
+) -> Result<()> {
+    let profile = enforce_runtime_security_profile(security_profile, suite_id)?;
     println!(
-        "active_suite: protocol_v{} suite_id={} kem={:?} dh={:?} kdf={:?} aead={:?} pq_oqs={}",
+        "active_profile: {} protocol_v{} suite_id={} kem={:?} dh={:?} kdf={:?} aead={:?} pq_oqs={}",
+        security_profile.as_str(),
         profile.protocol_version,
         profile.suite_id,
         profile.kem,
@@ -270,8 +383,18 @@ fn print_runtime_crypto_profile() -> Result<()> {
         profile.aead,
         profile.pq_oqs_enabled
     );
-    if !profile.pq_oqs_enabled {
-        return Err(anyhow!("pq-oqs backend is disabled"));
+    Ok(())
+}
+
+fn validate_server_url_for_profile(security_profile: SecurityProfile, server: &str) -> Result<()> {
+    let url = reqwest::Url::parse(server)
+        .with_context(|| format!("invalid --server URL '{}'", server))?;
+    if security_profile.requires_tls() && url.scheme() != "https" {
+        return Err(anyhow!(
+            "security profile '{}' requires HTTPS server URL, got '{}'",
+            security_profile.as_str(),
+            server
+        ));
     }
     Ok(())
 }
@@ -279,8 +402,20 @@ fn print_runtime_crypto_profile() -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let security_profile = security_profile_from_flag(cli.security_profile);
+    let state_passphrase = cli
+        .state_passphrase
+        .clone()
+        .or_else(|| env::var(ENV_STATE_PASSPHRASE).ok())
+        .filter(|value| !value.trim().is_empty());
+    let allow_plaintext_state =
+        cli.allow_plaintext_state || matches!(security_profile, SecurityProfile::Research);
+    let _ = STORAGE_POLICY.set(StoragePolicy {
+        passphrase: state_passphrase,
+        allow_plaintext: allow_plaintext_state,
+    });
     let client = Client::new();
-    print_runtime_crypto_profile()?;
+    print_runtime_crypto_profile(security_profile, None)?;
 
     match cli.command {
         Commands::Keygen {
@@ -290,6 +425,7 @@ async fn main() -> Result<()> {
             one_time_count,
             device_id,
         } => {
+            security_profile.enforce_suite_id(suite_to_suite_id(suite))?;
             let keys = generate_user_keys(
                 &user,
                 device_id.unwrap_or_else(|| format!("{user}-device-1")),
@@ -308,6 +444,8 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
+            security_profile.enforce_suite_id(suite_to_suite_id(keys_file.suite))?;
+            validate_server_url_for_profile(security_profile, &cli.server)?;
             register_user(&client, &cli.server, &keys_file).await?;
         }
         Commands::PublishPrekeys { user, keys, suite } => {
@@ -322,6 +460,8 @@ async fn main() -> Result<()> {
             if let Some(override_suite) = suite {
                 keys_file.suite = override_suite;
             }
+            security_profile.enforce_suite_id(suite_to_suite_id(keys_file.suite))?;
+            validate_server_url_for_profile(security_profile, &cli.server)?;
             publish_prekeys(&client, &cli.server, &keys_file).await?;
         }
         Commands::Send {
@@ -330,6 +470,7 @@ async fn main() -> Result<()> {
             text,
             keys,
             suite,
+            accept_key_change,
         } => {
             let keys_path = keys.unwrap_or_else(|| default_keys_path(&from));
             let mut keys_file = read_keys_file(&keys_path)?;
@@ -343,12 +484,17 @@ async fn main() -> Result<()> {
             if let Some(override_suite) = suite {
                 keys_file.suite = override_suite;
             }
+            security_profile.enforce_suite_id(suite_to_suite_id(keys_file.suite))?;
+            validate_server_url_for_profile(security_profile, &cli.server)?;
             send_message_flow(
                 &client,
                 &cli.server,
                 &cli.state_dir,
+                SendOptions {
+                    security_profile,
+                    accept_key_change,
+                },
                 &keys_file,
-                &from,
                 &to,
                 text.as_bytes(),
             )
@@ -363,7 +509,16 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
-            poll_inbox_flow(&client, &cli.server, &cli.state_dir, &keys_file).await?;
+            security_profile.enforce_suite_id(suite_to_suite_id(keys_file.suite))?;
+            validate_server_url_for_profile(security_profile, &cli.server)?;
+            poll_inbox_flow(
+                &client,
+                &cli.server,
+                &cli.state_dir,
+                security_profile,
+                &keys_file,
+            )
+            .await?;
         }
     }
 
@@ -481,19 +636,29 @@ async fn send_message_flow(
     client: &Client,
     server: &str,
     state_dir: &Path,
+    options: SendOptions,
     sender_keys: &UserKeysFile,
-    from: &str,
     to: &str,
     plaintext: &[u8],
 ) -> Result<()> {
+    let from = sender_keys.user_id.as_str();
     let session_path = session_file_path(state_dir, from, to);
-    let ad = make_ad(from, to);
+    let ad = make_ad(from, to)?;
+    let auth_signing_key = auth_signing_key_for_user(sender_keys)?;
 
     if session_path.exists() {
         let mut session = load_session(&session_path)?;
         let wire = session.encrypt(plaintext, &ad)?;
-        let response =
-            relay_message(client, server, from, &sender_keys.device_id, &wire, to).await?;
+        let response = relay_message(
+            client,
+            server,
+            from,
+            &sender_keys.device_id,
+            &wire,
+            to,
+            &auth_signing_key,
+        )
+        .await?;
         save_session(
             &session_path,
             SessionFile {
@@ -513,7 +678,11 @@ async fn send_message_flow(
     }
 
     let bundle = fetch_bundle(client, server, to).await?;
+    enforce_identity_pin(state_dir, from, &bundle, options.accept_key_change)?;
     let prekey_bundle = bundle_to_core(&bundle, sender_keys.suite)?;
+    options
+        .security_profile
+        .enforce_suite_id(prekey_bundle.suite.suite_id()?)?;
     let identity = to_identity_keypair(sender_keys)?;
     let kem = build_kem_for_suite(sender_keys.suite)?;
     let verifier = Ed25519SignatureVerifier;
@@ -536,6 +705,7 @@ async fn send_message_flow(
         &sender_keys.device_id,
         &initial_encoded,
         to,
+        &auth_signing_key,
     )
     .await?;
 
@@ -574,20 +744,31 @@ async fn poll_inbox_flow(
     client: &Client,
     server: &str,
     state_dir: &Path,
+    security_profile: SecurityProfile,
     keys: &UserKeysFile,
 ) -> Result<()> {
     let cursor_path = inbox_cursor_path(state_dir, &keys.user_id);
     let mut cursor = load_cursor(&cursor_path)?;
-    let inbox = fetch_inbox(client, server, &keys.user_id, cursor.since_message_id).await?;
+    let auth_signing_key = auth_signing_key_for_user(keys)?;
+    let inbox = fetch_inbox(
+        client,
+        server,
+        &keys.user_id,
+        &keys.device_id,
+        cursor.since_message_id,
+        &auth_signing_key,
+    )
+    .await?;
 
     for item in inbox.messages {
         let bytes = decode_b64("message_bytes_base64", &item.message_bytes_base64)?;
         let sender = item.sender_user_id.clone();
-        let ad = make_ad(&sender, &keys.user_id);
+        let ad = make_ad(&sender, &keys.user_id)?;
         let session_path = session_file_path(state_dir, &keys.user_id, &sender);
 
         let mut handled = false;
         if let Ok(initial) = InitialMessage::decode(&bytes) {
+            security_profile.enforce_suite_id(initial.suite_id)?;
             let suite = suite_from_suite_id(initial.suite_id)?;
             let kem = build_kem_for_suite(suite)?;
             let identity = to_identity_keypair(keys)?;
@@ -722,18 +903,27 @@ async fn relay_message(
     device_id: &str,
     message_bytes: &[u8],
     recipient: &str,
+    auth_signing_key: &SigningKey,
 ) -> Result<RelayResponse> {
     let req = RelayRequest {
         sender_user_id: sender_user_id.to_string(),
         device_id: device_id.to_string(),
         message_bytes_base64: B64.encode(message_bytes),
     };
-    let response = client
+    let auth_headers = relay_auth_headers(
+        auth_signing_key,
+        sender_user_id,
+        device_id,
+        recipient,
+        message_bytes,
+    )?;
+    let mut request = client
         .post(format!("{server}/v1/relay/{recipient}"))
-        .json(&req)
-        .send()
-        .await
-        .context("relay request failed")?;
+        .json(&req);
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request.send().await.context("relay request failed")?;
     handle_json_response(response).await
 }
 
@@ -741,13 +931,16 @@ async fn fetch_inbox(
     client: &Client,
     server: &str,
     user: &str,
+    device_id: &str,
     since: i64,
+    auth_signing_key: &SigningKey,
 ) -> Result<InboxResponse> {
-    let response = client
-        .get(format!("{server}/v1/inbox/{user}?since={since}"))
-        .send()
-        .await
-        .context("fetch inbox request failed")?;
+    let auth_headers = inbox_auth_headers(auth_signing_key, user, device_id, since)?;
+    let mut request = client.get(format!("{server}/v1/inbox/{user}?since={since}"));
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request.send().await.context("fetch inbox request failed")?;
     handle_json_response(response).await
 }
 
@@ -812,6 +1005,10 @@ fn default_keys_path(user: &str) -> PathBuf {
     Path::new(DEFAULT_KEYS_DIR).join(format!("{user}.json"))
 }
 
+fn identity_pins_file_path(state_dir: &Path, user: &str) -> PathBuf {
+    state_dir.join(user).join("_identity_pins.json")
+}
+
 fn session_file_path(state_dir: &Path, user: &str, peer: &str) -> PathBuf {
     state_dir.join(user).join(format!("{peer}.json"))
 }
@@ -820,8 +1017,204 @@ fn inbox_cursor_path(state_dir: &Path, user: &str) -> PathBuf {
     state_dir.join(user).join("_inbox_cursor.json")
 }
 
-fn make_ad(sender: &str, recipient: &str) -> Vec<u8> {
-    format!("pqmsg-cli-ad:v1:{sender}:{recipient}").into_bytes()
+fn make_ad(sender: &str, recipient: &str) -> Result<Vec<u8>> {
+    conversation_associated_data(sender, recipient)
+        .map_err(|err| anyhow!("failed to build associated data: {err}"))
+}
+
+fn auth_timestamp() -> Result<i64> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| anyhow!("system time is before UNIX epoch"))?;
+    i64::try_from(duration.as_secs()).map_err(|_| anyhow!("system time overflow"))
+}
+
+fn auth_nonce() -> String {
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    B64.encode(bytes)
+}
+
+fn auth_common_records(
+    endpoint: &'static str,
+    user_id: &str,
+    device_id: &str,
+    timestamp: i64,
+    nonce: &str,
+) -> Vec<TlvRecord> {
+    vec![
+        TlvRecord {
+            ty: AUTH_TAG_ENDPOINT,
+            value: endpoint.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: AUTH_TAG_USER_ID,
+            value: user_id.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: AUTH_TAG_DEVICE_ID,
+            value: device_id.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: AUTH_TAG_TIMESTAMP,
+            value: timestamp.to_be_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: AUTH_TAG_NONCE,
+            value: nonce.as_bytes().to_vec(),
+        },
+    ]
+}
+
+fn relay_auth_headers(
+    signing_key: &SigningKey,
+    sender_user_id: &str,
+    sender_device_id: &str,
+    recipient_user_id: &str,
+    message_blob: &[u8],
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("relay", sender_user_id, sender_device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: recipient_user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_MESSAGE_BLOB,
+        value: message_blob.to_vec(),
+    });
+    let transcript =
+        encode(&records).map_err(|_| anyhow!("failed to encode relay auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, sender_user_id.to_string()),
+        (AUTH_HEADER_DEVICE, sender_device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn inbox_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    since: i64,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("inbox", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_SINCE,
+        value: since.to_be_bytes().to_vec(),
+    });
+    let transcript =
+        encode(&records).map_err(|_| anyhow!("failed to encode inbox auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn bundle_identity_fingerprint(bundle: &BundleResponse) -> Result<String> {
+    if let Some(fingerprint) = &bundle.identity_fingerprint_sha256 {
+        let normalized = fingerprint.trim().to_ascii_lowercase();
+        if !normalized.is_empty() {
+            return Ok(normalized);
+        }
+    }
+    let identity_key = decode_b64("identity_x25519_pub", &bundle.identity_x25519_pub)?;
+    let mut hasher = Sha256::new();
+    hasher.update(identity_key);
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn bundle_identity_version(bundle: &BundleResponse) -> u32 {
+    bundle.identity_key_version.unwrap_or(1)
+}
+
+fn bundle_observed_at(bundle: &BundleResponse) -> String {
+    bundle
+        .bundle_generated_at
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn load_identity_pins(path: &Path, user_id: &str) -> Result<IdentityPinsFile> {
+    if !path.exists() {
+        return Ok(IdentityPinsFile {
+            version: 1,
+            user_id: user_id.to_string(),
+            peers: HashMap::new(),
+        });
+    }
+    read_json_file(path)
+}
+
+fn save_identity_pins(path: &Path, pins: &IdentityPinsFile) -> Result<()> {
+    write_json_file(path, pins)
+}
+
+fn enforce_identity_pin(
+    state_dir: &Path,
+    user_id: &str,
+    bundle: &BundleResponse,
+    accept_key_change: bool,
+) -> Result<()> {
+    let pins_path = identity_pins_file_path(state_dir, user_id);
+    let mut pins = load_identity_pins(&pins_path, user_id)?;
+    let peer = bundle.user_id.clone();
+    let observed = IdentityPinEntry {
+        identity_fingerprint_sha256: bundle_identity_fingerprint(bundle)?,
+        identity_key_version: bundle_identity_version(bundle),
+        identity_sig_pub: bundle.identity_sig_pub.clone(),
+        observed_at: bundle_observed_at(bundle),
+    };
+
+    match pins.peers.get(&peer) {
+        None => {
+            pins.peers.insert(peer.clone(), observed);
+            save_identity_pins(&pins_path, &pins)?;
+            println!("pinned identity for peer '{}'", peer);
+        }
+        Some(existing)
+            if existing.identity_fingerprint_sha256 == observed.identity_fingerprint_sha256 =>
+        {
+            if existing.identity_key_version != observed.identity_key_version
+                || existing.identity_sig_pub != observed.identity_sig_pub
+            {
+                pins.peers.insert(peer.clone(), observed);
+                save_identity_pins(&pins_path, &pins)?;
+            }
+        }
+        Some(existing) => {
+            if !accept_key_change {
+                return Err(anyhow!(
+                    "peer identity key changed for '{}': {} (v{}) -> {} (v{}). rerun send with --accept-key-change to trust new identity",
+                    peer,
+                    existing.identity_fingerprint_sha256,
+                    existing.identity_key_version,
+                    observed.identity_fingerprint_sha256,
+                    observed.identity_key_version
+                ));
+            }
+            pins.peers.insert(peer.clone(), observed);
+            save_identity_pins(&pins_path, &pins)?;
+            println!("accepted updated identity for peer '{}'", peer);
+        }
+    }
+
+    Ok(())
 }
 
 fn load_session(path: &Path) -> Result<SessionState> {
@@ -848,8 +1241,106 @@ fn read_keys_file(path: &Path) -> Result<UserKeysFile> {
     read_json_file(path)
 }
 
+fn storage_policy() -> StoragePolicy {
+    STORAGE_POLICY.get().cloned().unwrap_or(StoragePolicy {
+        passphrase: None,
+        allow_plaintext: true,
+    })
+}
+
+fn derive_storage_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
+    let hk = Hkdf::<Sha256>::new(Some(salt), passphrase.as_bytes());
+    let mut key = [0u8; 32];
+    hk.expand(STORAGE_AAD, &mut key)
+        .map_err(|_| anyhow!("failed to derive storage key"))?;
+    Ok(key)
+}
+
+fn seal_plaintext(plaintext: &[u8], passphrase: &str) -> Result<Vec<u8>> {
+    let mut salt = [0u8; STORAGE_SALT_BYTES];
+    OsRng.fill_bytes(&mut salt);
+    let mut nonce = [0u8; STORAGE_NONCE_BYTES];
+    OsRng.fill_bytes(&mut nonce);
+    let key = derive_storage_key(passphrase, &salt)?;
+    let cipher = ChaCha20Poly1305::new_from_slice(&key)
+        .map_err(|_| anyhow!("failed to initialize storage cipher"))?;
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad: STORAGE_AAD,
+            },
+        )
+        .map_err(|_| anyhow!("failed to encrypt local state"))?;
+    let sealed = SealedFile {
+        kind: STORAGE_SEALED_KIND.to_string(),
+        version: STORAGE_SEALED_VERSION,
+        salt_b64: B64.encode(salt),
+        nonce_b64: B64.encode(nonce),
+        ciphertext_b64: B64.encode(ciphertext),
+    };
+    serde_json::to_vec_pretty(&sealed).context("failed to encode sealed local state")
+}
+
+fn unseal_plaintext(sealed: &SealedFile, passphrase: &str) -> Result<Vec<u8>> {
+    if sealed.kind != STORAGE_SEALED_KIND || sealed.version != STORAGE_SEALED_VERSION {
+        return Err(anyhow!("unsupported sealed local state format"));
+    }
+    let salt = decode_b64("sealed.salt_b64", &sealed.salt_b64)?;
+    let nonce = decode_b64("sealed.nonce_b64", &sealed.nonce_b64)?;
+    let ciphertext = decode_b64("sealed.ciphertext_b64", &sealed.ciphertext_b64)?;
+    if salt.len() != STORAGE_SALT_BYTES {
+        return Err(anyhow!(
+            "sealed salt must be {STORAGE_SALT_BYTES} bytes, got {}",
+            salt.len()
+        ));
+    }
+    if nonce.len() != STORAGE_NONCE_BYTES {
+        return Err(anyhow!(
+            "sealed nonce must be {STORAGE_NONCE_BYTES} bytes, got {}",
+            nonce.len()
+        ));
+    }
+    let key = derive_storage_key(passphrase, &salt)?;
+    let cipher = ChaCha20Poly1305::new_from_slice(&key)
+        .map_err(|_| anyhow!("failed to initialize storage cipher"))?;
+    let plaintext = cipher
+        .decrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: &ciphertext,
+                aad: STORAGE_AAD,
+            },
+        )
+        .map_err(|_| anyhow!("failed to decrypt local state; check passphrase"))?;
+    Ok(plaintext)
+}
+
 fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     let data = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if let Ok(sealed) = serde_json::from_slice::<SealedFile>(&data) {
+        let policy = storage_policy();
+        let passphrase = policy.passphrase.ok_or_else(|| {
+            anyhow!(
+                "state file '{}' is encrypted; set --state-passphrase or {}",
+                path.display(),
+                ENV_STATE_PASSPHRASE
+            )
+        })?;
+        let plaintext = unseal_plaintext(&sealed, &passphrase)
+            .with_context(|| format!("failed to decrypt {}", path.display()))?;
+        return serde_json::from_slice(&plaintext)
+            .with_context(|| format!("failed to parse {}", path.display()));
+    }
+
+    let policy = storage_policy();
+    if !policy.allow_plaintext {
+        return Err(anyhow!(
+            "plaintext local state is disabled for '{}'; provide --state-passphrase or use --allow-plaintext-state",
+            path.display()
+        ));
+    }
     serde_json::from_slice(&data).with_context(|| format!("failed to parse {}", path.display()))
 }
 
@@ -858,7 +1349,21 @@ fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
-    let data = serde_json::to_vec_pretty(value)?;
+    let plaintext = serde_json::to_vec_pretty(value)?;
+    let policy = storage_policy();
+    let data = match policy.passphrase {
+        Some(passphrase) => seal_plaintext(&plaintext, &passphrase)
+            .with_context(|| format!("failed to encrypt {}", path.display()))?,
+        None => {
+            if !policy.allow_plaintext {
+                return Err(anyhow!(
+                    "plaintext local state is disabled for '{}'; provide --state-passphrase or use --allow-plaintext-state",
+                    path.display()
+                ));
+            }
+            plaintext
+        }
+    };
     fs::write(path, data).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
@@ -928,8 +1433,62 @@ mod tests {
     }
 
     #[test]
+    fn parse_security_profile_flag() {
+        let cli = Cli::try_parse_from([
+            "pqmsg-cli",
+            "--security-profile",
+            "nss-aligned",
+            "keygen",
+            "--user",
+            "alice",
+            "--out",
+            "./devkeys/alice.json",
+        ])
+        .expect("parse");
+        assert_eq!(cli.security_profile, SecurityProfileFlag::NssAligned);
+    }
+
+    #[test]
+    fn high_assurance_requires_https_server_url() {
+        let result = validate_server_url_for_profile(
+            SecurityProfile::HighAssurance,
+            "http://localhost:3000",
+        );
+        assert!(result.is_err());
+        validate_server_url_for_profile(SecurityProfile::HighAssurance, "https://example.test")
+            .expect("https allowed");
+    }
+
+    #[test]
+    fn identity_pin_requires_explicit_acceptance_on_key_change() {
+        let dir = tempdir().expect("tempdir");
+        let bundle_v1 = BundleResponse {
+            user_id: "bob".to_string(),
+            identity_x25519_pub: B64.encode([1u8; 32]),
+            identity_sig_pub: B64.encode([2u8; 32]),
+            signed_prekey_x25519_pub: B64.encode([3u8; 32]),
+            sig_over_spk: B64.encode([4u8; 64]),
+            pq_signed_prekey_pub_mlkem768: B64.encode([5u8; 64]),
+            sig_over_pqspk: B64.encode([6u8; 64]),
+            one_time_prekey_x25519: None,
+            one_time_prekey_mlkem768: None,
+            identity_key_version: Some(1),
+            identity_fingerprint_sha256: Some("aaa".to_string()),
+            bundle_generated_at: Some("2026-03-04T00:00:00Z".to_string()),
+        };
+        enforce_identity_pin(dir.path(), "alice", &bundle_v1, false).expect("first pin");
+
+        let mut bundle_v2 = bundle_v1;
+        bundle_v2.identity_key_version = Some(2);
+        bundle_v2.identity_fingerprint_sha256 = Some("bbb".to_string());
+        let blocked = enforce_identity_pin(dir.path(), "alice", &bundle_v2, false);
+        assert!(blocked.is_err());
+        enforce_identity_pin(dir.path(), "alice", &bundle_v2, true).expect("accepted key change");
+    }
+
+    #[test]
     fn mocked_flow_handshake_then_session_roundtrip() {
-        if let Ok(profile) = runtime_crypto_profile() {
+        if let Ok(profile) = pqmsg_core::alg::runtime_crypto_profile() {
             if !profile.pq_oqs_enabled {
                 return;
             }
@@ -1047,9 +1606,26 @@ mod tests {
         .expect("save");
 
         alice_session = load_session(&session_path).expect("load");
-        let ad = make_ad("alice", "bob");
+        let ad = make_ad("alice", "bob").expect("ad");
         let wire = alice_session.encrypt(b"next", &ad).expect("encrypt");
         let plain = bob_session.decrypt(&wire, &ad).expect("decrypt");
         assert_eq!(plain, b"next");
+    }
+
+    #[test]
+    fn sealed_state_roundtrip() {
+        let plaintext = br#"{"v":1,"sample":"state"}"#;
+        let sealed = seal_plaintext(plaintext, "passphrase").expect("seal");
+        let parsed: SealedFile = serde_json::from_slice(&sealed).expect("parse sealed");
+        let unsealed = unseal_plaintext(&parsed, "passphrase").expect("unseal");
+        assert_eq!(unsealed, plaintext);
+    }
+
+    #[test]
+    fn sealed_state_rejects_wrong_passphrase() {
+        let plaintext = br#"{"v":1,"sample":"state"}"#;
+        let sealed = seal_plaintext(plaintext, "passphrase").expect("seal");
+        let parsed: SealedFile = serde_json::from_slice(&sealed).expect("parse sealed");
+        assert!(unseal_plaintext(&parsed, "wrong-passphrase").is_err());
     }
 }

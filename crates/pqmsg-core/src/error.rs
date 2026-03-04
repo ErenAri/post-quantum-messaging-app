@@ -36,4 +36,8 @@ pub enum CoreError {
     MessageKeyUnavailable,
     #[error("pq ratchet is not enabled")]
     PqRatchetDisabled,
+    #[error("security policy violation: {0}")]
+    PolicyViolation(&'static str),
+    #[error("invalid security profile: {0}")]
+    InvalidSecurityProfile(&'static str),
 }

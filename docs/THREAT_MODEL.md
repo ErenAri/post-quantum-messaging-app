@@ -40,11 +40,15 @@ The server is explicitly not trusted with plaintext.
 | Threat | Control |
 |---|---|
 | Identity takeover via re-registration | Immutable `user_id` identity binding (`409` on mutation) |
+| Unauthorized identity key rotation | Challenge-confirm rotation signed by both current and new identity keys |
 | Unauthorized prekey publication | Ed25519 signature verification on uploaded `SPK`/`PQSPK` |
+| Unauthenticated inbox access / relay spoofing | Signed transport auth headers (`x-pqmsg-auth-*`) with device binding and nonce replay checks |
+| Silent peer key substitution after first contact | Client-side peer identity fingerprint pinning with explicit trust prompt on key change |
 | Suite/version downgrade | AD binding plus strict suite continuity checks |
 | Ratchet metadata tampering (`pq_step_ct`, counters) | Ratchet header fields included in AEAD associated data |
 | Parser-driven DoS | Strict TLV decode, critical-tag rejection, fuzz targets |
 | Secret retention in memory | `zeroize` and zeroizing containers for keying material |
+| Secret leakage from local state files | Encrypted-at-rest key/session persistence in CLI and Android client stores |
 
 ## 6. Residual Risk
 
