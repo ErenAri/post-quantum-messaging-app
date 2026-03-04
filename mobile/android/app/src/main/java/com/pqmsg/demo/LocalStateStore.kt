@@ -5,6 +5,7 @@ import androidx.security.crypto.EncryptedFile
 import androidx.security.crypto.MasterKey
 import java.io.File
 import java.nio.charset.StandardCharsets
+import java.util.LinkedHashSet
 
 data class SetupConfig(
     val serverUrl: String,
@@ -132,6 +133,27 @@ class LocalStateStore(context: Context) {
 
     fun writeCursor(userId: String, cursor: Long) {
         prefs.edit().putLong("cursor_$userId", cursor).apply()
+    }
+
+    fun readPeerLastMessageId(userId: String, peerUserId: String): Long {
+        return prefs.getLong("peer_last_${userId}_$peerUserId", 0L)
+    }
+
+    fun writePeerLastMessageId(userId: String, peerUserId: String, messageId: Long) {
+        prefs.edit()
+            .putLong("peer_last_${userId}_$peerUserId", messageId)
+            .apply()
+    }
+
+    fun readPeerSeenCipherHashes(userId: String, peerUserId: String): LinkedHashSet<String> {
+        val stored = prefs.getStringSet("peer_seen_${userId}_$peerUserId", emptySet()) ?: emptySet()
+        return LinkedHashSet(stored)
+    }
+
+    fun writePeerSeenCipherHashes(userId: String, peerUserId: String, hashes: Set<String>) {
+        prefs.edit()
+            .putStringSet("peer_seen_${userId}_$peerUserId", LinkedHashSet(hashes))
+            .apply()
     }
 
     fun writeBundleFetchedAt(userId: String, peerUserId: String, timestamp: String) {

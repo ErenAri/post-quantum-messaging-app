@@ -25,6 +25,7 @@ The strongest contributions are:
 ```mermaid
 flowchart LR
     C[pqmsg-cli / Android Client] -->|HTTP JSON transport| S[pqmsg-server]
+    S -->|WebSocket inbox stream| C
     C -->|UniFFI bridge| A[pqmsg-android]
     A --> CORE[pqmsg-core]
     C --> CORE
@@ -46,10 +47,16 @@ flowchart TD
 - Server prekey uploads require valid Ed25519 signatures under registered identity signature keys.
 - Server provides authenticated identity rotation challenge/confirm endpoints and a versioned identity event log.
 - Server relay/inbox/identity-log endpoints require signed request-auth headers bound to user/device identity keys.
+- Server exposes authenticated prekey inventory status (`/v1/users/{user_id}/prekeys/status`) with low-inventory signaling.
+- Server WebSocket inbox stream (`/v1/ws/inbox/{user_id}`) uses the same signed request-auth model for real-time relay delivery.
+- Server enforces monotonic inbox cursors per authenticated user/device session and rejects cursor regression.
+- Server performs TTL-bounded relay ciphertext deduplication to reduce replay delivery risk.
 - Session decryption enforces suite continuity and authenticates ratchet metadata, including optional `pq_step_ct`.
 - Clients expose active crypto profile and fail closed when PQ backend is not available.
 - Clients pin peer identity fingerprints and require explicit trust on key changes.
-- CLI and Android persist key/session files encrypted at rest (CLI passphrase policy + Android keystore-backed encrypted files).
+- Clients track seen ciphertext blobs and reject replayed transport message IDs per peer.
+- CLI and Android clients auto-replenish one-time prekeys when server low-inventory signals are observed.
+- CLI and Android persist key/session files encrypted at rest (CLI uses Argon2id + AES-256-GCM wrapping; Android uses keystore-backed encrypted files).
 
 ## Repository Layout
 
@@ -89,6 +96,13 @@ For non-research profiles, local CLI key/session files should be accessed with:
 
 Legacy plaintext local files are blocked unless explicitly allowed with `--allow-plaintext-state`.
 
+CLI key backup and restore:
+
+```powershell
+cargo run -p pqmsg-cli -- backup-keys --keys ./devkeys/alice.json --out ./backups/alice.backup.json --backup-passphrase "<backup-passphrase>"
+cargo run -p pqmsg-cli -- restore-keys --input ./backups/alice.backup.json --out ./devkeys/alice-restored.json --backup-passphrase "<backup-passphrase>"
+```
+
 ### PQ Backend Build (required for high-assurance/NSS runs)
 
 ```powershell
@@ -106,6 +120,23 @@ The CLI performs an active runtime profile check and aborts when the PQ backend 
 $env:PQMSG_DATABASE_URL='sqlite://./pqmsg-server.db?mode=rwc'
 $env:PQMSG_BIND='127.0.0.1:3000'
 $env:PQMSG_SECURITY_PROFILE='research'
+cargo run -p pqmsg-server
+```
+
+For PostgreSQL-backed server startup:
+
+```powershell
+$env:PQMSG_DATABASE_URL='postgres://pqmsg:pqmsg@localhost:5432/pqmsg'
+$env:PQMSG_BIND='127.0.0.1:3000'
+$env:PQMSG_SECURITY_PROFILE='high_assurance'
+$env:PQMSG_DB_MAX_CONNECTIONS='30'
+$env:PQMSG_DB_MIN_CONNECTIONS='5'
+$env:PQMSG_DB_ACQUIRE_TIMEOUT_SECS='5'
+$env:PQMSG_DB_IDLE_TIMEOUT_SECS='300'
+$env:PQMSG_FCM_SERVER_KEY='<optional-fcm-legacy-server-key>'
+$env:PQMSG_FCM_ENDPOINT='https://fcm.googleapis.com/fcm/send'
+$env:PQMSG_TLS_CERT_PATH='C:\certs\server.crt'
+$env:PQMSG_TLS_KEY_PATH='C:\certs\server.key'
 cargo run -p pqmsg-server
 ```
 
@@ -135,13 +166,26 @@ cd mobile/android
 5. In Chat screen:
 
 - Alice fetches Bob bundle and sends message,
-- Bob polls inbox and decrypts.
+- Bob polls inbox and decrypts (HTTP fallback),
+- real-time clients can also subscribe to `/v1/ws/inbox/{user_id}?since=<message_id>` with signed auth headers.
+
+Optional push-token registration endpoint for Android devices:
+
+`POST /v1/users/{user_id}/push-token`
+
+The server sends wake-only FCM payloads (`{"wake":"1","v":"1"}`) and never includes plaintext message content in push transport.
 
 ## Production Transport Note
 
 The Android emulator endpoint pattern (`http://10.0.2.2:...`) is demonstration-only.  
 Operational deployment requires TLS and should include certificate pinning.  
 Set `PQMSG_SECURITY_PROFILE=high_assurance` (or `nss_aligned`) with `PQMSG_TLS_CERT_PATH` and `PQMSG_TLS_KEY_PATH` on the server.
+
+## SQLite to PostgreSQL Data Migration
+
+```powershell
+cargo run -p pqmsg-server --bin migrate_sqlite_to_postgres -- --sqlite-url "sqlite://./pqmsg-server.db?mode=ro" --postgres-url "postgres://pqmsg:pqmsg@localhost:5432/pqmsg"
+```
 
 ## Documentation Index
 
@@ -152,3 +196,4 @@ Set `PQMSG_SECURITY_PROFILE=high_assurance` (or `nss_aligned`) with `PQMSG_TLS_C
 - [API](docs/API.md)
 - [SECURITY_GATES](docs/SECURITY_GATES.md)
 - [ANDROID](docs/ANDROID.md)
+- [TLS_ROTATION](docs/TLS_ROTATION.md)

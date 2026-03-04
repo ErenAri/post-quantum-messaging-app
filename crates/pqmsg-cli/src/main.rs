@@ -20,11 +20,15 @@ use pqmsg_core::handshake::{
 use pqmsg_core::kem::MlKem768;
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
 use pqmsg_core::session::{SessionRole, SessionSnapshot, SessionState};
+use pqmsg_core::storage::{
+    unwrap_bytes as unwrap_wrapped_bytes, wrap_bytes as wrap_wrapped_bytes, WrappedSecret,
+};
 use pqmsg_core::tlv::{critical_type, encode, TlvRecord};
 use pqmsg_core::CoreError;
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use reqwest::Client;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -38,6 +42,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const DEFAULT_STATE_DIR: &str = "./state";
 const DEFAULT_KEYS_DIR: &str = "./devkeys";
 const DEFAULT_ONE_TIME_PREKEYS: usize = 16;
+const MAX_ONE_TIME_PREKEYS: usize = 256;
 const AUTH_HEADER_USER: &str = "x-pqmsg-auth-user";
 const AUTH_HEADER_DEVICE: &str = "x-pqmsg-auth-device";
 const AUTH_HEADER_TIMESTAMP: &str = "x-pqmsg-auth-timestamp";
@@ -51,12 +56,28 @@ const AUTH_TAG_NONCE: u16 = critical_type(0x3205);
 const AUTH_TAG_RECIPIENT_ID: u16 = critical_type(0x3206);
 const AUTH_TAG_SINCE: u16 = critical_type(0x3207);
 const AUTH_TAG_MESSAGE_BLOB: u16 = critical_type(0x3208);
-const STORAGE_SEALED_KIND: &str = "pqmsg-cli-sealed";
-const STORAGE_SEALED_VERSION: u16 = 1;
-const STORAGE_SALT_BYTES: usize = 16;
-const STORAGE_NONCE_BYTES: usize = 12;
-const STORAGE_AAD: &[u8] = b"pqmsg-cli-storage-v1";
+const AUTH_TAG_PREKEY_SPK_HASH: u16 = critical_type(0x3209);
+const AUTH_TAG_PREKEY_PQSPK_HASH: u16 = critical_type(0x320A);
+#[allow(dead_code)]
+const AUTH_TAG_ROTATE_NEW_X25519_HASH: u16 = critical_type(0x320B);
+#[allow(dead_code)]
+const AUTH_TAG_ROTATE_NEW_SIG_HASH: u16 = critical_type(0x320C);
+#[allow(dead_code)]
+const AUTH_TAG_ROTATE_CHALLENGE_ID: u16 = critical_type(0x320D);
+#[allow(dead_code)]
+const AUTH_TAG_ROTATE_SIG_CURRENT_HASH: u16 = critical_type(0x320E);
+#[allow(dead_code)]
+const AUTH_TAG_ROTATE_SIG_NEW_HASH: u16 = critical_type(0x320F);
+const LEGACY_STORAGE_SEALED_KIND: &str = "pqmsg-cli-sealed";
+const LEGACY_STORAGE_SEALED_VERSION: u16 = 1;
+const LEGACY_STORAGE_SALT_BYTES: usize = 16;
+const LEGACY_STORAGE_NONCE_BYTES: usize = 12;
+const LEGACY_STORAGE_AAD: &[u8] = b"pqmsg-cli-storage-v1";
 const ENV_STATE_PASSPHRASE: &str = "PQMSG_STATE_PASSPHRASE";
+const REPLAY_GUARD_VERSION: u16 = 1;
+const REPLAY_HASH_TTL_SECONDS: i64 = 86_400;
+const REPLAY_HASH_MAX_ENTRIES_PER_PEER: usize = 512;
+const PREKEY_REPLENISH_TARGET: usize = DEFAULT_ONE_TIME_PREKEYS;
 
 static STORAGE_POLICY: OnceLock<StoragePolicy> = OnceLock::new();
 
@@ -123,6 +144,22 @@ enum Commands {
         #[arg(long, value_enum)]
         suite: Option<SuiteFlag>,
     },
+    BackupKeys {
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        backup_passphrase: String,
+    },
+    RestoreKeys {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        backup_passphrase: String,
+    },
     Send {
         #[arg(long)]
         from: String,
@@ -187,7 +224,7 @@ struct StoragePolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct SealedFile {
+struct LegacySealedFile {
     kind: String,
     version: u16,
     salt_b64: String,
@@ -198,6 +235,25 @@ struct SealedFile {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct InboxCursor {
     since_message_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SeenMessageHash {
+    hash_hex: String,
+    expires_at_unix: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PeerReplayGuard {
+    last_message_id: i64,
+    seen_hashes: Vec<SeenMessageHash>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReplayGuardFile {
+    version: u16,
+    user_id: String,
+    peers: HashMap<String, PeerReplayGuard>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,9 +267,25 @@ struct BundleResponse {
     sig_over_pqspk: String,
     one_time_prekey_x25519: Option<String>,
     one_time_prekey_mlkem768: Option<String>,
+    remaining_one_time_prekeys_x25519: Option<usize>,
+    remaining_one_time_prekeys_mlkem768: Option<usize>,
+    low_one_time_prekeys: Option<bool>,
+    minimum_recommended_one_time_prekeys: Option<usize>,
+    last_resort_prekey_only: Option<bool>,
     identity_key_version: Option<u32>,
     identity_fingerprint_sha256: Option<String>,
     bundle_generated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrekeysStatusResponse {
+    user_id: String,
+    device_id: String,
+    remaining_one_time_prekeys_x25519: usize,
+    remaining_one_time_prekeys_mlkem768: usize,
+    low_one_time_prekeys: bool,
+    minimum_recommended_one_time_prekeys: usize,
+    checked_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -464,6 +536,23 @@ async fn main() -> Result<()> {
             validate_server_url_for_profile(security_profile, &cli.server)?;
             publish_prekeys(&client, &cli.server, &keys_file).await?;
         }
+        Commands::BackupKeys {
+            keys,
+            out,
+            backup_passphrase,
+        } => {
+            backup_keys_file(&keys, &out, &backup_passphrase)?;
+            println!("wrote encrypted key backup: {}", out.display());
+        }
+        Commands::RestoreKeys {
+            input,
+            out,
+            backup_passphrase,
+        } => {
+            let keys = restore_keys_file(&input, &backup_passphrase)?;
+            write_json_file(&out, &keys)?;
+            println!("restored keys for '{}': {}", keys.user_id, out.display());
+        }
         Commands::Send {
             from,
             to,
@@ -486,6 +575,7 @@ async fn main() -> Result<()> {
             }
             security_profile.enforce_suite_id(suite_to_suite_id(keys_file.suite))?;
             validate_server_url_for_profile(security_profile, &cli.server)?;
+            ensure_prekeys_replenished(&client, &cli.server, &keys_path, &mut keys_file).await?;
             send_message_flow(
                 &client,
                 &cli.server,
@@ -501,7 +591,7 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Poll { user, keys } => {
-            let keys_file = read_keys_file(&keys)?;
+            let mut keys_file = read_keys_file(&keys)?;
             if keys_file.user_id != user {
                 return Err(anyhow!(
                     "user mismatch: command user '{}' vs keys file user '{}'",
@@ -511,6 +601,7 @@ async fn main() -> Result<()> {
             }
             security_profile.enforce_suite_id(suite_to_suite_id(keys_file.suite))?;
             validate_server_url_for_profile(security_profile, &cli.server)?;
+            ensure_prekeys_replenished(&client, &cli.server, &keys, &mut keys_file).await?;
             poll_inbox_flow(
                 &client,
                 &cli.server,
@@ -575,6 +666,42 @@ fn generate_user_keys(
     })
 }
 
+fn refresh_one_time_prekeys(keys: &mut UserKeysFile, one_time_count: usize) -> Result<()> {
+    if one_time_count == 0 || one_time_count > MAX_ONE_TIME_PREKEYS {
+        return Err(anyhow!(
+            "one_time_count must be in 1..={MAX_ONE_TIME_PREKEYS}"
+        ));
+    }
+    let mut rng = OsRng;
+    let kem = build_kem_for_suite(keys.suite)?;
+    let timestamp = auth_timestamp().unwrap_or(0);
+    let mut one_time_x25519 = Vec::with_capacity(one_time_count);
+    let mut one_time_mlkem = Vec::with_capacity(one_time_count);
+
+    for idx in 0..one_time_count {
+        let key = OneTimePreKey::generate(
+            format!("{}-otk-x-{}-{idx}", keys.user_id, timestamp),
+            &mut rng,
+        );
+        one_time_x25519.push(OneTimeKeyRecord {
+            key_id: key.key_id,
+            public_b64: B64.encode(key.public_key.0),
+            secret_b64: B64.encode(key.secret_key.as_slice()),
+        });
+
+        let pq_key = kem.keypair()?;
+        one_time_mlkem.push(OneTimeKeyRecord {
+            key_id: format!("{}-otk-pq-{}-{idx}", keys.user_id, timestamp),
+            public_b64: B64.encode(pq_key.public_key),
+            secret_b64: B64.encode(pq_key.secret_key.as_slice()),
+        });
+    }
+
+    keys.one_time_prekeys_x25519 = one_time_x25519;
+    keys.one_time_prekeys_mlkem768 = one_time_mlkem;
+    Ok(())
+}
+
 async fn register_user(client: &Client, server: &str, keys: &UserKeysFile) -> Result<()> {
     let req = RegisterRequest {
         user_id: keys.user_id.clone(),
@@ -622,13 +749,84 @@ async fn publish_prekeys(client: &Client, server: &str, keys: &UserKeysFile) -> 
             .collect(),
     };
 
-    let value = post_json(
+    let auth_signing_key = auth_signing_key_for_user(keys)?;
+    let auth_headers =
+        prekeys_auth_headers(&auth_signing_key, &keys.user_id, &keys.device_id, &req)?;
+    let mut request = client
+        .post(format!("{server}/v1/users/{}/prekeys", keys.user_id))
+        .json(&req);
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("publish prekeys request failed")?;
+    let value: Value = handle_json_response(response).await?;
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+async fn fetch_prekeys_status(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    auth_signing_key: &SigningKey,
+) -> Result<PrekeysStatusResponse> {
+    let auth_headers = prekeys_status_auth_headers(auth_signing_key, user, device_id)?;
+    let mut request = client.get(format!("{server}/v1/users/{user}/prekeys/status"));
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("fetch prekeys status request failed")?;
+    handle_json_response(response).await
+}
+
+async fn ensure_prekeys_replenished(
+    client: &Client,
+    server: &str,
+    keys_path: &Path,
+    keys: &mut UserKeysFile,
+) -> Result<()> {
+    let auth_signing_key = auth_signing_key_for_user(keys)?;
+    let status = fetch_prekeys_status(
         client,
-        format!("{server}/v1/users/{}/prekeys", keys.user_id),
-        &req,
+        server,
+        &keys.user_id,
+        &keys.device_id,
+        &auth_signing_key,
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&value)?);
+    if status.user_id != keys.user_id || status.device_id != keys.device_id {
+        return Err(anyhow!(
+            "prekeys status identity mismatch: expected {}/{} got {}/{}",
+            keys.user_id,
+            keys.device_id,
+            status.user_id,
+            status.device_id
+        ));
+    }
+    if !status.low_one_time_prekeys {
+        return Ok(());
+    }
+
+    let target = status
+        .minimum_recommended_one_time_prekeys
+        .max(PREKEY_REPLENISH_TARGET);
+    refresh_one_time_prekeys(keys, target)?;
+    publish_prekeys(client, server, keys).await?;
+    write_json_file(keys_path, keys)?;
+    println!(
+        "auto-replenished one-time prekeys for {} (x25519={}, mlkem768={}, checked_at={})",
+        keys.user_id,
+        status.remaining_one_time_prekeys_x25519,
+        status.remaining_one_time_prekeys_mlkem768,
+        status.checked_at
+    );
     Ok(())
 }
 
@@ -678,6 +876,23 @@ async fn send_message_flow(
     }
 
     let bundle = fetch_bundle(client, server, to).await?;
+    if bundle.low_one_time_prekeys.unwrap_or(false) {
+        println!(
+            "bundle for '{}' reports low prekey inventory (remaining_x25519={:?}, remaining_mlkem768={:?}, recommended={:?})",
+            to,
+            bundle.remaining_one_time_prekeys_x25519,
+            bundle.remaining_one_time_prekeys_mlkem768,
+            bundle.minimum_recommended_one_time_prekeys
+        );
+    }
+    if bundle.last_resort_prekey_only.unwrap_or(false) {
+        println!(
+            "bundle for '{}' is in last-resort mode (remaining_x25519={:?}, remaining_mlkem768={:?})",
+            to,
+            bundle.remaining_one_time_prekeys_x25519,
+            bundle.remaining_one_time_prekeys_mlkem768
+        );
+    }
     enforce_identity_pin(state_dir, from, &bundle, options.accept_key_change)?;
     let prekey_bundle = bundle_to_core(&bundle, sender_keys.suite)?;
     options
@@ -748,7 +963,16 @@ async fn poll_inbox_flow(
     keys: &UserKeysFile,
 ) -> Result<()> {
     let cursor_path = inbox_cursor_path(state_dir, &keys.user_id);
+    let replay_guard_path = replay_guard_file_path(state_dir, &keys.user_id);
     let mut cursor = load_cursor(&cursor_path)?;
+    let mut replay_guard = load_replay_guard(&replay_guard_path, &keys.user_id)?;
+    let now_unix = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| anyhow!("system time before UNIX epoch"))?
+            .as_secs(),
+    )
+    .map_err(|_| anyhow!("system time overflow"))?;
     let auth_signing_key = auth_signing_key_for_user(keys)?;
     let inbox = fetch_inbox(
         client,
@@ -763,6 +987,34 @@ async fn poll_inbox_flow(
     for item in inbox.messages {
         let bytes = decode_b64("message_bytes_base64", &item.message_bytes_base64)?;
         let sender = item.sender_user_id.clone();
+        let message_hash = message_hash_hex(&bytes);
+        {
+            let peer_guard = replay_guard.peers.entry(sender.clone()).or_default();
+            peer_guard
+                .seen_hashes
+                .retain(|entry| entry.expires_at_unix > now_unix);
+            if item.message_id <= peer_guard.last_message_id {
+                eprintln!(
+                    "[{}] rejected replayed transport message id {} (last seen {})",
+                    sender, item.message_id, peer_guard.last_message_id
+                );
+                cursor.since_message_id = cursor.since_message_id.max(item.message_id);
+                continue;
+            }
+            if peer_guard
+                .seen_hashes
+                .iter()
+                .any(|entry| entry.hash_hex == message_hash)
+            {
+                eprintln!(
+                    "[{}] rejected duplicate ciphertext blob for message id {}",
+                    sender, item.message_id
+                );
+                peer_guard.last_message_id = peer_guard.last_message_id.max(item.message_id);
+                cursor.since_message_id = cursor.since_message_id.max(item.message_id);
+                continue;
+            }
+        }
         let ad = make_ad(&sender, &keys.user_id)?;
         let session_path = session_file_path(state_dir, &keys.user_id, &sender);
 
@@ -841,10 +1093,21 @@ async fn poll_inbox_flow(
             );
         }
 
+        let peer_guard = replay_guard.peers.entry(sender).or_default();
+        peer_guard.last_message_id = peer_guard.last_message_id.max(item.message_id);
+        peer_guard.seen_hashes.push(SeenMessageHash {
+            hash_hex: message_hash,
+            expires_at_unix: now_unix + REPLAY_HASH_TTL_SECONDS,
+        });
+        if peer_guard.seen_hashes.len() > REPLAY_HASH_MAX_ENTRIES_PER_PEER {
+            let overflow = peer_guard.seen_hashes.len() - REPLAY_HASH_MAX_ENTRIES_PER_PEER;
+            peer_guard.seen_hashes.drain(0..overflow);
+        }
         cursor.since_message_id = cursor.since_message_id.max(item.message_id);
     }
 
     save_cursor(&cursor_path, &cursor)?;
+    save_replay_guard(&replay_guard_path, &replay_guard)?;
     Ok(())
 }
 
@@ -1009,12 +1272,22 @@ fn identity_pins_file_path(state_dir: &Path, user: &str) -> PathBuf {
     state_dir.join(user).join("_identity_pins.json")
 }
 
+fn replay_guard_file_path(state_dir: &Path, user: &str) -> PathBuf {
+    state_dir.join(user).join("_replay_guard.json")
+}
+
 fn session_file_path(state_dir: &Path, user: &str, peer: &str) -> PathBuf {
     state_dir.join(user).join(format!("{peer}.json"))
 }
 
 fn inbox_cursor_path(state_dir: &Path, user: &str) -> PathBuf {
     state_dir.join(user).join("_inbox_cursor.json")
+}
+
+fn message_hash_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
 }
 
 fn make_ad(sender: &str, recipient: &str) -> Result<Vec<u8>> {
@@ -1116,6 +1389,62 @@ fn inbox_auth_headers(
     });
     let transcript =
         encode(&records).map_err(|_| anyhow!("failed to encode inbox auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn prekeys_status_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("prekeys-status", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let transcript =
+        encode(&records).map_err(|_| anyhow!("failed to encode prekeys-status auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn prekeys_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    request: &PublishPrekeysRequest,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("prekeys", user_id, device_id, timestamp, &nonce);
+    let mut hasher = Sha256::new();
+    hasher.update(request.signed_prekey_x25519_pub.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PREKEY_SPK_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(request.pq_signed_prekey_pub_mlkem768.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PREKEY_PQSPK_HASH,
+        value: hasher.finalize().to_vec(),
+    });
+    let transcript =
+        encode(&records).map_err(|_| anyhow!("failed to encode prekeys auth transcript"))?;
     let signature = signing_key.sign(&transcript).to_bytes();
     Ok(vec![
         (AUTH_HEADER_USER, user_id.to_string()),
@@ -1237,8 +1566,82 @@ fn save_cursor(path: &Path, cursor: &InboxCursor) -> Result<()> {
     write_json_file(path, cursor)
 }
 
+fn load_replay_guard(path: &Path, user_id: &str) -> Result<ReplayGuardFile> {
+    if !path.exists() {
+        return Ok(ReplayGuardFile {
+            version: REPLAY_GUARD_VERSION,
+            user_id: user_id.to_string(),
+            peers: HashMap::new(),
+        });
+    }
+    let guard: ReplayGuardFile = read_json_file(path)?;
+    if guard.version != REPLAY_GUARD_VERSION {
+        return Err(anyhow!(
+            "unsupported replay guard version '{}' in {}",
+            guard.version,
+            path.display()
+        ));
+    }
+    if guard.user_id != user_id {
+        return Err(anyhow!(
+            "replay guard user mismatch in {}: expected '{}' got '{}'",
+            path.display(),
+            user_id,
+            guard.user_id
+        ));
+    }
+    Ok(guard)
+}
+
+fn save_replay_guard(path: &Path, guard: &ReplayGuardFile) -> Result<()> {
+    write_json_file(path, guard)
+}
+
 fn read_keys_file(path: &Path) -> Result<UserKeysFile> {
     read_json_file(path)
+}
+
+fn backup_keys_file(keys_path: &Path, out_path: &Path, passphrase: &str) -> Result<()> {
+    if passphrase.trim().is_empty() {
+        return Err(anyhow!("backup_passphrase cannot be empty"));
+    }
+    let keys = read_keys_file(keys_path)?;
+    let plaintext = serde_json::to_vec_pretty(&keys)
+        .with_context(|| format!("failed to encode keys from {}", keys_path.display()))?;
+    let sealed = seal_plaintext(&plaintext, passphrase)?;
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
+    fs::write(out_path, sealed)
+        .with_context(|| format!("failed to write {}", out_path.display()))?;
+    Ok(())
+}
+
+fn restore_keys_file(backup_path: &Path, passphrase: &str) -> Result<UserKeysFile> {
+    if passphrase.trim().is_empty() {
+        return Err(anyhow!("backup_passphrase cannot be empty"));
+    }
+    let data = fs::read(backup_path)
+        .with_context(|| format!("failed to read {}", backup_path.display()))?;
+    if let Ok(wrapped) = serde_json::from_slice::<WrappedSecret>(&data) {
+        if is_wrapped_secret(&wrapped) {
+            let plaintext = unseal_plaintext(&wrapped, passphrase)
+                .with_context(|| format!("failed to decrypt {}", backup_path.display()))?;
+            return serde_json::from_slice(&plaintext)
+                .with_context(|| format!("failed to parse {}", backup_path.display()));
+        }
+    }
+    if let Ok(legacy) = serde_json::from_slice::<LegacySealedFile>(&data) {
+        let plaintext = unseal_legacy_plaintext(&legacy, passphrase)
+            .with_context(|| format!("failed to decrypt {}", backup_path.display()))?;
+        return serde_json::from_slice(&plaintext)
+            .with_context(|| format!("failed to parse {}", backup_path.display()));
+    }
+    Err(anyhow!(
+        "backup file '{}' is not a supported encrypted key backup format",
+        backup_path.display()
+    ))
 }
 
 fn storage_policy() -> StoragePolicy {
@@ -1248,78 +1651,86 @@ fn storage_policy() -> StoragePolicy {
     })
 }
 
-fn derive_storage_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
-    let hk = Hkdf::<Sha256>::new(Some(salt), passphrase.as_bytes());
-    let mut key = [0u8; 32];
-    hk.expand(STORAGE_AAD, &mut key)
-        .map_err(|_| anyhow!("failed to derive storage key"))?;
-    Ok(key)
+fn is_wrapped_secret(value: &WrappedSecret) -> bool {
+    value.kind == "pqmsg-sealed"
+        && value.version == 1
+        && value.kdf == "argon2id"
+        && value.aead == "aes-256-gcm"
 }
 
 fn seal_plaintext(plaintext: &[u8], passphrase: &str) -> Result<Vec<u8>> {
-    let mut salt = [0u8; STORAGE_SALT_BYTES];
-    OsRng.fill_bytes(&mut salt);
-    let mut nonce = [0u8; STORAGE_NONCE_BYTES];
-    OsRng.fill_bytes(&mut nonce);
-    let key = derive_storage_key(passphrase, &salt)?;
-    let cipher = ChaCha20Poly1305::new_from_slice(&key)
-        .map_err(|_| anyhow!("failed to initialize storage cipher"))?;
-    let ciphertext = cipher
-        .encrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: plaintext,
-                aad: STORAGE_AAD,
-            },
-        )
-        .map_err(|_| anyhow!("failed to encrypt local state"))?;
-    let sealed = SealedFile {
-        kind: STORAGE_SEALED_KIND.to_string(),
-        version: STORAGE_SEALED_VERSION,
-        salt_b64: B64.encode(salt),
-        nonce_b64: B64.encode(nonce),
-        ciphertext_b64: B64.encode(ciphertext),
-    };
-    serde_json::to_vec_pretty(&sealed).context("failed to encode sealed local state")
+    let wrapped = wrap_wrapped_bytes(&SecretString::new(passphrase.to_string().into()), plaintext)
+        .map_err(|e| anyhow!("failed to encrypt local state: {e}"))?;
+    serde_json::to_vec_pretty(&wrapped).context("failed to encode sealed local state")
 }
 
-fn unseal_plaintext(sealed: &SealedFile, passphrase: &str) -> Result<Vec<u8>> {
-    if sealed.kind != STORAGE_SEALED_KIND || sealed.version != STORAGE_SEALED_VERSION {
-        return Err(anyhow!("unsupported sealed local state format"));
+fn unseal_plaintext(sealed: &WrappedSecret, passphrase: &str) -> Result<Vec<u8>> {
+    unwrap_wrapped_bytes(&SecretString::new(passphrase.to_string().into()), sealed)
+        .map_err(|e| anyhow!("failed to decrypt local state; check passphrase: {e}"))
+}
+
+fn legacy_derive_storage_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
+    let hk = Hkdf::<Sha256>::new(Some(salt), passphrase.as_bytes());
+    let mut key = [0u8; 32];
+    hk.expand(LEGACY_STORAGE_AAD, &mut key)
+        .map_err(|_| anyhow!("failed to derive legacy storage key"))?;
+    Ok(key)
+}
+
+fn unseal_legacy_plaintext(sealed: &LegacySealedFile, passphrase: &str) -> Result<Vec<u8>> {
+    if sealed.kind != LEGACY_STORAGE_SEALED_KIND || sealed.version != LEGACY_STORAGE_SEALED_VERSION
+    {
+        return Err(anyhow!("unsupported legacy sealed local state format"));
     }
     let salt = decode_b64("sealed.salt_b64", &sealed.salt_b64)?;
     let nonce = decode_b64("sealed.nonce_b64", &sealed.nonce_b64)?;
     let ciphertext = decode_b64("sealed.ciphertext_b64", &sealed.ciphertext_b64)?;
-    if salt.len() != STORAGE_SALT_BYTES {
+    if salt.len() != LEGACY_STORAGE_SALT_BYTES {
         return Err(anyhow!(
-            "sealed salt must be {STORAGE_SALT_BYTES} bytes, got {}",
+            "legacy sealed salt must be {LEGACY_STORAGE_SALT_BYTES} bytes, got {}",
             salt.len()
         ));
     }
-    if nonce.len() != STORAGE_NONCE_BYTES {
+    if nonce.len() != LEGACY_STORAGE_NONCE_BYTES {
         return Err(anyhow!(
-            "sealed nonce must be {STORAGE_NONCE_BYTES} bytes, got {}",
+            "legacy sealed nonce must be {LEGACY_STORAGE_NONCE_BYTES} bytes, got {}",
             nonce.len()
         ));
     }
-    let key = derive_storage_key(passphrase, &salt)?;
+    let key = legacy_derive_storage_key(passphrase, &salt)?;
     let cipher = ChaCha20Poly1305::new_from_slice(&key)
-        .map_err(|_| anyhow!("failed to initialize storage cipher"))?;
+        .map_err(|_| anyhow!("failed to initialize legacy storage cipher"))?;
     let plaintext = cipher
         .decrypt(
             Nonce::from_slice(&nonce),
             Payload {
                 msg: &ciphertext,
-                aad: STORAGE_AAD,
+                aad: LEGACY_STORAGE_AAD,
             },
         )
-        .map_err(|_| anyhow!("failed to decrypt local state; check passphrase"))?;
+        .map_err(|_| anyhow!("failed to decrypt legacy local state; check passphrase"))?;
     Ok(plaintext)
 }
 
 fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     let data = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    if let Ok(sealed) = serde_json::from_slice::<SealedFile>(&data) {
+    if let Ok(sealed) = serde_json::from_slice::<WrappedSecret>(&data) {
+        if is_wrapped_secret(&sealed) {
+            let policy = storage_policy();
+            let passphrase = policy.passphrase.ok_or_else(|| {
+                anyhow!(
+                    "state file '{}' is encrypted; set --state-passphrase or {}",
+                    path.display(),
+                    ENV_STATE_PASSPHRASE
+                )
+            })?;
+            let plaintext = unseal_plaintext(&sealed, &passphrase)
+                .with_context(|| format!("failed to decrypt {}", path.display()))?;
+            return serde_json::from_slice(&plaintext)
+                .with_context(|| format!("failed to parse {}", path.display()));
+        }
+    }
+    if let Ok(sealed) = serde_json::from_slice::<LegacySealedFile>(&data) {
         let policy = storage_policy();
         let passphrase = policy.passphrase.ok_or_else(|| {
             anyhow!(
@@ -1328,7 +1739,7 @@ fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
                 ENV_STATE_PASSPHRASE
             )
         })?;
-        let plaintext = unseal_plaintext(&sealed, &passphrase)
+        let plaintext = unseal_legacy_plaintext(&sealed, &passphrase)
             .with_context(|| format!("failed to decrypt {}", path.display()))?;
         return serde_json::from_slice(&plaintext)
             .with_context(|| format!("failed to parse {}", path.display()));
@@ -1433,6 +1844,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_backup_keys_args() {
+        let cli = Cli::try_parse_from([
+            "pqmsg-cli",
+            "backup-keys",
+            "--keys",
+            "./devkeys/alice.json",
+            "--out",
+            "./backups/alice.backup.json",
+            "--backup-passphrase",
+            "secret",
+        ])
+        .expect("parse");
+        match cli.command {
+            Commands::BackupKeys { .. } => {}
+            _ => panic!("expected backup-keys command"),
+        }
+    }
+
+    #[test]
     fn parse_security_profile_flag() {
         let cli = Cli::try_parse_from([
             "pqmsg-cli",
@@ -1472,6 +1902,11 @@ mod tests {
             sig_over_pqspk: B64.encode([6u8; 64]),
             one_time_prekey_x25519: None,
             one_time_prekey_mlkem768: None,
+            remaining_one_time_prekeys_x25519: Some(0),
+            remaining_one_time_prekeys_mlkem768: Some(0),
+            low_one_time_prekeys: Some(true),
+            minimum_recommended_one_time_prekeys: Some(PREKEY_REPLENISH_TARGET),
+            last_resort_prekey_only: Some(true),
             identity_key_version: Some(1),
             identity_fingerprint_sha256: Some("aaa".to_string()),
             bundle_generated_at: Some("2026-03-04T00:00:00Z".to_string()),
@@ -1613,10 +2048,119 @@ mod tests {
     }
 
     #[test]
+    fn backup_and_restore_keys_roundtrip() {
+        let dir = tempdir().expect("tempdir");
+        let keys_path = dir.path().join("alice.json");
+        let backup_path = dir.path().join("alice.backup.json");
+        let keys = UserKeysFile {
+            version: 1,
+            user_id: "alice".to_string(),
+            device_id: "alice-device-1".to_string(),
+            suite: SuiteFlag::MlKem768,
+            identity_x25519_pub_b64: B64.encode([1u8; 32]),
+            identity_x25519_secret_b64: B64.encode([2u8; 32]),
+            identity_sig_pub_b64: B64.encode([3u8; 32]),
+            identity_sig_secret_b64: B64.encode([4u8; 32]),
+            signed_prekey_x25519_pub_b64: B64.encode([5u8; 32]),
+            signed_prekey_x25519_secret_b64: B64.encode([6u8; 32]),
+            pq_signed_prekey_pub_b64: B64.encode([7u8; 64]),
+            pq_signed_prekey_secret_b64: B64.encode([8u8; 64]),
+            one_time_prekeys_x25519: vec![
+                OneTimeKeyRecord {
+                    key_id: "otk-x-1".to_string(),
+                    public_b64: B64.encode([9u8; 32]),
+                    secret_b64: B64.encode([10u8; 32]),
+                },
+                OneTimeKeyRecord {
+                    key_id: "otk-x-2".to_string(),
+                    public_b64: B64.encode([11u8; 32]),
+                    secret_b64: B64.encode([12u8; 32]),
+                },
+            ],
+            one_time_prekeys_mlkem768: vec![
+                OneTimeKeyRecord {
+                    key_id: "otk-pq-1".to_string(),
+                    public_b64: B64.encode([13u8; 64]),
+                    secret_b64: B64.encode([14u8; 64]),
+                },
+                OneTimeKeyRecord {
+                    key_id: "otk-pq-2".to_string(),
+                    public_b64: B64.encode([15u8; 64]),
+                    secret_b64: B64.encode([16u8; 64]),
+                },
+            ],
+        };
+        let keys_json = serde_json::to_vec_pretty(&keys).expect("serialize");
+        fs::write(&keys_path, keys_json).expect("write keys");
+
+        backup_keys_file(&keys_path, &backup_path, "backup-passphrase").expect("backup");
+        let restored = restore_keys_file(&backup_path, "backup-passphrase").expect("restore");
+
+        assert_eq!(restored.user_id, keys.user_id);
+        assert_eq!(restored.device_id, keys.device_id);
+        assert_eq!(
+            restored.identity_x25519_secret_b64,
+            keys.identity_x25519_secret_b64
+        );
+        assert_eq!(
+            restored.identity_sig_secret_b64,
+            keys.identity_sig_secret_b64
+        );
+        assert_eq!(restored.one_time_prekeys_x25519.len(), 2);
+        assert_eq!(restored.one_time_prekeys_mlkem768.len(), 2);
+    }
+
+    #[test]
+    fn replay_guard_roundtrip() {
+        let dir = tempdir().expect("tempdir");
+        let path = replay_guard_file_path(dir.path(), "alice");
+        let guard = ReplayGuardFile {
+            version: REPLAY_GUARD_VERSION,
+            user_id: "alice".to_string(),
+            peers: HashMap::from([(
+                "bob".to_string(),
+                PeerReplayGuard {
+                    last_message_id: 12,
+                    seen_hashes: vec![SeenMessageHash {
+                        hash_hex: "abcd".to_string(),
+                        expires_at_unix: 999_999,
+                    }],
+                },
+            )]),
+        };
+        save_replay_guard(&path, &guard).expect("save guard");
+        let loaded = load_replay_guard(&path, "alice").expect("load guard");
+        assert_eq!(loaded.user_id, "alice");
+        assert_eq!(
+            loaded.peers.get("bob").expect("bob entry").last_message_id,
+            12
+        );
+    }
+
+    #[test]
+    fn refresh_one_time_prekeys_updates_inventory() {
+        if let Ok(profile) = pqmsg_core::alg::runtime_crypto_profile() {
+            if !profile.pq_oqs_enabled {
+                return;
+            }
+        }
+        let mut keys = generate_user_keys(
+            "alice",
+            "alice-device-1".to_string(),
+            SuiteFlag::MlKem768,
+            2,
+        )
+        .expect("keys");
+        refresh_one_time_prekeys(&mut keys, 5).expect("refresh");
+        assert_eq!(keys.one_time_prekeys_x25519.len(), 5);
+        assert_eq!(keys.one_time_prekeys_mlkem768.len(), 5);
+    }
+
+    #[test]
     fn sealed_state_roundtrip() {
         let plaintext = br#"{"v":1,"sample":"state"}"#;
         let sealed = seal_plaintext(plaintext, "passphrase").expect("seal");
-        let parsed: SealedFile = serde_json::from_slice(&sealed).expect("parse sealed");
+        let parsed: WrappedSecret = serde_json::from_slice(&sealed).expect("parse sealed");
         let unsealed = unseal_plaintext(&parsed, "passphrase").expect("unseal");
         assert_eq!(unsealed, plaintext);
     }
@@ -1625,7 +2169,7 @@ mod tests {
     fn sealed_state_rejects_wrong_passphrase() {
         let plaintext = br#"{"v":1,"sample":"state"}"#;
         let sealed = seal_plaintext(plaintext, "passphrase").expect("seal");
-        let parsed: SealedFile = serde_json::from_slice(&sealed).expect("parse sealed");
+        let parsed: WrappedSecret = serde_json::from_slice(&sealed).expect("parse sealed");
         assert!(unseal_plaintext(&parsed, "wrong-passphrase").is_err());
     }
 }

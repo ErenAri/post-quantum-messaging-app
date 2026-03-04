@@ -41,7 +41,33 @@ data class PublishPrekeysResponse(
     val device_id: String,
     val uploaded_one_time_prekeys_x25519: Int,
     val uploaded_one_time_prekeys_mlkem768: Int,
+    val remaining_one_time_prekeys_x25519: Int,
+    val remaining_one_time_prekeys_mlkem768: Int,
+    val low_one_time_prekeys: Boolean,
+    val minimum_recommended_one_time_prekeys: Int,
     val updated_at: String,
+)
+
+data class PrekeysStatusResponse(
+    val user_id: String,
+    val device_id: String,
+    val remaining_one_time_prekeys_x25519: Int,
+    val remaining_one_time_prekeys_mlkem768: Int,
+    val low_one_time_prekeys: Boolean,
+    val minimum_recommended_one_time_prekeys: Int,
+    val checked_at: String,
+)
+
+data class RegisterPushTokenRequest(
+    val device_id: String,
+    val fcm_token: String,
+)
+
+data class RegisterPushTokenResponse(
+    val user_id: String,
+    val device_id: String,
+    val provider: String,
+    val registered_at: String,
 )
 
 data class BundleResponse(
@@ -55,6 +81,11 @@ data class BundleResponse(
     val sig_over_pqspk: String,
     val one_time_prekey_x25519: String?,
     val one_time_prekey_mlkem768: String?,
+    val remaining_one_time_prekeys_x25519: Int?,
+    val remaining_one_time_prekeys_mlkem768: Int?,
+    val low_one_time_prekeys: Boolean?,
+    val minimum_recommended_one_time_prekeys: Int?,
+    val last_resort_prekey_only: Boolean?,
     val identity_key_version: Int?,
     val identity_fingerprint_sha256: String?,
     val bundle_generated_at: String,
@@ -95,6 +126,19 @@ interface PqmsgApi {
         @Path("user_id") userId: String,
         @Body request: PublishPrekeysRequest,
     ): PublishPrekeysResponse
+
+    @GET("/v1/users/{user_id}/prekeys/status")
+    suspend fun prekeysStatus(
+        @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
+    ): PrekeysStatusResponse
+
+    @POST("/v1/users/{user_id}/push-token")
+    suspend fun registerPushToken(
+        @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
+        @Body request: RegisterPushTokenRequest,
+    ): RegisterPushTokenResponse
 
     @GET("/v1/users/{user_id}/bundle")
     suspend fun getBundle(@Path("user_id") userId: String): BundleResponse

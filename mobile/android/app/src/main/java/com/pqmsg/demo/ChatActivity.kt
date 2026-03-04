@@ -13,17 +13,21 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import uniffi.pqmsg_android.RequestAuthHeaders
 import uniffi.pqmsg_android.buildInboxAuthHeaders
+import uniffi.pqmsg_android.buildPrekeysStatusAuthHeaders
+import uniffi.pqmsg_android.buildPublishPrekeysPayload
 import uniffi.pqmsg_android.buildRelayAuthHeaders
 import uniffi.pqmsg_android.ServerBundle
 import uniffi.pqmsg_android.decryptMessage
 import uniffi.pqmsg_android.encryptWithSession
 import uniffi.pqmsg_android.initiateSessionAndEncrypt
 import uniffi.pqmsg_android.loadUserProfile
+import uniffi.pqmsg_android.replenishOneTimePrekeys
 import java.security.MessageDigest
 import java.util.Base64
 import kotlin.coroutines.resume
 
 class ChatActivity : AppCompatActivity() {
+    private val maxSeenCipherHashesPerPeer = 512
     private lateinit var store: LocalStateStore
     private lateinit var serverInput: EditText
     private lateinit var userInput: EditText
@@ -152,13 +156,17 @@ class ChatActivity : AppCompatActivity() {
         require(peerUser.isNotBlank()) { "peer user id is empty" }
         require(text.isNotBlank()) { "message is empty" }
 
-        val keysJson = store.readKeys(fromUser) ?: error("missing keys for $fromUser")
-        val profile = loadUserProfile(keysJson)
+        var keysJson = store.readKeys(fromUser) ?: error("missing keys for $fromUser")
         val api = ApiClientFactory.create(server)
+        keysJson = ensurePrekeysReplenished(api, fromUser, keysJson)
+        val profile = loadUserProfile(keysJson)
         val existingSession = store.readSession(fromUser, peerUser)
 
         val sendResult = if (existingSession.isNullOrBlank()) {
             val fetched = latestBundle ?: api.getBundle(peerUser).also { latestBundle = it }
+            if (fetched.last_resort_prekey_only == true) {
+                appendLog("peer $peerUser is using last-resort prekey fallback")
+            }
             enforceIdentityPin(fromUser, peerUser, fetched)
             initiateSessionAndEncrypt(
                 keysJson = keysJson,
@@ -308,13 +316,19 @@ class ChatActivity : AppCompatActivity() {
         return digest.joinToString("") { "%02x".format(it) }
     }
 
+    private fun sha256Hex(value: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
     private suspend fun pollFlow() {
         val server = serverInput.text.toString().trim()
         val user = userInput.text.toString().trim()
         require(server.isNotBlank()) { "server URL is empty" }
         require(user.isNotBlank()) { "user id is empty" }
-        val keysJson = store.readKeys(user) ?: error("missing keys for $user")
+        var keysJson = store.readKeys(user) ?: error("missing keys for $user")
         val api = ApiClientFactory.create(server)
+        keysJson = ensurePrekeysReplenished(api, user, keysJson)
         var cursor = store.readCursor(user)
         val inbox = api.inbox(
             user,
@@ -332,6 +346,21 @@ class ChatActivity : AppCompatActivity() {
         }
 
         for (item in inbox.messages) {
+            val peer = item.sender_user_id
+            val peerLastMessageId = store.readPeerLastMessageId(user, peer)
+            if (item.message_id <= peerLastMessageId) {
+                appendLog("replay rejected from $peer [message_id=${item.message_id}]")
+                cursor = maxOf(cursor, item.message_id)
+                continue
+            }
+            val cipherHash = sha256Hex(item.message_bytes_base64)
+            val seenCipherHashes = store.readPeerSeenCipherHashes(user, peer)
+            if (seenCipherHashes.contains(cipherHash)) {
+                appendLog("duplicate ciphertext rejected from $peer [message_id=${item.message_id}]")
+                store.writePeerLastMessageId(user, peer, maxOf(peerLastMessageId, item.message_id))
+                cursor = maxOf(cursor, item.message_id)
+                continue
+            }
             val existingSession = store.readSession(user, item.sender_user_id)
             runCatching {
                 val result = decryptMessage(
@@ -348,11 +377,58 @@ class ChatActivity : AppCompatActivity() {
                 renderError(mapped)
                 appendLog("decrypt failed for ${item.sender_user_id}")
             }
+            seenCipherHashes.add(cipherHash)
+            while (seenCipherHashes.size > maxSeenCipherHashesPerPeer) {
+                val first = seenCipherHashes.firstOrNull() ?: break
+                seenCipherHashes.remove(first)
+            }
+            store.writePeerSeenCipherHashes(user, peer, seenCipherHashes)
+            store.writePeerLastMessageId(user, peer, maxOf(peerLastMessageId, item.message_id))
             cursor = maxOf(cursor, item.message_id)
         }
 
         store.writeCursor(user, cursor)
         refreshMeta()
+    }
+
+    private suspend fun ensurePrekeysReplenished(
+        api: PqmsgApi,
+        user: String,
+        keysJson: String,
+    ): String {
+        return runCatching {
+            val status = api.prekeysStatus(
+                user,
+                buildPrekeysStatusAuthHeaders(
+                    keysJson = keysJson,
+                    userId = user,
+                ).toHeaderMap(),
+            )
+            if (!status.low_one_time_prekeys) {
+                return@runCatching keysJson
+            }
+            val target = maxOf(status.minimum_recommended_one_time_prekeys, 16)
+            val refreshedKeysJson = replenishOneTimePrekeys(keysJson, target.toUInt())
+            val payload = buildPublishPrekeysPayload(refreshedKeysJson)
+            api.publishPrekeys(
+                user,
+                PublishPrekeysRequest(
+                    signed_prekey_x25519_pub = payload.signedPrekeyX25519Pub,
+                    sig_over_spk = payload.sigOverSpk,
+                    pq_signed_prekey_pub_mlkem768 = payload.pqSignedPrekeyPubMlkem768,
+                    sig_over_pqspk = payload.sigOverPqspk,
+                    one_time_prekeys_x25519 = payload.oneTimePrekeysX25519,
+                    one_time_prekeys_mlkem768 = payload.oneTimePrekeysMlkem768,
+                ),
+            )
+            store.writeKeys(user, refreshedKeysJson)
+            appendLog(
+                "auto-replenished prekeys for $user at ${status.checked_at} (x=${status.remaining_one_time_prekeys_x25519}, pq=${status.remaining_one_time_prekeys_mlkem768})",
+            )
+            refreshedKeysJson
+        }.getOrElse {
+            keysJson
+        }
     }
 
     private fun refreshMeta() {

@@ -8,6 +8,7 @@
     <string name="hint_device">Device ID</string>
     <string name="hint_suite">Suite (ml-kem-768 or kyber768)</string>
     <string name="hint_peer">Peer User ID</string>
+    <string name="hint_push_token">FCM Token (optional)</string>
     <string name="hint_message">Message</string>
     <string name="button_generate">Generate Identity Keys</string>
     <string name="button_register">Register User</string>

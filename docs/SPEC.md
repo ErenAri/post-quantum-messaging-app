@@ -27,7 +27,7 @@ sequenceDiagram
     A->>A: EK_A + encapsulate(PQSPK_B)
     A->>A: SK = HKDF(DH1 || DH2 || DH3 || ss_pq)
     A->>S: Relay InitialMessage
-    B->>S: Poll inbox
+    B->>S: Poll inbox or subscribe ws-inbox
     S-->>B: InitialMessage
     B->>B: decapsulate + DH recompute + decrypt
 ```
@@ -67,6 +67,12 @@ Server-side directory behavior is defined as:
 1. `user_id` identity binding is immutable after first successful registration,
 2. prekey uploads are accepted only when Ed25519 signatures over `SPK` and `PQSPK` transcripts verify under registered `identity_sig_pub`.
 3. relay/inbox/identity-log access requires Ed25519-signed transport auth headers bound to registered `user_id` and `device_id`.
+4. websocket inbox subscriptions (`/v1/ws/inbox/{user_id}`) require the same Ed25519 transport-auth header model and include `since` in the signature transcript.
+5. push-token registration (`/v1/users/{user_id}/push-token`) requires signed transport auth and only permits wake-signal push semantics.
+6. relay ciphertext replay is constrained server-side via deduplication over `(sender, recipient, ciphertext)` within a bounded TTL window.
+7. inbox `since` cursors are monotonic per authenticated `(user_id, device_id)` session and regressions are rejected.
+8. server exposes authenticated prekey inventory status and marks low-inventory conditions with a replenishment recommendation.
+9. bundle responses expose remaining one-time prekey inventory and an explicit `last_resort_prekey_only` indicator.
 
 ## 7. Ratchet Metadata Authentication
 
@@ -97,7 +103,15 @@ Critical unknown TLV tags and duplicate critical tags are rejected in strict mod
 
 No parser path should panic on adversarial input.
 
-## 10. Verification Artifacts
+## 10. Replay Controls
+
+The implementation enforces replay resistance at three layers:
+
+1. transport request nonces (signed header transcripts),
+2. relay ciphertext deduplication with TTL on the server,
+3. client-side seen-message tracking and per-peer monotonic transport message-id checks.
+
+## 11. Verification Artifacts
 
 Current verification set:
 

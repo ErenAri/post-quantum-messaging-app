@@ -14,6 +14,7 @@ import uniffi.pqmsg_android.Suite
 import uniffi.pqmsg_android.activeCryptoProfile
 import uniffi.pqmsg_android.buildInboxAuthHeaders
 import uniffi.pqmsg_android.buildPublishPrekeysPayload
+import uniffi.pqmsg_android.buildPushTokenAuthHeaders
 import uniffi.pqmsg_android.buildRegisterPayload
 import uniffi.pqmsg_android.generateIdentityKeys
 import uniffi.pqmsg_android.loadUserProfile
@@ -26,6 +27,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var deviceInput: EditText
     private lateinit var suiteInput: EditText
     private lateinit var peerInput: EditText
+    private lateinit var pushTokenInput: EditText
     private lateinit var presetAliceButton: Button
     private lateinit var presetBobButton: Button
     private lateinit var generateButton: Button
@@ -55,6 +57,7 @@ class MainActivity : AppCompatActivity() {
         deviceInput = findViewById(R.id.editDevice)
         suiteInput = findViewById(R.id.editSuite)
         peerInput = findViewById(R.id.editPeer)
+        pushTokenInput = findViewById(R.id.editPushToken)
         presetAliceButton = findViewById(R.id.buttonPresetAlice)
         presetBobButton = findViewById(R.id.buttonPresetBob)
         generateButton = findViewById(R.id.buttonGenerate)
@@ -181,11 +184,31 @@ class MainActivity : AppCompatActivity() {
                         since = store.readCursor(user),
                     )
                     api.inbox(user, inboxAuth.toHeaderMap(), store.readCursor(user))
+                    val pushToken = pushTokenInput.text.toString().trim()
+                    if (pushToken.isNotEmpty()) {
+                        val pushAuth = buildPushTokenAuthHeaders(
+                            keysJson = keysJson,
+                            userId = user,
+                            fcmToken = pushToken,
+                        )
+                        api.registerPushToken(
+                            userId = user,
+                            headers = pushAuth.toHeaderMap(),
+                            request = RegisterPushTokenRequest(
+                                device_id = loadUserProfile(keysJson).deviceId,
+                                fcm_token = pushToken,
+                            ),
+                        )
+                    }
                     saveSetup()
                     syncProgressUser()
                     progress = progress.afterServerVerified()
                     store.saveProgress(progressUserId, progress)
-                    "Server reachable and API authenticated for $user"
+                    if (pushToken.isEmpty()) {
+                        "Server reachable and API authenticated for $user"
+                    } else {
+                        "Server reachable, API authenticated, and push token registered for $user"
+                    }
                 }
             }
         }

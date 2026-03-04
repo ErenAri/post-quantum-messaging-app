@@ -36,6 +36,9 @@ The Android Setup screen enforces the ordering above and persists progress per u
 - HTTP transport is allowed only for local emulator/demo hosts in debug mode,
 - HTTPS transport requires certificate pinning configured via `BuildConfig.TLS_PIN_SHA256`,
 - relay and inbox requests include Ed25519-signed auth headers generated from local identity signing keys,
+- inbox processing enforces per-peer monotonic transport message IDs and local seen-ciphertext replay rejection,
+- chat send/poll flows perform authenticated prekey-inventory checks and auto-replenish one-time prekeys when inventory is low,
+- optional push-token registration uses Ed25519-signed auth headers and binds token updates to the authenticated user/device pair,
 - local key/session files are persisted through Android keystore-backed encrypted file storage.
 
 ## 4. Prerequisites
@@ -96,6 +99,7 @@ APK output:
 $env:PQMSG_DATABASE_URL='sqlite://./pqmsg-server.db?mode=rwc'
 $env:PQMSG_BIND='127.0.0.1:3000'
 $env:PQMSG_SECURITY_PROFILE='research'
+$env:PQMSG_FCM_SERVER_KEY='<optional-fcm-legacy-server-key>'
 cargo run -p pqmsg-server
 ```
 
@@ -105,8 +109,9 @@ cargo run -p pqmsg-server
 - Emulator B: preset Bob.
 4. Keep server URL as `http://10.0.2.2:3000`.
 5. Execute setup in order on both devices.
-6. Alice sends a message in Chat screen.
-7. Bob polls inbox and decrypts.
+6. Optionally paste an FCM token in the Setup screen before `Verify Server` to register wake-signal push routing.
+7. Alice sends a message in Chat screen.
+8. Bob polls inbox and decrypts.
 
 ## 9. End-to-End Sequence
 
@@ -138,3 +143,15 @@ sequenceDiagram
 
 The emulator URL pattern (`http://10.0.2.2:...`) is strictly demonstration-only.  
 Operational deployment requires HTTPS and should include certificate pinning.
+
+## 12. Certificate Pin Rotation
+
+Production pin rotation should follow a dual-pin overlap window:
+
+1. compute pin for next server certificate,
+2. ship client build that accepts both current and next pin,
+3. rotate server certificate,
+4. verify production connectivity,
+5. remove old pin in subsequent client release.
+
+Operational details are specified in [TLS_ROTATION](TLS_ROTATION.md).

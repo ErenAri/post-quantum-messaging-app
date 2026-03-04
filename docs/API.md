@@ -17,21 +17,31 @@ sequenceDiagram
     participant S as Server
     C->>S: POST /users/register
     C->>S: POST /users/{id}/prekeys
+    C->>S: GET /users/{id}/prekeys/status
+    C->>S: POST /users/{id}/push-token
     C->>S: GET /users/{peer}/bundle
     C->>S: POST /users/{id}/rotate/init
     C->>S: POST /users/{id}/rotate/confirm
     C->>S: GET /users/{id}/identity-log
     C->>S: POST /relay/{peer}
     C->>S: GET /inbox/{id}?since=n
+    C->>S: GET /ws/inbox/{id}?since=n (WebSocket)
 ```
 
 ## 2.1 Security Profile Configuration
 
 Server startup is controlled by environment variables:
 
-- `PQMSG_SECURITY_PROFILE`: `research` | `high_assurance` | `nss_aligned` (default: `research`)
+- `PQMSG_SECURITY_PROFILE`: `research` | `high_assurance` | `nss_aligned` (default: `high_assurance`)
+- `PQMSG_DATABASE_URL`: `sqlite://...` or `postgres://...`
 - `PQMSG_TLS_CERT_PATH`: PEM certificate path
 - `PQMSG_TLS_KEY_PATH`: PEM private key path
+- `PQMSG_DB_MAX_CONNECTIONS`: pool max connections (default: `20`)
+- `PQMSG_DB_MIN_CONNECTIONS`: pool min connections (default: `1`)
+- `PQMSG_DB_ACQUIRE_TIMEOUT_SECS`: connection acquisition timeout seconds (default: `5`)
+- `PQMSG_DB_IDLE_TIMEOUT_SECS`: idle connection timeout seconds (default: `300`)
+- `PQMSG_FCM_SERVER_KEY`: optional FCM legacy server key for wake-signal dispatch
+- `PQMSG_FCM_ENDPOINT`: optional override (default: `https://fcm.googleapis.com/fcm/send`)
 
 In `high_assurance` and `nss_aligned`, server startup fails unless both TLS paths are provided.
 
@@ -55,8 +65,11 @@ flowchart TD
 The following endpoints require request authentication headers:
 
 - `GET /v1/users/{user_id}/identity-log`
+- `GET /v1/users/{user_id}/prekeys/status`
 - `POST /v1/relay/{recipient_user_id}`
 - `GET /v1/inbox/{user_id}`
+- `GET /v1/ws/inbox/{user_id}`
+- `POST /v1/users/{user_id}/push-token`
 
 Required headers:
 
@@ -66,7 +79,7 @@ Required headers:
 - `x-pqmsg-auth-nonce` (single-use)
 - `x-pqmsg-auth-signature` (`base64(64-byte Ed25519 signature)`)
 
-The server verifies signatures under registered `identity_sig_pub`, enforces device binding, applies timestamp skew checks, and rejects nonce replay.
+The server verifies signatures under registered `identity_sig_pub`, enforces device binding, applies timestamp skew checks, rejects nonce replay, enforces monotonic inbox cursors per authenticated `user_id` + `device_id`, and applies relay ciphertext deduplication with TTL.
 
 ## 4. Endpoint Definitions
 
@@ -129,7 +142,38 @@ The server verifies:
 2. `sig_over_pqspk` over protocol transcript for `PQSPK`,
 3. both under registered `identity_sig_pub`.
 
-### 4.3 Fetch Bundle
+Success response fields also include remaining one-time prekey counts and low-inventory advisory flags.
+
+### 4.3 Prekey Inventory Status
+
+`GET /v1/users/{user_id}/prekeys/status`
+
+Requires authenticated transport headers (Section 3.1).
+
+Prekeys-status auth signature transcript fields:
+
+1. endpoint label (`prekeys-status`),
+2. auth user id,
+3. auth device id,
+4. auth timestamp,
+5. auth nonce,
+6. target user id.
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "device_id": "alice-device-1",
+  "remaining_one_time_prekeys_x25519": 12,
+  "remaining_one_time_prekeys_mlkem768": 12,
+  "low_one_time_prekeys": false,
+  "minimum_recommended_one_time_prekeys": 16,
+  "checked_at": "2026-03-04T12:00:00Z"
+}
+```
+
+### 4.4 Fetch Bundle
 
 `GET /v1/users/{user_id}/bundle`
 
@@ -147,13 +191,57 @@ Response:
   "sig_over_pqspk": "base64...",
   "one_time_prekey_x25519": "base64 or null",
   "one_time_prekey_mlkem768": "base64 or null",
+  "remaining_one_time_prekeys_x25519": 11,
+  "remaining_one_time_prekeys_mlkem768": 11,
+  "low_one_time_prekeys": false,
+  "minimum_recommended_one_time_prekeys": 16,
+  "last_resort_prekey_only": false,
   "identity_key_version": 1,
   "identity_fingerprint_sha256": "hex(sha256(identity_x25519_pub))",
   "bundle_generated_at": "2026-03-04T12:00:00Z"
 }
 ```
 
-### 4.4 Initiate Identity Rotation
+When `PQMSG_FCM_SERVER_KEY` is configured, relay delivery triggers an FCM wake-only push payload (`data: {"wake":"1","v":"1"}`) to registered recipient tokens.
+
+### 4.5 Register Push Token
+
+`POST /v1/users/{user_id}/push-token`
+
+Requires authenticated transport headers (Section 3.1).
+
+Request:
+
+```json
+{
+  "device_id": "alice-device-1",
+  "fcm_token": "fcm-registration-token"
+}
+```
+
+Push-token auth signature transcript fields:
+
+1. endpoint label (`push-token`),
+2. auth user id,
+3. auth device id,
+4. auth timestamp,
+5. auth nonce,
+6. target user id,
+7. device id,
+8. SHA-256 hash of `fcm_token` bytes.
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "device_id": "alice-device-1",
+  "provider": "fcm",
+  "registered_at": "2026-03-04T12:00:00Z"
+}
+```
+
+### 4.6 Initiate Identity Rotation
 
 `POST /v1/users/{user_id}/rotate/init`
 
@@ -178,7 +266,7 @@ Response:
 }
 ```
 
-### 4.5 Confirm Identity Rotation
+### 4.7 Confirm Identity Rotation
 
 `POST /v1/users/{user_id}/rotate/confirm`
 
@@ -212,7 +300,7 @@ Response:
 }
 ```
 
-### 4.6 Identity Event Log
+### 4.8 Identity Event Log
 
 `GET /v1/users/{user_id}/identity-log`
 
@@ -246,7 +334,7 @@ Response:
 }
 ```
 
-### 4.7 Relay Message
+### 4.9 Relay Message
 
 `POST /v1/relay/{recipient_user_id}`
 
@@ -263,6 +351,7 @@ Request:
 ```
 
 The payload is treated as opaque and persisted without server-side plaintext processing.
+The server computes a deduplication key over `sender_user_id || recipient_user_id || message_blob` and rejects duplicates while the relay dedup window remains active.
 
 Relay auth signature transcript fields:
 
@@ -274,7 +363,9 @@ Relay auth signature transcript fields:
 6. recipient user id,
 7. decoded relay message blob bytes.
 
-### 4.8 Poll Inbox
+Duplicate relay submissions within the dedup window are rejected with `409 Conflict`.
+
+### 4.10 Poll Inbox
 
 `GET /v1/inbox/{user_id}?since=<message_id>`
 
@@ -289,6 +380,9 @@ Inbox auth signature transcript fields:
 5. auth nonce,
 6. target user id,
 7. `since` value.
+
+`since` is monotonic per authenticated `(user_id, device_id)` session.  
+If `since` regresses below the stored server cursor for that session, the request is rejected with `409 Conflict`.
 
 Response:
 
@@ -306,7 +400,46 @@ Response:
 }
 ```
 
-### 4.9 Health
+### 4.11 WebSocket Inbox
+
+`GET /v1/ws/inbox/{user_id}?since=<message_id>`
+
+Requires authenticated transport headers (Section 3.1) and a standard WebSocket handshake.
+
+WebSocket auth signature transcript fields:
+
+1. endpoint label (`ws-inbox`),
+2. auth user id,
+3. auth device id,
+4. auth timestamp,
+5. auth nonce,
+6. target user id,
+7. `since` value.
+
+The same monotonic `since` rule is enforced for WebSocket session establishment per authenticated `(user_id, device_id)`.
+
+Server messages are JSON text frames:
+
+```json
+{
+  "event": "sync",
+  "user_id": "bob",
+  "messages": [
+    {
+      "message_id": 42,
+      "sender_user_id": "alice",
+      "message_bytes_base64": "base64(...)",
+      "received_at": "2026-03-04T12:00:00Z"
+    }
+  ]
+}
+```
+
+- `event = "sync"` carries the initial catch-up window from `since`.
+- `event = "relay"` carries newly relayed ciphertexts in near real time.
+- Clients should still keep HTTP polling (`GET /v1/inbox/{user_id}`) as degraded/offline fallback.
+
+### 4.12 Health
 
 `GET /health`
 
@@ -315,7 +448,12 @@ Response:
 ```json
 {
   "status": "ok",
-  "security_profile": "research"
+  "security_profile": "research",
+  "db_backend": "sqlite",
+  "db_ready": true,
+  "db_pool_size": 1,
+  "db_pool_idle": 1,
+  "push_enabled": false
 }
 ```
 
@@ -324,6 +462,7 @@ Response:
 - one-time prekey family maximum: `256` entries each,
 - relay decoded blob maximum: `1,000,000` bytes,
 - inbox page maximum: `200` messages,
+- relay ciphertext dedup window: `900` seconds,
 - endpoint-level in-memory token bucket rate limiting.
 
 ## 6. Transport Requirement

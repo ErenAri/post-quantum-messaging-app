@@ -15,7 +15,7 @@ This document defines minimum security quality gates for ongoing development and
 1. Shared secrets and KDF intermediates SHOULD use zeroizing containers.
 2. Temporary key buffers MUST be wiped after use where feasible.
 3. Secret-bearing structures SHOULD use `SecretBytes`/`Zeroizing` patterns.
-4. Client-side key/session persistence SHOULD default to encrypted-at-rest storage.
+4. Client-side key/session persistence SHOULD default to encrypted-at-rest storage using Argon2id-derived keys and AES-256-GCM wrapping where local passphrases are used.
 
 ## 4. Parsing Policy
 
@@ -33,8 +33,20 @@ This document defines minimum security quality gates for ongoing development and
 4. Identity rotation MUST require challenge-based proof from both current and new identity signing keys.
 5. Clients MUST pin peer identity fingerprints and require explicit trust decisions on key changes.
 6. Relay/inbox transport endpoints MUST enforce authenticated user/device request signatures with replay resistance.
+7. Push-token registration MUST be authenticated with the same user/device signature model as relay/inbox endpoints.
+8. Inbox `since` cursors MUST be monotonic per authenticated user/device session and cursor regressions MUST be rejected.
+9. Relay ciphertext submissions MUST be deduplicated server-side with a bounded TTL window.
+10. Clients MUST track seen ciphertexts and reject replayed transport message identifiers.
+11. Server MUST expose authenticated one-time prekey inventory status and low-inventory signaling.
+12. Clients SHOULD auto-replenish one-time prekeys when low-inventory signals are observed.
 
-## 6. PQ Backend Gate Policy
+## 6. Push Transport Policy
+
+1. Push payloads MUST be wake signals only and MUST NOT contain plaintext message data.
+2. Push tokens MUST be bound to authenticated user/device identity at registration time.
+3. Push delivery failures MUST NOT block opaque relay persistence or polling fallback behavior.
+
+## 7. PQ Backend Gate Policy
 
 ```mermaid
 flowchart LR
@@ -45,7 +57,7 @@ flowchart LR
 
 Client applications MUST expose the active crypto profile and fail closed when PQ backend support is unavailable.
 
-## 7. Test Policy
+## 8. Test Policy
 
 Required coverage:
 
@@ -54,7 +66,7 @@ Required coverage:
 - fuzz targets for parser-facing decode entry points,
 - server integration tests for input validation and directory behavior.
 
-## 8. CI Policy
+## 9. CI Policy
 
 - stable path: `fmt`, `clippy`, `test`,
 - optional nightly/manual path: fuzz smoke.

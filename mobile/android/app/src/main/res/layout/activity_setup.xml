@@ -84,6 +84,14 @@
             android:hint="@string/hint_peer"
             android:inputType="text" />
 
+        <EditText
+            android:id="@+id/editPushToken"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="@string/hint_push_token"
+            android:inputType="text" />
+
         <TextView
             android:id="@+id/textStepKeys"
             android:layout_width="match_parent"

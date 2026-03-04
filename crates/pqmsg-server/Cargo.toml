@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64.workspace = true
 chrono.workspace = true
@@ -23,7 +23,10 @@ sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+reqwest.workspace = true
+tower = "0.5"
+http-body-util = "0.1"
+futures-util = "0.3"
 
 [dev-dependencies]
-http-body-util = "0.1"
-tower = "0.5"
+tokio-tungstenite = "0.24"

@@ -40,4 +40,10 @@ pub enum CoreError {
     PolicyViolation(&'static str),
     #[error("invalid security profile: {0}")]
     InvalidSecurityProfile(&'static str),
+    #[error("invalid storage format: {0}")]
+    InvalidStorageFormat(&'static str),
+    #[error("invalid storage base64 field: {0}")]
+    InvalidStorageBase64(&'static str),
+    #[error("storage decryption failed")]
+    StorageDecryptionFailed,
 }

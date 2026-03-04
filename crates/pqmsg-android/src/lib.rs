@@ -22,6 +22,7 @@ use pqmsg_core::CoreError;
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_ONE_TIME_PREKEYS: u32 = 256;
@@ -33,6 +34,8 @@ const AUTH_TAG_NONCE: u16 = critical_type(0x3205);
 const AUTH_TAG_RECIPIENT_ID: u16 = critical_type(0x3206);
 const AUTH_TAG_SINCE: u16 = critical_type(0x3207);
 const AUTH_TAG_MESSAGE_BLOB: u16 = critical_type(0x3208);
+const AUTH_TAG_PUSH_DEVICE_ID: u16 = critical_type(0x3210);
+const AUTH_TAG_PUSH_TOKEN_HASH: u16 = critical_type(0x3211);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, uniffi::Enum)]
 pub enum Suite {
@@ -247,6 +250,45 @@ fn auth_signing_key_for_user(keys: &UserKeysFile) -> Result<SigningKey, PqmsgAnd
     Ok(signing_key)
 }
 
+fn refresh_one_time_prekeys(
+    keys: &mut UserKeysFile,
+    one_time_count: u32,
+) -> Result<(), PqmsgAndroidError> {
+    if one_time_count == 0 || one_time_count > MAX_ONE_TIME_PREKEYS {
+        return Err(invalid_input(format!(
+            "one_time_count must be in 1..={MAX_ONE_TIME_PREKEYS}"
+        )));
+    }
+    let mut rng = OsRng;
+    let kem = build_kem_for_suite(keys.suite)?;
+    let timestamp = auth_timestamp()?;
+    let mut one_time_x25519 = Vec::with_capacity(one_time_count as usize);
+    let mut one_time_mlkem = Vec::with_capacity(one_time_count as usize);
+
+    for idx in 0..one_time_count {
+        let key = OneTimePreKey::generate(
+            format!("{}-otk-x-{}-{idx}", keys.user_id, timestamp),
+            &mut rng,
+        );
+        one_time_x25519.push(OneTimeKeyRecord {
+            key_id: key.key_id,
+            public_b64: B64.encode(key.public_key.0),
+            secret_b64: B64.encode(key.secret_key.as_slice()),
+        });
+
+        let pq_key = kem_keypair(&kem)?;
+        one_time_mlkem.push(OneTimeKeyRecord {
+            key_id: format!("{}-otk-pq-{}-{idx}", keys.user_id, timestamp),
+            public_b64: B64.encode(pq_key.public_key),
+            secret_b64: B64.encode(pq_key.secret_key),
+        });
+    }
+
+    keys.one_time_prekeys_x25519 = one_time_x25519;
+    keys.one_time_prekeys_mlkem768 = one_time_mlkem;
+    Ok(())
+}
+
 fn auth_timestamp() -> Result<i64, PqmsgAndroidError> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -455,6 +497,16 @@ pub fn build_publish_prekeys_payload(
 }
 
 #[uniffi::export]
+pub fn replenish_one_time_prekeys(
+    keys_json: String,
+    one_time_count: u32,
+) -> Result<String, PqmsgAndroidError> {
+    let mut keys = read_keys_file(&keys_json)?;
+    refresh_one_time_prekeys(&mut keys, one_time_count)?;
+    serde_json::to_string_pretty(&keys).map_err(Into::into)
+}
+
+#[uniffi::export]
 pub fn parse_bundle_json(bundle_json: String) -> Result<ServerBundle, PqmsgAndroidError> {
     let bundle: BundleResponse = serde_json::from_str(&bundle_json)?;
     Ok(ServerBundle {
@@ -537,6 +589,91 @@ pub fn build_inbox_auth_headers(
     });
     let transcript =
         encode(&records).map_err(|_| operation_failed("failed to encode inbox auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_prekeys_status_auth_headers(
+    keys_json: String,
+    user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "prekeys-status",
+        &user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode prekeys-status auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_push_token_auth_headers(
+    keys_json: String,
+    user_id: String,
+    fcm_token: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    if fcm_token.trim().is_empty() {
+        return Err(invalid_input("fcm_token must not be empty"));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("push-token", &user_id, &keys.device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PUSH_DEVICE_ID,
+        value: keys.device_id.as_bytes().to_vec(),
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(fcm_token.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PUSH_TOKEN_HASH,
+        value: hasher.finalize().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode push-token auth transcript"))?;
     let signature = signing_key.sign(&transcript).to_bytes();
     Ok(RequestAuthHeaders {
         auth_user: user_id,
