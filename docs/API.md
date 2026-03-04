@@ -16,6 +16,9 @@ sequenceDiagram
     participant C as Client
     participant S as Server
     C->>S: POST /users/register
+    C->>S: POST /users/{id}/devices/link
+    C->>S: GET /users/{id}/devices
+    C->>S: POST /users/{id}/devices/{device_id}/revoke
     C->>S: POST /users/{id}/prekeys
     C->>S: GET /users/{id}/prekeys/status
     C->>S: POST /users/{id}/push-token
@@ -66,6 +69,10 @@ The following endpoints require request authentication headers:
 
 - `GET /v1/users/{user_id}/identity-log`
 - `GET /v1/users/{user_id}/prekeys/status`
+- `GET /v1/users/{user_id}/devices`
+- `POST /v1/users/{user_id}/devices/link`
+- `POST /v1/users/{user_id}/devices/{target_device_id}/revoke`
+- `POST /v1/users/{user_id}/prekeys`
 - `POST /v1/relay/{recipient_user_id}`
 - `GET /v1/inbox/{user_id}`
 - `GET /v1/ws/inbox/{user_id}`
@@ -79,7 +86,7 @@ Required headers:
 - `x-pqmsg-auth-nonce` (single-use)
 - `x-pqmsg-auth-signature` (`base64(64-byte Ed25519 signature)`)
 
-The server verifies signatures under registered `identity_sig_pub`, enforces device binding, applies timestamp skew checks, rejects nonce replay, enforces monotonic inbox cursors per authenticated `user_id` + `device_id`, and applies relay ciphertext deduplication with TTL.
+The server verifies signatures under registered `identity_sig_pub`, enforces authenticated device binding against active `user_devices` records, applies timestamp skew checks, rejects nonce replay, enforces monotonic inbox cursors per authenticated `user_id` + `device_id`, and applies relay ciphertext deduplication with TTL.
 
 ## 4. Endpoint Definitions
 
@@ -144,6 +151,78 @@ The server verifies:
 
 Success response fields also include remaining one-time prekey counts and low-inventory advisory flags.
 
+### 4.2A Device Management
+
+`GET /v1/users/{user_id}/devices`
+
+Returns all linked devices with active/revoked state:
+
+```json
+{
+  "user_id": "alice",
+  "devices": [
+    {
+      "device_id": "alice-device-1",
+      "active": true,
+      "linked_at": "2026-03-04T12:00:00Z",
+      "revoked_at": null
+    }
+  ]
+}
+```
+
+`POST /v1/users/{user_id}/devices/link`
+
+Request:
+
+```json
+{
+  "new_device_id": "alice-device-2"
+}
+```
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "linked_device_id": "alice-device-2",
+  "linked_at": "2026-03-04T12:10:00Z"
+}
+```
+
+`POST /v1/users/{user_id}/devices/{target_device_id}/revoke`
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "revoked_device_id": "alice-device-2",
+  "revoked_at": "2026-03-04T12:20:00Z"
+}
+```
+
+Device-link auth signature transcript fields:
+
+1. endpoint label (`devices-link`),
+2. auth user id,
+3. auth device id,
+4. auth timestamp,
+5. auth nonce,
+6. target user id,
+7. linked device id.
+
+Device-revoke auth signature transcript fields:
+
+1. endpoint label (`devices-revoke`),
+2. auth user id,
+3. auth device id,
+4. auth timestamp,
+5. auth nonce,
+6. target user id,
+7. revoked device id.
+
 ### 4.3 Prekey Inventory Status
 
 `GET /v1/users/{user_id}/prekeys/status`
@@ -175,7 +254,10 @@ Response:
 
 ### 4.4 Fetch Bundle
 
-`GET /v1/users/{user_id}/bundle`
+`GET /v1/users/{user_id}/bundle[?device_id=<device_id>]`
+
+If `device_id` is omitted, the server selects the earliest active linked device with published prekeys.
+If `device_id` is present, the server returns a bundle only for that active device.
 
 Response:
 
@@ -352,6 +434,7 @@ Request:
 
 The payload is treated as opaque and persisted without server-side plaintext processing.
 The server computes a deduplication key over `sender_user_id || recipient_user_id || message_blob` and rejects duplicates while the relay dedup window remains active.
+Relay storage and delivery are performed per active recipient device.
 
 Relay auth signature transcript fields:
 
@@ -364,6 +447,16 @@ Relay auth signature transcript fields:
 7. decoded relay message blob bytes.
 
 Duplicate relay submissions within the dedup window are rejected with `409 Conflict`.
+
+Success response:
+
+```json
+{
+  "message_id": 42,
+  "delivered_device_count": 2,
+  "received_at": "2026-03-04T12:00:00Z"
+}
+```
 
 ### 4.10 Poll Inbox
 
@@ -381,6 +474,7 @@ Inbox auth signature transcript fields:
 6. target user id,
 7. `since` value.
 
+Inbox views are device-scoped: the authenticated `x-pqmsg-auth-device` selects the recipient device mailbox.
 `since` is monotonic per authenticated `(user_id, device_id)` session.  
 If `since` regresses below the stored server cursor for that session, the request is rejected with `409 Conflict`.
 

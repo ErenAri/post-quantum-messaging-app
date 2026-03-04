@@ -77,6 +77,8 @@ const AUTH_TAG_ROTATE_SIG_CURRENT_HASH: u16 = critical_type(0x320E);
 const AUTH_TAG_ROTATE_SIG_NEW_HASH: u16 = critical_type(0x320F);
 const AUTH_TAG_PUSH_DEVICE_ID: u16 = critical_type(0x3210);
 const AUTH_TAG_PUSH_TOKEN_HASH: u16 = critical_type(0x3211);
+const AUTH_TAG_LINK_DEVICE_ID: u16 = critical_type(0x3212);
+const AUTH_TAG_REVOKE_DEVICE_ID: u16 = critical_type(0x3213);
 
 static SQLITE_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
 static POSTGRES_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgres");
@@ -316,45 +318,54 @@ impl RealtimeHub {
         }
     }
 
-    fn subscribe(&self, user_id: &str) -> (u64, mpsc::UnboundedReceiver<InboxItem>) {
+    fn subscribe(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> (u64, mpsc::UnboundedReceiver<InboxItem>) {
         let (sender, receiver) = mpsc::unbounded_channel();
         let subscriber_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let key = inbox_stream_key(user_id, device_id);
         if let Ok(mut map) = self.inner.lock() {
-            map.entry(user_id.to_string())
-                .or_default()
-                .push(RealtimeSubscriber {
-                    id: subscriber_id,
-                    sender,
-                });
+            map.entry(key).or_default().push(RealtimeSubscriber {
+                id: subscriber_id,
+                sender,
+            });
         }
         (subscriber_id, receiver)
     }
 
-    fn unsubscribe(&self, user_id: &str, subscriber_id: u64) {
+    fn unsubscribe(&self, user_id: &str, device_id: &str, subscriber_id: u64) {
         let Ok(mut map) = self.inner.lock() else {
             return;
         };
-        let Some(subscribers) = map.get_mut(user_id) else {
+        let key = inbox_stream_key(user_id, device_id);
+        let Some(subscribers) = map.get_mut(&key) else {
             return;
         };
         subscribers.retain(|subscriber| subscriber.id != subscriber_id);
         if subscribers.is_empty() {
-            map.remove(user_id);
+            map.remove(&key);
         }
     }
 
-    fn publish(&self, user_id: &str, message: InboxItem) {
+    fn publish(&self, user_id: &str, device_id: &str, message: InboxItem) {
         let Ok(mut map) = self.inner.lock() else {
             return;
         };
-        let Some(subscribers) = map.get_mut(user_id) else {
+        let key = inbox_stream_key(user_id, device_id);
+        let Some(subscribers) = map.get_mut(&key) else {
             return;
         };
         subscribers.retain(|subscriber| subscriber.sender.send(message.clone()).is_ok());
         if subscribers.is_empty() {
-            map.remove(user_id);
+            map.remove(&key);
         }
     }
+}
+
+fn inbox_stream_key(user_id: &str, device_id: &str) -> String {
+    format!("{user_id}:{device_id}")
 }
 
 impl PushNotifier {
@@ -513,6 +524,39 @@ struct RegisterUserResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct LinkDeviceRequest {
+    new_device_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LinkDeviceResponse {
+    user_id: String,
+    linked_device_id: String,
+    linked_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RevokeDeviceResponse {
+    user_id: String,
+    revoked_device_id: String,
+    revoked_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DeviceRecord {
+    device_id: String,
+    active: bool,
+    linked_at: String,
+    revoked_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeviceListResponse {
+    user_id: String,
+    devices: Vec<DeviceRecord>,
+}
+
+#[derive(Debug, Deserialize)]
 struct PublishPrekeysRequest {
     signed_prekey_x25519_pub: String,
     sig_over_spk: String,
@@ -639,6 +683,7 @@ struct RegisterPushTokenResponse {
 #[derive(Debug, Serialize)]
 struct RelayResponse {
     message_id: i64,
+    delivered_device_count: usize,
     received_at: String,
 }
 
@@ -650,6 +695,11 @@ struct InboxQuery {
 #[derive(Debug, Deserialize)]
 struct WsInboxQuery {
     since: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BundleQuery {
+    device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -710,6 +760,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/users/register", post(register_user))
         .route("/v1/users/:user_id/prekeys", post(publish_prekeys))
         .route("/v1/users/:user_id/prekeys/status", get(get_prekeys_status))
+        .route("/v1/users/:user_id/devices", get(list_devices))
+        .route("/v1/users/:user_id/devices/link", post(link_device))
+        .route(
+            "/v1/users/:user_id/devices/:target_device_id/revoke",
+            post(revoke_device),
+        )
         .route("/v1/users/:user_id/push-token", post(register_push_token))
         .route("/v1/users/:user_id/bundle", get(get_bundle))
         .route("/v1/users/:user_id/rotate/init", post(rotate_init))
@@ -822,6 +878,19 @@ async fn register_user(
                 ));
             }
 
+            sqlx::query(
+                "INSERT INTO user_devices (user_id, device_id, active, linked_at, revoked_at)
+                 VALUES ($1, $2, 1, $3, NULL)
+                 ON CONFLICT (user_id, device_id) DO UPDATE SET
+                    active = 1,
+                    revoked_at = NULL",
+            )
+            .bind(&request.user_id)
+            .bind(&existing_device_id)
+            .bind(&existing_created_at)
+            .execute(&state.pool)
+            .await?;
+
             return Ok(Json(RegisterUserResponse {
                 user_id: request.user_id,
                 device_id: existing_device_id,
@@ -830,6 +899,19 @@ async fn register_user(
         }
         Err(error) => return Err(error.into()),
     }
+
+    sqlx::query(
+        "INSERT INTO user_devices (user_id, device_id, active, linked_at, revoked_at)
+         VALUES ($1, $2, 1, $3, NULL)
+         ON CONFLICT (user_id, device_id) DO UPDATE SET
+            active = 1,
+            revoked_at = NULL",
+    )
+    .bind(&request.user_id)
+    .bind(&request.device_id)
+    .bind(&now)
+    .execute(&state.pool)
+    .await?;
 
     sqlx::query(
         "INSERT INTO identity_events (
@@ -849,6 +931,201 @@ async fn register_user(
         user_id: request.user_id,
         device_id: request.device_id,
         registered_at: now,
+    }))
+}
+
+async fn list_devices(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<DeviceListResponse>, AppError> {
+    check_rate_limit(&state, &format!("devices-list:{user_id}"))?;
+    validate_id("user_id", &user_id)?;
+
+    let auth = parse_request_auth(&headers)?;
+    if auth.user_id != user_id {
+        return Err(AppError::bad_request("auth user_id mismatch"));
+    }
+    let auth_message = list_devices_auth_message(&auth, &user_id)?;
+    verify_request_auth(&state, &auth, &auth_message).await?;
+    ensure_user_exists(state.pool(), &user_id).await?;
+
+    let rows = sqlx::query(
+        "SELECT device_id, active, linked_at, revoked_at
+         FROM user_devices
+         WHERE user_id = $1
+         ORDER BY linked_at ASC, device_id ASC",
+    )
+    .bind(&user_id)
+    .fetch_all(state.pool())
+    .await?;
+    let mut devices = Vec::with_capacity(rows.len());
+    for row in rows {
+        let active: i64 = row.try_get("active")?;
+        devices.push(DeviceRecord {
+            device_id: row.try_get("device_id")?,
+            active: active != 0,
+            linked_at: row.try_get("linked_at")?,
+            revoked_at: row.try_get("revoked_at")?,
+        });
+    }
+
+    Ok(Json(DeviceListResponse { user_id, devices }))
+}
+
+async fn link_device(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<LinkDeviceRequest>,
+) -> Result<Json<LinkDeviceResponse>, AppError> {
+    check_rate_limit(&state, &format!("devices-link:{user_id}"))?;
+    validate_id("user_id", &user_id)?;
+    validate_id("new_device_id", &request.new_device_id)?;
+
+    let auth = parse_request_auth(&headers)?;
+    if auth.user_id != user_id {
+        return Err(AppError::bad_request("auth user_id mismatch"));
+    }
+    if auth.device_id == request.new_device_id {
+        return Err(AppError::bad_request(
+            "new_device_id must differ from authenticated device_id",
+        ));
+    }
+    let auth_message = link_device_auth_message(&auth, &user_id, &request.new_device_id)?;
+    verify_request_auth(&state, &auth, &auth_message).await?;
+    ensure_user_exists(state.pool(), &user_id).await?;
+
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO user_devices (user_id, device_id, active, linked_at, revoked_at)
+         VALUES ($1, $2, 1, $3, NULL)
+         ON CONFLICT (user_id, device_id) DO UPDATE SET
+            active = 1,
+            revoked_at = NULL",
+    )
+    .bind(&user_id)
+    .bind(&request.new_device_id)
+    .bind(&now)
+    .execute(state.pool())
+    .await?;
+
+    let linked_at: String = sqlx::query_scalar(
+        "SELECT linked_at
+         FROM user_devices
+         WHERE user_id = $1 AND device_id = $2",
+    )
+    .bind(&user_id)
+    .bind(&request.new_device_id)
+    .fetch_one(state.pool())
+    .await?;
+
+    Ok(Json(LinkDeviceResponse {
+        user_id,
+        linked_device_id: request.new_device_id,
+        linked_at,
+    }))
+}
+
+async fn revoke_device(
+    State(state): State<AppState>,
+    Path((user_id, target_device_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<RevokeDeviceResponse>, AppError> {
+    check_rate_limit(&state, &format!("devices-revoke:{user_id}"))?;
+    validate_id("user_id", &user_id)?;
+    validate_id("target_device_id", &target_device_id)?;
+
+    let auth = parse_request_auth(&headers)?;
+    if auth.user_id != user_id {
+        return Err(AppError::bad_request("auth user_id mismatch"));
+    }
+    if auth.device_id == target_device_id {
+        return Err(AppError::bad_request(
+            "cannot revoke currently authenticated device",
+        ));
+    }
+    let auth_message = revoke_device_auth_message(&auth, &user_id, &target_device_id)?;
+    verify_request_auth(&state, &auth, &auth_message).await?;
+    ensure_user_exists(state.pool(), &user_id).await?;
+
+    let target_row = sqlx::query(
+        "SELECT active
+         FROM user_devices
+         WHERE user_id = $1 AND device_id = $2",
+    )
+    .bind(&user_id)
+    .bind(&target_device_id)
+    .fetch_optional(state.pool())
+    .await?;
+    let Some(target_row) = target_row else {
+        return Err(AppError::not_found("target device not found"));
+    };
+    let target_active: i64 = target_row.try_get("active")?;
+    if target_active == 0 {
+        return Err(AppError::conflict("target device is already revoked"));
+    }
+
+    let revoked_at = Utc::now().to_rfc3339();
+    let mut tx = state.pool.begin().await?;
+    let updated = sqlx::query(
+        "UPDATE user_devices
+         SET active = 0, revoked_at = $3
+         WHERE user_id = $1 AND device_id = $2 AND active = 1",
+    )
+    .bind(&user_id)
+    .bind(&target_device_id)
+    .bind(&revoked_at)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::conflict("target device is already revoked"));
+    }
+
+    sqlx::query(
+        "UPDATE users
+         SET device_id = $1, updated_at = $2
+         WHERE user_id = $3 AND device_id = $4",
+    )
+    .bind(&auth.device_id)
+    .bind(&revoked_at)
+    .bind(&user_id)
+    .bind(&target_device_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("DELETE FROM prekeys WHERE user_id = $1 AND device_id = $2")
+        .bind(&user_id)
+        .bind(&target_device_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM one_time_prekeys_x25519 WHERE user_id = $1 AND device_id = $2")
+        .bind(&user_id)
+        .bind(&target_device_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM one_time_prekeys_mlkem768 WHERE user_id = $1 AND device_id = $2")
+        .bind(&user_id)
+        .bind(&target_device_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM push_tokens WHERE user_id = $1 AND device_id = $2")
+        .bind(&user_id)
+        .bind(&target_device_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM inbox_cursors WHERE user_id = $1 AND device_id = $2")
+        .bind(&user_id)
+        .bind(&target_device_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    Ok(Json(RevokeDeviceResponse {
+        user_id,
+        revoked_device_id: target_device_id,
+        revoked_at,
     }))
 }
 
@@ -963,7 +1240,7 @@ async fn publish_prekeys(
         )?);
     }
 
-    let user_row = sqlx::query("SELECT device_id, identity_sig_pub FROM users WHERE user_id = $1")
+    let user_row = sqlx::query("SELECT identity_sig_pub FROM users WHERE user_id = $1")
         .bind(&user_id)
         .fetch_optional(&state.pool)
         .await?;
@@ -980,23 +1257,24 @@ async fn publish_prekeys(
         &sig_over_pqspk,
     )?;
 
-    let device_id: String = user_row.try_get("device_id")?;
+    let device_id = auth.device_id.clone();
     let now = Utc::now().to_rfc3339();
     let mut tx = state.pool.begin().await?;
 
     sqlx::query(
         "INSERT INTO prekeys (
-            user_id, signed_prekey_x25519_pub, sig_over_spk,
+            user_id, device_id, signed_prekey_x25519_pub, sig_over_spk,
             pq_signed_prekey_pub_mlkem768, sig_over_pqspk, updated_at
-         ) VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT(user_id) DO UPDATE SET
-            signed_prekey_x25519_pub = excluded.signed_prekey_x25519_pub,
-            sig_over_spk = excluded.sig_over_spk,
-            pq_signed_prekey_pub_mlkem768 = excluded.pq_signed_prekey_pub_mlkem768,
-            sig_over_pqspk = excluded.sig_over_pqspk,
-            updated_at = excluded.updated_at",
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT(user_id, device_id) DO UPDATE SET
+            signed_prekey_x25519_pub = EXCLUDED.signed_prekey_x25519_pub,
+            sig_over_spk = EXCLUDED.sig_over_spk,
+            pq_signed_prekey_pub_mlkem768 = EXCLUDED.pq_signed_prekey_pub_mlkem768,
+            sig_over_pqspk = EXCLUDED.sig_over_pqspk,
+            updated_at = EXCLUDED.updated_at",
     )
     .bind(&user_id)
+    .bind(&device_id)
     .bind(&signed_prekey_x)
     .bind(&sig_over_spk)
     .bind(&pq_signed_prekey)
@@ -1005,21 +1283,24 @@ async fn publish_prekeys(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("DELETE FROM one_time_prekeys_x25519 WHERE user_id = $1")
+    sqlx::query("DELETE FROM one_time_prekeys_x25519 WHERE user_id = $1 AND device_id = $2")
         .bind(&user_id)
+        .bind(&device_id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM one_time_prekeys_mlkem768 WHERE user_id = $1")
+    sqlx::query("DELETE FROM one_time_prekeys_mlkem768 WHERE user_id = $1 AND device_id = $2")
         .bind(&user_id)
+        .bind(&device_id)
         .execute(&mut *tx)
         .await?;
 
     for key in &one_time_x {
         sqlx::query(
-            "INSERT INTO one_time_prekeys_x25519 (user_id, prekey, consumed, created_at)
-             VALUES ($1, $2, 0, $3)",
+            "INSERT INTO one_time_prekeys_x25519 (user_id, device_id, prekey, consumed, created_at)
+             VALUES ($1, $2, $3, 0, $4)",
         )
         .bind(&user_id)
+        .bind(&device_id)
         .bind(key)
         .bind(&now)
         .execute(&mut *tx)
@@ -1027,10 +1308,11 @@ async fn publish_prekeys(
     }
     for key in &one_time_pq {
         sqlx::query(
-            "INSERT INTO one_time_prekeys_mlkem768 (user_id, prekey, consumed, created_at)
-             VALUES ($1, $2, 0, $3)",
+            "INSERT INTO one_time_prekeys_mlkem768 (user_id, device_id, prekey, consumed, created_at)
+             VALUES ($1, $2, $3, 0, $4)",
         )
         .bind(&user_id)
+        .bind(&device_id)
         .bind(key)
         .bind(&now)
         .execute(&mut *tx)
@@ -1039,7 +1321,7 @@ async fn publish_prekeys(
 
     tx.commit().await?;
     let (remaining_x, remaining_pq) =
-        load_remaining_one_time_counts(state.pool(), &user_id).await?;
+        load_remaining_one_time_counts(state.pool(), &user_id, &device_id).await?;
     let low_one_time_prekeys = is_prekey_inventory_low(remaining_x, remaining_pq);
 
     Ok(Json(PublishPrekeysResponse {
@@ -1076,7 +1358,7 @@ async fn get_prekeys_status(
 
     let device_id = auth.device_id.clone();
     let (remaining_x, remaining_pq) =
-        load_remaining_one_time_counts(state.pool(), &user_id).await?;
+        load_remaining_one_time_counts(state.pool(), &user_id, &device_id).await?;
     let low_one_time_prekeys = is_prekey_inventory_low(remaining_x, remaining_pq);
 
     Ok(Json(PrekeysStatusResponse {
@@ -1096,44 +1378,84 @@ async fn get_prekeys_status(
 async fn get_bundle(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
+    Query(query): Query<BundleQuery>,
 ) -> Result<Json<BundleResponse>, AppError> {
     check_rate_limit(&state, &format!("bundle:{user_id}"))?;
     validate_id("user_id", &user_id)?;
+    if let Some(device_id) = &query.device_id {
+        validate_id("device_id", device_id)?;
+    }
 
     let mut tx = state.pool.begin().await?;
 
-    let row = sqlx::query(
-        "SELECT
-            u.user_id,
-            u.device_id,
-            u.identity_x25519_pub,
-            u.identity_sig_pub,
-            p.signed_prekey_x25519_pub,
-            p.sig_over_spk,
-            p.pq_signed_prekey_pub_mlkem768,
-            p.sig_over_pqspk,
-            COALESCE((
-                SELECT MAX(ie.version)
-                FROM identity_events ie
-                WHERE ie.user_id = u.user_id
-            ), 1) AS identity_key_version
-         FROM users u
-         JOIN prekeys p ON p.user_id = u.user_id
-         WHERE u.user_id = $1",
-    )
-    .bind(&user_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let row = if let Some(target_device_id) = &query.device_id {
+        sqlx::query(
+            "SELECT
+                u.user_id,
+                ud.device_id,
+                u.identity_x25519_pub,
+                u.identity_sig_pub,
+                p.signed_prekey_x25519_pub,
+                p.sig_over_spk,
+                p.pq_signed_prekey_pub_mlkem768,
+                p.sig_over_pqspk,
+                COALESCE((
+                    SELECT MAX(ie.version)
+                    FROM identity_events ie
+                    WHERE ie.user_id = u.user_id
+                ), 1) AS identity_key_version
+             FROM users u
+             JOIN user_devices ud ON ud.user_id = u.user_id
+             JOIN prekeys p ON p.user_id = u.user_id AND p.device_id = ud.device_id
+             WHERE u.user_id = $1 AND ud.device_id = $2 AND ud.active = 1
+             LIMIT 1",
+        )
+        .bind(&user_id)
+        .bind(target_device_id)
+        .fetch_optional(&mut *tx)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT
+                u.user_id,
+                ud.device_id,
+                u.identity_x25519_pub,
+                u.identity_sig_pub,
+                p.signed_prekey_x25519_pub,
+                p.sig_over_spk,
+                p.pq_signed_prekey_pub_mlkem768,
+                p.sig_over_pqspk,
+                COALESCE((
+                    SELECT MAX(ie.version)
+                    FROM identity_events ie
+                    WHERE ie.user_id = u.user_id
+                ), 1) AS identity_key_version
+             FROM users u
+             JOIN user_devices ud ON ud.user_id = u.user_id
+             JOIN prekeys p ON p.user_id = u.user_id AND p.device_id = ud.device_id
+             WHERE u.user_id = $1 AND ud.active = 1
+             ORDER BY ud.linked_at ASC, ud.device_id ASC
+             LIMIT 1",
+        )
+        .bind(&user_id)
+        .fetch_optional(&mut *tx)
+        .await?
+    };
     let Some(row) = row else {
         return Err(AppError::not_found("bundle not found"));
     };
+    let device_id: String = row.try_get("device_id")?;
 
-    let x25519_otk = select_one_time_key(&mut tx, "one_time_prekeys_x25519", &user_id).await?;
-    let mlkem_otk = select_one_time_key(&mut tx, "one_time_prekeys_mlkem768", &user_id).await?;
+    let x25519_otk =
+        select_one_time_key(&mut tx, "one_time_prekeys_x25519", &user_id, &device_id).await?;
+    let mlkem_otk =
+        select_one_time_key(&mut tx, "one_time_prekeys_mlkem768", &user_id, &device_id).await?;
     let remaining_x =
-        count_available_one_time_keys(&mut tx, "one_time_prekeys_x25519", &user_id).await?;
+        count_available_one_time_keys(&mut tx, "one_time_prekeys_x25519", &user_id, &device_id)
+            .await?;
     let remaining_pq =
-        count_available_one_time_keys(&mut tx, "one_time_prekeys_mlkem768", &user_id).await?;
+        count_available_one_time_keys(&mut tx, "one_time_prekeys_mlkem768", &user_id, &device_id)
+            .await?;
     tx.commit().await?;
 
     let identity_x25519_pub_bytes = row.try_get::<Vec<u8>, _>("identity_x25519_pub")?;
@@ -1146,7 +1468,7 @@ async fn get_bundle(
 
     Ok(Json(BundleResponse {
         user_id: row.try_get("user_id")?,
-        device_id: row.try_get("device_id")?,
+        device_id,
         identity_x25519_pub: B64.encode(identity_x25519_pub_bytes),
         identity_sig_pub: B64.encode(row.try_get::<Vec<u8>, _>("identity_sig_pub")?),
         signed_prekey_x25519_pub: B64
@@ -1374,6 +1696,49 @@ async fn rotate_confirm(
     .execute(&mut *tx)
     .await?;
 
+    sqlx::query(
+        "UPDATE user_devices
+         SET active = 0, revoked_at = $1
+         WHERE user_id = $2",
+    )
+    .bind(&rotated_at)
+    .bind(&user_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO user_devices (user_id, device_id, active, linked_at, revoked_at)
+         VALUES ($1, $2, 1, $3, NULL)
+         ON CONFLICT (user_id, device_id) DO UPDATE SET
+            active = 1,
+            linked_at = EXCLUDED.linked_at,
+            revoked_at = NULL",
+    )
+    .bind(&user_id)
+    .bind(&new_device_id)
+    .bind(&rotated_at)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM prekeys WHERE user_id = $1 AND device_id <> $2")
+        .bind(&user_id)
+        .bind(&new_device_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM one_time_prekeys_x25519 WHERE user_id = $1 AND device_id <> $2")
+        .bind(&user_id)
+        .bind(&new_device_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM one_time_prekeys_mlkem768 WHERE user_id = $1 AND device_id <> $2")
+        .bind(&user_id)
+        .bind(&new_device_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM push_tokens WHERE user_id = $1 AND device_id <> $2")
+        .bind(&user_id)
+        .bind(&new_device_id)
+        .execute(&mut *tx)
+        .await?;
+
     let next_version_i64: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(version), 0) + 1
          FROM identity_events
@@ -1543,35 +1908,61 @@ async fn relay_message(
 
     ensure_user_exists(&state.pool, &recipient_user_id).await?;
     ensure_user_exists(&state.pool, &request.sender_user_id).await?;
+    let recipient_devices = load_active_device_ids(state.pool(), &recipient_user_id).await?;
+    if recipient_devices.is_empty() {
+        return Err(AppError::not_found(
+            "recipient has no active linked devices to deliver",
+        ));
+    }
 
     let now = Utc::now().to_rfc3339();
-    let message_id: i64 = sqlx::query_scalar(
-        "INSERT INTO relay_messages (
-            recipient_user_id, sender_user_id, device_id, message_blob, received_at
-         ) VALUES ($1, $2, $3, $4, $5)
-         RETURNING message_id",
-    )
-    .bind(&recipient_user_id)
-    .bind(&request.sender_user_id)
-    .bind(&request.device_id)
-    .bind(&blob)
-    .bind(&now)
-    .fetch_one(&state.pool)
-    .await?;
+    let mut tx = state.pool.begin().await?;
+    let mut deliveries = Vec::with_capacity(recipient_devices.len());
+    for recipient_device_id in &recipient_devices {
+        let message_id: i64 = sqlx::query_scalar(
+            "INSERT INTO relay_messages (
+                recipient_user_id,
+                recipient_device_id,
+                sender_user_id,
+                device_id,
+                message_blob,
+                received_at
+             ) VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING message_id",
+        )
+        .bind(&recipient_user_id)
+        .bind(recipient_device_id)
+        .bind(&request.sender_user_id)
+        .bind(&request.device_id)
+        .bind(&blob)
+        .bind(&now)
+        .fetch_one(&mut *tx)
+        .await?;
+        deliveries.push((
+            recipient_device_id.clone(),
+            InboxItem {
+                message_id,
+                sender_user_id: request.sender_user_id.clone(),
+                message_bytes_base64: B64.encode(&blob),
+                received_at: now.clone(),
+            },
+        ));
+    }
+    tx.commit().await?;
 
-    state.realtime_hub().publish(
-        &recipient_user_id,
-        InboxItem {
-            message_id,
-            sender_user_id: request.sender_user_id.clone(),
-            message_bytes_base64: B64.encode(&blob),
-            received_at: now.clone(),
-        },
-    );
+    for (recipient_device_id, item) in &deliveries {
+        state
+            .realtime_hub()
+            .publish(&recipient_user_id, recipient_device_id, item.clone());
+    }
 
     let push_state = state.clone();
     let push_recipient = recipient_user_id.clone();
-    let push_excluded_device = request.device_id.clone();
+    let push_excluded_device = if request.sender_user_id == recipient_user_id {
+        request.device_id.clone()
+    } else {
+        String::new()
+    };
     tokio::spawn(async move {
         if let Err(error) =
             dispatch_push_wake_signals(&push_state, &push_recipient, &push_excluded_device).await
@@ -1585,7 +1976,11 @@ async fn relay_message(
     });
 
     Ok(Json(RelayResponse {
-        message_id,
+        message_id: deliveries
+            .first()
+            .map(|(_, item)| item.message_id)
+            .unwrap_or(0),
+        delivered_device_count: deliveries.len(),
         received_at: now,
     }))
 }
@@ -1613,7 +2008,7 @@ async fn get_inbox(
     let last_seen =
         enforce_inbox_cursor_monotonic(&state, &user_id, &auth.device_id, since).await?;
 
-    let messages = load_inbox_messages(state.pool(), &user_id, since).await?;
+    let messages = load_inbox_messages(state.pool(), &user_id, &auth.device_id, since).await?;
     let delivered_max = messages
         .iter()
         .map(|item| item.message_id)
@@ -1631,13 +2026,15 @@ async fn handle_ws_inbox_socket(
     since: i64,
     socket: WebSocket,
 ) {
-    let (subscriber_id, mut receiver) = state.realtime_hub().subscribe(&user_id);
+    let (subscriber_id, mut receiver) = state.realtime_hub().subscribe(&user_id, &device_id);
     let mut last_message_id = since;
-    let backlog = load_inbox_messages(state.pool(), &user_id, since).await;
+    let backlog = load_inbox_messages(state.pool(), &user_id, &device_id, since).await;
     let (mut sender, mut client_stream) = socket.split();
 
     let Ok(backlog_messages) = backlog else {
-        state.realtime_hub().unsubscribe(&user_id, subscriber_id);
+        state
+            .realtime_hub()
+            .unsubscribe(&user_id, &device_id, subscriber_id);
         let _ = sender.send(WsMessage::Close(None)).await;
         return;
     };
@@ -1652,12 +2049,16 @@ async fn handle_ws_inbox_socket(
             messages: backlog_messages,
         };
         let Ok(text) = serde_json::to_string(&payload) else {
-            state.realtime_hub().unsubscribe(&user_id, subscriber_id);
+            state
+                .realtime_hub()
+                .unsubscribe(&user_id, &device_id, subscriber_id);
             let _ = sender.send(WsMessage::Close(None)).await;
             return;
         };
         if sender.send(WsMessage::Text(text)).await.is_err() {
-            state.realtime_hub().unsubscribe(&user_id, subscriber_id);
+            state
+                .realtime_hub()
+                .unsubscribe(&user_id, &device_id, subscriber_id);
             return;
         }
     }
@@ -1665,7 +2066,9 @@ async fn handle_ws_inbox_socket(
         .await
         .is_err()
     {
-        state.realtime_hub().unsubscribe(&user_id, subscriber_id);
+        state
+            .realtime_hub()
+            .unsubscribe(&user_id, &device_id, subscriber_id);
         let _ = sender.send(WsMessage::Close(None)).await;
         return;
     }
@@ -1714,22 +2117,26 @@ async fn handle_ws_inbox_socket(
         }
     }
 
-    state.realtime_hub().unsubscribe(&user_id, subscriber_id);
+    state
+        .realtime_hub()
+        .unsubscribe(&user_id, &device_id, subscriber_id);
 }
 
 async fn load_inbox_messages(
     pool: &AnyPool,
     user_id: &str,
+    device_id: &str,
     since: i64,
 ) -> Result<Vec<InboxItem>, AppError> {
     let rows = sqlx::query(
         "SELECT message_id, sender_user_id, message_blob, received_at
          FROM relay_messages
-         WHERE recipient_user_id = $1 AND message_id > $2
+         WHERE recipient_user_id = $1 AND recipient_device_id = $2 AND message_id > $3
          ORDER BY message_id ASC
-         LIMIT $3",
+         LIMIT $4",
     )
     .bind(user_id)
+    .bind(device_id)
     .bind(since)
     .bind(MAX_INBOX_PAGE)
     .fetch_all(pool)
@@ -1833,9 +2240,15 @@ async fn dispatch_push_wake_signals(
         return Ok(());
     }
     let rows = sqlx::query(
-        "SELECT token
-         FROM push_tokens
-         WHERE user_id = $1 AND provider = 'fcm' AND device_id <> $2",
+        "SELECT pt.token
+         FROM push_tokens pt
+         JOIN user_devices ud
+           ON ud.user_id = pt.user_id
+          AND ud.device_id = pt.device_id
+         WHERE pt.user_id = $1
+           AND pt.provider = 'fcm'
+           AND ud.active = 1
+           AND pt.device_id <> $2",
     )
     .bind(recipient_user_id)
     .bind(excluded_device_id)
@@ -1854,15 +2267,17 @@ async fn select_one_time_key(
     tx: &mut sqlx::Transaction<'_, sqlx::Any>,
     table: &str,
     user_id: &str,
+    device_id: &str,
 ) -> Result<Option<Vec<u8>>, AppError> {
     let query = format!(
         "SELECT id, prekey FROM {table}
-         WHERE user_id = $1 AND consumed = 0
+         WHERE user_id = $1 AND device_id = $2 AND consumed = 0
          ORDER BY id ASC
          LIMIT 1"
     );
     let row = sqlx::query(&query)
         .bind(user_id)
+        .bind(device_id)
         .fetch_optional(&mut **tx)
         .await?;
     let Some(row) = row else {
@@ -1880,14 +2295,16 @@ async fn count_available_one_time_keys(
     tx: &mut sqlx::Transaction<'_, sqlx::Any>,
     table: &str,
     user_id: &str,
+    device_id: &str,
 ) -> Result<i64, AppError> {
     let query = format!(
         "SELECT COUNT(*) AS count
          FROM {table}
-         WHERE user_id = $1 AND consumed = 0"
+         WHERE user_id = $1 AND device_id = $2 AND consumed = 0"
     );
     let count = sqlx::query_scalar::<_, i64>(&query)
         .bind(user_id)
+        .bind(device_id)
         .fetch_one(&mut **tx)
         .await?;
     Ok(count)
@@ -1896,21 +2313,24 @@ async fn count_available_one_time_keys(
 async fn load_remaining_one_time_counts(
     pool: &AnyPool,
     user_id: &str,
+    device_id: &str,
 ) -> Result<(i64, i64), AppError> {
     let remaining_x = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) AS count
          FROM one_time_prekeys_x25519
-         WHERE user_id = $1 AND consumed = 0",
+         WHERE user_id = $1 AND device_id = $2 AND consumed = 0",
     )
     .bind(user_id)
+    .bind(device_id)
     .fetch_one(pool)
     .await?;
     let remaining_pq = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) AS count
          FROM one_time_prekeys_mlkem768
-         WHERE user_id = $1 AND consumed = 0",
+         WHERE user_id = $1 AND device_id = $2 AND consumed = 0",
     )
     .bind(user_id)
+    .bind(device_id)
     .fetch_one(pool)
     .await?;
     Ok((remaining_x, remaining_pq))
@@ -1929,6 +2349,23 @@ async fn ensure_user_exists(pool: &AnyPool, user_id: &str) -> Result<(), AppErro
         return Err(AppError::not_found(format!("user '{user_id}' not found")));
     }
     Ok(())
+}
+
+async fn load_active_device_ids(pool: &AnyPool, user_id: &str) -> Result<Vec<String>, AppError> {
+    let rows = sqlx::query(
+        "SELECT device_id
+         FROM user_devices
+         WHERE user_id = $1 AND active = 1
+         ORDER BY linked_at ASC, device_id ASC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    let mut device_ids = Vec::with_capacity(rows.len());
+    for row in rows {
+        device_ids.push(row.try_get("device_id")?);
+    }
+    Ok(device_ids)
 }
 
 fn parse_request_auth(headers: &HeaderMap) -> Result<RequestAuth, AppError> {
@@ -1990,16 +2427,26 @@ async fn verify_request_auth(
         return Err(AppError::conflict("request nonce replayed"));
     }
 
-    let user_row = sqlx::query("SELECT device_id, identity_sig_pub FROM users WHERE user_id = $1")
+    let user_row = sqlx::query("SELECT identity_sig_pub FROM users WHERE user_id = $1")
         .bind(&auth.user_id)
         .fetch_optional(state.pool())
         .await?;
     let Some(user_row) = user_row else {
         return Err(AppError::not_found("auth user not found"));
     };
-    let registered_device: String = user_row.try_get("device_id")?;
-    if registered_device != auth.device_id {
-        return Err(AppError::bad_request("auth device mismatch for user"));
+    let active_device = sqlx::query(
+        "SELECT 1
+         FROM user_devices
+         WHERE user_id = $1 AND device_id = $2 AND active = 1",
+    )
+    .bind(&auth.user_id)
+    .bind(&auth.device_id)
+    .fetch_optional(state.pool())
+    .await?;
+    if active_device.is_none() {
+        return Err(AppError::bad_request(
+            "auth device mismatch for user or device revoked",
+        ));
     }
     let identity_sig_pub: Vec<u8> = user_row.try_get("identity_sig_pub")?;
     verify_ed25519_signature(
@@ -2080,6 +2527,52 @@ fn ws_inbox_auth_message(
         value: since.to_be_bytes().to_vec(),
     });
     encode(&records).map_err(|_| AppError::internal("failed to encode ws-inbox auth transcript"))
+}
+
+fn list_devices_auth_message(auth: &RequestAuth, user_id: &str) -> Result<Vec<u8>, AppError> {
+    let mut records = auth_common_records(auth, "devices-list");
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    encode(&records)
+        .map_err(|_| AppError::internal("failed to encode devices-list auth transcript"))
+}
+
+fn link_device_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+    new_device_id: &str,
+) -> Result<Vec<u8>, AppError> {
+    let mut records = auth_common_records(auth, "devices-link");
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_LINK_DEVICE_ID,
+        value: new_device_id.as_bytes().to_vec(),
+    });
+    encode(&records)
+        .map_err(|_| AppError::internal("failed to encode devices-link auth transcript"))
+}
+
+fn revoke_device_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+    target_device_id: &str,
+) -> Result<Vec<u8>, AppError> {
+    let mut records = auth_common_records(auth, "devices-revoke");
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_REVOKE_DEVICE_ID,
+        value: target_device_id.as_bytes().to_vec(),
+    });
+    encode(&records)
+        .map_err(|_| AppError::internal("failed to encode devices-revoke auth transcript"))
 }
 
 fn identity_log_auth_message(auth: &RequestAuth, user_id: &str) -> Result<Vec<u8>, AppError> {

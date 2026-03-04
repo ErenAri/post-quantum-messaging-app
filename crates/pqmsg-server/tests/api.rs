@@ -52,6 +52,8 @@ const AUTH_TAG_ROTATE_SIG_CURRENT_HASH: u16 = critical_type(0x320E);
 const AUTH_TAG_ROTATE_SIG_NEW_HASH: u16 = critical_type(0x320F);
 const AUTH_TAG_PUSH_DEVICE_ID: u16 = critical_type(0x3210);
 const AUTH_TAG_PUSH_TOKEN_HASH: u16 = critical_type(0x3211);
+const AUTH_TAG_LINK_DEVICE_ID: u16 = critical_type(0x3212);
+const AUTH_TAG_REVOKE_DEVICE_ID: u16 = critical_type(0x3213);
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 async fn test_app() -> axum::Router {
@@ -400,6 +402,96 @@ fn prekeys_status_auth_headers(
     vec![
         (AUTH_HEADER_USER, user_id.to_string()),
         (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn devices_list_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "devices-list-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("devices-list", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("devices-list auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn link_device_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    auth_device_id: &str,
+    new_device_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "devices-link-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records =
+        auth_common_records("devices-link", user_id, auth_device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_LINK_DEVICE_ID,
+        value: new_device_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("devices-link auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, auth_device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn revoke_device_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    auth_device_id: &str,
+    target_device_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "devices-revoke-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records =
+        auth_common_records("devices-revoke", user_id, auth_device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_REVOKE_DEVICE_ID,
+        value: target_device_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("devices-revoke auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, auth_device_id.to_string()),
         (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
         (AUTH_HEADER_NONCE, nonce),
         (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
@@ -914,6 +1006,25 @@ async fn identity_rotation_happy_path_and_log() {
     .await;
     assert_eq!(status_confirm, StatusCode::OK);
     assert_eq!(body_confirm["identity_key_version"].as_u64(), Some(2));
+
+    let publish_after_rotate = publish_prekeys_payload(
+        &key_new,
+        [17u8; 32],
+        vec![18u8; 64],
+        vec![[19u8; 32]],
+        vec![vec![20u8; 64]],
+    );
+    let publish_after_rotate_auth =
+        prekeys_auth_headers(&key_new, "bob", "bob-dev-2", &publish_after_rotate);
+    let (status_publish_after_rotate, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/prekeys",
+        publish_after_rotate,
+        &publish_after_rotate_auth,
+    )
+    .await;
+    assert_eq!(status_publish_after_rotate, StatusCode::OK);
 
     let (status_bundle, bundle) =
         json_request(app.clone(), Method::GET, "/v1/users/bob/bundle", json!({})).await;
@@ -1433,4 +1544,291 @@ async fn websocket_inbox_streams_relay_messages() {
     assert_eq!(messages[0]["sender_user_id"].as_str(), Some("alice"));
 
     server_handle.abort();
+}
+
+#[tokio::test]
+async fn multi_device_link_list_revoke_and_bundle_selection() {
+    let app = test_app().await;
+    let bob_sig = signing_key(101);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [1u8; 32], &bob_sig);
+    let (status_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_bob, StatusCode::OK);
+
+    let publish_dev1 = publish_prekeys_payload(
+        &bob_sig,
+        [5u8; 32],
+        vec![7u8; 64],
+        vec![[9u8; 32]],
+        vec![vec![11u8; 64]],
+    );
+    let publish_dev1_auth = prekeys_auth_headers(&bob_sig, "bob", "bob-dev-1", &publish_dev1);
+    let (status_publish_dev1, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/prekeys",
+        publish_dev1,
+        &publish_dev1_auth,
+    )
+    .await;
+    assert_eq!(status_publish_dev1, StatusCode::OK);
+
+    let link_body = json!({
+        "new_device_id": "bob-dev-2"
+    });
+    let link_headers = link_device_auth_headers(&bob_sig, "bob", "bob-dev-1", "bob-dev-2");
+    let (status_link, link_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/devices/link",
+        link_body,
+        &link_headers,
+    )
+    .await;
+    assert_eq!(status_link, StatusCode::OK);
+    assert_eq!(link_payload["linked_device_id"].as_str(), Some("bob-dev-2"));
+
+    let list_headers = devices_list_auth_headers(&bob_sig, "bob", "bob-dev-1");
+    let (status_list, list_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/bob/devices",
+        json!({}),
+        &list_headers,
+    )
+    .await;
+    assert_eq!(status_list, StatusCode::OK);
+    let devices = list_payload["devices"].as_array().expect("devices array");
+    assert_eq!(devices.len(), 2);
+    assert!(devices
+        .iter()
+        .any(|item| item["device_id"].as_str() == Some("bob-dev-2") && item["active"] == true));
+
+    let publish_dev2 = publish_prekeys_payload(
+        &bob_sig,
+        [15u8; 32],
+        vec![17u8; 64],
+        vec![[19u8; 32]],
+        vec![vec![21u8; 64]],
+    );
+    let publish_dev2_auth = prekeys_auth_headers(&bob_sig, "bob", "bob-dev-2", &publish_dev2);
+    let (status_publish_dev2, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/prekeys",
+        publish_dev2,
+        &publish_dev2_auth,
+    )
+    .await;
+    assert_eq!(status_publish_dev2, StatusCode::OK);
+
+    let (status_bundle_dev2, bundle_dev2) = json_request(
+        app.clone(),
+        Method::GET,
+        "/v1/users/bob/bundle?device_id=bob-dev-2",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_bundle_dev2, StatusCode::OK);
+    assert_eq!(bundle_dev2["device_id"].as_str(), Some("bob-dev-2"));
+
+    let revoke_headers = revoke_device_auth_headers(&bob_sig, "bob", "bob-dev-1", "bob-dev-2");
+    let (status_revoke, revoke_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/devices/bob-dev-2/revoke",
+        json!({}),
+        &revoke_headers,
+    )
+    .await;
+    assert_eq!(status_revoke, StatusCode::OK);
+    assert_eq!(
+        revoke_payload["revoked_device_id"].as_str(),
+        Some("bob-dev-2")
+    );
+
+    let list_headers_after = devices_list_auth_headers(&bob_sig, "bob", "bob-dev-1");
+    let (status_list_after, list_after_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/bob/devices",
+        json!({}),
+        &list_headers_after,
+    )
+    .await;
+    assert_eq!(status_list_after, StatusCode::OK);
+    let devices_after = list_after_payload["devices"]
+        .as_array()
+        .expect("devices array");
+    assert!(devices_after
+        .iter()
+        .any(|item| item["device_id"].as_str() == Some("bob-dev-2") && item["active"] == false));
+
+    let dev2_status_headers = prekeys_status_auth_headers(&bob_sig, "bob", "bob-dev-2");
+    let (status_dev2_status, _) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/bob/prekeys/status",
+        json!({}),
+        &dev2_status_headers,
+    )
+    .await;
+    assert_eq!(status_dev2_status, StatusCode::BAD_REQUEST);
+
+    let (status_bundle_dev2_after_revoke, _) = json_request(
+        app.clone(),
+        Method::GET,
+        "/v1/users/bob/bundle?device_id=bob-dev-2",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_bundle_dev2_after_revoke, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn relay_fans_out_to_all_active_recipient_devices() {
+    let app = test_app().await;
+    let bob_sig = signing_key(111);
+    let alice_sig = signing_key(112);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [1u8; 32], &bob_sig);
+    let (status_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_bob, StatusCode::OK);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", [3u8; 32], &alice_sig);
+    let (status_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_alice, StatusCode::OK);
+
+    let link_body = json!({
+        "new_device_id": "bob-dev-2"
+    });
+    let link_headers = link_device_auth_headers(&bob_sig, "bob", "bob-dev-1", "bob-dev-2");
+    let (status_link, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/devices/link",
+        link_body,
+        &link_headers,
+    )
+    .await;
+    assert_eq!(status_link, StatusCode::OK);
+
+    let relay_first = json!({
+        "sender_user_id": "alice",
+        "device_id": "alice-dev-1",
+        "message_bytes_base64": B64.encode("fanout-1")
+    });
+    let relay_first_headers =
+        relay_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob", b"fanout-1");
+    let (status_relay_first, relay_first_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob",
+        relay_first,
+        &relay_first_headers,
+    )
+    .await;
+    assert_eq!(status_relay_first, StatusCode::OK);
+    assert_eq!(
+        relay_first_payload["delivered_device_count"].as_u64(),
+        Some(2)
+    );
+
+    let inbox_dev1_headers = inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0);
+    let (status_inbox_dev1, inbox_dev1_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/inbox/bob?since=0",
+        json!({}),
+        &inbox_dev1_headers,
+    )
+    .await;
+    assert_eq!(status_inbox_dev1, StatusCode::OK);
+    assert_eq!(
+        inbox_dev1_payload["messages"].as_array().map(|v| v.len()),
+        Some(1)
+    );
+    let dev1_first_message_id = inbox_dev1_payload["messages"][0]["message_id"]
+        .as_i64()
+        .expect("device 1 first message id");
+
+    let inbox_dev2_headers = inbox_auth_headers(&bob_sig, "bob", "bob-dev-2", 0);
+    let (status_inbox_dev2, inbox_dev2_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/inbox/bob?since=0",
+        json!({}),
+        &inbox_dev2_headers,
+    )
+    .await;
+    assert_eq!(status_inbox_dev2, StatusCode::OK);
+    assert_eq!(
+        inbox_dev2_payload["messages"].as_array().map(|v| v.len()),
+        Some(1)
+    );
+
+    let revoke_headers = revoke_device_auth_headers(&bob_sig, "bob", "bob-dev-1", "bob-dev-2");
+    let (status_revoke, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/devices/bob-dev-2/revoke",
+        json!({}),
+        &revoke_headers,
+    )
+    .await;
+    assert_eq!(status_revoke, StatusCode::OK);
+
+    let relay_second = json!({
+        "sender_user_id": "alice",
+        "device_id": "alice-dev-1",
+        "message_bytes_base64": B64.encode("fanout-2")
+    });
+    let relay_second_headers =
+        relay_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob", b"fanout-2");
+    let (status_relay_second, relay_second_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob",
+        relay_second,
+        &relay_second_headers,
+    )
+    .await;
+    assert_eq!(status_relay_second, StatusCode::OK);
+    assert_eq!(
+        relay_second_payload["delivered_device_count"].as_u64(),
+        Some(1)
+    );
+
+    let inbox_dev1_second_headers =
+        inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", dev1_first_message_id);
+    let inbox_dev1_second_uri = format!("/v1/inbox/bob?since={dev1_first_message_id}");
+    let (status_inbox_dev1_second, inbox_dev1_second_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        &inbox_dev1_second_uri,
+        json!({}),
+        &inbox_dev1_second_headers,
+    )
+    .await;
+    assert_eq!(status_inbox_dev1_second, StatusCode::OK);
+    assert_eq!(
+        inbox_dev1_second_payload["messages"]
+            .as_array()
+            .map(|v| v.len()),
+        Some(1)
+    );
+
+    let inbox_dev2_after_revoke_headers = inbox_auth_headers(&bob_sig, "bob", "bob-dev-2", 0);
+    let (status_inbox_dev2_after_revoke, _) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/inbox/bob?since=0",
+        json!({}),
+        &inbox_dev2_after_revoke_headers,
+    )
+    .await;
+    assert_eq!(status_inbox_dev2_after_revoke, StatusCode::BAD_REQUEST);
 }
