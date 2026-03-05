@@ -54,6 +54,20 @@ const AUTH_TAG_PUSH_DEVICE_ID: u16 = critical_type(0x3210);
 const AUTH_TAG_PUSH_TOKEN_HASH: u16 = critical_type(0x3211);
 const AUTH_TAG_LINK_DEVICE_ID: u16 = critical_type(0x3212);
 const AUTH_TAG_REVOKE_DEVICE_ID: u16 = critical_type(0x3213);
+const AUTH_TAG_DELETE_IDS_HASH: u16 = critical_type(0x3214);
+const AUTH_TAG_DELETE_BEFORE_ID: u16 = critical_type(0x3215);
+const AUTH_TAG_DISCOVERY_PHONE_HASHES_HASH: u16 = critical_type(0x3216);
+const AUTH_TAG_DISCOVERY_EMAIL_HASHES_HASH: u16 = critical_type(0x3217);
+const AUTH_TAG_DISCOVERY_QUERY_HASHES_HASH: u16 = critical_type(0x3218);
+const AUTH_TAG_CONTACT_USER_ID: u16 = critical_type(0x3219);
+const AUTH_TAG_CONTACT_ALIAS_HASH: u16 = critical_type(0x321A);
+const AUTH_TAG_CONTACT_VERIFIED_FLAG: u16 = critical_type(0x321B);
+const AUTH_TAG_CONTACT_FINGERPRINT: u16 = critical_type(0x321C);
+const AUTH_TAG_GROUP_ID: u16 = critical_type(0x321D);
+const AUTH_TAG_GROUP_MEMBER_USER_ID: u16 = critical_type(0x321E);
+const AUTH_TAG_GROUP_MEMBERS_HASH: u16 = critical_type(0x321F);
+const AUTH_TAG_GROUP_SENDER_USER_ID: u16 = critical_type(0x3220);
+const AUTH_TAG_GROUP_MESSAGE_BLOB_HASH: u16 = critical_type(0x3221);
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 async fn test_app() -> axum::Router {
@@ -331,6 +345,37 @@ fn inbox_auth_headers(
     ]
 }
 
+fn sealed_inbox_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    since: i64,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "sealed-inbox-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("sealed-inbox", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_SINCE,
+        value: since.to_be_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("sealed-inbox auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
 fn ws_inbox_auth_headers(
     signing_key: &SigningKey,
     user_id: &str,
@@ -492,6 +537,426 @@ fn revoke_device_auth_headers(
     vec![
         (AUTH_HEADER_USER, user_id.to_string()),
         (AUTH_HEADER_DEVICE, auth_device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn normalize_message_ids(message_ids: &[i64]) -> Vec<i64> {
+    let mut ids = message_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn inbox_delete_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    message_ids: &[i64],
+    delete_before_id: Option<i64>,
+) -> Vec<(&'static str, String)> {
+    use sha2::{Digest, Sha256};
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "inbox-delete-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("inbox-delete", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let normalized_ids = normalize_message_ids(message_ids);
+    let mut hasher = Sha256::new();
+    for message_id in &normalized_ids {
+        hasher.update(message_id.to_be_bytes());
+    }
+    records.push(TlvRecord {
+        ty: AUTH_TAG_DELETE_IDS_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    if let Some(delete_before) = delete_before_id {
+        records.push(TlvRecord {
+            ty: AUTH_TAG_DELETE_BEFORE_ID,
+            value: delete_before.to_be_bytes().to_vec(),
+        });
+    }
+    let message = encode(&records).expect("inbox-delete auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn normalize_sha256_hashes(values: &[String]) -> Vec<String> {
+    let mut hashes = values
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    hashes.sort_unstable();
+    hashes.dedup();
+    hashes
+}
+
+fn hash_string_list_sha256(values: &[String]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for value in values {
+        hasher.update(value.as_bytes());
+    }
+    hasher.finalize().to_vec()
+}
+
+fn discovery_handles_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    phone_hashes: &[String],
+    email_hashes: &[String],
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "discovery-handles-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records =
+        auth_common_records("discovery-handles", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_DISCOVERY_PHONE_HASHES_HASH,
+        value: hash_string_list_sha256(&normalize_sha256_hashes(phone_hashes)),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_DISCOVERY_EMAIL_HASHES_HASH,
+        value: hash_string_list_sha256(&normalize_sha256_hashes(email_hashes)),
+    });
+    let message = encode(&records).expect("discovery-handles auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn discovery_match_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    hashes: &[String],
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "discovery-match-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("discovery-match", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_DISCOVERY_QUERY_HASHES_HASH,
+        value: hash_string_list_sha256(&normalize_sha256_hashes(hashes)),
+    });
+    let message = encode(&records).expect("discovery-match auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn contacts_list_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "contacts-list-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("contacts-list", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("contacts-list auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn contacts_upsert_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    contact_user_id: &str,
+    alias: Option<&str>,
+    verified_by_qr: bool,
+    verified_fingerprint_sha256: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    use sha2::{Digest, Sha256};
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "contacts-upsert-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("contacts-upsert", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_CONTACT_USER_ID,
+        value: contact_user_id.as_bytes().to_vec(),
+    });
+    let mut alias_hasher = Sha256::new();
+    alias_hasher.update(alias.unwrap_or_default().as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_CONTACT_ALIAS_HASH,
+        value: alias_hasher.finalize().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_CONTACT_VERIFIED_FLAG,
+        value: vec![if verified_by_qr { 1 } else { 0 }],
+    });
+    if let Some(fingerprint) = verified_fingerprint_sha256 {
+        records.push(TlvRecord {
+            ty: AUTH_TAG_CONTACT_FINGERPRINT,
+            value: fingerprint.as_bytes().to_vec(),
+        });
+    }
+    let message = encode(&records).expect("contacts-upsert auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn contacts_remove_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    contact_user_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "contacts-remove-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("contacts-remove", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_CONTACT_USER_ID,
+        value: contact_user_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("contacts-remove auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn groups_create_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    group_id: &str,
+    member_user_ids: &[String],
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "groups-create-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("groups-create", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    let mut normalized = member_user_ids.to_vec();
+    normalized.sort_unstable();
+    normalized.dedup();
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_MEMBERS_HASH,
+        value: hash_string_list_sha256(&normalized),
+    });
+    let message = encode(&records).expect("groups-create auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn groups_members_list_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    group_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "groups-members-list-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records =
+        auth_common_records("groups-members-list", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("groups-members-list auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn groups_members_add_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    group_id: &str,
+    member_user_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "groups-members-add-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records =
+        auth_common_records("groups-members-add", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_MEMBER_USER_ID,
+        value: member_user_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("groups-members-add auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn groups_members_remove_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    group_id: &str,
+    member_user_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "groups-members-remove-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records(
+        "groups-members-remove",
+        user_id,
+        device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_MEMBER_USER_ID,
+        value: member_user_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("groups-members-remove auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn groups_relay_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    group_id: &str,
+    sender_user_id: &str,
+    message_blob: &[u8],
+) -> Vec<(&'static str, String)> {
+    use sha2::{Digest, Sha256};
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "groups-relay-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("groups-relay", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_SENDER_USER_ID,
+        value: sender_user_id.as_bytes().to_vec(),
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(message_blob);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_MESSAGE_BLOB_HASH,
+        value: hasher.finalize().to_vec(),
+    });
+    let message = encode(&records).expect("groups-relay auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
         (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
         (AUTH_HEADER_NONCE, nonce),
         (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
@@ -1831,4 +2296,609 @@ async fn relay_fans_out_to_all_active_recipient_devices() {
     )
     .await;
     assert_eq!(status_inbox_dev2_after_revoke, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn inbox_delete_endpoint_removes_remote_messages_for_device() {
+    let app = test_app().await;
+    let bob_sig = signing_key(121);
+    let alice_sig = signing_key(122);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [1u8; 32], &bob_sig);
+    let (status_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_bob, StatusCode::OK);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", [2u8; 32], &alice_sig);
+    let (status_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_alice, StatusCode::OK);
+
+    let relay_1 = json!({
+        "sender_user_id": "alice",
+        "device_id": "alice-dev-1",
+        "message_bytes_base64": B64.encode("delete-me-1")
+    });
+    let relay_1_headers =
+        relay_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob", b"delete-me-1");
+    let (status_relay_1, relay_1_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob",
+        relay_1,
+        &relay_1_headers,
+    )
+    .await;
+    assert_eq!(status_relay_1, StatusCode::OK);
+    let first_id = relay_1_payload["message_id"]
+        .as_i64()
+        .expect("first message id");
+
+    let relay_2 = json!({
+        "sender_user_id": "alice",
+        "device_id": "alice-dev-1",
+        "message_bytes_base64": B64.encode("delete-me-2")
+    });
+    let relay_2_headers =
+        relay_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob", b"delete-me-2");
+    let (status_relay_2, relay_2_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob",
+        relay_2,
+        &relay_2_headers,
+    )
+    .await;
+    assert_eq!(status_relay_2, StatusCode::OK);
+    let second_id = relay_2_payload["message_id"]
+        .as_i64()
+        .expect("second message id");
+
+    let delete_body = json!({
+        "message_ids": [first_id],
+        "delete_before_id": null
+    });
+    let delete_headers = inbox_delete_auth_headers(&bob_sig, "bob", "bob-dev-1", &[first_id], None);
+    let (status_delete_first, delete_first_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/inbox/bob/delete",
+        delete_body,
+        &delete_headers,
+    )
+    .await;
+    assert_eq!(status_delete_first, StatusCode::OK);
+    assert_eq!(delete_first_payload["deleted_count"].as_u64(), Some(1));
+
+    let inbox_after_first_delete_headers =
+        inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", first_id);
+    let after_first_uri = format!("/v1/inbox/bob?since={first_id}");
+    let (status_after_first_delete, after_first_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        &after_first_uri,
+        json!({}),
+        &inbox_after_first_delete_headers,
+    )
+    .await;
+    assert_eq!(status_after_first_delete, StatusCode::OK);
+    assert_eq!(
+        after_first_payload["messages"]
+            .as_array()
+            .map(|items| items.len()),
+        Some(1)
+    );
+    assert_eq!(
+        after_first_payload["messages"][0]["message_id"].as_i64(),
+        Some(second_id)
+    );
+
+    let delete_before_body = json!({
+        "message_ids": [],
+        "delete_before_id": second_id
+    });
+    let delete_before_headers =
+        inbox_delete_auth_headers(&bob_sig, "bob", "bob-dev-1", &[], Some(second_id));
+    let (status_delete_before, delete_before_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/inbox/bob/delete",
+        delete_before_body,
+        &delete_before_headers,
+    )
+    .await;
+    assert_eq!(status_delete_before, StatusCode::OK);
+    assert_eq!(delete_before_payload["deleted_count"].as_u64(), Some(1));
+
+    let inbox_after_all_delete_headers =
+        inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", second_id);
+    let after_all_uri = format!("/v1/inbox/bob?since={second_id}");
+    let (status_after_all_delete, after_all_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        &after_all_uri,
+        json!({}),
+        &inbox_after_all_delete_headers,
+    )
+    .await;
+    assert_eq!(status_after_all_delete, StatusCode::OK);
+    assert_eq!(
+        after_all_payload["messages"]
+            .as_array()
+            .map(|items| items.len()),
+        Some(0)
+    );
+}
+
+#[tokio::test]
+async fn discovery_and_contacts_flow() {
+    use sha2::{Digest, Sha256};
+
+    let app = test_app().await;
+    let alice_sig = signing_key(131);
+    let bob_sig = signing_key(132);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", [1u8; 32], &alice_sig);
+    let (status_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_alice, StatusCode::OK);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [2u8; 32], &bob_sig);
+    let (status_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_bob, StatusCode::OK);
+
+    let bob_phone_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(b"+15550001111");
+        hex::encode(hasher.finalize())
+    };
+    let bob_email_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(b"bob@example.com");
+        hex::encode(hasher.finalize())
+    };
+
+    let upload_phone_hashes = vec![bob_phone_hash.clone()];
+    let upload_email_hashes = vec![bob_email_hash.clone()];
+    let discovery_upload = json!({
+        "phone_hashes_sha256": upload_phone_hashes,
+        "email_hashes_sha256": upload_email_hashes
+    });
+    let discovery_upload_headers = discovery_handles_auth_headers(
+        &bob_sig,
+        "bob",
+        "bob-dev-1",
+        &upload_phone_hashes,
+        &upload_email_hashes,
+    );
+    let (status_upload, upload_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/discovery/handles",
+        discovery_upload,
+        &discovery_upload_headers,
+    )
+    .await;
+    assert_eq!(status_upload, StatusCode::OK);
+    assert_eq!(upload_payload["uploaded_phone_hashes"].as_u64(), Some(1));
+    assert_eq!(upload_payload["uploaded_email_hashes"].as_u64(), Some(1));
+
+    let unknown_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(b"unknown@example.com");
+        hex::encode(hasher.finalize())
+    };
+    let match_hashes = vec![bob_phone_hash.clone(), unknown_hash];
+    let discovery_match_body = json!({
+        "hashes_sha256": match_hashes
+    });
+    let discovery_match_headers =
+        discovery_match_auth_headers(&alice_sig, "alice", "alice-dev-1", &match_hashes);
+    let (status_match, match_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/discovery/match",
+        discovery_match_body,
+        &discovery_match_headers,
+    )
+    .await;
+    assert_eq!(status_match, StatusCode::OK);
+    let matches = match_payload["matches"].as_array().expect("matches");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0]["matched_user_id"].as_str(), Some("bob"));
+    assert_eq!(
+        matches[0]["hash_sha256"].as_str(),
+        Some(bob_phone_hash.as_str())
+    );
+
+    let fingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let contact_add_body = json!({
+        "contact_user_id": "bob",
+        "alias": "Bobby",
+        "verified_by_qr": true,
+        "verified_fingerprint_sha256": fingerprint
+    });
+    let contact_add_headers = contacts_upsert_auth_headers(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "bob",
+        Some("Bobby"),
+        true,
+        Some(fingerprint),
+    );
+    let (status_contact_add, contact_add_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/contacts",
+        contact_add_body,
+        &contact_add_headers,
+    )
+    .await;
+    assert_eq!(status_contact_add, StatusCode::OK);
+    assert_eq!(contact_add_payload["contact_user_id"].as_str(), Some("bob"));
+    assert_eq!(contact_add_payload["verified_by_qr"].as_bool(), Some(true));
+
+    let contacts_list_headers = contacts_list_auth_headers(&alice_sig, "alice", "alice-dev-1");
+    let (status_contacts_list, contacts_list_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/alice/contacts",
+        json!({}),
+        &contacts_list_headers,
+    )
+    .await;
+    assert_eq!(status_contacts_list, StatusCode::OK);
+    let contacts = contacts_list_payload["contacts"]
+        .as_array()
+        .expect("contacts");
+    assert_eq!(contacts.len(), 1);
+    assert_eq!(contacts[0]["contact_user_id"].as_str(), Some("bob"));
+    assert_eq!(contacts[0]["alias"].as_str(), Some("Bobby"));
+    assert_eq!(contacts[0]["verified_by_qr"].as_bool(), Some(true));
+
+    let contact_remove_body = json!({
+        "contact_user_id": "bob"
+    });
+    let contact_remove_headers =
+        contacts_remove_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob");
+    let (status_contact_remove, contact_remove_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/contacts/remove",
+        contact_remove_body,
+        &contact_remove_headers,
+    )
+    .await;
+    assert_eq!(status_contact_remove, StatusCode::OK);
+    assert_eq!(contact_remove_payload["removed"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+async fn group_membership_and_relay_flow() {
+    let app = test_app().await;
+    let alice_sig = signing_key(141);
+    let bob_sig = signing_key(142);
+    let carol_sig = signing_key(143);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", [11u8; 32], &alice_sig);
+    let (status_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_alice, StatusCode::OK);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [12u8; 32], &bob_sig);
+    let (status_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_bob, StatusCode::OK);
+
+    let reg_carol = register_payload("carol", "carol-dev-1", [13u8; 32], &carol_sig);
+    let (status_carol, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_carol).await;
+    assert_eq!(status_carol, StatusCode::OK);
+
+    let initial_members = vec!["bob".to_string()];
+    let create_group_body = json!({
+        "group_id": "alpha",
+        "member_user_ids": initial_members
+    });
+    let create_group_headers = groups_create_auth_headers(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "alpha",
+        &initial_members,
+    );
+    let (status_create_group, create_group_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/groups",
+        create_group_body,
+        &create_group_headers,
+    )
+    .await;
+    assert_eq!(status_create_group, StatusCode::OK);
+    assert_eq!(create_group_payload["group_id"].as_str(), Some("alpha"));
+    assert_eq!(
+        create_group_payload["owner_user_id"].as_str(),
+        Some("alice")
+    );
+    assert_eq!(create_group_payload["member_count"].as_u64(), Some(2));
+
+    let list_members_headers =
+        groups_members_list_auth_headers(&bob_sig, "bob", "bob-dev-1", "alpha");
+    let (status_list_members, list_members_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/groups/alpha/members",
+        json!({}),
+        &list_members_headers,
+    )
+    .await;
+    assert_eq!(status_list_members, StatusCode::OK);
+    let members = list_members_payload["members"].as_array().expect("members");
+    assert_eq!(members.len(), 2);
+    assert!(members
+        .iter()
+        .any(|item| item["user_id"].as_str() == Some("alice")));
+    assert!(members
+        .iter()
+        .any(|item| item["user_id"].as_str() == Some("bob")));
+
+    let add_member_body = json!({
+        "member_user_id": "carol"
+    });
+    let add_member_headers =
+        groups_members_add_auth_headers(&alice_sig, "alice", "alice-dev-1", "alpha", "carol");
+    let (status_add_member, add_member_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/groups/alpha/members/add",
+        add_member_body,
+        &add_member_headers,
+    )
+    .await;
+    assert_eq!(status_add_member, StatusCode::OK);
+    assert_eq!(add_member_payload["changed"].as_bool(), Some(true));
+
+    let group_message_1 = b"group-message-1".to_vec();
+    let group_message_1_b64 = B64.encode(&group_message_1);
+    let relay_group_body_1 = json!({
+        "sender_user_id": "alice",
+        "device_id": "alice-dev-1",
+        "message_bytes_base64": group_message_1_b64.clone()
+    });
+    let relay_group_headers_1 = groups_relay_auth_headers(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "alpha",
+        "alice",
+        &group_message_1,
+    );
+    let (status_group_relay_1, group_relay_payload_1) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/groups/alpha/relay",
+        relay_group_body_1,
+        &relay_group_headers_1,
+    )
+    .await;
+    assert_eq!(status_group_relay_1, StatusCode::OK);
+    assert_eq!(
+        group_relay_payload_1["delivered_user_count"].as_u64(),
+        Some(2)
+    );
+    assert_eq!(
+        group_relay_payload_1["delivered_message_count"].as_u64(),
+        Some(2)
+    );
+
+    let bob_inbox_headers = inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0);
+    let (status_bob_inbox, bob_inbox_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/inbox/bob?since=0",
+        json!({}),
+        &bob_inbox_headers,
+    )
+    .await;
+    assert_eq!(status_bob_inbox, StatusCode::OK);
+    let bob_messages = bob_inbox_payload["messages"]
+        .as_array()
+        .expect("bob messages");
+    assert_eq!(bob_messages.len(), 1);
+    assert_eq!(
+        bob_messages[0]["message_bytes_base64"].as_str(),
+        Some(group_message_1_b64.as_str())
+    );
+    let bob_first_message_id = bob_messages[0]["message_id"]
+        .as_i64()
+        .expect("bob message id");
+
+    let carol_inbox_headers = inbox_auth_headers(&carol_sig, "carol", "carol-dev-1", 0);
+    let (status_carol_inbox, carol_inbox_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/inbox/carol?since=0",
+        json!({}),
+        &carol_inbox_headers,
+    )
+    .await;
+    assert_eq!(status_carol_inbox, StatusCode::OK);
+    let carol_messages = carol_inbox_payload["messages"]
+        .as_array()
+        .expect("carol messages");
+    assert_eq!(carol_messages.len(), 1);
+    let carol_first_message_id = carol_messages[0]["message_id"]
+        .as_i64()
+        .expect("carol message id");
+
+    let remove_member_body = json!({
+        "member_user_id": "bob"
+    });
+    let remove_member_headers =
+        groups_members_remove_auth_headers(&alice_sig, "alice", "alice-dev-1", "alpha", "bob");
+    let (status_remove_member, remove_member_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/groups/alpha/members/remove",
+        remove_member_body,
+        &remove_member_headers,
+    )
+    .await;
+    assert_eq!(status_remove_member, StatusCode::OK);
+    assert_eq!(remove_member_payload["changed"].as_bool(), Some(true));
+
+    let group_message_2 = b"group-message-2".to_vec();
+    let group_message_2_b64 = B64.encode(&group_message_2);
+    let relay_group_body_2 = json!({
+        "sender_user_id": "alice",
+        "device_id": "alice-dev-1",
+        "message_bytes_base64": group_message_2_b64.clone()
+    });
+    let relay_group_headers_2 = groups_relay_auth_headers(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "alpha",
+        "alice",
+        &group_message_2,
+    );
+    let (status_group_relay_2, group_relay_payload_2) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/groups/alpha/relay",
+        relay_group_body_2,
+        &relay_group_headers_2,
+    )
+    .await;
+    assert_eq!(status_group_relay_2, StatusCode::OK);
+    assert_eq!(
+        group_relay_payload_2["delivered_user_count"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        group_relay_payload_2["delivered_message_count"].as_u64(),
+        Some(1)
+    );
+
+    let bob_after_headers = inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", bob_first_message_id);
+    let bob_after_uri = format!("/v1/inbox/bob?since={bob_first_message_id}");
+    let (status_bob_after, bob_after_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        &bob_after_uri,
+        json!({}),
+        &bob_after_headers,
+    )
+    .await;
+    assert_eq!(status_bob_after, StatusCode::OK);
+    assert_eq!(
+        bob_after_payload["messages"]
+            .as_array()
+            .map(|items| items.len()),
+        Some(0)
+    );
+
+    let carol_after_headers =
+        inbox_auth_headers(&carol_sig, "carol", "carol-dev-1", carol_first_message_id);
+    let carol_after_uri = format!("/v1/inbox/carol?since={carol_first_message_id}");
+    let (status_carol_after, carol_after_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        &carol_after_uri,
+        json!({}),
+        &carol_after_headers,
+    )
+    .await;
+    assert_eq!(status_carol_after, StatusCode::OK);
+    assert_eq!(
+        carol_after_payload["messages"]
+            .as_array()
+            .map(|items| items.len()),
+        Some(1)
+    );
+    assert_eq!(
+        carol_after_payload["messages"][0]["message_bytes_base64"].as_str(),
+        Some(group_message_2_b64.as_str())
+    );
+}
+
+#[tokio::test]
+async fn sealed_sender_relay_and_inbox_flow() {
+    let app = test_app().await;
+    let bob_sig = signing_key(151);
+    let alice_sig = signing_key(152);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [31u8; 32], &bob_sig);
+    let (status_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_bob, StatusCode::OK);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", [32u8; 32], &alice_sig);
+    let (status_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_alice, StatusCode::OK);
+
+    let publish = publish_prekeys_payload(
+        &bob_sig,
+        [7u8; 32],
+        vec![8u8; 32],
+        vec![[9u8; 32]],
+        vec![vec![10u8; 32]],
+    );
+    let publish_auth = prekeys_auth_headers(&bob_sig, "bob", "bob-dev-1", &publish);
+    let (status_prekeys, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/prekeys",
+        publish,
+        &publish_auth,
+    )
+    .await;
+    assert_eq!(status_prekeys, StatusCode::OK);
+
+    let (status_bundle, bundle_payload) = json_request(
+        app.clone(),
+        Method::GET,
+        "/v1/anon/users/bob/bundle",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_bundle, StatusCode::OK);
+    assert_eq!(bundle_payload["user_id"].as_str(), Some("bob"));
+
+    let sealed_blob = b"sealed-ciphertext-placeholder".to_vec();
+    let relay_body = json!({
+        "message_bytes_base64": B64.encode(&sealed_blob)
+    });
+    let (status_relay, relay_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/sealed-relay/bob",
+        relay_body,
+    )
+    .await;
+    assert_eq!(status_relay, StatusCode::OK);
+    assert_eq!(relay_payload["delivered_device_count"].as_u64(), Some(1));
+
+    let sealed_inbox_headers = sealed_inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0);
+    let (status_inbox, inbox_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/sealed-inbox/bob?since=0",
+        json!({}),
+        &sealed_inbox_headers,
+    )
+    .await;
+    assert_eq!(status_inbox, StatusCode::OK);
+    let messages = inbox_payload["messages"].as_array().expect("messages");
+    assert_eq!(messages.len(), 1);
+    let sealed_blob_b64 = B64.encode(&sealed_blob);
+    assert_eq!(
+        messages[0]["message_bytes_base64"].as_str(),
+        Some(sealed_blob_b64.as_str())
+    );
+    assert!(messages[0].get("sender_user_id").is_none());
 }

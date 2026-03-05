@@ -51,12 +51,14 @@ flowchart TD
 - Server WebSocket inbox stream (`/v1/ws/inbox/{user_id}`) uses the same signed request-auth model for real-time relay delivery.
 - Server enforces monotonic inbox cursors per authenticated user/device session and rejects cursor regression.
 - Server performs TTL-bounded relay ciphertext deduplication to reduce replay delivery risk.
-- Session decryption enforces suite continuity and authenticates ratchet metadata, including optional `pq_step_ct`.
+- Session decryption enforces suite continuity and authenticates ratchet metadata, including `pq_step_ct` on PQ-step messages.
+- PQ ratchet support is always compiled in `pqmsg-core`; runtime behavior is configured by session state and interval policy.
 - Clients expose active crypto profile and fail closed when PQ backend is not available.
 - Clients pin peer identity fingerprints and require explicit trust on key changes.
 - Clients track seen ciphertext blobs and reject replayed transport message IDs per peer.
 - CLI and Android clients auto-replenish one-time prekeys when server low-inventory signals are observed.
 - CLI and Android persist key/session files encrypted at rest (CLI uses Argon2id + AES-256-GCM wrapping; Android uses keystore-backed encrypted files).
+- CLI maintains an encrypted local message archive with retention TTL enforcement and supports authenticated remote inbox deletion requests.
 
 ## Repository Layout
 
@@ -94,6 +96,12 @@ For non-research profiles, local CLI key/session files should be accessed with:
 --state-passphrase "<strong-passphrase>"
 ```
 
+Optional message archive retention window (days):
+
+```powershell
+--message-retention-days 30
+```
+
 Legacy plaintext local files are blocked unless explicitly allowed with `--allow-plaintext-state`.
 
 CLI key backup and restore:
@@ -101,6 +109,27 @@ CLI key backup and restore:
 ```powershell
 cargo run -p pqmsg-cli -- backup-keys --keys ./devkeys/alice.json --out ./backups/alice.backup.json --backup-passphrase "<backup-passphrase>"
 cargo run -p pqmsg-cli -- restore-keys --input ./backups/alice.backup.json --out ./devkeys/alice-restored.json --backup-passphrase "<backup-passphrase>"
+```
+
+CLI message archive deletion (local and optional remote inbox delete request):
+
+```powershell
+cargo run -p pqmsg-cli -- delete-messages --user alice --keys ./devkeys/alice.json --peer bob --before-message-id 250
+cargo run -p pqmsg-cli -- delete-messages --user alice --keys ./devkeys/alice.json --before-message-id 250 --remote
+```
+
+CLI discovery, contacts, and group fan-out relay:
+
+```powershell
+cargo run -p pqmsg-cli -- discovery-upload --user alice --keys ./devkeys/alice.json --phone-hash <sha256hex> --email-hash <sha256hex>
+cargo run -p pqmsg-cli -- discovery-match --user alice --keys ./devkeys/alice.json --hash <sha256hex>
+cargo run -p pqmsg-cli -- contacts-add --user alice --keys ./devkeys/alice.json --peer bob --alias "Bobby"
+cargo run -p pqmsg-cli -- contacts-list --user alice --keys ./devkeys/alice.json
+cargo run -p pqmsg-cli -- groups-create --user alice --keys ./devkeys/alice.json --group alpha --member bob --member carol
+cargo run -p pqmsg-cli -- groups-members --user alice --keys ./devkeys/alice.json --group alpha
+cargo run -p pqmsg-cli -- groups-send --user alice --keys ./devkeys/alice.json --group alpha --text "group-ciphertext-placeholder"
+cargo run -p pqmsg-cli -- send-sealed --from alice --to bob --text "sealed-ciphertext-placeholder"
+cargo run -p pqmsg-cli -- poll-sealed --user bob --keys ./devkeys/bob.json
 ```
 
 ### PQ Backend Build (required for high-assurance/NSS runs)

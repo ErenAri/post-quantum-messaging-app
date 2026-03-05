@@ -1,5 +1,4 @@
 use crate::kdf::hkdf_sha256_32;
-#[cfg(feature = "pq_ratchet")]
 use crate::kem::KemProvider;
 use crate::keys::SecretBytes;
 use crate::CoreError;
@@ -29,7 +28,6 @@ pub fn mix_root_with_pq(root_key: &[u8; 32], ss_pq: &[u8]) -> Result<[u8; 32], C
     hkdf_sha256_32(ss_pq, Some(root_key), INFO_PQ_STEP)
 }
 
-#[cfg(feature = "pq_ratchet")]
 pub fn sender_step<K: KemProvider + ?Sized>(
     state: &PqRatchetState,
     kem: &K,
@@ -47,17 +45,6 @@ pub fn sender_step<K: KemProvider + ?Sized>(
     }))
 }
 
-#[cfg(not(feature = "pq_ratchet"))]
-pub fn sender_step<K>(
-    _state: &PqRatchetState,
-    _kem: &K,
-    _root_key: &[u8; 32],
-    _msg_num: u32,
-) -> Result<Option<PqStepOutput>, CoreError> {
-    Ok(None)
-}
-
-#[cfg(feature = "pq_ratchet")]
 pub fn receiver_step<K: KemProvider + ?Sized>(
     state: &PqRatchetState,
     kem: &K,
@@ -66,14 +53,4 @@ pub fn receiver_step<K: KemProvider + ?Sized>(
 ) -> Result<[u8; 32], CoreError> {
     let ss_pq = kem.decapsulate(state.local_secret_key.as_slice(), ciphertext)?;
     mix_root_with_pq(root_key, &ss_pq)
-}
-
-#[cfg(not(feature = "pq_ratchet"))]
-pub fn receiver_step<K>(
-    _state: &PqRatchetState,
-    _kem: &K,
-    root_key: &[u8; 32],
-    _ciphertext: &[u8],
-) -> Result<[u8; 32], CoreError> {
-    Ok(*root_key)
 }

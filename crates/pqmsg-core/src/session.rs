@@ -1,9 +1,7 @@
 use crate::aead::{decrypt, encrypt_with_rng, CiphertextEnvelope};
 use crate::dh::{generate_keypair, DhKeyPair, DhPublicKey};
 use crate::kdf::hkdf_sha256_32;
-#[cfg(feature = "pq_ratchet")]
 use crate::kem::KemProvider;
-#[cfg(feature = "pq_ratchet")]
 use crate::ratchet::pq::{self, PqRatchetState};
 use crate::ratchet::{dh_root_step, ChainState, SkippedKeyId, SkippedMessageKeys};
 use crate::tlv::{critical_type, encode, TlvRecord};
@@ -63,9 +61,7 @@ pub struct SessionState {
     remote_dh_pub: DhPublicKey,
     prev_chain_len: u32,
     skipped: SkippedMessageKeys,
-    #[cfg(feature = "pq_ratchet")]
     pq_state: Option<PqRatchetState>,
-    #[cfg(feature = "pq_ratchet")]
     pq_kem: Option<Box<dyn KemProvider>>,
 }
 
@@ -112,14 +108,11 @@ impl SessionState {
             remote_dh_pub,
             prev_chain_len: 0,
             skipped: SkippedMessageKeys::new(max_skipped),
-            #[cfg(feature = "pq_ratchet")]
             pq_state: None,
-            #[cfg(feature = "pq_ratchet")]
             pq_kem: None,
         })
     }
 
-    #[cfg(feature = "pq_ratchet")]
     pub fn enable_pq_ratchet(&mut self, state: PqRatchetState, kem: Box<dyn KemProvider>) {
         self.pq_state = Some(state);
         self.pq_kem = Some(kem);
@@ -192,21 +185,15 @@ impl SessionState {
             remote_dh_pub: DhPublicKey(snapshot.remote_dh_pub),
             prev_chain_len: snapshot.prev_chain_len,
             skipped: SkippedMessageKeys::from_entries(snapshot.max_skipped, skipped),
-            #[cfg(feature = "pq_ratchet")]
             pq_state: None,
-            #[cfg(feature = "pq_ratchet")]
             pq_kem: None,
         }
     }
 
     pub fn encrypt(&mut self, message: &[u8], ad: &[u8]) -> Result<Vec<u8>, CoreError> {
         let (msg_num, mut message_key) = self.sending_chain.next_message_key()?;
-        #[cfg(feature = "pq_ratchet")]
         let mut pq_step_ct = None;
-        #[cfg(not(feature = "pq_ratchet"))]
-        let pq_step_ct: Option<Vec<u8>> = None;
 
-        #[cfg(feature = "pq_ratchet")]
         if let (Some(state), Some(kem)) = (&self.pq_state, &self.pq_kem) {
             if let Some(step) = pq::sender_step(state, kem.as_ref(), &self.root_key, msg_num)? {
                 self.root_key = step.root_key;
@@ -288,16 +275,10 @@ impl SessionState {
         let plaintext = decrypt(&message_key, &envelope)?;
         message_key.zeroize();
 
-        #[cfg(feature = "pq_ratchet")]
         if let Some(ct) = wire.pq_step_ct.as_deref() {
             let state = self.pq_state.as_ref().ok_or(CoreError::PqRatchetDisabled)?;
             let kem = self.pq_kem.as_ref().ok_or(CoreError::PqRatchetDisabled)?;
             self.root_key = pq::receiver_step(state, kem.as_ref(), &self.root_key, ct)?;
-        }
-
-        #[cfg(not(feature = "pq_ratchet"))]
-        if wire.pq_step_ct.is_some() {
-            return Err(CoreError::PqRatchetDisabled);
         }
 
         Ok(plaintext)
@@ -383,7 +364,6 @@ mod tests {
     };
     use crate::kem::{KemEncapsulation, KemProvider};
     use crate::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
-    #[cfg(feature = "pq_ratchet")]
     use crate::ratchet::pq::PqRatchetState;
     use crate::wire::WireMessage;
     use crate::CoreError;
@@ -616,7 +596,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "pq_ratchet")]
     #[test]
     fn pq_step_evolves_root_and_keeps_decryption_working() {
         let (mut alice, mut bob) = setup_sessions(32);
@@ -668,7 +647,6 @@ mod tests {
         assert_eq!(plain3, b"b1");
     }
 
-    #[cfg(feature = "pq_ratchet")]
     #[test]
     fn tampered_pq_step_ciphertext_is_rejected() {
         let (mut alice, mut bob) = setup_sessions(32);

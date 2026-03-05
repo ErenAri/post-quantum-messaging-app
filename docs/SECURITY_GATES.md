@@ -56,6 +56,7 @@ flowchart LR
 ```
 
 Client applications MUST expose the active crypto profile and fail closed when PQ backend support is unavailable.
+PQ ratchet support MUST be compiled in all builds; feature-flag disable paths are not permitted for release artifacts.
 
 ## 8. Test Policy
 

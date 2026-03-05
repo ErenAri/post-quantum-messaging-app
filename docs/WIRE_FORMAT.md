@@ -19,9 +19,27 @@ Strict decoders reject unknown critical tags and duplicate critical tags.
 | `0x9003` | `sender_dh_pub` | 32-byte X25519 public key |
 | `0x9004` | `msg_num` | `u32` |
 | `0x9005` | `prev_chain_len` | `u32` |
-| `0x9006` | `pq_step_ct` | optional byte string |
+| `0x9006` | `pq_step_ct` | byte string present on PQ-step messages |
 | `0x9007` | `aead_nonce` | 12-byte nonce |
 | `0x9008` | `ciphertext` | byte string |
+
+## 2A. Sealed Sender Envelope (v1)
+
+| Tag (effective) | Field | Type |
+|---|---|---|
+| `0xA201` | `version` | `u16` |
+| `0xA202` | `suite_id` | `u16` |
+| `0xA203` | `recipient_user_id` | UTF-8 string |
+| `0xA204` | `aead_nonce` | 12-byte nonce |
+| `0xA205` | `ciphertext` | byte string |
+
+Decrypted inner payload fields:
+
+| Tag (effective) | Field | Type |
+|---|---|---|
+| `0xA301` | `sender_user_id` | UTF-8 string |
+| `0xA302` | `sender_device_id` | UTF-8 string |
+| `0xA303` | `payload` | byte string |
 
 ## 3. Handshake InitialMessage (v1)
 
@@ -55,7 +73,7 @@ For session traffic, external AD is constructed via the shared `pqmsg-core::ad::
 
 - `version` and `suite_id` are cryptographically bound by AEAD.
 - Session decryption rejects suite mismatch relative to established state.
-- Ratchet header metadata, including optional `pq_step_ct`, is authenticated through AD.
+- Ratchet header metadata, including `pq_step_ct` when present, is authenticated through AD.
 
 This prevents unauthenticated metadata mutation that could otherwise induce ratchet divergence.
 

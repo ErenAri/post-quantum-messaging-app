@@ -11,6 +11,7 @@ pub mod kdf;
 pub mod kem;
 pub mod keys;
 pub mod ratchet;
+pub mod sealed;
 pub mod session;
 pub mod storage;
 pub mod tlv;

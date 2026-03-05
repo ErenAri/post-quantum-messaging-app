@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use base64::engine::general_purpose::STANDARD as B64;
+use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL};
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
@@ -19,6 +19,10 @@ use pqmsg_core::handshake::{
 };
 use pqmsg_core::kem::MlKem768;
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
+use pqmsg_core::sealed::{
+    derive_pairwise_sealed_sender_key, open_message as open_sealed_message,
+    seal_message as seal_sealed_message, SealedEnvelope,
+};
 use pqmsg_core::session::{SessionRole, SessionSnapshot, SessionState};
 use pqmsg_core::storage::{
     unwrap_bytes as unwrap_wrapped_bytes, wrap_bytes as wrap_wrapped_bytes, WrappedSecret,
@@ -68,6 +72,20 @@ const AUTH_TAG_ROTATE_CHALLENGE_ID: u16 = critical_type(0x320D);
 const AUTH_TAG_ROTATE_SIG_CURRENT_HASH: u16 = critical_type(0x320E);
 #[allow(dead_code)]
 const AUTH_TAG_ROTATE_SIG_NEW_HASH: u16 = critical_type(0x320F);
+const AUTH_TAG_DELETE_IDS_HASH: u16 = critical_type(0x3214);
+const AUTH_TAG_DELETE_BEFORE_ID: u16 = critical_type(0x3215);
+const AUTH_TAG_DISCOVERY_PHONE_HASHES_HASH: u16 = critical_type(0x3216);
+const AUTH_TAG_DISCOVERY_EMAIL_HASHES_HASH: u16 = critical_type(0x3217);
+const AUTH_TAG_DISCOVERY_QUERY_HASHES_HASH: u16 = critical_type(0x3218);
+const AUTH_TAG_CONTACT_USER_ID: u16 = critical_type(0x3219);
+const AUTH_TAG_CONTACT_ALIAS_HASH: u16 = critical_type(0x321A);
+const AUTH_TAG_CONTACT_VERIFIED_FLAG: u16 = critical_type(0x321B);
+const AUTH_TAG_CONTACT_FINGERPRINT: u16 = critical_type(0x321C);
+const AUTH_TAG_GROUP_ID: u16 = critical_type(0x321D);
+const AUTH_TAG_GROUP_MEMBER_USER_ID: u16 = critical_type(0x321E);
+const AUTH_TAG_GROUP_MEMBERS_HASH: u16 = critical_type(0x321F);
+const AUTH_TAG_GROUP_SENDER_USER_ID: u16 = critical_type(0x3220);
+const AUTH_TAG_GROUP_MESSAGE_BLOB_HASH: u16 = critical_type(0x3221);
 const LEGACY_STORAGE_SEALED_KIND: &str = "pqmsg-cli-sealed";
 const LEGACY_STORAGE_SEALED_VERSION: u16 = 1;
 const LEGACY_STORAGE_SALT_BYTES: usize = 16;
@@ -78,6 +96,16 @@ const REPLAY_GUARD_VERSION: u16 = 1;
 const REPLAY_HASH_TTL_SECONDS: i64 = 86_400;
 const REPLAY_HASH_MAX_ENTRIES_PER_PEER: usize = 512;
 const PREKEY_REPLENISH_TARGET: usize = DEFAULT_ONE_TIME_PREKEYS;
+const DEFAULT_MESSAGE_RETENTION_DAYS: u32 = 30;
+const MESSAGE_STORE_VERSION: u16 = 1;
+const MAX_LOCAL_MESSAGE_HISTORY: usize = 10_000;
+const MAX_REMOTE_DELETE_BATCH: usize = 512;
+const MAX_DISCOVERY_HASHES: usize = 4096;
+const SHA256_HEX_LEN: usize = 64;
+const MAX_CONTACT_ALIAS_LEN: usize = 128;
+const MAX_GROUP_MEMBERS: usize = 512;
+const MAX_GROUP_MESSAGE_BYTES: usize = 1_000_000;
+const QR_PAYLOAD_VERSION: u16 = 1;
 
 static STORAGE_POLICY: OnceLock<StoragePolicy> = OnceLock::new();
 
@@ -112,6 +140,13 @@ struct Cli {
     state_passphrase: Option<String>,
     #[arg(long, global = true, default_value_t = false)]
     allow_plaintext_state: bool,
+    #[arg(
+        long,
+        global = true,
+        default_value_t = DEFAULT_MESSAGE_RETENTION_DAYS,
+        value_parser = clap::value_parser!(u32).range(1..=3650)
+    )]
+    message_retention_days: u32,
     #[command(subcommand)]
     command: Commands,
 }
@@ -144,6 +179,110 @@ enum Commands {
         #[arg(long, value_enum)]
         suite: Option<SuiteFlag>,
     },
+    DiscoveryUpload {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long = "phone-hash")]
+        phone_hashes_sha256: Vec<String>,
+        #[arg(long = "email-hash")]
+        email_hashes_sha256: Vec<String>,
+    },
+    DiscoveryMatch {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long = "hash")]
+        hashes_sha256: Vec<String>,
+    },
+    ContactsAdd {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long)]
+        peer: String,
+        #[arg(long)]
+        alias: Option<String>,
+        #[arg(long)]
+        qr_payload: Option<String>,
+    },
+    ContactsList {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+    },
+    ContactsRemove {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long)]
+        peer: String,
+    },
+    GroupsCreate {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long)]
+        group: String,
+        #[arg(long = "member")]
+        members: Vec<String>,
+    },
+    GroupsMembers {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long)]
+        group: String,
+    },
+    GroupsAddMember {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        member: String,
+    },
+    GroupsRemoveMember {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        member: String,
+    },
+    GroupsSend {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long)]
+        group: String,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        payload_b64: Option<String>,
+    },
+    QrExport {
+        #[arg(long)]
+        keys: PathBuf,
+    },
+    QrVerify {
+        #[arg(long)]
+        payload: String,
+        #[arg(long)]
+        expected_user: Option<String>,
+    },
     BackupKeys {
         #[arg(long)]
         keys: PathBuf,
@@ -174,11 +313,43 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         accept_key_change: bool,
     },
+    SendSealed {
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        text: String,
+        #[arg(long)]
+        keys: Option<PathBuf>,
+        #[arg(long, value_enum)]
+        suite: Option<SuiteFlag>,
+        #[arg(long, default_value_t = false)]
+        accept_key_change: bool,
+    },
     Poll {
         #[arg(long)]
         user: String,
         #[arg(long)]
         keys: PathBuf,
+    },
+    PollSealed {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+    },
+    DeleteMessages {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long)]
+        peer: Option<String>,
+        #[arg(long)]
+        before_message_id: Option<i64>,
+        #[arg(long, default_value_t = false)]
+        remote: bool,
     },
 }
 
@@ -289,6 +460,143 @@ struct PrekeysStatusResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct DiscoveryHandlesUploadRequest {
+    phone_hashes_sha256: Vec<String>,
+    email_hashes_sha256: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DiscoveryHandlesUploadResponse {
+    user_id: String,
+    device_id: String,
+    uploaded_phone_hashes: usize,
+    uploaded_email_hashes: usize,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DiscoveryMatchRequest {
+    hashes_sha256: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DiscoveryMatchItem {
+    hash_sha256: String,
+    matched_user_id: String,
+    handle_kind: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DiscoveryMatchResponse {
+    user_id: String,
+    matches: Vec<DiscoveryMatchItem>,
+    checked_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct UpsertContactRequest {
+    contact_user_id: String,
+    alias: Option<String>,
+    verified_by_qr: Option<bool>,
+    verified_fingerprint_sha256: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UpsertContactResponse {
+    user_id: String,
+    contact_user_id: String,
+    alias: Option<String>,
+    verified_by_qr: bool,
+    verified_fingerprint_sha256: Option<String>,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ContactListItem {
+    contact_user_id: String,
+    alias: Option<String>,
+    verified_by_qr: bool,
+    verified_fingerprint_sha256: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ContactListResponse {
+    user_id: String,
+    contacts: Vec<ContactListItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoveContactRequest {
+    contact_user_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RemoveContactResponse {
+    user_id: String,
+    removed_contact_user_id: String,
+    removed: bool,
+    removed_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateGroupRequest {
+    group_id: String,
+    member_user_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CreateGroupResponse {
+    group_id: String,
+    owner_user_id: String,
+    member_count: usize,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GroupMemberRecord {
+    user_id: String,
+    joined_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GroupMembersResponse {
+    group_id: String,
+    members: Vec<GroupMemberRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct GroupMemberMutationRequest {
+    member_user_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GroupMemberMutationResponse {
+    group_id: String,
+    member_user_id: String,
+    owner_user_id: String,
+    changed: bool,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GroupRelayRequest {
+    sender_user_id: String,
+    device_id: String,
+    message_bytes_base64: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GroupRelayResponse {
+    group_id: String,
+    delivered_message_count: usize,
+    delivered_user_count: usize,
+    first_message_id: Option<i64>,
+    received_at: String,
+}
+
+#[derive(Debug, Serialize)]
 struct RegisterRequest {
     user_id: String,
     identity_x25519_pub: String,
@@ -313,9 +621,22 @@ struct RelayRequest {
     message_bytes_base64: String,
 }
 
+#[derive(Debug, Serialize)]
+struct SealedRelayRequest {
+    message_bytes_base64: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SealedRelayResponse {
+    delivered_device_count: usize,
+    first_message_id: Option<i64>,
+    received_at: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct RelayResponse {
     message_id: i64,
+    delivered_device_count: Option<usize>,
     received_at: String,
 }
 
@@ -329,6 +650,64 @@ struct InboxMessage {
     message_id: i64,
     sender_user_id: String,
     message_bytes_base64: String,
+    received_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SealedInboxResponse {
+    messages: Vec<SealedInboxMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SealedInboxMessage {
+    message_id: i64,
+    message_bytes_base64: String,
+    received_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeleteInboxRequest {
+    message_ids: Vec<i64>,
+    delete_before_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteInboxResponse {
+    user_id: String,
+    device_id: String,
+    deleted_count: u64,
+    deleted_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct QrIdentityPayload {
+    version: u16,
+    user_id: String,
+    device_id: String,
+    suite: SuiteFlag,
+    identity_x25519_pub_b64: String,
+    identity_sig_pub_b64: String,
+    identity_fingerprint_sha256: String,
+    generated_at_unix: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredMessageRecord {
+    message_id: i64,
+    peer_user_id: String,
+    direction: String,
+    text: String,
+    server_timestamp: Option<String>,
+    stored_at_unix: i64,
+    expires_at_unix: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MessageStoreFile {
+    version: u16,
+    user_id: String,
+    retention_seconds: i64,
+    messages: Vec<StoredMessageRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,6 +715,8 @@ struct IdentityPinEntry {
     identity_fingerprint_sha256: String,
     identity_key_version: u32,
     identity_sig_pub: String,
+    #[serde(default)]
+    identity_x25519_pub: Option<String>,
     observed_at: String,
 }
 
@@ -350,6 +731,14 @@ struct IdentityPinsFile {
 struct SendOptions {
     security_profile: SecurityProfile,
     accept_key_change: bool,
+    message_retention_seconds: i64,
+}
+
+struct DeleteMessagesOptions<'a> {
+    peer: Option<&'a str>,
+    before_message_id: Option<i64>,
+    remote: bool,
+    message_retention_seconds: i64,
 }
 
 struct Ed25519SignatureVerifier;
@@ -487,6 +876,7 @@ async fn main() -> Result<()> {
         allow_plaintext: allow_plaintext_state,
     });
     let client = Client::new();
+    let message_retention_seconds = message_retention_days_to_seconds(cli.message_retention_days)?;
     print_runtime_crypto_profile(security_profile, None)?;
 
     match cli.command {
@@ -536,6 +926,329 @@ async fn main() -> Result<()> {
             validate_server_url_for_profile(security_profile, &cli.server)?;
             publish_prekeys(&client, &cli.server, &keys_file).await?;
         }
+        Commands::DiscoveryUpload {
+            user,
+            keys,
+            phone_hashes_sha256,
+            email_hashes_sha256,
+        } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            validate_server_url_for_profile(security_profile, &cli.server)?;
+            let phone_hashes =
+                normalize_sha256_hashes("phone_hashes_sha256", &phone_hashes_sha256)?;
+            let email_hashes =
+                normalize_sha256_hashes("email_hashes_sha256", &email_hashes_sha256)?;
+            let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+            let response = upload_discovery_handles_remote(
+                &client,
+                &cli.server,
+                &keys_file.user_id,
+                &keys_file.device_id,
+                &phone_hashes,
+                &email_hashes,
+                &auth_signing_key,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::DiscoveryMatch {
+            user,
+            keys,
+            hashes_sha256,
+        } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            validate_server_url_for_profile(security_profile, &cli.server)?;
+            let hashes = normalize_sha256_hashes("hashes_sha256", &hashes_sha256)?;
+            let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+            let response = discovery_match_remote(
+                &client,
+                &cli.server,
+                &keys_file.user_id,
+                &keys_file.device_id,
+                &hashes,
+                &auth_signing_key,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::ContactsAdd {
+            user,
+            keys,
+            peer,
+            alias,
+            qr_payload,
+        } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            validate_server_url_for_profile(security_profile, &cli.server)?;
+            validate_id("peer", &peer)?;
+            let alias = validate_optional_alias(alias.as_deref())?;
+            let qr_verified = if let Some(payload) = qr_payload {
+                let qr = decode_qr_payload(&payload)?;
+                verify_qr_payload(&qr, Some(&peer))?;
+                Some(qr.identity_fingerprint_sha256)
+            } else {
+                None
+            };
+            let req = UpsertContactRequest {
+                contact_user_id: peer.clone(),
+                alias: alias.clone(),
+                verified_by_qr: Some(qr_verified.is_some()),
+                verified_fingerprint_sha256: qr_verified.clone(),
+            };
+            let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+            let response = upsert_contact_remote(
+                &client,
+                &cli.server,
+                &keys_file.user_id,
+                &keys_file.device_id,
+                &req,
+                &auth_signing_key,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::ContactsList { user, keys } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            validate_server_url_for_profile(security_profile, &cli.server)?;
+            let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+            let response = list_contacts_remote(
+                &client,
+                &cli.server,
+                &keys_file.user_id,
+                &keys_file.device_id,
+                &auth_signing_key,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::ContactsRemove { user, keys, peer } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            validate_server_url_for_profile(security_profile, &cli.server)?;
+            validate_id("peer", &peer)?;
+            let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+            let response = remove_contact_remote(
+                &client,
+                &cli.server,
+                &keys_file.user_id,
+                &keys_file.device_id,
+                &peer,
+                &auth_signing_key,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::GroupsCreate {
+            user,
+            keys,
+            group,
+            members,
+        } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            validate_server_url_for_profile(security_profile, &cli.server)?;
+            validate_id("group", &group)?;
+            let members = normalize_group_member_ids(&members)?;
+            let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+            let response = create_group_remote(
+                &client,
+                &cli.server,
+                &keys_file.user_id,
+                &keys_file.device_id,
+                &group,
+                &members,
+                &auth_signing_key,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::GroupsMembers { user, keys, group } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            validate_server_url_for_profile(security_profile, &cli.server)?;
+            validate_id("group", &group)?;
+            let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+            let response = list_group_members_remote(
+                &client,
+                &cli.server,
+                &keys_file.user_id,
+                &keys_file.device_id,
+                &group,
+                &auth_signing_key,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::GroupsAddMember {
+            user,
+            keys,
+            group,
+            member,
+        } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            validate_server_url_for_profile(security_profile, &cli.server)?;
+            validate_id("group", &group)?;
+            validate_id("member", &member)?;
+            let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+            let response = add_group_member_remote(
+                &client,
+                &cli.server,
+                &keys_file.user_id,
+                &keys_file.device_id,
+                &group,
+                &member,
+                &auth_signing_key,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::GroupsRemoveMember {
+            user,
+            keys,
+            group,
+            member,
+        } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            validate_server_url_for_profile(security_profile, &cli.server)?;
+            validate_id("group", &group)?;
+            validate_id("member", &member)?;
+            let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+            let response = remove_group_member_remote(
+                &client,
+                &cli.server,
+                &keys_file.user_id,
+                &keys_file.device_id,
+                &group,
+                &member,
+                &auth_signing_key,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::GroupsSend {
+            user,
+            keys,
+            group,
+            text,
+            payload_b64,
+        } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            validate_server_url_for_profile(security_profile, &cli.server)?;
+            validate_id("group", &group)?;
+            let message_blob = match (text, payload_b64) {
+                (Some(value), None) => value.into_bytes(),
+                (None, Some(value)) => decode_group_payload_b64(&value)?,
+                (Some(_), Some(_)) => {
+                    return Err(anyhow!(
+                        "provide only one of --text or --payload-b64 for groups-send"
+                    ))
+                }
+                (None, None) => {
+                    return Err(anyhow!(
+                        "provide either --text or --payload-b64 for groups-send"
+                    ))
+                }
+            };
+            if message_blob.is_empty() || message_blob.len() > MAX_GROUP_MESSAGE_BYTES {
+                return Err(anyhow!(
+                    "group message bytes must be 1..={MAX_GROUP_MESSAGE_BYTES}"
+                ));
+            }
+            let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+            let response = relay_group_message_remote(
+                &client,
+                &cli.server,
+                &keys_file.user_id,
+                &keys_file.device_id,
+                &group,
+                &message_blob,
+                &auth_signing_key,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::QrExport { keys } => {
+            let keys_file = read_keys_file(&keys)?;
+            let payload = build_qr_payload(&keys_file)?;
+            let encoded = encode_qr_payload(&payload)?;
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+            println!("{encoded}");
+        }
+        Commands::QrVerify {
+            payload,
+            expected_user,
+        } => {
+            let decoded = decode_qr_payload(&payload)?;
+            verify_qr_payload(&decoded, expected_user.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&decoded)?);
+        }
         Commands::BackupKeys {
             keys,
             out,
@@ -583,6 +1296,45 @@ async fn main() -> Result<()> {
                 SendOptions {
                     security_profile,
                     accept_key_change,
+                    message_retention_seconds,
+                },
+                &keys_file,
+                &to,
+                text.as_bytes(),
+            )
+            .await?;
+        }
+        Commands::SendSealed {
+            from,
+            to,
+            text,
+            keys,
+            suite,
+            accept_key_change,
+        } => {
+            let keys_path = keys.unwrap_or_else(|| default_keys_path(&from));
+            let mut keys_file = read_keys_file(&keys_path)?;
+            if keys_file.user_id != from {
+                return Err(anyhow!(
+                    "from mismatch: command from '{}' vs keys file user '{}'",
+                    from,
+                    keys_file.user_id
+                ));
+            }
+            if let Some(override_suite) = suite {
+                keys_file.suite = override_suite;
+            }
+            security_profile.enforce_suite_id(suite_to_suite_id(keys_file.suite))?;
+            validate_server_url_for_profile(security_profile, &cli.server)?;
+            ensure_prekeys_replenished(&client, &cli.server, &keys_path, &mut keys_file).await?;
+            send_sealed_message_flow(
+                &client,
+                &cli.server,
+                &cli.state_dir,
+                SendOptions {
+                    security_profile,
+                    accept_key_change,
+                    message_retention_seconds,
                 },
                 &keys_file,
                 &to,
@@ -606,8 +1358,62 @@ async fn main() -> Result<()> {
                 &client,
                 &cli.server,
                 &cli.state_dir,
+                message_retention_seconds,
                 security_profile,
                 &keys_file,
+            )
+            .await?;
+        }
+        Commands::PollSealed { user, keys } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            security_profile.enforce_suite_id(suite_to_suite_id(keys_file.suite))?;
+            validate_server_url_for_profile(security_profile, &cli.server)?;
+            poll_sealed_inbox_flow(
+                &client,
+                &cli.server,
+                &cli.state_dir,
+                message_retention_seconds,
+                security_profile,
+                &keys_file,
+            )
+            .await?;
+        }
+        Commands::DeleteMessages {
+            user,
+            keys,
+            peer,
+            before_message_id,
+            remote,
+        } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            if remote {
+                validate_server_url_for_profile(security_profile, &cli.server)?;
+            }
+            delete_messages_flow(
+                &client,
+                &cli.server,
+                &cli.state_dir,
+                &keys_file,
+                DeleteMessagesOptions {
+                    peer: peer.as_deref(),
+                    before_message_id,
+                    remote,
+                    message_retention_seconds,
+                },
             )
             .await?;
         }
@@ -786,6 +1592,291 @@ async fn fetch_prekeys_status(
     handle_json_response(response).await
 }
 
+async fn upload_discovery_handles_remote(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    phone_hashes_sha256: &[String],
+    email_hashes_sha256: &[String],
+    auth_signing_key: &SigningKey,
+) -> Result<DiscoveryHandlesUploadResponse> {
+    let req = DiscoveryHandlesUploadRequest {
+        phone_hashes_sha256: phone_hashes_sha256.to_vec(),
+        email_hashes_sha256: email_hashes_sha256.to_vec(),
+    };
+    let auth_headers = discovery_handles_auth_headers(
+        auth_signing_key,
+        user,
+        device_id,
+        &req.phone_hashes_sha256,
+        &req.email_hashes_sha256,
+    )?;
+    let mut request = client
+        .post(format!("{server}/v1/users/{user}/discovery/handles"))
+        .json(&req);
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("upload discovery handles request failed")?;
+    handle_json_response(response).await
+}
+
+async fn discovery_match_remote(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    hashes_sha256: &[String],
+    auth_signing_key: &SigningKey,
+) -> Result<DiscoveryMatchResponse> {
+    let req = DiscoveryMatchRequest {
+        hashes_sha256: hashes_sha256.to_vec(),
+    };
+    let auth_headers =
+        discovery_match_auth_headers(auth_signing_key, user, device_id, &req.hashes_sha256)?;
+    let mut request = client
+        .post(format!("{server}/v1/users/{user}/discovery/match"))
+        .json(&req);
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("discovery match request failed")?;
+    handle_json_response(response).await
+}
+
+async fn upsert_contact_remote(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    req: &UpsertContactRequest,
+    auth_signing_key: &SigningKey,
+) -> Result<UpsertContactResponse> {
+    let auth_headers = contacts_upsert_auth_headers(
+        auth_signing_key,
+        user,
+        device_id,
+        &req.contact_user_id,
+        req.alias.as_deref(),
+        req.verified_by_qr.unwrap_or(false),
+        req.verified_fingerprint_sha256.as_deref(),
+    )?;
+    let mut request = client
+        .post(format!("{server}/v1/users/{user}/contacts"))
+        .json(&req);
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("upsert contact request failed")?;
+    handle_json_response(response).await
+}
+
+async fn list_contacts_remote(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    auth_signing_key: &SigningKey,
+) -> Result<ContactListResponse> {
+    let auth_headers = contacts_list_auth_headers(auth_signing_key, user, device_id)?;
+    let mut request = client.get(format!("{server}/v1/users/{user}/contacts"));
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("list contacts request failed")?;
+    handle_json_response(response).await
+}
+
+async fn remove_contact_remote(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    peer_user_id: &str,
+    auth_signing_key: &SigningKey,
+) -> Result<RemoveContactResponse> {
+    let req = RemoveContactRequest {
+        contact_user_id: peer_user_id.to_string(),
+    };
+    let auth_headers =
+        contacts_remove_auth_headers(auth_signing_key, user, device_id, &req.contact_user_id)?;
+    let mut request = client
+        .post(format!("{server}/v1/users/{user}/contacts/remove"))
+        .json(&req);
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("remove contact request failed")?;
+    handle_json_response(response).await
+}
+
+async fn create_group_remote(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    group_id: &str,
+    member_user_ids: &[String],
+    auth_signing_key: &SigningKey,
+) -> Result<CreateGroupResponse> {
+    let req = CreateGroupRequest {
+        group_id: group_id.to_string(),
+        member_user_ids: member_user_ids.to_vec(),
+    };
+    let auth_headers = groups_create_auth_headers(
+        auth_signing_key,
+        user,
+        device_id,
+        &req.group_id,
+        &req.member_user_ids,
+    )?;
+    let mut request = client.post(format!("{server}/v1/groups")).json(&req);
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("create group request failed")?;
+    handle_json_response(response).await
+}
+
+async fn list_group_members_remote(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    group_id: &str,
+    auth_signing_key: &SigningKey,
+) -> Result<GroupMembersResponse> {
+    let auth_headers =
+        groups_members_list_auth_headers(auth_signing_key, user, device_id, group_id)?;
+    let mut request = client.get(format!("{server}/v1/groups/{group_id}/members"));
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("list group members request failed")?;
+    handle_json_response(response).await
+}
+
+async fn add_group_member_remote(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    group_id: &str,
+    member_user_id: &str,
+    auth_signing_key: &SigningKey,
+) -> Result<GroupMemberMutationResponse> {
+    let req = GroupMemberMutationRequest {
+        member_user_id: member_user_id.to_string(),
+    };
+    let auth_headers = groups_members_add_auth_headers(
+        auth_signing_key,
+        user,
+        device_id,
+        group_id,
+        &req.member_user_id,
+    )?;
+    let mut request = client
+        .post(format!("{server}/v1/groups/{group_id}/members/add"))
+        .json(&req);
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("add group member request failed")?;
+    handle_json_response(response).await
+}
+
+async fn remove_group_member_remote(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    group_id: &str,
+    member_user_id: &str,
+    auth_signing_key: &SigningKey,
+) -> Result<GroupMemberMutationResponse> {
+    let req = GroupMemberMutationRequest {
+        member_user_id: member_user_id.to_string(),
+    };
+    let auth_headers = groups_members_remove_auth_headers(
+        auth_signing_key,
+        user,
+        device_id,
+        group_id,
+        &req.member_user_id,
+    )?;
+    let mut request = client
+        .post(format!("{server}/v1/groups/{group_id}/members/remove"))
+        .json(&req);
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("remove group member request failed")?;
+    handle_json_response(response).await
+}
+
+async fn relay_group_message_remote(
+    client: &Client,
+    server: &str,
+    sender_user_id: &str,
+    sender_device_id: &str,
+    group_id: &str,
+    message_blob: &[u8],
+    auth_signing_key: &SigningKey,
+) -> Result<GroupRelayResponse> {
+    let req = GroupRelayRequest {
+        sender_user_id: sender_user_id.to_string(),
+        device_id: sender_device_id.to_string(),
+        message_bytes_base64: B64.encode(message_blob),
+    };
+    let auth_headers = groups_relay_auth_headers(
+        auth_signing_key,
+        sender_user_id,
+        sender_device_id,
+        group_id,
+        &req.sender_user_id,
+        message_blob,
+    )?;
+    let mut request = client
+        .post(format!("{server}/v1/groups/{group_id}/relay"))
+        .json(&req);
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("relay group message request failed")?;
+    handle_json_response(response).await
+}
+
 async fn ensure_prekeys_replenished(
     client: &Client,
     server: &str,
@@ -868,9 +1959,26 @@ async fn send_message_flow(
                 passphrase_kdf_hint: None,
             },
         )?;
+        let text = String::from_utf8_lossy(plaintext).to_string();
+        append_message_record(
+            state_dir,
+            from,
+            options.message_retention_seconds,
+            StoredMessageRecord {
+                message_id: response.message_id,
+                peer_user_id: to.to_string(),
+                direction: "outgoing".to_string(),
+                text,
+                server_timestamp: Some(response.received_at.clone()),
+                stored_at_unix: unix_time_now()?,
+                expires_at_unix: 0,
+            },
+        )?;
         println!(
-            "sent session message {} at {}",
-            response.message_id, response.received_at
+            "sent session message {} at {} (fanout_devices={})",
+            response.message_id,
+            response.received_at,
+            response.delivered_device_count.unwrap_or(1)
         );
         return Ok(());
     }
@@ -947,10 +2055,82 @@ async fn send_message_flow(
             passphrase_kdf_hint: None,
         },
     )?;
+    let text = String::from_utf8_lossy(plaintext).to_string();
+    append_message_record(
+        state_dir,
+        from,
+        options.message_retention_seconds,
+        StoredMessageRecord {
+            message_id: response.message_id,
+            peer_user_id: to.to_string(),
+            direction: "outgoing".to_string(),
+            text,
+            server_timestamp: Some(response.received_at.clone()),
+            stored_at_unix: unix_time_now()?,
+            expires_at_unix: 0,
+        },
+    )?;
 
     println!(
-        "sent initial handshake message {} at {}",
-        response.message_id, response.received_at
+        "sent initial handshake message {} at {} (fanout_devices={})",
+        response.message_id,
+        response.received_at,
+        response.delivered_device_count.unwrap_or(1)
+    );
+    Ok(())
+}
+
+async fn send_sealed_message_flow(
+    client: &Client,
+    server: &str,
+    state_dir: &Path,
+    options: SendOptions,
+    sender_keys: &UserKeysFile,
+    to: &str,
+    plaintext: &[u8],
+) -> Result<()> {
+    let from = sender_keys.user_id.as_str();
+    let suite_id = suite_to_suite_id(sender_keys.suite);
+    options.security_profile.enforce_suite_id(suite_id)?;
+
+    let bundle = fetch_bundle(client, server, to).await?;
+    enforce_identity_pin(state_dir, from, &bundle, options.accept_key_change)?;
+
+    let identity = to_identity_keypair(sender_keys)?;
+    let local_secret = identity.require_secret_key()?;
+    let remote_pub = DhPublicKey(decode_b64_32(
+        "identity_x25519_pub",
+        &bundle.identity_x25519_pub,
+    )?);
+    let sealed_key = derive_pairwise_sealed_sender_key(&local_secret, &remote_pub, suite_id)?;
+    let sealed_payload = seal_sealed_message(
+        &sealed_key,
+        suite_id,
+        to,
+        from,
+        &sender_keys.device_id,
+        plaintext,
+    )?;
+    let response = relay_sealed_message(client, server, to, &sealed_payload).await?;
+
+    let text = String::from_utf8_lossy(plaintext).to_string();
+    append_message_record(
+        state_dir,
+        from,
+        options.message_retention_seconds,
+        StoredMessageRecord {
+            message_id: response.first_message_id.unwrap_or(0),
+            peer_user_id: to.to_string(),
+            direction: "outgoing-sealed".to_string(),
+            text,
+            server_timestamp: Some(response.received_at.clone()),
+            stored_at_unix: unix_time_now()?,
+            expires_at_unix: 0,
+        },
+    )?;
+    println!(
+        "sent sealed message at {} (fanout_devices={})",
+        response.received_at, response.delivered_device_count
     );
     Ok(())
 }
@@ -959,6 +2139,7 @@ async fn poll_inbox_flow(
     client: &Client,
     server: &str,
     state_dir: &Path,
+    message_retention_seconds: i64,
     security_profile: SecurityProfile,
     keys: &UserKeysFile,
 ) -> Result<()> {
@@ -1054,6 +2235,20 @@ async fn poll_inbox_flow(
                     passphrase_kdf_hint: None,
                 },
             )?;
+            append_message_record(
+                state_dir,
+                &keys.user_id,
+                message_retention_seconds,
+                StoredMessageRecord {
+                    message_id: item.message_id,
+                    peer_user_id: sender.clone(),
+                    direction: "incoming".to_string(),
+                    text,
+                    server_timestamp: item.received_at.clone(),
+                    stored_at_unix: unix_time_now()?,
+                    expires_at_unix: 0,
+                },
+            )?;
             handled = true;
         }
 
@@ -1073,6 +2268,20 @@ async fn poll_inbox_flow(
                             suite: keys.suite,
                             snapshot: session.snapshot(),
                             passphrase_kdf_hint: None,
+                        },
+                    )?;
+                    append_message_record(
+                        state_dir,
+                        &keys.user_id,
+                        message_retention_seconds,
+                        StoredMessageRecord {
+                            message_id: item.message_id,
+                            peer_user_id: sender.clone(),
+                            direction: "incoming".to_string(),
+                            text,
+                            server_timestamp: item.received_at.clone(),
+                            stored_at_unix: unix_time_now()?,
+                            expires_at_unix: 0,
                         },
                     )?;
                 }
@@ -1108,6 +2317,189 @@ async fn poll_inbox_flow(
 
     save_cursor(&cursor_path, &cursor)?;
     save_replay_guard(&replay_guard_path, &replay_guard)?;
+    Ok(())
+}
+
+async fn poll_sealed_inbox_flow(
+    client: &Client,
+    server: &str,
+    state_dir: &Path,
+    message_retention_seconds: i64,
+    security_profile: SecurityProfile,
+    keys: &UserKeysFile,
+) -> Result<()> {
+    let cursor_path = sealed_inbox_cursor_path(state_dir, &keys.user_id);
+    let mut cursor = load_cursor(&cursor_path)?;
+    let auth_signing_key = auth_signing_key_for_user(keys)?;
+    let inbox = fetch_sealed_inbox(
+        client,
+        server,
+        &keys.user_id,
+        &keys.device_id,
+        cursor.since_message_id,
+        &auth_signing_key,
+    )
+    .await?;
+
+    let pins_path = identity_pins_file_path(state_dir, &keys.user_id);
+    let pins = load_identity_pins(&pins_path, &keys.user_id)?;
+    let identity = to_identity_keypair(keys)?;
+    let local_secret = identity.require_secret_key()?;
+
+    for item in inbox.messages {
+        let bytes = decode_b64("message_bytes_base64", &item.message_bytes_base64)?;
+        let envelope = match SealedEnvelope::decode(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                cursor.since_message_id = cursor.since_message_id.max(item.message_id);
+                continue;
+            }
+        };
+        security_profile.enforce_suite_id(envelope.suite_id)?;
+
+        let mut opened_message = None;
+        for pin in pins.peers.values() {
+            let Some(identity_x25519_pub) = pin.identity_x25519_pub.as_deref() else {
+                continue;
+            };
+            let Ok(peer_pub_bytes) = decode_b64_32("pin.identity_x25519_pub", identity_x25519_pub)
+            else {
+                continue;
+            };
+            let peer_pub = DhPublicKey(peer_pub_bytes);
+            let Ok(sealed_key) =
+                derive_pairwise_sealed_sender_key(&local_secret, &peer_pub, envelope.suite_id)
+            else {
+                continue;
+            };
+            if let Ok(opened) =
+                open_sealed_message(&sealed_key, &bytes, envelope.suite_id, &keys.user_id)
+            {
+                opened_message = Some(opened);
+                break;
+            }
+        }
+
+        if let Some(opened) = opened_message {
+            let text = String::from_utf8(opened.payload.clone())
+                .unwrap_or_else(|_| format!("<{} bytes binary>", opened.payload.len()));
+            println!("[sealed:{}] {}", opened.sender_user_id, text);
+            append_message_record(
+                state_dir,
+                &keys.user_id,
+                message_retention_seconds,
+                StoredMessageRecord {
+                    message_id: item.message_id,
+                    peer_user_id: opened.sender_user_id,
+                    direction: "incoming-sealed".to_string(),
+                    text,
+                    server_timestamp: item.received_at.clone(),
+                    stored_at_unix: unix_time_now()?,
+                    expires_at_unix: 0,
+                },
+            )?;
+        } else {
+            eprintln!(
+                "unable to decrypt sealed message id {} for user '{}'",
+                item.message_id, keys.user_id
+            );
+        }
+        cursor.since_message_id = cursor.since_message_id.max(item.message_id);
+    }
+
+    save_cursor(&cursor_path, &cursor)?;
+    Ok(())
+}
+
+async fn delete_messages_flow(
+    client: &Client,
+    server: &str,
+    state_dir: &Path,
+    keys: &UserKeysFile,
+    options: DeleteMessagesOptions<'_>,
+) -> Result<()> {
+    if options.before_message_id.is_some_and(|value| value <= 0) {
+        return Err(anyhow!("before_message_id must be a positive integer"));
+    }
+    if let Some(peer_user) = options.peer {
+        validate_id("peer", peer_user)?;
+    }
+
+    let message_store_path = message_store_file_path(state_dir, &keys.user_id);
+    let mut message_store = load_message_store(
+        &message_store_path,
+        &keys.user_id,
+        options.message_retention_seconds,
+    )?;
+    let deleted_local_ids =
+        delete_message_records(&mut message_store, options.peer, options.before_message_id);
+    let deleted_local_count = deleted_local_ids.len();
+    save_message_store(&message_store_path, &message_store)?;
+    println!(
+        "deleted {} local archived messages for user '{}'",
+        deleted_local_count, keys.user_id
+    );
+
+    if !options.remote {
+        return Ok(());
+    }
+
+    let auth_signing_key = auth_signing_key_for_user(keys)?;
+    let mut remote_deleted_total: u64 = 0;
+    if options.peer.is_none() && options.before_message_id.is_some() {
+        let response = delete_inbox_remote(
+            client,
+            server,
+            &keys.user_id,
+            &keys.device_id,
+            &[],
+            options.before_message_id,
+            &auth_signing_key,
+        )
+        .await?;
+        validate_delete_inbox_response(&response, keys)?;
+        remote_deleted_total = remote_deleted_total.saturating_add(response.deleted_count);
+    } else {
+        let normalized_ids = normalize_message_ids(&deleted_local_ids);
+        for chunk in normalized_ids.chunks(MAX_REMOTE_DELETE_BATCH) {
+            let response = delete_inbox_remote(
+                client,
+                server,
+                &keys.user_id,
+                &keys.device_id,
+                chunk,
+                None,
+                &auth_signing_key,
+            )
+            .await?;
+            validate_delete_inbox_response(&response, keys)?;
+            remote_deleted_total = remote_deleted_total.saturating_add(response.deleted_count);
+        }
+    }
+
+    println!(
+        "requested remote inbox deletion for user '{}' device '{}' (deleted_count={})",
+        keys.user_id, keys.device_id, remote_deleted_total
+    );
+    Ok(())
+}
+
+fn validate_delete_inbox_response(
+    response: &DeleteInboxResponse,
+    keys: &UserKeysFile,
+) -> Result<()> {
+    if response.user_id != keys.user_id || response.device_id != keys.device_id {
+        return Err(anyhow!(
+            "delete inbox response identity mismatch: expected {}/{} got {}/{}",
+            keys.user_id,
+            keys.device_id,
+            response.user_id,
+            response.device_id
+        ));
+    }
+    if response.deleted_at.trim().is_empty() {
+        return Err(anyhow!("delete inbox response missing deleted_at"));
+    }
     Ok(())
 }
 
@@ -1190,6 +2582,24 @@ async fn relay_message(
     handle_json_response(response).await
 }
 
+async fn relay_sealed_message(
+    client: &Client,
+    server: &str,
+    recipient: &str,
+    message_bytes: &[u8],
+) -> Result<SealedRelayResponse> {
+    let req = SealedRelayRequest {
+        message_bytes_base64: B64.encode(message_bytes),
+    };
+    let response = client
+        .post(format!("{server}/v1/sealed-relay/{recipient}"))
+        .json(&req)
+        .send()
+        .await
+        .context("sealed relay request failed")?;
+    handle_json_response(response).await
+}
+
 async fn fetch_inbox(
     client: &Client,
     server: &str,
@@ -1204,6 +2614,59 @@ async fn fetch_inbox(
         request = request.header(name, value);
     }
     let response = request.send().await.context("fetch inbox request failed")?;
+    handle_json_response(response).await
+}
+
+async fn fetch_sealed_inbox(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    since: i64,
+    auth_signing_key: &SigningKey,
+) -> Result<SealedInboxResponse> {
+    let auth_headers = sealed_inbox_auth_headers(auth_signing_key, user, device_id, since)?;
+    let mut request = client.get(format!("{server}/v1/sealed-inbox/{user}?since={since}"));
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("fetch sealed inbox request failed")?;
+    handle_json_response(response).await
+}
+
+async fn delete_inbox_remote(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    message_ids: &[i64],
+    delete_before_id: Option<i64>,
+    auth_signing_key: &SigningKey,
+) -> Result<DeleteInboxResponse> {
+    let req = DeleteInboxRequest {
+        message_ids: message_ids.to_vec(),
+        delete_before_id,
+    };
+    let auth_headers = inbox_delete_auth_headers(
+        auth_signing_key,
+        user,
+        device_id,
+        &req.message_ids,
+        req.delete_before_id,
+    )?;
+    let mut request = client
+        .post(format!("{server}/v1/inbox/{user}/delete"))
+        .json(&req);
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("delete inbox request failed")?;
     handle_json_response(response).await
 }
 
@@ -1284,10 +2747,198 @@ fn inbox_cursor_path(state_dir: &Path, user: &str) -> PathBuf {
     state_dir.join(user).join("_inbox_cursor.json")
 }
 
+fn sealed_inbox_cursor_path(state_dir: &Path, user: &str) -> PathBuf {
+    state_dir.join(user).join("_sealed_inbox_cursor.json")
+}
+
+fn message_store_file_path(state_dir: &Path, user: &str) -> PathBuf {
+    state_dir.join(user).join("_messages.json")
+}
+
 fn message_hash_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
+}
+
+fn normalize_message_ids(message_ids: &[i64]) -> Vec<i64> {
+    let mut ids = message_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn hash_string_list_sha256(values: &[String]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    for value in values {
+        hasher.update(value.as_bytes());
+    }
+    hasher.finalize().to_vec()
+}
+
+fn unix_time_now() -> Result<i64> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| anyhow!("system time before UNIX epoch"))?;
+    i64::try_from(duration.as_secs()).map_err(|_| anyhow!("system time overflow"))
+}
+
+fn message_retention_days_to_seconds(days: u32) -> Result<i64> {
+    let seconds = i64::from(days)
+        .checked_mul(86_400)
+        .ok_or_else(|| anyhow!("message retention days overflow"))?;
+    Ok(seconds)
+}
+
+fn validate_id(field: &'static str, value: &str) -> Result<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return Err(anyhow!("{field} must be 1..128 non-whitespace characters"));
+    }
+    Ok(())
+}
+
+fn validate_optional_alias(value: Option<&str>) -> Result<Option<String>> {
+    let Some(alias) = value else {
+        return Ok(None);
+    };
+    let trimmed = alias.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.len() > MAX_CONTACT_ALIAS_LEN {
+        return Err(anyhow!(
+            "alias must be <= {MAX_CONTACT_ALIAS_LEN} characters"
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn normalize_group_member_ids(values: &[String]) -> Result<Vec<String>> {
+    if values.len() > MAX_GROUP_MEMBERS {
+        return Err(anyhow!("members cannot exceed {MAX_GROUP_MEMBERS} entries"));
+    }
+    let mut normalized = Vec::with_capacity(values.len());
+    for value in values {
+        validate_id("member", value)?;
+        normalized.push(value.trim().to_string());
+    }
+    normalized.sort_unstable();
+    normalized.dedup();
+    Ok(normalized)
+}
+
+fn decode_group_payload_b64(value: &str) -> Result<Vec<u8>> {
+    let payload = decode_b64("payload_b64", value)?;
+    if payload.is_empty() || payload.len() > MAX_GROUP_MESSAGE_BYTES {
+        return Err(anyhow!(
+            "decoded payload_b64 must be 1..={MAX_GROUP_MESSAGE_BYTES} bytes"
+        ));
+    }
+    Ok(payload)
+}
+
+fn validate_sha256_hex(field: &'static str, value: &str) -> Result<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.len() != SHA256_HEX_LEN {
+        return Err(anyhow!(
+            "{field} must be {SHA256_HEX_LEN} lowercase hex characters"
+        ));
+    }
+    if !normalized.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(anyhow!("{field} must be lowercase hex"));
+    }
+    Ok(normalized)
+}
+
+fn normalize_sha256_hashes(field: &'static str, values: &[String]) -> Result<Vec<String>> {
+    if values.len() > MAX_DISCOVERY_HASHES {
+        return Err(anyhow!(
+            "{field} cannot exceed {MAX_DISCOVERY_HASHES} entries"
+        ));
+    }
+    let mut hashes = values
+        .iter()
+        .map(|value| validate_sha256_hex(field, value))
+        .collect::<Result<Vec<_>>>()?;
+    hashes.sort_unstable();
+    hashes.dedup();
+    Ok(hashes)
+}
+
+fn identity_fingerprint_from_pub_b64(identity_pub_b64: &str) -> Result<String> {
+    let bytes = decode_b64("identity_x25519_pub_b64", identity_pub_b64)?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn build_qr_payload(keys: &UserKeysFile) -> Result<QrIdentityPayload> {
+    Ok(QrIdentityPayload {
+        version: QR_PAYLOAD_VERSION,
+        user_id: keys.user_id.clone(),
+        device_id: keys.device_id.clone(),
+        suite: keys.suite,
+        identity_x25519_pub_b64: keys.identity_x25519_pub_b64.clone(),
+        identity_sig_pub_b64: keys.identity_sig_pub_b64.clone(),
+        identity_fingerprint_sha256: identity_fingerprint_from_pub_b64(
+            &keys.identity_x25519_pub_b64,
+        )?,
+        generated_at_unix: unix_time_now()?,
+    })
+}
+
+fn encode_qr_payload(payload: &QrIdentityPayload) -> Result<String> {
+    let bytes = serde_json::to_vec(payload).context("failed to encode QR payload")?;
+    Ok(B64URL.encode(bytes))
+}
+
+fn decode_qr_payload(payload: &str) -> Result<QrIdentityPayload> {
+    let trimmed = payload.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("qr payload cannot be empty"));
+    }
+    let decoded = B64URL.decode(trimmed.as_bytes()).ok();
+    let parsed = if let Some(raw) = decoded {
+        serde_json::from_slice::<QrIdentityPayload>(&raw)
+            .context("failed to parse base64 QR payload JSON")?
+    } else {
+        serde_json::from_str::<QrIdentityPayload>(trimmed)
+            .context("failed to parse QR payload JSON")?
+    };
+    Ok(parsed)
+}
+
+fn verify_qr_payload(payload: &QrIdentityPayload, expected_user: Option<&str>) -> Result<()> {
+    if payload.version != QR_PAYLOAD_VERSION {
+        return Err(anyhow!(
+            "unsupported qr payload version '{}'",
+            payload.version
+        ));
+    }
+    if let Some(expected) = expected_user {
+        if payload.user_id != expected {
+            return Err(anyhow!(
+                "qr payload user mismatch: expected '{}' got '{}'",
+                expected,
+                payload.user_id
+            ));
+        }
+    }
+    validate_id("qr.user_id", &payload.user_id)?;
+    validate_id("qr.device_id", &payload.device_id)?;
+    let fingerprint = identity_fingerprint_from_pub_b64(&payload.identity_x25519_pub_b64)?;
+    let normalized = validate_sha256_hex(
+        "qr.identity_fingerprint_sha256",
+        &payload.identity_fingerprint_sha256,
+    )?;
+    if fingerprint != normalized {
+        return Err(anyhow!(
+            "qr payload fingerprint does not match identity_x25519_pub_b64"
+        ));
+    }
+    decode_b64("qr.identity_sig_pub_b64", &payload.identity_sig_pub_b64)?;
+    Ok(())
 }
 
 fn make_ad(sender: &str, recipient: &str) -> Result<Vec<u8>> {
@@ -1389,6 +3040,407 @@ fn inbox_auth_headers(
     });
     let transcript =
         encode(&records).map_err(|_| anyhow!("failed to encode inbox auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn sealed_inbox_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    since: i64,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("sealed-inbox", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_SINCE,
+        value: since.to_be_bytes().to_vec(),
+    });
+    let transcript =
+        encode(&records).map_err(|_| anyhow!("failed to encode sealed-inbox auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn inbox_delete_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    message_ids: &[i64],
+    delete_before_id: Option<i64>,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("inbox-delete", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let normalized_ids = normalize_message_ids(message_ids);
+    let mut hasher = Sha256::new();
+    for message_id in &normalized_ids {
+        hasher.update(message_id.to_be_bytes());
+    }
+    records.push(TlvRecord {
+        ty: AUTH_TAG_DELETE_IDS_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    if let Some(delete_before) = delete_before_id {
+        records.push(TlvRecord {
+            ty: AUTH_TAG_DELETE_BEFORE_ID,
+            value: delete_before.to_be_bytes().to_vec(),
+        });
+    }
+    let transcript =
+        encode(&records).map_err(|_| anyhow!("failed to encode inbox-delete auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn discovery_handles_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    phone_hashes_sha256: &[String],
+    email_hashes_sha256: &[String],
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("discovery-handles", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_DISCOVERY_PHONE_HASHES_HASH,
+        value: hash_string_list_sha256(&normalize_sha256_hashes(
+            "phone_hashes_sha256",
+            phone_hashes_sha256,
+        )?),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_DISCOVERY_EMAIL_HASHES_HASH,
+        value: hash_string_list_sha256(&normalize_sha256_hashes(
+            "email_hashes_sha256",
+            email_hashes_sha256,
+        )?),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| anyhow!("failed to encode discovery-handles auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn discovery_match_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    hashes_sha256: &[String],
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("discovery-match", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_DISCOVERY_QUERY_HASHES_HASH,
+        value: hash_string_list_sha256(&normalize_sha256_hashes("hashes_sha256", hashes_sha256)?),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| anyhow!("failed to encode discovery-match auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn contacts_list_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("contacts-list", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let transcript =
+        encode(&records).map_err(|_| anyhow!("failed to encode contacts-list auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn contacts_upsert_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    contact_user_id: &str,
+    alias: Option<&str>,
+    verified_by_qr: bool,
+    verified_fingerprint_sha256: Option<&str>,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("contacts-upsert", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_CONTACT_USER_ID,
+        value: contact_user_id.as_bytes().to_vec(),
+    });
+    let mut alias_hasher = Sha256::new();
+    alias_hasher.update(alias.unwrap_or_default().as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_CONTACT_ALIAS_HASH,
+        value: alias_hasher.finalize().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_CONTACT_VERIFIED_FLAG,
+        value: vec![if verified_by_qr { 1 } else { 0 }],
+    });
+    if let Some(fingerprint) = verified_fingerprint_sha256 {
+        records.push(TlvRecord {
+            ty: AUTH_TAG_CONTACT_FINGERPRINT,
+            value: fingerprint.as_bytes().to_vec(),
+        });
+    }
+    let transcript = encode(&records)
+        .map_err(|_| anyhow!("failed to encode contacts-upsert auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn contacts_remove_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    contact_user_id: &str,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("contacts-remove", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_CONTACT_USER_ID,
+        value: contact_user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| anyhow!("failed to encode contacts-remove auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn groups_create_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    group_id: &str,
+    member_user_ids: &[String],
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("groups-create", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_MEMBERS_HASH,
+        value: hash_string_list_sha256(&normalize_group_member_ids(member_user_ids)?),
+    });
+    let transcript =
+        encode(&records).map_err(|_| anyhow!("failed to encode groups-create auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn groups_members_list_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    group_id: &str,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("groups-members-list", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| anyhow!("failed to encode groups-members-list auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn groups_members_add_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    group_id: &str,
+    member_user_id: &str,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("groups-members-add", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_MEMBER_USER_ID,
+        value: member_user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| anyhow!("failed to encode groups-members-add auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn groups_members_remove_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    group_id: &str,
+    member_user_id: &str,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "groups-members-remove",
+        user_id,
+        device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_MEMBER_USER_ID,
+        value: member_user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| anyhow!("failed to encode groups-members-remove auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn groups_relay_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    group_id: &str,
+    sender_user_id: &str,
+    message_blob: &[u8],
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("groups-relay", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_SENDER_USER_ID,
+        value: sender_user_id.as_bytes().to_vec(),
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(message_blob);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_MESSAGE_BLOB_HASH,
+        value: hasher.finalize().to_vec(),
+    });
+    let transcript =
+        encode(&records).map_err(|_| anyhow!("failed to encode groups-relay auth transcript"))?;
     let signature = signing_key.sign(&transcript).to_bytes();
     Ok(vec![
         (AUTH_HEADER_USER, user_id.to_string()),
@@ -1507,6 +3559,7 @@ fn enforce_identity_pin(
         identity_fingerprint_sha256: bundle_identity_fingerprint(bundle)?,
         identity_key_version: bundle_identity_version(bundle),
         identity_sig_pub: bundle.identity_sig_pub.clone(),
+        identity_x25519_pub: Some(bundle.identity_x25519_pub.clone()),
         observed_at: bundle_observed_at(bundle),
     };
 
@@ -1595,6 +3648,93 @@ fn load_replay_guard(path: &Path, user_id: &str) -> Result<ReplayGuardFile> {
 
 fn save_replay_guard(path: &Path, guard: &ReplayGuardFile) -> Result<()> {
     write_json_file(path, guard)
+}
+
+fn default_message_store(user_id: &str, retention_seconds: i64) -> MessageStoreFile {
+    MessageStoreFile {
+        version: MESSAGE_STORE_VERSION,
+        user_id: user_id.to_string(),
+        retention_seconds,
+        messages: Vec::new(),
+    }
+}
+
+fn load_message_store(
+    path: &Path,
+    user_id: &str,
+    retention_seconds: i64,
+) -> Result<MessageStoreFile> {
+    if !path.exists() {
+        return Ok(default_message_store(user_id, retention_seconds));
+    }
+    let mut store: MessageStoreFile = read_json_file(path)?;
+    if store.version != MESSAGE_STORE_VERSION {
+        return Err(anyhow!(
+            "unsupported message store version '{}' in {}",
+            store.version,
+            path.display()
+        ));
+    }
+    if store.user_id != user_id {
+        return Err(anyhow!(
+            "message store user mismatch in {}: expected '{}' got '{}'",
+            path.display(),
+            user_id,
+            store.user_id
+        ));
+    }
+    store.retention_seconds = retention_seconds;
+    prune_message_store(&mut store, unix_time_now()?);
+    Ok(store)
+}
+
+fn save_message_store(path: &Path, store: &MessageStoreFile) -> Result<()> {
+    write_json_file(path, store)
+}
+
+fn prune_message_store(store: &mut MessageStoreFile, now_unix: i64) {
+    store
+        .messages
+        .retain(|item| item.expires_at_unix > 0 && item.expires_at_unix > now_unix);
+    if store.messages.len() > MAX_LOCAL_MESSAGE_HISTORY {
+        let overflow = store.messages.len() - MAX_LOCAL_MESSAGE_HISTORY;
+        store.messages.drain(0..overflow);
+    }
+}
+
+fn append_message_record(
+    state_dir: &Path,
+    user_id: &str,
+    retention_seconds: i64,
+    mut record: StoredMessageRecord,
+) -> Result<()> {
+    let store_path = message_store_file_path(state_dir, user_id);
+    let mut store = load_message_store(&store_path, user_id, retention_seconds)?;
+    if record.stored_at_unix <= 0 {
+        record.stored_at_unix = unix_time_now()?;
+    }
+    record.expires_at_unix = record.stored_at_unix.saturating_add(retention_seconds);
+    store.messages.push(record);
+    prune_message_store(&mut store, unix_time_now()?);
+    save_message_store(&store_path, &store)
+}
+
+fn delete_message_records(
+    store: &mut MessageStoreFile,
+    peer: Option<&str>,
+    before_message_id: Option<i64>,
+) -> Vec<i64> {
+    let mut deleted_ids = Vec::new();
+    store.messages.retain(|item| {
+        let peer_match = peer.map_or(true, |target| item.peer_user_id == target);
+        let before_match = before_message_id.map_or(true, |threshold| item.message_id <= threshold);
+        let should_delete = peer_match && before_match;
+        if should_delete && item.message_id > 0 {
+            deleted_ids.push(item.message_id);
+        }
+        !should_delete
+    });
+    normalize_message_ids(&deleted_ids)
 }
 
 fn read_keys_file(path: &Path) -> Result<UserKeysFile> {
@@ -1879,6 +4019,96 @@ mod tests {
     }
 
     #[test]
+    fn parse_delete_messages_args() {
+        let cli = Cli::try_parse_from([
+            "pqmsg-cli",
+            "delete-messages",
+            "--user",
+            "alice",
+            "--keys",
+            "./devkeys/alice.json",
+            "--peer",
+            "bob",
+            "--before-message-id",
+            "42",
+            "--remote",
+        ])
+        .expect("parse");
+        match cli.command {
+            Commands::DeleteMessages {
+                user,
+                keys,
+                peer,
+                before_message_id,
+                remote,
+            } => {
+                assert_eq!(user, "alice");
+                assert_eq!(keys, PathBuf::from("./devkeys/alice.json"));
+                assert_eq!(peer.as_deref(), Some("bob"));
+                assert_eq!(before_message_id, Some(42));
+                assert!(remote);
+            }
+            _ => panic!("expected delete-messages command"),
+        }
+    }
+
+    #[test]
+    fn parse_groups_create_args() {
+        let cli = Cli::try_parse_from([
+            "pqmsg-cli",
+            "groups-create",
+            "--user",
+            "alice",
+            "--keys",
+            "./devkeys/alice.json",
+            "--group",
+            "alpha",
+            "--member",
+            "bob",
+            "--member",
+            "carol",
+        ])
+        .expect("parse");
+        match cli.command {
+            Commands::GroupsCreate {
+                user,
+                keys,
+                group,
+                members,
+            } => {
+                assert_eq!(user, "alice");
+                assert_eq!(keys, PathBuf::from("./devkeys/alice.json"));
+                assert_eq!(group, "alpha");
+                assert_eq!(members, vec!["bob".to_string(), "carol".to_string()]);
+            }
+            _ => panic!("expected groups-create command"),
+        }
+    }
+
+    #[test]
+    fn parse_send_sealed_args() {
+        let cli = Cli::try_parse_from([
+            "pqmsg-cli",
+            "send-sealed",
+            "--from",
+            "alice",
+            "--to",
+            "bob",
+            "--text",
+            "hello",
+        ])
+        .expect("parse");
+        match cli.command {
+            Commands::SendSealed { from, to, text, .. } => {
+                assert_eq!(from, "alice");
+                assert_eq!(to, "bob");
+                assert_eq!(text, "hello");
+            }
+            _ => panic!("expected send-sealed command"),
+        }
+    }
+
+    #[test]
     fn high_assurance_requires_https_server_url() {
         let result = validate_server_url_for_profile(
             SecurityProfile::HighAssurance,
@@ -1887,6 +4117,74 @@ mod tests {
         assert!(result.is_err());
         validate_server_url_for_profile(SecurityProfile::HighAssurance, "https://example.test")
             .expect("https allowed");
+    }
+
+    #[test]
+    fn message_store_prunes_expired_entries() {
+        let dir = tempdir().expect("tempdir");
+        let path = message_store_file_path(dir.path(), "alice");
+        let now = unix_time_now().expect("unix now");
+        let mut store = default_message_store("alice", 60);
+        store.messages.push(StoredMessageRecord {
+            message_id: 1,
+            peer_user_id: "bob".to_string(),
+            direction: "incoming".to_string(),
+            text: "expired".to_string(),
+            server_timestamp: None,
+            stored_at_unix: now - 120,
+            expires_at_unix: now - 1,
+        });
+        store.messages.push(StoredMessageRecord {
+            message_id: 2,
+            peer_user_id: "bob".to_string(),
+            direction: "incoming".to_string(),
+            text: "fresh".to_string(),
+            server_timestamp: None,
+            stored_at_unix: now,
+            expires_at_unix: now + 60,
+        });
+        save_message_store(&path, &store).expect("save");
+        let loaded = load_message_store(&path, "alice", 60).expect("load");
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].message_id, 2);
+    }
+
+    #[test]
+    fn delete_message_records_filters_by_peer_and_message_id() {
+        let mut store = default_message_store("alice", 60);
+        store.messages = vec![
+            StoredMessageRecord {
+                message_id: 1,
+                peer_user_id: "bob".to_string(),
+                direction: "incoming".to_string(),
+                text: "a".to_string(),
+                server_timestamp: None,
+                stored_at_unix: 1,
+                expires_at_unix: 100,
+            },
+            StoredMessageRecord {
+                message_id: 2,
+                peer_user_id: "bob".to_string(),
+                direction: "outgoing".to_string(),
+                text: "b".to_string(),
+                server_timestamp: None,
+                stored_at_unix: 2,
+                expires_at_unix: 100,
+            },
+            StoredMessageRecord {
+                message_id: 3,
+                peer_user_id: "carol".to_string(),
+                direction: "incoming".to_string(),
+                text: "c".to_string(),
+                server_timestamp: None,
+                stored_at_unix: 3,
+                expires_at_unix: 100,
+            },
+        ];
+        let deleted = delete_message_records(&mut store, Some("bob"), Some(2));
+        assert_eq!(deleted, vec![1, 2]);
+        assert_eq!(store.messages.len(), 1);
+        assert_eq!(store.messages[0].peer_user_id, "carol");
     }
 
     #[test]

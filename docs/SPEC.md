@@ -56,7 +56,7 @@ Protocol version is currently `v1`.
 - sending and receiving chain states,
 - local/remote DH ratchet keys,
 - bounded skipped-message-key cache,
-- optional sparse PQ ratchet state.
+- sparse PQ ratchet state support with configurable interval.
 
 The implementation is intentionally minimal and is not a complete Signal clone.
 
@@ -74,6 +74,15 @@ Server-side directory behavior is defined as:
 8. server exposes authenticated prekey inventory status and marks low-inventory conditions with a replenishment recommendation.
 9. bundle responses expose remaining one-time prekey inventory and an explicit `last_resort_prekey_only` indicator.
 
+## 6A. Sealed Sender Extension
+
+The implementation supports a sealed-sender transport mode with the following properties:
+
+1. sender identifiers are encrypted inside a sealed envelope payload,
+2. server-side sealed relay routing uses only `recipient_user_id`,
+3. sealed relay persistence stores only recipient addressing and opaque blob bytes,
+4. sealed inbox retrieval is authenticated with the same signed request-header model, using endpoint label `sealed-inbox`.
+
 ## 7. Ratchet Metadata Authentication
 
 Session AEAD associated data MUST include:
@@ -83,7 +92,7 @@ Session AEAD associated data MUST include:
 3. sender ratchet DH public key,
 4. message number,
 5. previous chain length,
-6. optional `pq_step_ct`,
+6. `pq_step_ct` when present on interval-triggered PQ step messages,
 7. external caller AD derived from shared `pqmsg-core` conversation-associated-data construction.
 
 This requirement ensures ratchet header mutation is rejected at AEAD verification time.

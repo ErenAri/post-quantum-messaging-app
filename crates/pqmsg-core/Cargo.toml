@@ -21,9 +21,8 @@ zeroize.workspace = true
 oqs = { version = "0.11", default-features = false, features = ["vendored", "ml_kem", "kyber"], optional = true }
 
 [features]
-default = ["pq_ratchet"]
+default = []
 pq-oqs = ["dep:oqs"]
-pq_ratchet = []
 insecure-no-pq = []
 
 [dev-dependencies]

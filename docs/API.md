@@ -19,15 +19,29 @@ sequenceDiagram
     C->>S: POST /users/{id}/devices/link
     C->>S: GET /users/{id}/devices
     C->>S: POST /users/{id}/devices/{device_id}/revoke
+    C->>S: POST /users/{id}/discovery/handles
+    C->>S: POST /users/{id}/discovery/match
+    C->>S: GET /users/{id}/contacts
+    C->>S: POST /users/{id}/contacts
+    C->>S: POST /users/{id}/contacts/remove
     C->>S: POST /users/{id}/prekeys
     C->>S: GET /users/{id}/prekeys/status
     C->>S: POST /users/{id}/push-token
     C->>S: GET /users/{peer}/bundle
+    C->>S: GET /anon/users/{peer}/bundle
     C->>S: POST /users/{id}/rotate/init
     C->>S: POST /users/{id}/rotate/confirm
     C->>S: GET /users/{id}/identity-log
+    C->>S: POST /groups
+    C->>S: GET /groups/{group}/members
+    C->>S: POST /groups/{group}/members/add
+    C->>S: POST /groups/{group}/members/remove
+    C->>S: POST /groups/{group}/relay
     C->>S: POST /relay/{peer}
+    C->>S: POST /sealed-relay/{peer}
     C->>S: GET /inbox/{id}?since=n
+    C->>S: GET /sealed-inbox/{id}?since=n
+    C->>S: POST /inbox/{id}/delete
     C->>S: GET /ws/inbox/{id}?since=n (WebSocket)
 ```
 
@@ -70,11 +84,23 @@ The following endpoints require request authentication headers:
 - `GET /v1/users/{user_id}/identity-log`
 - `GET /v1/users/{user_id}/prekeys/status`
 - `GET /v1/users/{user_id}/devices`
+- `POST /v1/users/{user_id}/discovery/handles`
+- `POST /v1/users/{user_id}/discovery/match`
+- `GET /v1/users/{user_id}/contacts`
+- `POST /v1/users/{user_id}/contacts`
+- `POST /v1/users/{user_id}/contacts/remove`
 - `POST /v1/users/{user_id}/devices/link`
 - `POST /v1/users/{user_id}/devices/{target_device_id}/revoke`
 - `POST /v1/users/{user_id}/prekeys`
+- `POST /v1/groups`
+- `GET /v1/groups/{group_id}/members`
+- `POST /v1/groups/{group_id}/members/add`
+- `POST /v1/groups/{group_id}/members/remove`
+- `POST /v1/groups/{group_id}/relay`
 - `POST /v1/relay/{recipient_user_id}`
 - `GET /v1/inbox/{user_id}`
+- `GET /v1/sealed-inbox/{user_id}`
+- `POST /v1/inbox/{user_id}/delete`
 - `GET /v1/ws/inbox/{user_id}`
 - `POST /v1/users/{user_id}/push-token`
 
@@ -416,6 +442,239 @@ Response:
 }
 ```
 
+### 4.8A Discovery and Contacts
+
+`POST /v1/users/{user_id}/discovery/handles`
+
+Request:
+
+```json
+{
+  "phone_hashes_sha256": ["hex(sha256(e164_phone))"],
+  "email_hashes_sha256": ["hex(sha256(lowercase_email))"]
+}
+```
+
+`POST /v1/users/{user_id}/discovery/match`
+
+Request:
+
+```json
+{
+  "hashes_sha256": ["hex(sha256(contact_handle))"]
+}
+```
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "matches": [
+    {
+      "hash_sha256": "hex...",
+      "matched_user_id": "bob",
+      "handle_kind": "phone"
+    }
+  ],
+  "checked_at": "2026-03-05T12:00:00Z"
+}
+```
+
+`GET /v1/users/{user_id}/contacts`
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "contacts": [
+    {
+      "contact_user_id": "bob",
+      "alias": "Bobby",
+      "verified_by_qr": true,
+      "verified_fingerprint_sha256": "hex...",
+      "created_at": "2026-03-05T12:00:00Z",
+      "updated_at": "2026-03-05T12:00:00Z"
+    }
+  ]
+}
+```
+
+`POST /v1/users/{user_id}/contacts`
+
+Request:
+
+```json
+{
+  "contact_user_id": "bob",
+  "alias": "Bobby",
+  "verified_by_qr": true,
+  "verified_fingerprint_sha256": "hex(sha256(identity_x25519_pub))"
+}
+```
+
+`POST /v1/users/{user_id}/contacts/remove`
+
+Request:
+
+```json
+{
+  "contact_user_id": "bob"
+}
+```
+
+### 4.8B Group Membership and Fan-Out Relay
+
+`POST /v1/groups`
+
+Request:
+
+```json
+{
+  "group_id": "alpha",
+  "member_user_ids": ["bob", "carol"]
+}
+```
+
+Response:
+
+```json
+{
+  "group_id": "alpha",
+  "owner_user_id": "alice",
+  "member_count": 3,
+  "created_at": "2026-03-05T12:00:00Z"
+}
+```
+
+`GET /v1/groups/{group_id}/members`
+
+Response:
+
+```json
+{
+  "group_id": "alpha",
+  "members": [
+    {
+      "user_id": "alice",
+      "joined_at": "2026-03-05T12:00:00Z"
+    },
+    {
+      "user_id": "bob",
+      "joined_at": "2026-03-05T12:00:00Z"
+    }
+  ]
+}
+```
+
+`POST /v1/groups/{group_id}/members/add`
+
+Request:
+
+```json
+{
+  "member_user_id": "carol"
+}
+```
+
+`POST /v1/groups/{group_id}/members/remove`
+
+Request:
+
+```json
+{
+  "member_user_id": "bob"
+}
+```
+
+`POST /v1/groups/{group_id}/relay`
+
+Request:
+
+```json
+{
+  "sender_user_id": "alice",
+  "device_id": "alice-device-1",
+  "message_bytes_base64": "base64(group_ciphertext_blob)"
+}
+```
+
+Response:
+
+```json
+{
+  "group_id": "alpha",
+  "delivered_message_count": 2,
+  "delivered_user_count": 2,
+  "first_message_id": 81,
+  "received_at": "2026-03-05T12:00:00Z"
+}
+```
+
+The relay payload remains opaque to the server. Delivery fan-out is computed from active group membership and active recipient devices.
+
+### 4.8C Sealed Sender Transport
+
+`GET /v1/anon/users/{user_id}/bundle[?device_id=<device_id>]`
+
+This endpoint is an anonymous bundle-fetch alias to the standard bundle endpoint and returns the same response schema as `GET /v1/users/{user_id}/bundle`.
+
+`POST /v1/sealed-relay/{recipient_user_id}`
+
+Request:
+
+```json
+{
+  "message_bytes_base64": "base64(sealed_sender_envelope_bytes)"
+}
+```
+
+Response:
+
+```json
+{
+  "delivered_device_count": 2,
+  "first_message_id": 101,
+  "received_at": "2026-03-05T12:00:00Z"
+}
+```
+
+Server behavior:
+
+- payload remains opaque blob storage only,
+- sender identity is not provided in request body or persistence schema,
+- routing is recipient-only fan-out to active recipient devices.
+
+`GET /v1/sealed-inbox/{user_id}?since=<message_id>`
+
+Requires authenticated transport headers (Section 3.1).
+
+Sealed-inbox auth signature transcript fields:
+
+1. endpoint label (`sealed-inbox`),
+2. auth user id,
+3. auth device id,
+4. auth timestamp,
+5. auth nonce,
+6. target user id,
+7. `since` value.
+
+Response:
+
+```json
+{
+  "user_id": "bob",
+  "messages": [
+    {
+      "message_id": 101,
+      "message_bytes_base64": "base64(sealed_sender_envelope_bytes)",
+      "received_at": "2026-03-05T12:00:00Z"
+    }
+  ]
+}
+```
+
 ### 4.9 Relay Message
 
 `POST /v1/relay/{recipient_user_id}`
@@ -533,6 +792,49 @@ Server messages are JSON text frames:
 - `event = "relay"` carries newly relayed ciphertexts in near real time.
 - Clients should still keep HTTP polling (`GET /v1/inbox/{user_id}`) as degraded/offline fallback.
 
+### 4.11A Delete Inbox Messages
+
+`POST /v1/inbox/{user_id}/delete`
+
+Requires authenticated transport headers (Section 3.1).
+
+Request:
+
+```json
+{
+  "message_ids": [41, 42],
+  "delete_before_id": 100
+}
+```
+
+Rules:
+
+- At least one of `message_ids` or `delete_before_id` must be provided.
+- Deletions are device-scoped to the authenticated `(user_id, device_id)` mailbox.
+- `message_ids` is capped (`<= 512`) and values must be positive integers.
+
+Inbox-delete auth signature transcript fields:
+
+1. endpoint label (`inbox-delete`),
+2. auth user id,
+3. auth device id,
+4. auth timestamp,
+5. auth nonce,
+6. target user id,
+7. SHA-256 hash of sorted unique `message_ids` (`i64` big-endian encoding),
+8. optional `delete_before_id` (`i64` big-endian).
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "device_id": "alice-device-1",
+  "deleted_count": 2,
+  "deleted_at": "2026-03-05T12:00:00Z"
+}
+```
+
 ### 4.12 Health
 
 `GET /health`
@@ -555,6 +857,9 @@ Response:
 
 - one-time prekey family maximum: `256` entries each,
 - relay decoded blob maximum: `1,000,000` bytes,
+- group relay decoded blob maximum: `1,000,000` bytes,
+- sealed relay decoded blob maximum: `1,000,000` bytes,
+- group member maximum: `512`,
 - inbox page maximum: `200` messages,
 - relay ciphertext dedup window: `900` seconds,
 - endpoint-level in-memory token bucket rate limiting.
