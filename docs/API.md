@@ -43,6 +43,7 @@ sequenceDiagram
     C->>S: GET /sealed-inbox/{id}?since=n
     C->>S: POST /inbox/{id}/delete
     C->>S: GET /ws/inbox/{id}?since=n (WebSocket)
+    C->>S: GET /metrics
 ```
 
 ## 2.1 Security Profile Configuration
@@ -59,6 +60,17 @@ Server startup is controlled by environment variables:
 - `PQMSG_DB_IDLE_TIMEOUT_SECS`: idle connection timeout seconds (default: `300`)
 - `PQMSG_FCM_SERVER_KEY`: optional FCM legacy server key for wake-signal dispatch
 - `PQMSG_FCM_ENDPOINT`: optional override (default: `https://fcm.googleapis.com/fcm/send`)
+- `PQMSG_LOG_FORMAT`: `json` (default) or `pretty`
+- `PQMSG_AUDIT_LOG_PATH`: optional JSONL audit log file path
+- `PQMSG_RATE_LIMIT_CAPACITY`: token bucket capacity (default: `60`)
+- `PQMSG_RATE_LIMIT_REFILL_PER_SECOND`: token refill rate (default: `1`)
+- `PQMSG_RATE_LIMIT_MAX_ENTRIES`: in-memory bucket map size (default: `20000`)
+- `PQMSG_RATE_LIMIT_BUCKET_TTL_SECS`: bucket entry TTL seconds (default: `600`)
+- `PQMSG_RATE_LIMIT_REDIS_URL`: optional Redis URL to enable distributed rate limiting
+- `PQMSG_RATE_LIMIT_REDIS_KEY_PREFIX`: optional Redis key prefix (default: `pqmsg:ratelimit:`)
+- `PQMSG_REGISTRATION_POW_BITS`: optional registration proof-of-work difficulty override
+- `PQMSG_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS`: optional minimum interval between prekey publishes per user/device
+- `PQMSG_PREKEY_BUNDLE_RESERVE_COUNT`: optional one-time prekey reserve floor per device before returning last-resort bundle mode
 
 In `high_assurance` and `nss_aligned`, server startup fails unless both TLS paths are provided.
 
@@ -112,6 +124,10 @@ Required headers:
 - `x-pqmsg-auth-nonce` (single-use)
 - `x-pqmsg-auth-signature` (`base64(64-byte Ed25519 signature)`)
 
+Optional correlation header:
+
+- `x-request-id` (if omitted, server generates one and echoes it in response headers)
+
 The server verifies signatures under registered `identity_sig_pub`, enforces authenticated device binding against active `user_devices` records, applies timestamp skew checks, rejects nonce replay, enforces monotonic inbox cursors per authenticated `user_id` + `device_id`, and applies relay ciphertext deduplication with TTL.
 
 ## 4. Endpoint Definitions
@@ -127,9 +143,12 @@ Request:
   "user_id": "alice",
   "identity_x25519_pub": "base64(32 bytes)",
   "identity_sig_pub": "base64(32-byte Ed25519 public key)",
-  "device_id": "alice-device-1"
+  "device_id": "alice-device-1",
+  "pow_nonce": "optional-when-pow-enabled"
 }
 ```
+
+When `registration_pow_bits > 0` (reported by `GET /health`), `pow_nonce` is mandatory and MUST satisfy the server proof-of-work predicate over the registration transcript.
 
 Success response:
 
@@ -176,6 +195,7 @@ The server verifies:
 3. both under registered `identity_sig_pub`.
 
 Success response fields also include remaining one-time prekey counts and low-inventory advisory flags.
+If `prekey_publish_min_interval_seconds > 0`, repeated uploads for the same `user_id` + `device_id` inside that window are rejected with `429`.
 
 ### 4.2A Device Management
 
@@ -284,6 +304,7 @@ Response:
 
 If `device_id` is omitted, the server selects the earliest active linked device with published prekeys.
 If `device_id` is present, the server returns a bundle only for that active device.
+If one-time key inventory is at or below `prekey_bundle_reserve_count`, the server returns signed-prekey-only (last-resort) bundles to reduce exhaustion risk.
 
 Response:
 
@@ -849,9 +870,26 @@ Response:
   "db_ready": true,
   "db_pool_size": 1,
   "db_pool_idle": 1,
-  "push_enabled": false
+  "push_enabled": false,
+  "audit_logger_enabled": false,
+  "rate_limiter_mode": "in_memory",
+  "registration_pow_bits": 0,
+  "prekey_publish_min_interval_seconds": 0,
+  "prekey_bundle_reserve_count": 0
 }
 ```
+
+### 4.13 Prometheus Metrics
+
+`GET /metrics`
+
+Returns Prometheus text exposition with:
+
+- `pqmsg_http_in_flight_requests`
+- `pqmsg_http_requests_total{method,path,status}`
+- `pqmsg_http_request_duration_seconds_sum{method,path,status}`
+- `pqmsg_http_request_duration_seconds_count{method,path,status}`
+- `pqmsg_security_events_total{event}`
 
 ## 5. Validation and Limits
 
@@ -862,7 +900,11 @@ Response:
 - group member maximum: `512`,
 - inbox page maximum: `200` messages,
 - relay ciphertext dedup window: `900` seconds,
-- endpoint-level in-memory token bucket rate limiting.
+- endpoint-level token bucket rate limiting (`in_memory` or Redis-backed distributed mode),
+- optional registration proof-of-work gate (`pow_nonce`) with server-reported difficulty,
+- optional prekey publish cooldown per authenticated `user_id` + `device_id`,
+- optional one-time prekey reserve floor to mitigate exhaustion attacks,
+- per-request correlation IDs (`x-request-id`) propagated through responses and logs.
 
 ## 6. Transport Requirement
 

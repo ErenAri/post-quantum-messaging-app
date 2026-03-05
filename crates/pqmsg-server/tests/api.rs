@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::http::header::{HeaderName, HeaderValue};
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{HeaderMap, Method, Request, StatusCode};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::Utc;
@@ -12,9 +12,13 @@ use pqmsg_core::alg::PROTOCOL_VERSION_V1;
 use pqmsg_core::dh::DhPublicKey;
 use pqmsg_core::handshake::{pq_signed_prekey_signature_message, signed_prekey_signature_message};
 use pqmsg_core::tlv::{critical_type, encode, TlvRecord};
-use pqmsg_server::{build_router, init_db, parse_db_backend, AppState, RateLimiter};
+use pqmsg_server::{
+    build_router, init_db, parse_db_backend, AppState, AuditLogger, DosHardeningPolicy, RateLimiter,
+};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::any::AnyPoolOptions;
+use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -117,6 +121,56 @@ async fn test_app_with_profile(profile: SecurityProfile) -> axum::Router {
     build_router(state)
 }
 
+async fn test_app_with_dos_policy(dos_policy: DosHardeningPolicy) -> axum::Router {
+    sqlx::any::install_default_drivers();
+    let database_url = "sqlite::memory:";
+    let db_backend = parse_db_backend(database_url).expect("sqlite backend");
+    let pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .expect("connect sqlite memory");
+    init_db(&pool, db_backend).await.expect("migrate");
+    let state = AppState::new(
+        pool,
+        db_backend,
+        Arc::new(RateLimiter::new(
+            1_000.0,
+            1_000.0,
+            100_000,
+            StdDuration::from_secs(600),
+        )),
+    )
+    .with_dos_policy(dos_policy);
+    build_router(state)
+}
+
+async fn test_app_with_audit_log(audit_log_path: &str) -> axum::Router {
+    sqlx::any::install_default_drivers();
+    let database_url = "sqlite::memory:";
+    let db_backend = parse_db_backend(database_url).expect("sqlite backend");
+    let pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .expect("connect sqlite memory");
+    init_db(&pool, db_backend).await.expect("migrate");
+    let state = AppState::new(
+        pool,
+        db_backend,
+        Arc::new(RateLimiter::new(
+            1_000.0,
+            1_000.0,
+            100_000,
+            StdDuration::from_secs(600),
+        )),
+    )
+    .with_audit_logger(Arc::new(
+        AuditLogger::with_path(audit_log_path).expect("audit logger"),
+    ));
+    build_router(state)
+}
+
 async fn spawn_http_server(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -144,6 +198,17 @@ async fn json_request_with_headers(
     body: Value,
     headers: &[(&str, String)],
 ) -> (StatusCode, Value) {
+    let (status, _, payload) = json_request_with_headers_raw(app, method, uri, body, headers).await;
+    (status, payload)
+}
+
+async fn json_request_with_headers_raw(
+    app: axum::Router,
+    method: Method,
+    uri: &str,
+    body: Value,
+    headers: &[(&str, String)],
+) -> (StatusCode, HeaderMap, Value) {
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
@@ -156,6 +221,7 @@ async fn json_request_with_headers(
         .expect("build request");
     let response = app.oneshot(request).await.expect("request");
     let status = response.status();
+    let headers = response.headers().clone();
     let bytes = response
         .into_body()
         .collect()
@@ -164,7 +230,30 @@ async fn json_request_with_headers(
         .to_bytes();
     let payload: Value = serde_json::from_slice(&bytes)
         .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&bytes).to_string() }));
-    (status, payload)
+    (status, headers, payload)
+}
+
+async fn text_request(
+    app: axum::Router,
+    method: Method,
+    uri: &str,
+    headers: &[(&str, String)],
+) -> (StatusCode, HeaderMap, String) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(*name, value);
+    }
+    let request = builder.body(Body::empty()).expect("build request");
+    let response = app.oneshot(request).await.expect("request");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    (status, headers, String::from_utf8_lossy(&bytes).to_string())
 }
 
 fn signing_key(seed: u8) -> SigningKey {
@@ -183,6 +272,70 @@ fn register_payload(
         "identity_sig_pub": B64.encode(identity_signing_key.verifying_key().to_bytes()),
         "device_id": device_id,
     })
+}
+
+fn register_payload_with_pow(base: Value, bits: u8) -> Value {
+    if bits == 0 {
+        return base;
+    }
+    let mut payload = base;
+    let user_id = payload["user_id"].as_str().expect("user_id").to_string();
+    let device_id = payload["device_id"]
+        .as_str()
+        .expect("device_id")
+        .to_string();
+    let identity_x25519_pub = payload["identity_x25519_pub"]
+        .as_str()
+        .expect("identity_x25519_pub")
+        .to_string();
+    let identity_sig_pub = payload["identity_sig_pub"]
+        .as_str()
+        .expect("identity_sig_pub")
+        .to_string();
+    let mut nonce_counter: u64 = 0;
+    loop {
+        let nonce = format!("{nonce_counter:x}");
+        let digest = Sha256::digest(
+            [
+                b"register".as_slice(),
+                user_id.as_bytes(),
+                device_id.as_bytes(),
+                identity_x25519_pub.as_bytes(),
+                identity_sig_pub.as_bytes(),
+                nonce.as_bytes(),
+            ]
+            .join(&[0u8][..]),
+        );
+        if hash_has_leading_zero_bits(&digest, bits) {
+            payload["pow_nonce"] = json!(nonce);
+            return payload;
+        }
+        nonce_counter = nonce_counter
+            .checked_add(1)
+            .expect("pow nonce counter overflow");
+    }
+}
+
+fn hash_has_leading_zero_bits(bytes: &[u8], bits: u8) -> bool {
+    if bits == 0 {
+        return true;
+    }
+    let full_bytes = usize::from(bits / 8);
+    let remaining_bits = bits % 8;
+    if bytes.len() < full_bytes {
+        return false;
+    }
+    if bytes.iter().take(full_bytes).any(|byte| *byte != 0) {
+        return false;
+    }
+    if remaining_bits == 0 {
+        return true;
+    }
+    if bytes.len() <= full_bytes {
+        return false;
+    }
+    let mask = 0xFFu8 << (8 - remaining_bits);
+    bytes[full_bytes] & mask == 0
 }
 
 fn publish_prekeys_payload(
@@ -1366,13 +1519,20 @@ async fn publish_prekeys_rejects_invalid_signature() {
 #[tokio::test]
 async fn health_reports_security_profile() {
     let app = test_app().await;
-    let (status, body) = json_request(app, Method::GET, "/health", json!({})).await;
+    let (status, headers, body) =
+        json_request_with_headers_raw(app, Method::GET, "/health", json!({}), &[]).await;
     assert_eq!(status, StatusCode::OK);
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok());
+    assert!(request_id.is_some());
     assert_eq!(body["status"].as_str(), Some("ok"));
     assert_eq!(body["security_profile"].as_str(), Some("research"));
     assert_eq!(body["db_backend"].as_str(), Some("sqlite"));
     assert_eq!(body["db_ready"].as_bool(), Some(true));
     assert_eq!(body["push_enabled"].as_bool(), Some(false));
+    assert_eq!(body["audit_logger_enabled"].as_bool(), Some(false));
+    assert_eq!(body["rate_limiter_mode"].as_str(), Some("in_memory"));
 }
 
 #[tokio::test]
@@ -1390,6 +1550,59 @@ async fn high_assurance_sets_hsts_header() {
         .get("strict-transport-security")
         .and_then(|value| value.to_str().ok());
     assert_eq!(hsts, Some("max-age=31536000; includeSubDomains"));
+}
+
+#[tokio::test]
+async fn metrics_endpoint_exports_prometheus_counters() {
+    let app = test_app().await;
+    let (status_health, _, _) =
+        json_request_with_headers_raw(app.clone(), Method::GET, "/health", json!({}), &[]).await;
+    assert_eq!(status_health, StatusCode::OK);
+
+    let (status_metrics, headers_metrics, metrics_body) =
+        text_request(app.clone(), Method::GET, "/metrics", &[]).await;
+    assert_eq!(status_metrics, StatusCode::OK);
+    let content_type = headers_metrics
+        .get("content-type")
+        .and_then(|value| value.to_str().ok());
+    assert_eq!(
+        content_type,
+        Some("text/plain; version=0.0.4; charset=utf-8")
+    );
+    assert!(metrics_body.contains("pqmsg_http_requests_total"));
+    assert!(metrics_body.contains("path=\"/health\""));
+    assert!(metrics_body.contains("pqmsg_security_events_total"));
+}
+
+#[tokio::test]
+async fn audit_log_file_captures_security_rejects() {
+    let file_name = format!(
+        "pqmsg-audit-{}.jsonl",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let path = std::env::temp_dir().join(file_name);
+    let _ = fs::remove_file(&path);
+    let app = test_app_with_audit_log(path.to_str().expect("audit path")).await;
+
+    let invalid_register = json!({
+        "user_id": "",
+        "identity_x25519_pub": B64.encode([7u8; 32]),
+        "identity_sig_pub": B64.encode([8u8; 32]),
+        "device_id": "bad-dev"
+    });
+    let (status, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/users/register",
+        invalid_register,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let audit_contents = fs::read_to_string(&path).expect("read audit file");
+    assert!(audit_contents.contains("\"event\":\"client_error\""));
+    assert!(audit_contents.contains("\"outcome\":\"reject\""));
+    let _ = fs::remove_file(&path);
 }
 
 #[tokio::test]
@@ -2901,4 +3114,135 @@ async fn sealed_sender_relay_and_inbox_flow() {
         Some(sealed_blob_b64.as_str())
     );
     assert!(messages[0].get("sender_user_id").is_none());
+}
+
+#[tokio::test]
+async fn registration_requires_pow_when_enabled() {
+    let app = test_app_with_dos_policy(
+        DosHardeningPolicy::for_security_profile(SecurityProfile::Research)
+            .with_registration_pow_bits(12),
+    )
+    .await;
+    let bob_sig = signing_key(161);
+
+    let base_register = register_payload("bob", "bob-dev-1", [71u8; 32], &bob_sig);
+    let (status_missing_pow, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/users/register",
+        base_register.clone(),
+    )
+    .await;
+    assert_eq!(status_missing_pow, StatusCode::BAD_REQUEST);
+
+    let solved = register_payload_with_pow(base_register, 12);
+    let (status_with_pow, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", solved).await;
+    assert_eq!(status_with_pow, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn prekey_publish_interval_throttles_immediate_reupload() {
+    let app = test_app_with_dos_policy(
+        DosHardeningPolicy::for_security_profile(SecurityProfile::Research)
+            .with_prekey_publish_min_interval_seconds(3600),
+    )
+    .await;
+    let bob_sig = signing_key(162);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [72u8; 32], &bob_sig);
+    let (status_reg, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_reg, StatusCode::OK);
+
+    let publish = publish_prekeys_payload(
+        &bob_sig,
+        [8u8; 32],
+        vec![9u8; 64],
+        vec![[10u8; 32], [11u8; 32]],
+        vec![vec![12u8; 64], vec![13u8; 64]],
+    );
+    let publish_auth_1 = prekeys_auth_headers(&bob_sig, "bob", "bob-dev-1", &publish);
+    let (status_publish_1, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/prekeys",
+        publish.clone(),
+        &publish_auth_1,
+    )
+    .await;
+    assert_eq!(status_publish_1, StatusCode::OK);
+
+    let publish_auth_2 = prekeys_auth_headers(&bob_sig, "bob", "bob-dev-1", &publish);
+    let (status_publish_2, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/prekeys",
+        publish,
+        &publish_auth_2,
+    )
+    .await;
+    assert_eq!(status_publish_2, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn bundle_reserve_prevents_full_prekey_exhaustion() {
+    let app = test_app_with_dos_policy(
+        DosHardeningPolicy::for_security_profile(SecurityProfile::Research)
+            .with_prekey_bundle_reserve_count(2),
+    )
+    .await;
+    let bob_sig = signing_key(163);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [73u8; 32], &bob_sig);
+    let (status_reg, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_reg, StatusCode::OK);
+
+    let publish = publish_prekeys_payload(
+        &bob_sig,
+        [14u8; 32],
+        vec![15u8; 64],
+        vec![[16u8; 32], [17u8; 32], [18u8; 32]],
+        vec![vec![19u8; 64], vec![20u8; 64], vec![21u8; 64]],
+    );
+    let publish_auth = prekeys_auth_headers(&bob_sig, "bob", "bob-dev-1", &publish);
+    let (status_publish, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/prekeys",
+        publish,
+        &publish_auth,
+    )
+    .await;
+    assert_eq!(status_publish, StatusCode::OK);
+
+    let (status_bundle_1, bundle_1) =
+        json_request(app.clone(), Method::GET, "/v1/users/bob/bundle", json!({})).await;
+    assert_eq!(status_bundle_1, StatusCode::OK);
+    assert!(bundle_1["one_time_prekey_x25519"].as_str().is_some());
+    assert!(bundle_1["one_time_prekey_mlkem768"].as_str().is_some());
+    assert_eq!(
+        bundle_1["remaining_one_time_prekeys_x25519"].as_u64(),
+        Some(2)
+    );
+    assert_eq!(
+        bundle_1["remaining_one_time_prekeys_mlkem768"].as_u64(),
+        Some(2)
+    );
+
+    let (status_bundle_2, bundle_2) =
+        json_request(app.clone(), Method::GET, "/v1/users/bob/bundle", json!({})).await;
+    assert_eq!(status_bundle_2, StatusCode::OK);
+    assert!(bundle_2["one_time_prekey_x25519"].is_null());
+    assert!(bundle_2["one_time_prekey_mlkem768"].is_null());
+    assert_eq!(
+        bundle_2["remaining_one_time_prekeys_x25519"].as_u64(),
+        Some(2)
+    );
+    assert_eq!(
+        bundle_2["remaining_one_time_prekeys_mlkem768"].as_u64(),
+        Some(2)
+    );
+    assert_eq!(bundle_2["last_resort_prekey_only"].as_bool(), Some(true));
 }

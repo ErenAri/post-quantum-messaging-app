@@ -1,12 +1,12 @@
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::extract::{MatchedPath, Path, Query, State};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
 use pqmsg_core::alg::{SecurityProfile, PROTOCOL_VERSION_V1};
@@ -20,10 +20,14 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{AnyPool, Row};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 use tokio::sync::mpsc;
+use tracing::Instrument;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 const MAX_BODY_BYTES: usize = 1_048_576;
@@ -57,7 +61,9 @@ const AUTH_HEADER_DEVICE: &str = "x-pqmsg-auth-device";
 const AUTH_HEADER_TIMESTAMP: &str = "x-pqmsg-auth-timestamp";
 const AUTH_HEADER_NONCE: &str = "x-pqmsg-auth-nonce";
 const AUTH_HEADER_SIGNATURE: &str = "x-pqmsg-auth-signature";
+const REQUEST_ID_HEADER: &str = "x-request-id";
 const AUTH_MAX_NONCE_LEN: usize = 96;
+const MAX_REQUEST_ID_LEN: usize = 128;
 const AUTH_MAX_CLOCK_SKEW_SECONDS: i64 = 300;
 const AUTH_REPLAY_WINDOW_SECONDS: u64 = 600;
 const AUTH_REPLAY_MAX_ENTRIES: usize = 100_000;
@@ -98,6 +104,46 @@ const AUTH_TAG_GROUP_MEMBERS_HASH: u16 = critical_type(0x321F);
 const AUTH_TAG_GROUP_SENDER_USER_ID: u16 = critical_type(0x3220);
 const AUTH_TAG_GROUP_MESSAGE_BLOB_HASH: u16 = critical_type(0x3221);
 const MAX_DELETE_MESSAGE_IDS: usize = 512;
+const MAX_POW_NONCE_LEN: usize = 128;
+const DEFAULT_REGISTRATION_POW_BITS_HARDENED: u8 = 18;
+const DEFAULT_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS_HARDENED: i64 = 30;
+const DEFAULT_PREKEY_BUNDLE_RESERVE_COUNT_HARDENED: i64 = 2;
+const DEFAULT_REGISTRATION_POW_BITS_RESEARCH: u8 = 0;
+const DEFAULT_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS_RESEARCH: i64 = 0;
+const DEFAULT_PREKEY_BUNDLE_RESERVE_COUNT_RESEARCH: i64 = 0;
+const DEFAULT_RATE_LIMIT_REDIS_KEY_PREFIX: &str = "pqmsg:ratelimit:";
+const REDIS_RATE_LIMIT_SCRIPT: &str = r#"
+local key = KEYS[1]
+local now_ms = tonumber(ARGV[1])
+local capacity = tonumber(ARGV[2])
+local refill_per_ms = tonumber(ARGV[3])
+local ttl_ms = tonumber(ARGV[4])
+local requested = 1
+
+local current = redis.call('HMGET', key, 'tokens', 'last_ms')
+local tokens = tonumber(current[1])
+local last_ms = tonumber(current[2])
+if tokens == nil then
+  tokens = capacity
+  last_ms = now_ms
+end
+
+local elapsed = now_ms - last_ms
+if elapsed < 0 then
+  elapsed = 0
+end
+tokens = math.min(capacity, tokens + (elapsed * refill_per_ms))
+
+local allowed = 0
+if tokens >= requested then
+  tokens = tokens - requested
+  allowed = 1
+end
+
+redis.call('HMSET', key, 'tokens', tokens, 'last_ms', now_ms)
+redis.call('PEXPIRE', key, ttl_ms)
+return allowed
+"#;
 
 static SQLITE_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
 static POSTGRES_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgres");
@@ -131,6 +177,59 @@ pub fn parse_db_backend(database_url: &str) -> Result<DbBackend, &'static str> {
     Err("unsupported PQMSG_DATABASE_URL scheme; expected sqlite:// or postgres://")
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DosHardeningPolicy {
+    registration_pow_bits: u8,
+    prekey_publish_min_interval_seconds: i64,
+    prekey_bundle_reserve_count: i64,
+}
+
+impl DosHardeningPolicy {
+    pub fn for_security_profile(profile: SecurityProfile) -> Self {
+        match profile {
+            SecurityProfile::Research => Self {
+                registration_pow_bits: DEFAULT_REGISTRATION_POW_BITS_RESEARCH,
+                prekey_publish_min_interval_seconds:
+                    DEFAULT_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS_RESEARCH,
+                prekey_bundle_reserve_count: DEFAULT_PREKEY_BUNDLE_RESERVE_COUNT_RESEARCH,
+            },
+            SecurityProfile::HighAssurance | SecurityProfile::NssAligned => Self {
+                registration_pow_bits: DEFAULT_REGISTRATION_POW_BITS_HARDENED,
+                prekey_publish_min_interval_seconds:
+                    DEFAULT_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS_HARDENED,
+                prekey_bundle_reserve_count: DEFAULT_PREKEY_BUNDLE_RESERVE_COUNT_HARDENED,
+            },
+        }
+    }
+
+    pub fn registration_pow_bits(self) -> u8 {
+        self.registration_pow_bits
+    }
+
+    pub fn prekey_publish_min_interval_seconds(self) -> i64 {
+        self.prekey_publish_min_interval_seconds
+    }
+
+    pub fn prekey_bundle_reserve_count(self) -> i64 {
+        self.prekey_bundle_reserve_count
+    }
+
+    pub fn with_registration_pow_bits(mut self, bits: u8) -> Self {
+        self.registration_pow_bits = bits;
+        self
+    }
+
+    pub fn with_prekey_publish_min_interval_seconds(mut self, seconds: i64) -> Self {
+        self.prekey_publish_min_interval_seconds = seconds.max(0);
+        self
+    }
+
+    pub fn with_prekey_bundle_reserve_count(mut self, count: i64) -> Self {
+        self.prekey_bundle_reserve_count = count.max(0);
+        self
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pool: AnyPool,
@@ -140,10 +239,14 @@ pub struct AppState {
     realtime_hub: RealtimeHub,
     push_notifier: Arc<PushNotifier>,
     security_profile: SecurityProfile,
+    dos_policy: DosHardeningPolicy,
+    metrics: Arc<MetricsRegistry>,
+    audit_logger: Arc<AuditLogger>,
 }
 
 impl AppState {
     pub fn new(pool: AnyPool, db_backend: DbBackend, rate_limiter: Arc<RateLimiter>) -> Self {
+        let security_profile = SecurityProfile::Research;
         Self {
             pool,
             db_backend,
@@ -154,7 +257,10 @@ impl AppState {
             )),
             realtime_hub: RealtimeHub::new(),
             push_notifier: Arc::new(PushNotifier::disabled()),
-            security_profile: SecurityProfile::Research,
+            security_profile,
+            dos_policy: DosHardeningPolicy::for_security_profile(security_profile),
+            metrics: Arc::new(MetricsRegistry::new()),
+            audit_logger: Arc::new(AuditLogger::disabled()),
         }
     }
 
@@ -175,6 +281,9 @@ impl AppState {
             realtime_hub: RealtimeHub::new(),
             push_notifier: Arc::new(PushNotifier::disabled()),
             security_profile,
+            dos_policy: DosHardeningPolicy::for_security_profile(security_profile),
+            metrics: Arc::new(MetricsRegistry::new()),
+            audit_logger: Arc::new(AuditLogger::disabled()),
         }
     }
 
@@ -190,6 +299,10 @@ impl AppState {
         self.security_profile
     }
 
+    pub fn dos_policy(&self) -> DosHardeningPolicy {
+        self.dos_policy
+    }
+
     pub fn auth_replay(&self) -> &AuthReplayCache {
         &self.auth_replay
     }
@@ -202,8 +315,26 @@ impl AppState {
         &self.push_notifier
     }
 
+    pub fn metrics(&self) -> &MetricsRegistry {
+        &self.metrics
+    }
+
+    pub fn audit_logger(&self) -> &AuditLogger {
+        &self.audit_logger
+    }
+
     pub fn with_push_notifier(mut self, push_notifier: Arc<PushNotifier>) -> Self {
         self.push_notifier = push_notifier;
+        self
+    }
+
+    pub fn with_dos_policy(mut self, dos_policy: DosHardeningPolicy) -> Self {
+        self.dos_policy = dos_policy;
+        self
+    }
+
+    pub fn with_audit_logger(mut self, audit_logger: Arc<AuditLogger>) -> Self {
+        self.audit_logger = audit_logger;
         self
     }
 }
@@ -227,6 +358,32 @@ pub struct PushNotifier {
     fcm_endpoint: String,
 }
 
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct HttpMetricKey {
+    method: String,
+    path: String,
+    status: u16,
+}
+
+#[derive(Clone)]
+pub struct MetricsRegistry {
+    requests_total: Arc<Mutex<HashMap<HttpMetricKey, u64>>>,
+    request_duration_sum_seconds: Arc<Mutex<HashMap<HttpMetricKey, f64>>>,
+    security_events_total: Arc<Mutex<HashMap<String, u64>>>,
+    in_flight_requests: Arc<AtomicU64>,
+}
+
+#[derive(Clone)]
+pub struct AuditLogger {
+    file: Option<Arc<Mutex<std::fs::File>>>,
+}
+
+#[derive(Clone)]
+struct RedisRateLimiter {
+    client: redis::Client,
+    key_prefix: String,
+}
+
 #[derive(Clone)]
 pub struct RateLimiter {
     capacity: f64,
@@ -234,6 +391,7 @@ pub struct RateLimiter {
     max_entries: usize,
     bucket_ttl: StdDuration,
     inner: Arc<Mutex<HashMap<String, BucketState>>>,
+    redis_backend: Option<RedisRateLimiter>,
 }
 
 #[derive(Clone, Copy)]
@@ -249,6 +407,205 @@ pub struct AuthReplayCache {
     inner: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
+impl MetricsRegistry {
+    pub fn new() -> Self {
+        Self {
+            requests_total: Arc::new(Mutex::new(HashMap::new())),
+            request_duration_sum_seconds: Arc::new(Mutex::new(HashMap::new())),
+            security_events_total: Arc::new(Mutex::new(HashMap::new())),
+            in_flight_requests: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn observe_request_start(&self) {
+        self.in_flight_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn observe_request_finish(
+        &self,
+        method: &str,
+        path: &str,
+        status: u16,
+        duration: StdDuration,
+    ) {
+        let _ =
+            self.in_flight_requests
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    Some(value.saturating_sub(1))
+                });
+        let key = HttpMetricKey {
+            method: method.to_string(),
+            path: path.to_string(),
+            status,
+        };
+        if let Ok(mut totals) = self.requests_total.lock() {
+            *totals.entry(key.clone()).or_insert(0) += 1;
+        }
+        if let Ok(mut sums) = self.request_duration_sum_seconds.lock() {
+            *sums.entry(key).or_insert(0.0) += duration.as_secs_f64();
+        }
+    }
+
+    pub fn record_security_event(&self, event: &str) {
+        if let Ok(mut events) = self.security_events_total.lock() {
+            *events.entry(event.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    pub fn render_prometheus(&self) -> String {
+        let in_flight = self.in_flight_requests.load(Ordering::Relaxed);
+        let requests_total = self
+            .requests_total
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default();
+        let request_duration_sum_seconds = self
+            .request_duration_sum_seconds
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default();
+        let security_events_total = self
+            .security_events_total
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default();
+
+        let mut request_keys: Vec<_> = requests_total.keys().cloned().collect();
+        request_keys
+            .sort_by(|a, b| (&a.method, &a.path, a.status).cmp(&(&b.method, &b.path, b.status)));
+        let mut security_keys: Vec<_> = security_events_total.keys().cloned().collect();
+        security_keys.sort_unstable();
+
+        let mut body = String::new();
+        body.push_str("# HELP pqmsg_http_in_flight_requests Current in-flight HTTP requests\n");
+        body.push_str("# TYPE pqmsg_http_in_flight_requests gauge\n");
+        body.push_str(&format!("pqmsg_http_in_flight_requests {in_flight}\n"));
+        body.push_str(
+            "# HELP pqmsg_http_requests_total Total HTTP requests by method, path and status\n",
+        );
+        body.push_str("# TYPE pqmsg_http_requests_total counter\n");
+        for key in &request_keys {
+            let labels = format!(
+                "method=\"{}\",path=\"{}\",status=\"{}\"",
+                prometheus_escape_label(&key.method),
+                prometheus_escape_label(&key.path),
+                key.status
+            );
+            let count = requests_total.get(key).copied().unwrap_or(0);
+            body.push_str(&format!("pqmsg_http_requests_total{{{labels}}} {count}\n"));
+        }
+        body.push_str(
+            "# HELP pqmsg_http_request_duration_seconds_sum Total HTTP request duration in seconds\n",
+        );
+        body.push_str("# TYPE pqmsg_http_request_duration_seconds_sum counter\n");
+        for key in &request_keys {
+            let labels = format!(
+                "method=\"{}\",path=\"{}\",status=\"{}\"",
+                prometheus_escape_label(&key.method),
+                prometheus_escape_label(&key.path),
+                key.status
+            );
+            let sum = request_duration_sum_seconds
+                .get(key)
+                .copied()
+                .unwrap_or(0.0);
+            body.push_str(&format!(
+                "pqmsg_http_request_duration_seconds_sum{{{labels}}} {sum}\n"
+            ));
+            let count = requests_total.get(key).copied().unwrap_or(0);
+            body.push_str(&format!(
+                "pqmsg_http_request_duration_seconds_count{{{labels}}} {count}\n"
+            ));
+        }
+        body.push_str("# HELP pqmsg_security_events_total Total security events by type\n");
+        body.push_str("# TYPE pqmsg_security_events_total counter\n");
+        for key in security_keys {
+            let count = security_events_total.get(&key).copied().unwrap_or(0);
+            body.push_str(&format!(
+                "pqmsg_security_events_total{{event=\"{}\"}} {count}\n",
+                prometheus_escape_label(&key)
+            ));
+        }
+        body
+    }
+}
+
+impl Default for MetricsRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AuditLogger {
+    pub fn disabled() -> Self {
+        Self { file: None }
+    }
+
+    pub fn with_path(path: &str) -> std::io::Result<Self> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            file: Some(Arc::new(Mutex::new(file))),
+        })
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.file.is_some()
+    }
+
+    pub fn log_security_event(
+        &self,
+        event: &str,
+        outcome: &str,
+        request_id: Option<&str>,
+        user_id: Option<&str>,
+        device_id: Option<&str>,
+        detail: Option<&str>,
+    ) {
+        let payload = json!({
+            "ts": Utc::now().to_rfc3339(),
+            "event": event,
+            "outcome": outcome,
+            "request_id": request_id,
+            "user_id": user_id,
+            "device_id": device_id,
+            "detail": detail,
+        });
+        info!(
+            target: "pqmsg_server::audit",
+            event,
+            outcome,
+            request_id = request_id.unwrap_or_default(),
+            user_id = user_id.unwrap_or_default(),
+            device_id = device_id.unwrap_or_default(),
+            detail = detail.unwrap_or_default()
+        );
+        let Some(file) = &self.file else {
+            return;
+        };
+        let serialized = match serde_json::to_string(&payload) {
+            Ok(value) => value,
+            Err(error) => {
+                warn!("failed to serialize audit event: {error}");
+                return;
+            }
+        };
+        let Ok(mut guard) = file.lock() else {
+            warn!("failed to lock audit log file");
+            return;
+        };
+        if let Err(error) = writeln!(guard, "{serialized}") {
+            warn!("failed to append audit log event: {error}");
+        }
+    }
+}
+
+fn prometheus_escape_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
 impl RateLimiter {
     pub fn new(
         capacity: f64,
@@ -262,10 +619,45 @@ impl RateLimiter {
             max_entries,
             bucket_ttl,
             inner: Arc::new(Mutex::new(HashMap::new())),
+            redis_backend: None,
         }
     }
 
+    pub fn with_redis(
+        capacity: f64,
+        refill_per_second: f64,
+        max_entries: usize,
+        bucket_ttl: StdDuration,
+        redis_url: &str,
+        key_prefix: Option<String>,
+    ) -> Result<Self, redis::RedisError> {
+        let client = redis::Client::open(redis_url)?;
+        Ok(Self {
+            capacity,
+            refill_per_second,
+            max_entries,
+            bucket_ttl,
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            redis_backend: Some(RedisRateLimiter {
+                client,
+                key_prefix: key_prefix
+                    .unwrap_or_else(|| DEFAULT_RATE_LIMIT_REDIS_KEY_PREFIX.to_string()),
+            }),
+        })
+    }
+
+    pub fn is_distributed(&self) -> bool {
+        self.redis_backend.is_some()
+    }
+
     pub fn allow(&self, key: &str) -> bool {
+        if let Some(redis_backend) = &self.redis_backend {
+            return self.allow_redis(redis_backend, key);
+        }
+        self.allow_in_memory(key)
+    }
+
+    fn allow_in_memory(&self, key: &str) -> bool {
         let Ok(mut map) = self.inner.lock() else {
             return false;
         };
@@ -293,6 +685,40 @@ impl RateLimiter {
         } else {
             false
         }
+    }
+
+    fn allow_redis(&self, redis_backend: &RedisRateLimiter, key: &str) -> bool {
+        if !self.capacity.is_finite()
+            || !self.refill_per_second.is_finite()
+            || self.capacity <= 0.0
+            || self.refill_per_second <= 0.0
+        {
+            return false;
+        }
+        let ttl_ms_u128 = self.bucket_ttl.as_millis();
+        if ttl_ms_u128 == 0 {
+            return false;
+        }
+        let ttl_ms = i64::try_from(ttl_ms_u128.min(i64::MAX as u128)).unwrap_or(i64::MAX);
+        let refill_per_ms = self.refill_per_second / 1000.0;
+        if refill_per_ms <= 0.0 {
+            return false;
+        }
+        let now_ms = Utc::now().timestamp_millis();
+        let redis_key = format!("{}{}", redis_backend.key_prefix, key);
+        let script = redis::Script::new(REDIS_RATE_LIMIT_SCRIPT);
+        let mut connection = match redis_backend.client.get_connection() {
+            Ok(connection) => connection,
+            Err(_) => return false,
+        };
+        let result: redis::RedisResult<i64> = script
+            .key(redis_key)
+            .arg(now_ms)
+            .arg(self.capacity)
+            .arg(refill_per_ms)
+            .arg(ttl_ms)
+            .invoke(&mut connection);
+        matches!(result, Ok(1))
     }
 }
 
@@ -533,6 +959,8 @@ struct RegisterUserRequest {
     identity_x25519_pub: String,
     identity_sig_pub: String,
     device_id: String,
+    #[serde(default)]
+    pow_nonce: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -932,6 +1360,11 @@ struct StatusResponse {
     db_pool_size: u32,
     db_pool_idle: usize,
     push_enabled: bool,
+    audit_logger_enabled: bool,
+    rate_limiter_mode: &'static str,
+    registration_pow_bits: u8,
+    prekey_publish_min_interval_seconds: i64,
+    prekey_bundle_reserve_count: i64,
 }
 
 #[derive(Debug)]
@@ -955,8 +1388,10 @@ pub async fn init_db(
 
 pub fn build_router(state: AppState) -> Router {
     let hsts_enabled = state.security_profile().requires_tls();
+    let middleware_state = state.clone();
     let router = Router::new()
         .route("/health", get(health))
+        .route("/metrics", get(metrics))
         .route("/v1/users/register", post(register_user))
         .route("/v1/users/:user_id/prekeys", post(publish_prekeys))
         .route("/v1/users/:user_id/prekeys/status", get(get_prekeys_status))
@@ -1003,12 +1438,80 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/inbox/:user_id/delete", post(delete_inbox_messages))
         .route("/v1/ws/inbox/:user_id", get(ws_inbox))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .with_state(state);
+        .with_state(state)
+        .layer(axum::middleware::from_fn_with_state(
+            middleware_state,
+            observability_middleware,
+        ));
     if hsts_enabled {
         router.layer(axum::middleware::from_fn(hsts_middleware))
     } else {
         router
     }
+}
+
+async fn observability_middleware(
+    State(state): State<AppState>,
+    mut request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let request_id =
+        request_id_from_header(request.headers()).unwrap_or_else(|| Uuid::new_v4().to_string());
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        request.headers_mut().insert(REQUEST_ID_HEADER, value);
+    }
+    let method = request.method().to_string();
+    let path = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_else(|| request.uri().path().to_string());
+    state.metrics().observe_request_start();
+    let start = Instant::now();
+    let span = tracing::info_span!(
+        "http_request",
+        request_id = %request_id,
+        method = %method,
+        path = %path
+    );
+    let mut response = next.run(request).instrument(span).await;
+    let status = response.status().as_u16();
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert(REQUEST_ID_HEADER, value);
+    }
+    let duration = start.elapsed();
+    state
+        .metrics()
+        .observe_request_finish(&method, &path, status, duration);
+    info!(
+        target: "pqmsg_server::http",
+        request_id,
+        method,
+        path,
+        status,
+        latency_ms = duration.as_secs_f64() * 1000.0
+    );
+    if status >= 400 {
+        let event = if status == 429 {
+            "rate_limit_rejected"
+        } else if status == 409 {
+            "conflict_rejected"
+        } else if status >= 500 {
+            "server_error"
+        } else {
+            "client_error"
+        };
+        record_security_event(
+            &state,
+            event,
+            "reject",
+            Some(request_id.as_str()),
+            None,
+            None,
+            Some(format!("method={method} path={path} status={status}")),
+        );
+    }
+    response
 }
 
 async fn hsts_middleware(
@@ -1038,7 +1541,31 @@ async fn health(State(state): State<AppState>) -> Json<StatusResponse> {
         db_pool_size: state.pool().size(),
         db_pool_idle: state.pool().num_idle(),
         push_enabled: state.push_notifier().is_enabled(),
+        audit_logger_enabled: state.audit_logger().is_enabled(),
+        rate_limiter_mode: if state.rate_limiter.is_distributed() {
+            "redis"
+        } else {
+            "in_memory"
+        },
+        registration_pow_bits: state.dos_policy().registration_pow_bits(),
+        prekey_publish_min_interval_seconds: state
+            .dos_policy()
+            .prekey_publish_min_interval_seconds(),
+        prekey_bundle_reserve_count: state.dos_policy().prekey_bundle_reserve_count(),
     })
+}
+
+async fn metrics(State(state): State<AppState>) -> Response {
+    let body = state.metrics().render_prometheus();
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
 }
 
 async fn register_user(
@@ -1048,6 +1575,7 @@ async fn register_user(
     check_rate_limit(&state, &format!("register:{}", request.user_id))?;
     validate_id("user_id", &request.user_id)?;
     validate_id("device_id", &request.device_id)?;
+    enforce_registration_pow(&state, &request)?;
 
     let identity_x25519 = decode_base64_exact(
         "identity_x25519_pub",
@@ -2060,6 +2588,7 @@ async fn publish_prekeys(
     }
     let auth_message = prekeys_auth_message(&auth, &request)?;
     verify_request_auth(&state, &auth, &auth_message).await?;
+    enforce_prekey_publish_interval(&state, &user_id, &auth.device_id).await?;
     validate_one_time_count(
         "one_time_prekeys_x25519",
         request.one_time_prekeys_x25519.len(),
@@ -2310,10 +2839,25 @@ async fn get_bundle(
     };
     let device_id: String = row.try_get("device_id")?;
 
-    let x25519_otk =
-        select_one_time_key(&mut tx, "one_time_prekeys_x25519", &user_id, &device_id).await?;
-    let mlkem_otk =
-        select_one_time_key(&mut tx, "one_time_prekeys_mlkem768", &user_id, &device_id).await?;
+    let remaining_x_before =
+        count_available_one_time_keys(&mut tx, "one_time_prekeys_x25519", &user_id, &device_id)
+            .await?;
+    let remaining_pq_before =
+        count_available_one_time_keys(&mut tx, "one_time_prekeys_mlkem768", &user_id, &device_id)
+            .await?;
+    let reserve_count = state.dos_policy().prekey_bundle_reserve_count().max(0);
+    let consume_one_time =
+        remaining_x_before > reserve_count && remaining_pq_before > reserve_count;
+    let x25519_otk = if consume_one_time {
+        select_one_time_key(&mut tx, "one_time_prekeys_x25519", &user_id, &device_id).await?
+    } else {
+        None
+    };
+    let mlkem_otk = if consume_one_time {
+        select_one_time_key(&mut tx, "one_time_prekeys_mlkem768", &user_id, &device_id).await?
+    } else {
+        None
+    };
     let remaining_x =
         count_available_one_time_keys(&mut tx, "one_time_prekeys_x25519", &user_id, &device_id)
             .await?;
@@ -3645,11 +4189,29 @@ async fn verify_request_auth(
 ) -> Result<(), AppError> {
     let now = Utc::now().timestamp();
     if (now - auth.timestamp).abs() > AUTH_MAX_CLOCK_SKEW_SECONDS {
+        record_security_event(
+            state,
+            "auth_timestamp_skew",
+            "reject",
+            None,
+            Some(&auth.user_id),
+            Some(&auth.device_id),
+            Some("request timestamp outside allowed skew".to_string()),
+        );
         return Err(AppError::bad_request(
             "request timestamp outside allowed skew",
         ));
     }
     if !state.auth_replay().observe(&auth.user_id, &auth.nonce) {
+        record_security_event(
+            state,
+            "auth_nonce_replay",
+            "reject",
+            None,
+            Some(&auth.user_id),
+            Some(&auth.device_id),
+            Some("request nonce replayed".to_string()),
+        );
         return Err(AppError::conflict("request nonce replayed"));
     }
 
@@ -3658,6 +4220,15 @@ async fn verify_request_auth(
         .fetch_optional(state.pool())
         .await?;
     let Some(user_row) = user_row else {
+        record_security_event(
+            state,
+            "auth_unknown_user",
+            "reject",
+            None,
+            Some(&auth.user_id),
+            Some(&auth.device_id),
+            Some("auth user not found".to_string()),
+        );
         return Err(AppError::not_found("auth user not found"));
     };
     let active_device = sqlx::query(
@@ -3670,17 +4241,38 @@ async fn verify_request_auth(
     .fetch_optional(state.pool())
     .await?;
     if active_device.is_none() {
+        record_security_event(
+            state,
+            "auth_device_mismatch",
+            "reject",
+            None,
+            Some(&auth.user_id),
+            Some(&auth.device_id),
+            Some("auth device mismatch for user or device revoked".to_string()),
+        );
         return Err(AppError::bad_request(
             "auth device mismatch for user or device revoked",
         ));
     }
     let identity_sig_pub: Vec<u8> = user_row.try_get("identity_sig_pub")?;
-    verify_ed25519_signature(
+    let verification = verify_ed25519_signature(
         &identity_sig_pub,
         &auth.signature,
         message,
         AUTH_HEADER_SIGNATURE,
-    )
+    );
+    if verification.is_err() {
+        record_security_event(
+            state,
+            "auth_signature_invalid",
+            "reject",
+            None,
+            Some(&auth.user_id),
+            Some(&auth.device_id),
+            Some("x-pqmsg-auth-signature verification failed".to_string()),
+        );
+    }
+    verification
 }
 
 fn auth_common_records(auth: &RequestAuth, endpoint: &'static str) -> Vec<TlvRecord> {
@@ -4150,12 +4742,161 @@ fn rotate_confirm_auth_message(
         .map_err(|_| AppError::internal("failed to encode rotate-confirm auth transcript"))
 }
 
+fn request_id_from_header(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(REQUEST_ID_HEADER)?;
+    let value = value.to_str().ok()?.trim();
+    if value.is_empty() || value.len() > MAX_REQUEST_ID_LEN {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn record_security_event(
+    state: &AppState,
+    event: &str,
+    outcome: &str,
+    request_id: Option<&str>,
+    user_id: Option<&str>,
+    device_id: Option<&str>,
+    detail: Option<String>,
+) {
+    state.metrics().record_security_event(event);
+    state.audit_logger().log_security_event(
+        event,
+        outcome,
+        request_id,
+        user_id,
+        device_id,
+        detail.as_deref(),
+    );
+}
+
 fn check_rate_limit(state: &AppState, key: &str) -> Result<(), AppError> {
     if state.rate_limiter.allow(key) {
         Ok(())
     } else {
+        record_security_event(
+            state,
+            "rate_limit_rejected",
+            "reject",
+            None,
+            None,
+            None,
+            Some(format!("bucket={key}")),
+        );
         Err(AppError::rate_limited("rate limit exceeded"))
     }
+}
+
+fn enforce_registration_pow(
+    state: &AppState,
+    request: &RegisterUserRequest,
+) -> Result<(), AppError> {
+    let bits = state.dos_policy().registration_pow_bits();
+    if bits == 0 {
+        return Ok(());
+    }
+    if bits > 32 {
+        return Err(AppError::internal(
+            "registration_pow_bits must be <= 32 for SHA-256 proof checks",
+        ));
+    }
+    let nonce = request
+        .pow_nonce
+        .as_deref()
+        .ok_or_else(|| AppError::bad_request("pow_nonce is required for registration"))?;
+    validate_pow_nonce(nonce)?;
+    let message = registration_pow_message(request, nonce);
+    let digest = Sha256::digest(message);
+    if !has_leading_zero_bits(&digest, bits) {
+        return Err(AppError::bad_request("invalid registration proof-of-work"));
+    }
+    Ok(())
+}
+
+async fn enforce_prekey_publish_interval(
+    state: &AppState,
+    user_id: &str,
+    device_id: &str,
+) -> Result<(), AppError> {
+    let min_interval = state.dos_policy().prekey_publish_min_interval_seconds();
+    if min_interval <= 0 {
+        return Ok(());
+    }
+    let last_updated = sqlx::query_scalar::<_, String>(
+        "SELECT updated_at
+         FROM prekeys
+         WHERE user_id = $1 AND device_id = $2",
+    )
+    .bind(user_id)
+    .bind(device_id)
+    .fetch_optional(state.pool())
+    .await?;
+    let Some(last_updated) = last_updated else {
+        return Ok(());
+    };
+    let parsed = DateTime::parse_from_rfc3339(&last_updated)
+        .map_err(|_| AppError::internal("invalid prekeys.updated_at timestamp"))?
+        .with_timezone(&Utc);
+    let elapsed = Utc::now().signed_duration_since(parsed).num_seconds();
+    if elapsed < min_interval {
+        return Err(AppError::rate_limited(
+            "prekey upload interval has not elapsed",
+        ));
+    }
+    Ok(())
+}
+
+fn registration_pow_message(request: &RegisterUserRequest, nonce: &str) -> Vec<u8> {
+    [
+        b"register".as_slice(),
+        request.user_id.as_bytes(),
+        request.device_id.as_bytes(),
+        request.identity_x25519_pub.as_bytes(),
+        request.identity_sig_pub.as_bytes(),
+        nonce.as_bytes(),
+    ]
+    .join(&[0u8][..])
+}
+
+fn validate_pow_nonce(value: &str) -> Result<(), AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_POW_NONCE_LEN {
+        return Err(AppError::bad_request(format!(
+            "pow_nonce must be 1..={MAX_POW_NONCE_LEN} characters"
+        )));
+    }
+    if !trimmed
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(AppError::bad_request(
+            "pow_nonce must contain only [A-Za-z0-9_-]",
+        ));
+    }
+    Ok(())
+}
+
+fn has_leading_zero_bits(bytes: &[u8], bits: u8) -> bool {
+    if bits == 0 {
+        return true;
+    }
+    let full_bytes = usize::from(bits / 8);
+    let remaining_bits = bits % 8;
+    if bytes.len() < full_bytes {
+        return false;
+    }
+    if bytes.iter().take(full_bytes).any(|byte| *byte != 0) {
+        return false;
+    }
+    if remaining_bits == 0 {
+        return true;
+    }
+    if bytes.len() <= full_bytes {
+        return false;
+    }
+    let mask = 0xFFu8 << (8 - remaining_bits);
+    bytes[full_bytes] & mask == 0
 }
 
 fn validate_id(field: &'static str, value: &str) -> Result<(), AppError> {

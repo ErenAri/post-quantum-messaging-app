@@ -39,6 +39,15 @@ This document defines minimum security quality gates for ongoing development and
 10. Clients MUST track seen ciphertexts and reject replayed transport message identifiers.
 11. Server MUST expose authenticated one-time prekey inventory status and low-inventory signaling.
 12. Clients SHOULD auto-replenish one-time prekeys when low-inventory signals are observed.
+13. Registration endpoints SHOULD enforce adaptive abuse controls such as proof-of-work or CAPTCHA in hardened profiles.
+14. Prekey upload endpoints SHOULD enforce per-device publish cooldowns to constrain exhaustion amplification.
+15. Bundle selection SHOULD preserve a configurable one-time-prekey reserve floor and fall back to signed-prekey-only mode under depletion pressure.
+
+## 5A. DoS Hardening Policy
+
+1. Rate limiting MUST support a distributed backend for multi-instance deployments.
+2. Distributed limiter outages SHOULD fail closed for abuse-sensitive endpoints.
+3. Registration abuse controls MUST be externally observable through health metadata so clients can adapt request construction.
 
 ## 6. Push Transport Policy
 
@@ -73,3 +82,29 @@ Required coverage:
 - optional nightly/manual path: fuzz smoke.
 
 A change that weakens these controls requires explicit security rationale.
+
+## 10. Observability Policy
+
+1. Server logs SHOULD default to structured JSON with correlation identifiers.
+2. Every HTTP response SHOULD include a request correlation header (`x-request-id`).
+3. Server MUST expose Prometheus-compatible metrics for request volume/latency and security event counters.
+4. Security-relevant rejects (auth failures, replay rejects, rate limits, conflicts) SHOULD be written to an audit log sink when configured.
+
+## 11. Formal Verification Policy
+
+1. The PQXDH handshake model MUST be maintained as a machine-checkable symbolic specification.
+2. Formal model queries MUST at minimum cover:
+   - session-key secrecy,
+   - authentication correspondence between initiator and responder,
+   - confidentiality of encrypted payload abstraction.
+3. Model updates MUST accompany protocol-level changes to handshake transcripts or key schedule composition.
+
+## 12. Penetration Testing Policy
+
+1. Server penetration testing MUST include authenticated and unauthenticated abuse paths.
+2. Mandatory abuse probes:
+   - replay attempts,
+   - malformed input attempts,
+   - anti-abuse gate bypass attempts,
+   - identity/prekey ownership bypass attempts.
+3. Findings MUST be tracked to closure with reproducible regression tests.

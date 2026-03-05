@@ -106,6 +106,7 @@ const MAX_CONTACT_ALIAS_LEN: usize = 128;
 const MAX_GROUP_MEMBERS: usize = 512;
 const MAX_GROUP_MESSAGE_BYTES: usize = 1_000_000;
 const QR_PAYLOAD_VERSION: u16 = 1;
+const MAX_REGISTRATION_POW_BITS: u8 = 26;
 
 static STORAGE_POLICY: OnceLock<StoragePolicy> = OnceLock::new();
 
@@ -602,6 +603,13 @@ struct RegisterRequest {
     identity_x25519_pub: String,
     identity_sig_pub: String,
     device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pow_nonce: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HealthResponse {
+    registration_pow_bits: Option<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1509,12 +1517,19 @@ fn refresh_one_time_prekeys(keys: &mut UserKeysFile, one_time_count: usize) -> R
 }
 
 async fn register_user(client: &Client, server: &str, keys: &UserKeysFile) -> Result<()> {
-    let req = RegisterRequest {
+    let mut req = RegisterRequest {
         user_id: keys.user_id.clone(),
         identity_x25519_pub: keys.identity_x25519_pub_b64.clone(),
         identity_sig_pub: keys.identity_sig_pub_b64.clone(),
         device_id: keys.device_id.clone(),
+        pow_nonce: None,
     };
+    let pow_bits = fetch_registration_pow_bits(client, server)
+        .await
+        .unwrap_or(0);
+    if pow_bits > 0 {
+        req.pow_nonce = Some(solve_registration_pow(&req, pow_bits)?);
+    }
     let value = post_json(client, format!("{server}/v1/users/register"), &req).await?;
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
@@ -2675,6 +2690,16 @@ async fn post_json<T: Serialize>(client: &Client, url: String, body: &T) -> Resu
     handle_json_response(response).await
 }
 
+async fn fetch_registration_pow_bits(client: &Client, server: &str) -> Result<u8> {
+    let response = client
+        .get(format!("{server}/health"))
+        .send()
+        .await
+        .context("health request failed")?;
+    let health: HealthResponse = handle_json_response(response).await?;
+    Ok(health.registration_pow_bits.unwrap_or(0))
+}
+
 async fn handle_json_response<T: for<'de> Deserialize<'de>>(
     response: reqwest::Response,
 ) -> Result<T> {
@@ -2700,6 +2725,62 @@ fn to_identity_keypair(keys: &UserKeysFile) -> Result<IdentityKeyPair> {
             &keys.identity_x25519_secret_b64,
         )?),
     })
+}
+
+fn solve_registration_pow(request: &RegisterRequest, bits: u8) -> Result<String> {
+    if bits == 0 {
+        return Ok("0".to_string());
+    }
+    if bits > MAX_REGISTRATION_POW_BITS {
+        return Err(anyhow!(
+            "server requested registration pow bits={bits}; max supported by cli is {MAX_REGISTRATION_POW_BITS}"
+        ));
+    }
+    let mut counter: u64 = 0;
+    loop {
+        let nonce = format!("{counter:x}");
+        let digest = Sha256::digest(registration_pow_message(request, &nonce));
+        if has_leading_zero_bits(&digest, bits) {
+            return Ok(nonce);
+        }
+        counter = counter
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("registration pow nonce space exhausted"))?;
+    }
+}
+
+fn registration_pow_message(request: &RegisterRequest, nonce: &str) -> Vec<u8> {
+    [
+        b"register".as_slice(),
+        request.user_id.as_bytes(),
+        request.device_id.as_bytes(),
+        request.identity_x25519_pub.as_bytes(),
+        request.identity_sig_pub.as_bytes(),
+        nonce.as_bytes(),
+    ]
+    .join(&[0u8][..])
+}
+
+fn has_leading_zero_bits(bytes: &[u8], bits: u8) -> bool {
+    if bits == 0 {
+        return true;
+    }
+    let full_bytes = usize::from(bits / 8);
+    let remaining_bits = bits % 8;
+    if bytes.len() < full_bytes {
+        return false;
+    }
+    if bytes.iter().take(full_bytes).any(|byte| *byte != 0) {
+        return false;
+    }
+    if remaining_bits == 0 {
+        return true;
+    }
+    if bytes.len() <= full_bytes {
+        return false;
+    }
+    let mask = 0xFFu8 << (8 - remaining_bits);
+    bytes[full_bytes] & mask == 0
 }
 
 fn to_signed_prekey(keys: &UserKeysFile) -> Result<OneTimePreKey> {

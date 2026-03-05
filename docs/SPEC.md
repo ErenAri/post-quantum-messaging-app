@@ -127,4 +127,6 @@ Current verification set:
 - unit tests for handshake/session success and tamper failure paths,
 - deterministic handshake KAT transcript,
 - fuzz targets for TLV and wire decoding,
-- integration tests for server endpoint behavior and input validation.
+- integration tests for server endpoint behavior and input validation,
+- symbolic handshake model in `verification/proverif/pqxdh_hybrid_model.pv`,
+- penetration smoke runbooks and scripts under `docs/PENETRATION_TESTING.md` and `scripts/security/`.

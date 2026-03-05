@@ -70,6 +70,8 @@ flowchart TD
 | `crates/pqmsg-android` | UniFFI-facing Rust bridge for Android clients |
 | `mobile/android` | Minimal Kotlin demo UI and transport layer |
 | `docs` | Normative and security documentation corpus |
+| `verification/proverif` | Symbolic protocol verification model |
+| `scripts/security` | Formal-verification and penetration smoke helper scripts |
 
 ## Build and Verification
 
@@ -140,6 +142,7 @@ cargo run -p pqmsg-cli --features pqmsg-core/pq-oqs -- --help
 
 The CLI performs an active runtime profile check and aborts when the PQ backend is not enabled.
 `pqmsg-android` now fails closed if `pq-oqs` is not available.
+`pqmsg-cli register` automatically solves registration PoW when the server advertises `registration_pow_bits > 0`.
 
 ## 15-Minute Quickstart (Windows + Android Emulator)
 
@@ -150,6 +153,20 @@ $env:PQMSG_DATABASE_URL='sqlite://./pqmsg-server.db?mode=rwc'
 $env:PQMSG_BIND='127.0.0.1:3000'
 $env:PQMSG_SECURITY_PROFILE='research'
 cargo run -p pqmsg-server
+```
+
+Metrics and health can be inspected with:
+
+```powershell
+curl http://127.0.0.1:3000/health
+curl http://127.0.0.1:3000/metrics
+```
+
+Formal verification and penetration smoke commands:
+
+```powershell
+./scripts/security/run_proverif.ps1
+./scripts/security/pentest_smoke.ps1 -Server http://127.0.0.1:3000
 ```
 
 For PostgreSQL-backed server startup:
@@ -166,6 +183,12 @@ $env:PQMSG_FCM_SERVER_KEY='<optional-fcm-legacy-server-key>'
 $env:PQMSG_FCM_ENDPOINT='https://fcm.googleapis.com/fcm/send'
 $env:PQMSG_TLS_CERT_PATH='C:\certs\server.crt'
 $env:PQMSG_TLS_KEY_PATH='C:\certs\server.key'
+$env:PQMSG_RATE_LIMIT_REDIS_URL='redis://127.0.0.1:6379/'
+$env:PQMSG_REGISTRATION_POW_BITS='18'
+$env:PQMSG_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS='30'
+$env:PQMSG_PREKEY_BUNDLE_RESERVE_COUNT='2'
+$env:PQMSG_LOG_FORMAT='json'
+$env:PQMSG_AUDIT_LOG_PATH='C:\logs\pqmsg-audit.jsonl'
 cargo run -p pqmsg-server
 ```
 

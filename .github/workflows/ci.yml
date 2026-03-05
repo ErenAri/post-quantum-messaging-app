@@ -47,3 +47,38 @@ jobs:
       - name: fuzz wire smoke
         working-directory: crates/pqmsg-core
         run: cargo fuzz run fuzz_wire_decode -- -max_total_time=20
+
+  formal-verification-smoke:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install proverif if available
+        run: |
+          if ! command -v proverif >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y proverif || true
+          fi
+          if ! command -v proverif >/dev/null 2>&1; then
+            echo "proverif not available on runner; skipping formal smoke"
+            exit 0
+          fi
+          proverif verification/proverif/pqxdh_hybrid_model.pv
+
+  pentest-smoke:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: start server and run penetration smoke script
+        run: |
+          chmod +x scripts/security/pentest_smoke.sh
+          export PQMSG_DATABASE_URL='sqlite://./pqmsg-server.db?mode=rwc'
+          export PQMSG_BIND='127.0.0.1:3000'
+          export PQMSG_SECURITY_PROFILE='research'
+          cargo run -p pqmsg-server > /tmp/pqmsg-server.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID' EXIT
+          sleep 5
+          ./scripts/security/pentest_smoke.sh http://127.0.0.1:3000
