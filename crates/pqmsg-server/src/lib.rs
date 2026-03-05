@@ -374,6 +374,32 @@ pub struct PushNotifier {
     client: reqwest::Client,
     fcm_server_key: Option<String>,
     fcm_endpoint: String,
+    apns_bearer_token: Option<String>,
+    apns_topic: Option<String>,
+    apns_endpoint: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PushProvider {
+    Fcm,
+    Apns,
+}
+
+impl PushProvider {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fcm => "fcm",
+            Self::Apns => "apns",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "fcm" => Some(Self::Fcm),
+            "apns" => Some(Self::Apns),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -837,11 +863,46 @@ impl PushNotifier {
             client: reqwest::Client::new(),
             fcm_server_key: None,
             fcm_endpoint: "https://fcm.googleapis.com/fcm/send".to_string(),
+            apns_bearer_token: None,
+            apns_topic: None,
+            apns_endpoint: "https://api.push.apple.com".to_string(),
         }
     }
 
     pub fn with_fcm(fcm_server_key: Option<String>, fcm_endpoint: String) -> Self {
+        Self::with_providers(
+            fcm_server_key,
+            fcm_endpoint,
+            None,
+            None,
+            "https://api.push.apple.com".to_string(),
+        )
+    }
+
+    pub fn with_providers(
+        fcm_server_key: Option<String>,
+        fcm_endpoint: String,
+        apns_bearer_token: Option<String>,
+        apns_topic: Option<String>,
+        apns_endpoint: String,
+    ) -> Self {
         let key = fcm_server_key.and_then(|value| {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        let apns_token = apns_bearer_token.and_then(|value| {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        let apns_topic = apns_topic.and_then(|value| {
             let trimmed = value.trim().to_string();
             if trimmed.is_empty() {
                 None
@@ -853,14 +914,36 @@ impl PushNotifier {
             client: reqwest::Client::new(),
             fcm_server_key: key,
             fcm_endpoint,
+            apns_bearer_token: apns_token,
+            apns_topic,
+            apns_endpoint,
         }
     }
 
     pub fn is_enabled(&self) -> bool {
         self.fcm_server_key.is_some()
+            || (self.apns_bearer_token.is_some() && self.apns_topic.is_some())
     }
 
-    async fn send_wake_signal(&self, token: &str) -> Result<(), String> {
+    pub fn enabled_providers(&self) -> Vec<&'static str> {
+        let mut providers = Vec::new();
+        if self.fcm_server_key.is_some() {
+            providers.push(PushProvider::Fcm.as_str());
+        }
+        if self.apns_bearer_token.is_some() && self.apns_topic.is_some() {
+            providers.push(PushProvider::Apns.as_str());
+        }
+        providers
+    }
+
+    async fn send_wake_signal(&self, provider: PushProvider, token: &str) -> Result<(), String> {
+        match provider {
+            PushProvider::Fcm => self.send_fcm_wake_signal(token).await,
+            PushProvider::Apns => self.send_apns_wake_signal(token).await,
+        }
+    }
+
+    async fn send_fcm_wake_signal(&self, token: &str) -> Result<(), String> {
         let Some(server_key) = self.fcm_server_key.clone() else {
             return Ok(());
         };
@@ -886,6 +969,42 @@ impl PushNotifier {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(format!("FCM request failed with status {status}: {body}"));
+        }
+        Ok(())
+    }
+
+    async fn send_apns_wake_signal(&self, token: &str) -> Result<(), String> {
+        let Some(bearer) = self.apns_bearer_token.clone() else {
+            return Ok(());
+        };
+        let Some(topic) = self.apns_topic.clone() else {
+            return Ok(());
+        };
+        let endpoint = self.apns_endpoint.trim_end_matches('/');
+        let url = format!("{endpoint}/3/device/{token}");
+        let payload = json!({
+            "aps": {
+                "content-available": 1
+            },
+            "wake": "1",
+            "v": "1"
+        });
+        let response = self
+            .client
+            .post(url)
+            .header("authorization", format!("bearer {bearer}"))
+            .header("apns-topic", topic)
+            .header("apns-push-type", "background")
+            .header("apns-priority", "5")
+            .header("content-type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("APNs request failed with status {status}: {body}"));
         }
         Ok(())
     }
@@ -1301,14 +1420,16 @@ struct RelayRequest {
 #[derive(Debug, Deserialize)]
 struct RegisterPushTokenRequest {
     device_id: String,
-    fcm_token: String,
+    provider: Option<String>,
+    token: Option<String>,
+    fcm_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct RegisterPushTokenResponse {
     user_id: String,
     device_id: String,
-    provider: &'static str,
+    provider: String,
     registered_at: String,
 }
 
@@ -1466,6 +1587,7 @@ struct StatusResponse {
     db_pool_size: u32,
     db_pool_idle: usize,
     push_enabled: bool,
+    push_providers: Vec<&'static str>,
     audit_logger_enabled: bool,
     rate_limiter_mode: &'static str,
     registration_pow_bits: u8,
@@ -1668,6 +1790,7 @@ async fn health(State(state): State<AppState>) -> Json<StatusResponse> {
         db_pool_size: state.pool().size(),
         db_pool_idle: state.pool().num_idle(),
         push_enabled: state.push_notifier().is_enabled(),
+        push_providers: state.push_notifier().enabled_providers(),
         audit_logger_enabled: state.audit_logger().is_enabled(),
         rate_limiter_mode: if state.rate_limiter.is_distributed() {
             "redis"
@@ -2657,7 +2780,8 @@ async fn register_push_token(
     check_rate_limit(&state, &format!("push-token:{user_id}"))?;
     validate_id("user_id", &user_id)?;
     validate_id("device_id", &request.device_id)?;
-    validate_push_token(&request.fcm_token)?;
+    let (provider, token) = resolve_push_token_payload(&request)?;
+    let token = validate_push_token(provider, &token)?;
 
     let auth = parse_request_auth(&headers)?;
     if auth.user_id != user_id {
@@ -2668,7 +2792,7 @@ async fn register_push_token(
             "auth device_id must match request device_id",
         ));
     }
-    let auth_message = push_token_auth_message(&auth, &request)?;
+    let auth_message = push_token_auth_message(&auth, &request.device_id, &token)?;
     verify_request_auth(&state, &auth, &auth_message).await?;
     ensure_user_exists(state.pool(), &user_id).await?;
 
@@ -2680,14 +2804,15 @@ async fn register_push_token(
             provider,
             token,
             updated_at
-         ) VALUES ($1, $2, 'fcm', $3, $4)
+         ) VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (user_id, device_id, provider) DO UPDATE SET
             token = EXCLUDED.token,
             updated_at = EXCLUDED.updated_at",
     )
     .bind(&user_id)
     .bind(&request.device_id)
-    .bind(&request.fcm_token)
+    .bind(provider.as_str())
+    .bind(&token)
     .bind(&now)
     .execute(state.pool())
     .await?;
@@ -2695,7 +2820,7 @@ async fn register_push_token(
     Ok(Json(RegisterPushTokenResponse {
         user_id,
         device_id: request.device_id,
-        provider: "fcm",
+        provider: provider.as_str().to_string(),
         registered_at: now,
     }))
 }
@@ -4519,13 +4644,12 @@ async fn dispatch_push_wake_signals(
         return Ok(());
     }
     let rows = sqlx::query(
-        "SELECT pt.token
+        "SELECT pt.provider, pt.token
          FROM push_tokens pt
          JOIN user_devices ud
            ON ud.user_id = pt.user_id
           AND ud.device_id = pt.device_id
          WHERE pt.user_id = $1
-           AND pt.provider = 'fcm'
            AND ud.active = 1
            AND pt.device_id <> $2",
     )
@@ -4536,8 +4660,19 @@ async fn dispatch_push_wake_signals(
     .map_err(|error| error.to_string())?;
 
     for row in rows {
+        let provider_raw: String = row.try_get("provider").map_err(|error| error.to_string())?;
         let token: String = row.try_get("token").map_err(|error| error.to_string())?;
-        state.push_notifier().send_wake_signal(&token).await?;
+        let Some(provider) = PushProvider::parse(&provider_raw) else {
+            warn!(
+                "skipping unsupported push provider '{}' for user '{}'",
+                provider_raw, recipient_user_id
+            );
+            continue;
+        };
+        state
+            .push_notifier()
+            .send_wake_signal(provider, &token)
+            .await?;
     }
     Ok(())
 }
@@ -5280,7 +5415,8 @@ fn prekeys_auth_message(
 
 fn push_token_auth_message(
     auth: &RequestAuth,
-    request: &RegisterPushTokenRequest,
+    device_id: &str,
+    push_token: &str,
 ) -> Result<Vec<u8>, AppError> {
     let mut records = auth_common_records(auth, "push-token");
     records.push(TlvRecord {
@@ -5289,10 +5425,10 @@ fn push_token_auth_message(
     });
     records.push(TlvRecord {
         ty: AUTH_TAG_PUSH_DEVICE_ID,
-        value: request.device_id.as_bytes().to_vec(),
+        value: device_id.as_bytes().to_vec(),
     });
     let mut hasher = Sha256::new();
-    hasher.update(request.fcm_token.as_bytes());
+    hasher.update(push_token.as_bytes());
     records.push(TlvRecord {
         ty: AUTH_TAG_PUSH_TOKEN_HASH,
         value: hasher.finalize().to_vec(),
@@ -5661,14 +5797,46 @@ fn validate_one_time_count(field: &'static str, count: usize) -> Result<(), AppE
     Ok(())
 }
 
-fn validate_push_token(value: &str) -> Result<(), AppError> {
+fn resolve_push_token_payload(
+    request: &RegisterPushTokenRequest,
+) -> Result<(PushProvider, String), AppError> {
+    let provider = if let Some(raw) = request.provider.as_deref() {
+        PushProvider::parse(raw)
+            .ok_or_else(|| AppError::bad_request("provider must be one of: fcm, apns"))?
+    } else {
+        PushProvider::Fcm
+    };
+    let token = request
+        .token
+        .as_deref()
+        .or(request.fcm_token.as_deref())
+        .ok_or_else(|| AppError::bad_request("push token is required"))?;
+    Ok((provider, token.to_string()))
+}
+
+fn validate_push_token(provider: PushProvider, value: &str) -> Result<String, AppError> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.len() > MAX_PUSH_TOKEN_LEN {
         return Err(AppError::bad_request(format!(
-            "fcm_token must be 1..={MAX_PUSH_TOKEN_LEN} characters"
+            "token must be 1..={MAX_PUSH_TOKEN_LEN} characters"
         )));
     }
-    Ok(())
+    match provider {
+        PushProvider::Fcm => Ok(trimmed.to_string()),
+        PushProvider::Apns => {
+            if !trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(AppError::bad_request(
+                    "apns token must contain only hexadecimal characters",
+                ));
+            }
+            if trimmed.len() < 64 || trimmed.len() > 512 {
+                return Err(AppError::bad_request(
+                    "apns token must be 64..=512 hexadecimal characters",
+                ));
+            }
+            Ok(trimmed.to_string())
+        }
+    }
 }
 
 fn validate_file_id(value: &str) -> Result<(), AppError> {

@@ -2307,6 +2307,34 @@ async fn push_token_registration_requires_authenticated_headers() {
 }
 
 #[tokio::test]
+async fn push_token_registration_accepts_apns_provider() {
+    let app = test_app().await;
+    let alice_sig = signing_key(74);
+    let reg_alice = register_payload("alice", "alice-dev-1", [3u8; 32], &alice_sig);
+    let (status_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_alice, StatusCode::OK);
+
+    let apns_token = "a".repeat(64);
+    let body = json!({
+        "device_id": "alice-dev-1",
+        "provider": "apns",
+        "token": apns_token
+    });
+    let auth_headers = push_token_auth_headers(&alice_sig, "alice", "alice-dev-1", &apns_token);
+    let (status_ok, payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/push-token",
+        body,
+        &auth_headers,
+    )
+    .await;
+    assert_eq!(status_ok, StatusCode::OK);
+    assert_eq!(payload["provider"].as_str(), Some("apns"));
+}
+
+#[tokio::test]
 async fn prekeys_status_reports_low_inventory_and_last_resort_fallback() {
     let app = test_app().await;
     let bob_sig = signing_key(78);

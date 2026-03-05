@@ -198,7 +198,9 @@ class MainActivity : AppCompatActivity() {
                             headers = pushAuth.toHeaderMap(),
                             request = RegisterPushTokenRequest(
                                 device_id = loadUserProfile(keysJson).deviceId,
-                                fcm_token = pushToken,
+                                provider = "fcm",
+                                token = pushToken,
+                                fcm_token = null,
                             ),
                         )
                     }

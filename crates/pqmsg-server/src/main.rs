@@ -108,29 +108,27 @@ async fn main() -> anyhow::Result<()> {
                 .with(tracing_subscriber::fmt::layer().with_target(true))
                 .init();
         }
+    } else if sentry_enabled {
+        tracing_subscriber::registry()
+            .with(EnvFilter::new(log_filter))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_current_span(false)
+                    .with_span_list(false),
+            )
+            .with(sentry_tracing::layer())
+            .init();
     } else {
-        if sentry_enabled {
-            tracing_subscriber::registry()
-                .with(EnvFilter::new(log_filter))
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .json()
-                        .with_current_span(false)
-                        .with_span_list(false),
-                )
-                .with(sentry_tracing::layer())
-                .init();
-        } else {
-            tracing_subscriber::registry()
-                .with(EnvFilter::new(log_filter))
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .json()
-                        .with_current_span(false)
-                        .with_span_list(false),
-                )
-                .init();
-        }
+        tracing_subscriber::registry()
+            .with(EnvFilter::new(log_filter))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_current_span(false)
+                    .with_span_list(false),
+            )
+            .init();
     }
 
     let bind_addr = env::var("PQMSG_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
@@ -175,6 +173,10 @@ async fn main() -> anyhow::Result<()> {
     let fcm_server_key = env::var("PQMSG_FCM_SERVER_KEY").ok();
     let fcm_endpoint = env::var("PQMSG_FCM_ENDPOINT")
         .unwrap_or_else(|_| "https://fcm.googleapis.com/fcm/send".to_string());
+    let apns_bearer_token = env::var("PQMSG_APNS_BEARER_TOKEN").ok();
+    let apns_topic = env::var("PQMSG_APNS_TOPIC").ok();
+    let apns_endpoint = env::var("PQMSG_APNS_ENDPOINT")
+        .unwrap_or_else(|_| "https://api.push.apple.com".to_string());
     let audit_log_path = env::var("PQMSG_AUDIT_LOG_PATH").ok().and_then(|value| {
         let trimmed = value.trim().to_string();
         if trimmed.is_empty() {
@@ -219,8 +221,15 @@ async fn main() -> anyhow::Result<()> {
         ))
     };
 
-    let push_notifier = Arc::new(PushNotifier::with_fcm(fcm_server_key, fcm_endpoint));
+    let push_notifier = Arc::new(PushNotifier::with_providers(
+        fcm_server_key,
+        fcm_endpoint,
+        apns_bearer_token,
+        apns_topic,
+        apns_endpoint,
+    ));
     let push_enabled = push_notifier.is_enabled();
+    let push_providers = push_notifier.enabled_providers();
     let audit_logger = if let Some(path) = &audit_log_path {
         Arc::new(
             AuditLogger::with_path(path)
@@ -265,6 +274,7 @@ async fn main() -> anyhow::Result<()> {
                 dos_policy.prekey_bundle_reserve_count(),
                 sentry_enabled
             );
+            info!("enabled_push_providers={}", push_providers.join(","));
             axum_server::bind_rustls(bind_addr.parse()?, tls_config)
                 .serve(app.into_make_service())
                 .await?;
@@ -291,6 +301,7 @@ async fn main() -> anyhow::Result<()> {
                 dos_policy.prekey_bundle_reserve_count(),
                 sentry_enabled
             );
+            info!("enabled_push_providers={}", push_providers.join(","));
             axum::serve(listener, app).await?;
         }
         _ => {

@@ -146,3 +146,25 @@ jobs:
           trap 'kill $SERVER_PID' EXIT
           sleep 5
           ./scripts/security/pentest_smoke.sh http://127.0.0.1:3000
+
+  alertmanager-config-smoke:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: validate alertmanager configuration
+        run: |
+          cp observability/alertmanager/alertmanager.yml /tmp/alertmanager.rendered.yml
+          sed -i 's|${ALERT_EMAIL_SMARTHOST}|smtp.example.com:25|g' /tmp/alertmanager.rendered.yml
+          sed -i 's|${ALERT_EMAIL_FROM}|pqmsg-alerts@example.com|g' /tmp/alertmanager.rendered.yml
+          sed -i 's|${ALERT_EMAIL_USERNAME}|pqmsg-alerts@example.com|g' /tmp/alertmanager.rendered.yml
+          sed -i 's|${ALERT_EMAIL_PASSWORD}|test-password|g' /tmp/alertmanager.rendered.yml
+          sed -i 's|${ALERT_EMAIL_REQUIRE_TLS}|false|g' /tmp/alertmanager.rendered.yml
+          sed -i 's|${ALERT_EMAIL_CRITICAL_TO}|secops-critical@example.com|g' /tmp/alertmanager.rendered.yml
+          sed -i 's|${ALERT_EMAIL_HIGH_TO}|secops-high@example.com|g' /tmp/alertmanager.rendered.yml
+          sed -i 's|${ALERT_EMAIL_STANDARD_TO}|secops-standard@example.com|g' /tmp/alertmanager.rendered.yml
+          docker run --rm \
+            --entrypoint amtool \
+            -v "/tmp/alertmanager.rendered.yml:/etc/alertmanager/alertmanager.yml:ro" \
+            prom/alertmanager:v0.28.0 \
+            check-config /etc/alertmanager/alertmanager.yml

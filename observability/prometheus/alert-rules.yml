@@ -1,0 +1,49 @@
+groups:
+  - name: pqmsg-security-alerts
+    rules:
+      - alert: PQMSGHighServerErrorRate
+        expr: |
+          (
+            sum(rate(pqmsg_http_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(pqmsg_http_requests_total[5m])), 1)
+          ) > 0.02
+        for: 10m
+        labels:
+          severity: critical
+          service: pqmsg-server
+        annotations:
+          summary: "pqmsg-server 5xx rate is above 2%"
+          description: "Sustained server error rate exceeds production threshold for 10m."
+
+      - alert: PQMSGAuthRejectSpike
+        expr: |
+          sum(rate(pqmsg_security_events_total{event=~"auth_signature_invalid|auth_nonce_replay|auth_timestamp_skew"}[5m])) > 5
+        for: 5m
+        labels:
+          severity: high
+          service: pqmsg-server
+        annotations:
+          summary: "Authentication reject spike detected"
+          description: "Auth-related security rejects exceeded expected baseline."
+
+      - alert: PQMSGRatelimitRejectSpike
+        expr: |
+          sum(rate(pqmsg_security_events_total{event="rate_limit_rejected"}[5m])) > 20
+        for: 10m
+        labels:
+          severity: medium
+          service: pqmsg-server
+        annotations:
+          summary: "Rate-limit rejects are elevated"
+          description: "Rate-limit rejects may indicate abuse or insufficient capacity."
+
+      - alert: PQMSGHighInflightRequests
+        expr: pqmsg_http_in_flight_requests > 200
+        for: 10m
+        labels:
+          severity: medium
+          service: pqmsg-server
+        annotations:
+          summary: "High in-flight request pressure"
+          description: "In-flight requests exceeded 200 for 10m."

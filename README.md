@@ -176,6 +176,7 @@ Formal verification and penetration smoke commands:
 ```powershell
 ./scripts/security/run_proverif.ps1
 ./scripts/security/pentest_smoke.ps1 -Server http://127.0.0.1:3000
+./scripts/security/alert_drill.ps1 -Alertmanager http://127.0.0.1:9093
 ```
 
 For PostgreSQL-backed server startup:
@@ -190,6 +191,9 @@ $env:PQMSG_DB_ACQUIRE_TIMEOUT_SECS='5'
 $env:PQMSG_DB_IDLE_TIMEOUT_SECS='300'
 $env:PQMSG_FCM_SERVER_KEY='<optional-fcm-legacy-server-key>'
 $env:PQMSG_FCM_ENDPOINT='https://fcm.googleapis.com/fcm/send'
+$env:PQMSG_APNS_BEARER_TOKEN='<optional-apns-bearer-token>'
+$env:PQMSG_APNS_TOPIC='com.example.pqmsgdemo'
+$env:PQMSG_APNS_ENDPOINT='https://api.push.apple.com'
 $env:PQMSG_TLS_CERT_PATH='C:\certs\server.crt'
 $env:PQMSG_TLS_KEY_PATH='C:\certs\server.key'
 $env:PQMSG_RATE_LIMIT_REDIS_URL='redis://127.0.0.1:6379/'
@@ -251,7 +255,7 @@ Optional push-token registration endpoint for Android devices:
 
 `POST /v1/users/{user_id}/push-token`
 
-The server sends wake-only FCM payloads (`{"wake":"1","v":"1"}`) and never includes plaintext message content in push transport.
+The server sends wake-only FCM/APNs payloads and never includes plaintext message content in push transport.
 
 ## Production Transport Note
 
@@ -282,6 +286,15 @@ helm upgrade --install pqmsg-server deploy/helm/pqmsg-server --namespace pqmsg -
 docker compose -f docker-compose.observability.yml up -d --build
 ```
 
+Observability endpoints:
+
+- Prometheus: `http://localhost:9090`
+- Alertmanager: `http://localhost:9093`
+- Mailpit: `http://localhost:8025`
+- Grafana: `http://localhost:3001`
+
+Alert email settings are read from `.env.alerting` (use `.env.alerting.example` for real SMTP template).
+
 ## SQLite to PostgreSQL Data Migration
 
 ```powershell
@@ -298,6 +311,10 @@ cargo run -p pqmsg-server --bin migrate_sqlite_to_postgres -- --sqlite-url "sqli
 - [SECURITY_GATES](docs/SECURITY_GATES.md)
 - [DEPLOYMENT](docs/DEPLOYMENT.md)
 - [OBSERVABILITY](docs/OBSERVABILITY.md)
+- [OPERATIONS](docs/OPERATIONS.md)
+- [RELEASE_GOVERNANCE](docs/RELEASE_GOVERNANCE.md)
+- [FORMAL_AUDIT](docs/FORMAL_AUDIT.md)
+- [PENETRATION_TESTING](docs/PENETRATION_TESTING.md)
 - [ANDROID](docs/ANDROID.md)
 - [IOS](docs/IOS.md)
 - [WEB](docs/WEB.md)

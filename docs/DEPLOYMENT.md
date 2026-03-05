@@ -61,6 +61,8 @@ kubectl create secret generic pqmsg-server-secrets \
   --from-literal=PQMSG_DATABASE_URL='postgres://pqmsg:change-me@postgres.pqmsg.svc.cluster.local:5432/pqmsg' \
   --from-literal=PQMSG_RATE_LIMIT_REDIS_URL='redis://redis.pqmsg.svc.cluster.local:6379/' \
   --from-literal=PQMSG_FCM_SERVER_KEY='replace-with-fcm-server-key' \
+  --from-literal=PQMSG_APNS_BEARER_TOKEN='replace-with-apns-bearer-token' \
+  --from-literal=PQMSG_APNS_TOPIC='com.example.pqmsgdemo' \
   --from-literal=PQMSG_SENTRY_DSN='https://public@example.ingest.sentry.io/project-id'
 kubectl create secret tls pqmsg-server-tls \
   --namespace pqmsg \
@@ -79,6 +81,8 @@ kubectl create secret generic pqmsg-server-secrets \
   --namespace pqmsg \
   --from-literal=PQMSG_DATABASE_URL='postgres://pqmsg:change-me@postgres.pqmsg.svc.cluster.local:5432/pqmsg' \
   --from-literal=PQMSG_RATE_LIMIT_REDIS_URL='redis://redis.pqmsg.svc.cluster.local:6379/' \
+  --from-literal=PQMSG_APNS_BEARER_TOKEN='replace-with-apns-bearer-token' \
+  --from-literal=PQMSG_APNS_TOPIC='com.example.pqmsgdemo' \
   --from-literal=PQMSG_SENTRY_DSN='https://public@example.ingest.sentry.io/project-id'
 kubectl create secret tls pqmsg-server-tls --namespace pqmsg --cert=server.crt --key=server.key
 kubectl apply -k deploy/k8s
@@ -129,7 +133,10 @@ Requirements:
 3. Configure distributed rate limiting (`PQMSG_RATE_LIMIT_REDIS_URL=redis://...`).
 4. Set `PQMSG_LOG_FORMAT=json` and `PQMSG_AUDIT_LOG_PATH` for audit retention.
 5. Keep `PQMSG_SECURITY_PROFILE=high_assurance` or `nss_aligned`.
-6. Configure Sentry (`PQMSG_SENTRY_DSN`, `PQMSG_SENTRY_TRACES_SAMPLE_RATE`) for production error telemetry.
+6. Configure push provider credentials:
+   - FCM: `PQMSG_FCM_SERVER_KEY` (and optional `PQMSG_FCM_ENDPOINT`),
+   - APNs: `PQMSG_APNS_BEARER_TOKEN`, `PQMSG_APNS_TOPIC` (and optional `PQMSG_APNS_ENDPOINT`).
+7. Configure Sentry (`PQMSG_SENTRY_DSN`, `PQMSG_SENTRY_TRACES_SAMPLE_RATE`) for production error telemetry.
 
 ## 7. Observability Stack
 
@@ -142,7 +149,29 @@ docker compose -f docker-compose.observability.yml up -d --build
 This stack includes:
 
 - Prometheus scrape of `pqmsg-server:/metrics`,
+- Alertmanager routing for severity-based escalation paths,
+- local Mailpit SMTP sink for escalation drill validation,
 - Grafana with pre-provisioned PQMSG dashboard,
 - Loki + Promtail aggregation for application logs and audit JSONL streams.
 
 See `docs/OBSERVABILITY.md` for operational details and dashboard coverage.
+
+## 8. Alertmanager Email Escalation Inputs
+
+Configure Alertmanager SMTP and recipient routing environment variables in production:
+
+1. `ALERT_EMAIL_SMARTHOST` (example: `smtp.example.com:587`),
+2. `ALERT_EMAIL_FROM` (example: `pqmsg-alerts@example.com`),
+3. `ALERT_EMAIL_USERNAME`,
+4. `ALERT_EMAIL_PASSWORD`,
+5. `ALERT_EMAIL_REQUIRE_TLS` (`true` for production SMTP),
+6. `ALERT_EMAIL_CRITICAL_TO`,
+7. `ALERT_EMAIL_HIGH_TO`,
+8. `ALERT_EMAIL_STANDARD_TO`.
+
+For local compose:
+
+1. `.env.alerting` is prefilled with Mailpit-safe defaults.
+2. Copy `.env.alerting.example` over `.env.alerting` and set real SMTP credentials for production-like drills.
+
+Local observability compose defaults route email to Mailpit (`mailpit:1025`) for drill validation.

@@ -1,0 +1,49 @@
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: ${ALERT_EMAIL_SMARTHOST}
+  smtp_from: ${ALERT_EMAIL_FROM}
+  smtp_auth_username: ${ALERT_EMAIL_USERNAME}
+  smtp_auth_password: ${ALERT_EMAIL_PASSWORD}
+  smtp_require_tls: ${ALERT_EMAIL_REQUIRE_TLS}
+
+route:
+  receiver: oncall-standard
+  group_by:
+    - alertname
+    - service
+    - severity
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - severity="critical"
+      receiver: oncall-critical
+    - matchers:
+        - severity="high"
+      receiver: oncall-high
+    - matchers:
+        - severity=~"medium|low"
+      receiver: oncall-standard
+
+inhibit_rules:
+  - source_matchers:
+      - severity="critical"
+    target_matchers:
+      - severity=~"high|medium|low"
+    equal:
+      - service
+
+receivers:
+  - name: oncall-critical
+    email_configs:
+      - to: ${ALERT_EMAIL_CRITICAL_TO}
+        send_resolved: true
+  - name: oncall-high
+    email_configs:
+      - to: ${ALERT_EMAIL_HIGH_TO}
+        send_resolved: true
+  - name: oncall-standard
+    email_configs:
+      - to: ${ALERT_EMAIL_STANDARD_TO}
+        send_resolved: true

@@ -7,7 +7,9 @@ This document defines the default observability stack for `pqmsg-server`:
 - metrics: Prometheus scraping `/metrics`,
 - dashboards: Grafana with provisioned PQMSG dashboard,
 - logs: Loki with Promtail ingestion,
-- error tracking: Sentry via runtime DSN configuration.
+- error tracking: Sentry via runtime DSN configuration,
+- alert evaluation: Prometheus rule groups for availability and security anomalies,
+- escalation routing: Alertmanager severity-based receiver fan-out.
 
 ## 2. Runtime Signals
 
@@ -35,6 +37,8 @@ Endpoints:
 
 - server: `http://localhost:3000/health`
 - prometheus: `http://localhost:9090`
+- alertmanager: `http://localhost:9093`
+- mailpit UI (local email sink): `http://localhost:8025`
 - grafana: `http://localhost:3001` (default credentials: `admin` / `pqmsg`)
 - loki: `http://localhost:3100`
 
@@ -59,7 +63,66 @@ Default views include:
 5. application log stream,
 6. audit security-event stream.
 
-## 5. Log Aggregation
+## 5. Alert Rules
+
+Prometheus rule groups:
+
+- `observability/prometheus/alert-rules.yml`
+- `observability/alertmanager/alertmanager.yml`
+
+The default rules cover:
+
+1. sustained 5xx ratio breach,
+2. authentication reject spikes,
+3. rate-limit reject spikes,
+4. sustained high in-flight request load.
+
+The default Alertmanager routing maps:
+
+1. `severity=critical` -> `oncall-critical`,
+2. `severity=high` -> `oncall-high`,
+3. `severity in {medium,low}` -> `oncall-standard`.
+
+Receiver email routing in the local stack is:
+
+- `oncall-critical` -> `${ALERT_EMAIL_CRITICAL_TO}`
+- `oncall-high` -> `${ALERT_EMAIL_HIGH_TO}`
+- `oncall-standard` -> `${ALERT_EMAIL_STANDARD_TO}`
+
+SMTP configuration uses these environment variables:
+
+- `ALERT_EMAIL_SMARTHOST`
+- `ALERT_EMAIL_FROM`
+- `ALERT_EMAIL_USERNAME`
+- `ALERT_EMAIL_PASSWORD`
+- `ALERT_EMAIL_REQUIRE_TLS`
+
+Compose source of truth:
+
+- `.env.alerting` (local defaults),
+- `.env.alerting.example` (production template).
+
+## 5.1 Escalation Drill
+
+Run synthetic alert drills:
+
+```bash
+./scripts/security/alert_drill.sh
+```
+
+```powershell
+./scripts/security/alert_drill.ps1
+```
+
+Inspect sink delivery traces:
+
+```bash
+curl -sS http://127.0.0.1:8025/api/v1/messages
+```
+
+Alert handling and escalation policy are defined in `docs/OPERATIONS.md`.
+
+## 6. Log Aggregation
 
 Promtail scrapes:
 
@@ -68,7 +131,7 @@ Promtail scrapes:
 
 Loki labels include `job`, `source`, and parsed fields such as `request_id`, `event`, and `outcome`.
 
-## 6. Sentry Error Tracking
+## 7. Sentry Error Tracking
 
 Set the following environment variables for production deployments:
 
@@ -84,7 +147,7 @@ export PQMSG_SENTRY_TRACES_SAMPLE_RATE='0.1'
 
 With DSN configured, `pqmsg-server` installs Sentry tracing integration and forwards runtime error-level events.
 
-## 7. Kubernetes and Helm Inputs
+## 8. Kubernetes and Helm Inputs
 
 Kubernetes defaults:
 

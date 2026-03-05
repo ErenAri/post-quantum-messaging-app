@@ -60,7 +60,9 @@ data class PrekeysStatusResponse(
 
 data class RegisterPushTokenRequest(
     val device_id: String,
-    val fcm_token: String,
+    val provider: String? = null,
+    val token: String? = null,
+    val fcm_token: String? = null,
 )
 
 data class RegisterPushTokenResponse(

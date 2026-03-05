@@ -162,7 +162,9 @@ final class AppState: ObservableObject {
                     headers: pushHeaders,
                     requestBody: RegisterPushTokenRequest(
                         device_id: profile.deviceId,
-                        fcm_token: pushToken
+                        provider: "apns",
+                        token: pushToken,
+                        fcm_token: nil
                     )
                 )
             }

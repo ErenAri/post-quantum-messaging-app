@@ -57,6 +57,8 @@ secretEnv:
   PQMSG_DATABASE_URL: postgres://pqmsg:change-me@postgres.pqmsg.svc.cluster.local:5432/pqmsg
   PQMSG_RATE_LIMIT_REDIS_URL: redis://redis.pqmsg.svc.cluster.local:6379/
   PQMSG_FCM_SERVER_KEY: ""
+  PQMSG_APNS_BEARER_TOKEN: ""
+  PQMSG_APNS_TOPIC: ""
   PQMSG_SENTRY_DSN: ""
 
 podSecurityContext:

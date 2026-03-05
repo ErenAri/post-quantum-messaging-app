@@ -68,6 +68,9 @@ Server startup is controlled by environment variables:
 - `PQMSG_DB_IDLE_TIMEOUT_SECS`: idle connection timeout seconds (default: `300`)
 - `PQMSG_FCM_SERVER_KEY`: optional FCM legacy server key for wake-signal dispatch
 - `PQMSG_FCM_ENDPOINT`: optional override (default: `https://fcm.googleapis.com/fcm/send`)
+- `PQMSG_APNS_BEARER_TOKEN`: optional APNs bearer token for wake-signal dispatch
+- `PQMSG_APNS_TOPIC`: optional APNs app topic/bundle identifier (required when APNs token is set)
+- `PQMSG_APNS_ENDPOINT`: optional override (default: `https://api.push.apple.com`)
 - `PQMSG_LOG_FORMAT`: `json` (default) or `pretty`
 - `PQMSG_AUDIT_LOG_PATH`: optional JSONL audit log file path
 - `PQMSG_SENTRY_DSN`: optional Sentry DSN for server error telemetry
@@ -349,7 +352,10 @@ Response:
 }
 ```
 
-When `PQMSG_FCM_SERVER_KEY` is configured, relay delivery triggers an FCM wake-only push payload (`data: {"wake":"1","v":"1"}`) to registered recipient tokens.
+When push provider credentials are configured, relay delivery triggers wake-only push payloads to registered recipient tokens:
+
+- FCM (`provider="fcm"`): `data: {"wake":"1","v":"1"}`
+- APNs (`provider="apns"`): `{"aps":{"content-available":1},"wake":"1","v":"1"}`
 
 ### 4.5 Register Push Token
 
@@ -362,9 +368,21 @@ Request:
 ```json
 {
   "device_id": "alice-device-1",
+  "provider": "apns",
+  "token": "hex-apns-device-token"
+}
+```
+
+Backward-compatible request shape is also accepted:
+
+```json
+{
+  "device_id": "alice-device-1",
   "fcm_token": "fcm-registration-token"
 }
 ```
+
+If `provider` is omitted, server defaults to `fcm`.
 
 Push-token auth signature transcript fields:
 
@@ -375,7 +393,7 @@ Push-token auth signature transcript fields:
 5. auth nonce,
 6. target user id,
 7. device id,
-8. SHA-256 hash of `fcm_token` bytes.
+8. SHA-256 hash of effective push token bytes.
 
 Response:
 
@@ -383,7 +401,7 @@ Response:
 {
   "user_id": "alice",
   "device_id": "alice-device-1",
-  "provider": "fcm",
+  "provider": "apns",
   "registered_at": "2026-03-04T12:00:00Z"
 }
 ```
@@ -1044,6 +1062,7 @@ Response:
   "db_pool_size": 1,
   "db_pool_idle": 1,
   "push_enabled": false,
+  "push_providers": [],
   "audit_logger_enabled": false,
   "rate_limiter_mode": "in_memory",
   "registration_pow_bits": 0,

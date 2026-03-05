@@ -183,7 +183,9 @@ struct InboxResponse: Codable {
 
 struct RegisterPushTokenRequest: Codable {
     let device_id: String
-    let fcm_token: String
+    let provider: String?
+    let token: String?
+    let fcm_token: String?
 }
 
 struct RegisterPushTokenResponse: Codable {

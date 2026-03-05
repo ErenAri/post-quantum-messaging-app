@@ -86,7 +86,8 @@ cargo run -p pqmsg-server
 
 - The app requests notification permission and registers for APNs via `UIApplicationDelegate`.
 - APNs token is surfaced in Setup/Security and optionally submitted to `/v1/users/{user_id}/push-token`.
-- Current server wake pipeline uses FCM semantics; direct APNs dispatch support should be added in server transport before production deployment.
+- For APNs registration payloads, use `provider: "apns"` and `token: <apns-device-token-hex>` on `/v1/users/{user_id}/push-token`.
+- Server-side APNs wake dispatch requires `PQMSG_APNS_BEARER_TOKEN` and `PQMSG_APNS_TOPIC`.
 
 ## 9. App Store Submission Checklist
 

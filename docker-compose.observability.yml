@@ -33,9 +33,35 @@ services:
       - "9090:9090"
     volumes:
       - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
       - prometheus_data:/prometheus
     depends_on:
       - pqmsg-server
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    container_name: pqmsg-alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--config.expand-env"
+      - "--storage.path=/alertmanager"
+    env_file:
+      - ./.env.alerting
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    depends_on:
+      - mailpit
+
+  mailpit:
+    image: axllent/mailpit:v1.24.2
+    container_name: pqmsg-mailpit
+    ports:
+      - "8025:8025"
+      - "1025:1025"
 
   loki:
     image: grafana/loki:3.1.1
@@ -80,5 +106,6 @@ volumes:
   pqmsg_sqlite:
   pqmsg_logs:
   prometheus_data:
+  alertmanager_data:
   loki_data:
   grafana_data:
