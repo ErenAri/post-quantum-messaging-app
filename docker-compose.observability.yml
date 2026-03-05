@@ -1,0 +1,84 @@
+services:
+  pqmsg-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pqmsg-server
+    command:
+      - /bin/sh
+      - -lc
+      - /usr/local/bin/pqmsg-server 2>&1 | tee -a /var/log/pqmsg/server.log
+    ports:
+      - "3000:8080"
+    environment:
+      PQMSG_BIND: "0.0.0.0:8080"
+      PQMSG_DATABASE_URL: "sqlite:///data/pqmsg-server.db?mode=rwc"
+      PQMSG_SECURITY_PROFILE: "research"
+      PQMSG_LOG_FORMAT: "json"
+      RUST_LOG: "pqmsg_server=info"
+      PQMSG_AUDIT_LOG_PATH: "/var/log/pqmsg/audit.jsonl"
+      PQMSG_SENTRY_DSN: ""
+      PQMSG_SENTRY_TRACES_SAMPLE_RATE: "0.0"
+    volumes:
+      - pqmsg_sqlite:/data
+      - pqmsg_logs:/var/log/pqmsg
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: pqmsg-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - pqmsg-server
+
+  loki:
+    image: grafana/loki:3.1.1
+    container_name: pqmsg-loki
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+
+  promtail:
+    image: grafana/promtail:3.1.1
+    container_name: pqmsg-promtail
+    command: ["-config.file=/etc/promtail/promtail.yml"]
+    volumes:
+      - ./observability/promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      - pqmsg_logs:/var/log/pqmsg:ro
+    depends_on:
+      - loki
+      - pqmsg-server
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: pqmsg-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "pqmsg"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: ""
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+
+volumes:
+  pqmsg_sqlite:
+  pqmsg_logs:
+  prometheus_data:
+  loki_data:
+  grafana_data:

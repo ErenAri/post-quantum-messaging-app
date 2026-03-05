@@ -70,6 +70,8 @@ Server startup is controlled by environment variables:
 - `PQMSG_FCM_ENDPOINT`: optional override (default: `https://fcm.googleapis.com/fcm/send`)
 - `PQMSG_LOG_FORMAT`: `json` (default) or `pretty`
 - `PQMSG_AUDIT_LOG_PATH`: optional JSONL audit log file path
+- `PQMSG_SENTRY_DSN`: optional Sentry DSN for server error telemetry
+- `PQMSG_SENTRY_TRACES_SAMPLE_RATE`: optional tracing sample rate in `[0.0, 1.0]`
 - `PQMSG_RATE_LIMIT_CAPACITY`: token bucket capacity (default: `60`)
 - `PQMSG_RATE_LIMIT_REFILL_PER_SECOND`: token refill rate (default: `1`)
 - `PQMSG_RATE_LIMIT_MAX_ENTRIES`: in-memory bucket map size (default: `20000`)

@@ -1,0 +1,49 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build release binary
+        run: cargo build --release -p pqmsg-server
+      - name: package artifacts
+        run: |
+          mkdir -p dist
+          cp target/release/pqmsg-server dist/pqmsg-server-linux-x86_64
+          chmod +x dist/pqmsg-server-linux-x86_64
+          sha256sum dist/pqmsg-server-linux-x86_64 > dist/checksums.txt
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: sign checksums
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob \
+            --output-signature dist/checksums.txt.sig \
+            --output-certificate dist/checksums.txt.pem \
+            dist/checksums.txt
+      - name: upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts-${{ github.ref_name }}
+          path: dist/*
+      - name: publish github release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/pqmsg-server-linux-x86_64
+            dist/checksums.txt
+            dist/checksums.txt.sig
+            dist/checksums.txt.pem
+          generate_release_notes: true

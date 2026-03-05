@@ -1,0 +1,10 @@
+.git
+.github
+.idea
+.vscode
+target
+tmp
+verification
+mobile
+pqmsg-server.db
+**/*.log

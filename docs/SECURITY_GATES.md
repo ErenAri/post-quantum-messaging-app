@@ -79,7 +79,12 @@ Required coverage:
 ## 9. CI Policy
 
 - stable path: `fmt`, `clippy`, `test`,
+- dependency policy path (scheduled/manual): `cargo-audit` and `cargo-deny`,
+- coverage path: enforced minimum line coverage threshold in CI,
+- Android path: Rust bridge + APK assembly verification in CI,
 - optional nightly/manual path: fuzz smoke.
+
+Release artifacts published from tagged commits MUST include a signed checksum manifest.
 
 A change that weakens these controls requires explicit security rationale.
 
@@ -89,6 +94,8 @@ A change that weakens these controls requires explicit security rationale.
 2. Every HTTP response SHOULD include a request correlation header (`x-request-id`).
 3. Server MUST expose Prometheus-compatible metrics for request volume/latency and security event counters.
 4. Security-relevant rejects (auth failures, replay rejects, rate limits, conflicts) SHOULD be written to an audit log sink when configured.
+5. Production deployments SHOULD aggregate structured logs through Loki/ELK-class backends.
+6. Production deployments SHOULD forward runtime error events to an external tracking system (for example, Sentry).
 
 ## 11. Formal Verification Policy
 

@@ -5,11 +5,14 @@ use pqmsg_server::{
     build_router, init_db, parse_db_backend, AppState, AuditLogger, DosHardeningPolicy,
     PushNotifier, RateLimiter,
 };
+use sentry::ClientOptions;
 use sqlx::any::AnyPoolOptions;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use tracing::info;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::EnvFilter;
 
 fn parse_env_u32(name: &str, default: u32) -> anyhow::Result<u32> {
     match env::var(name) {
@@ -49,32 +52,90 @@ fn parse_env_optional_i64(name: &str) -> anyhow::Result<Option<i64>> {
     }
 }
 
+fn parse_env_optional_f64(name: &str) -> anyhow::Result<Option<f64>> {
+    match env::var(name) {
+        Ok(value) => value
+            .parse::<f64>()
+            .with_context(|| format!("invalid {name}='{value}': expected floating-point number"))
+            .map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     sqlx::any::install_default_drivers();
+    let profile_raw =
+        env::var("PQMSG_SECURITY_PROFILE").unwrap_or_else(|_| "high_assurance".to_string());
+    let security_profile = SecurityProfile::parse(&profile_raw)
+        .with_context(|| format!("invalid PQMSG_SECURITY_PROFILE '{profile_raw}'"))?;
+    let sentry_dsn = env::var("PQMSG_SENTRY_DSN").ok().and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    let sentry_traces_sample_rate = parse_env_optional_f64("PQMSG_SENTRY_TRACES_SAMPLE_RATE")?
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    let sentry_guard = sentry_dsn.as_deref().map(|dsn| {
+        sentry::init((
+            dsn,
+            ClientOptions {
+                release: sentry::release_name!(),
+                environment: Some(security_profile.as_str().to_string().into()),
+                traces_sample_rate: sentry_traces_sample_rate as f32,
+                attach_stacktrace: true,
+                ..Default::default()
+            },
+        ))
+    });
+    let sentry_enabled = sentry_guard.is_some();
     let log_filter = env::var("RUST_LOG").unwrap_or_else(|_| "pqmsg_server=info".to_string());
     let log_format = env::var("PQMSG_LOG_FORMAT").unwrap_or_else(|_| "json".to_string());
     if log_format.trim().eq_ignore_ascii_case("pretty") {
-        tracing_subscriber::fmt()
-            .with_env_filter(log_filter)
-            .with_target(true)
-            .init();
+        if sentry_enabled {
+            tracing_subscriber::registry()
+                .with(EnvFilter::new(log_filter))
+                .with(tracing_subscriber::fmt::layer().with_target(true))
+                .with(sentry_tracing::layer())
+                .init();
+        } else {
+            tracing_subscriber::registry()
+                .with(EnvFilter::new(log_filter))
+                .with(tracing_subscriber::fmt::layer().with_target(true))
+                .init();
+        }
     } else {
-        tracing_subscriber::fmt()
-            .json()
-            .with_current_span(false)
-            .with_span_list(false)
-            .with_env_filter(log_filter)
-            .init();
+        if sentry_enabled {
+            tracing_subscriber::registry()
+                .with(EnvFilter::new(log_filter))
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_current_span(false)
+                        .with_span_list(false),
+                )
+                .with(sentry_tracing::layer())
+                .init();
+        } else {
+            tracing_subscriber::registry()
+                .with(EnvFilter::new(log_filter))
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_current_span(false)
+                        .with_span_list(false),
+                )
+                .init();
+        }
     }
 
     let bind_addr = env::var("PQMSG_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
     let database_url =
         env::var("PQMSG_DATABASE_URL").unwrap_or_else(|_| "sqlite://pqmsg-server.db".to_string());
-    let profile_raw =
-        env::var("PQMSG_SECURITY_PROFILE").unwrap_or_else(|_| "high_assurance".to_string());
-    let security_profile = SecurityProfile::parse(&profile_raw)
-        .with_context(|| format!("invalid PQMSG_SECURITY_PROFILE '{profile_raw}'"))?;
     let db_backend = parse_db_backend(&database_url)
         .map_err(|message| anyhow::anyhow!("{message} (got '{database_url}')"))?;
     let db_max_connections = parse_env_u32("PQMSG_DB_MAX_CONNECTIONS", 20)?;
@@ -191,9 +252,8 @@ async fn main() -> anyhow::Result<()> {
                     )
                 })?;
             info!(
-                "pqmsg-server listening with TLS on {bind_addr} profile={} db_backend={} max_conn={} min_conn={} push_enabled={} audit_enabled={} limiter_mode={} registration_pow_bits={} prekey_publish_min_interval_seconds={} prekey_bundle_reserve_count={}",
-                security_profile.as_str()
-                ,
+                "pqmsg-server listening with TLS on {bind_addr} profile={} db_backend={} max_conn={} min_conn={} push_enabled={} audit_enabled={} limiter_mode={} registration_pow_bits={} prekey_publish_min_interval_seconds={} prekey_bundle_reserve_count={} sentry_enabled={}",
+                security_profile.as_str(),
                 db_backend.as_str(),
                 db_max_connections,
                 db_min_connections,
@@ -202,7 +262,8 @@ async fn main() -> anyhow::Result<()> {
                 rate_limiter_mode,
                 dos_policy.registration_pow_bits(),
                 dos_policy.prekey_publish_min_interval_seconds(),
-                dos_policy.prekey_bundle_reserve_count()
+                dos_policy.prekey_bundle_reserve_count(),
+                sentry_enabled
             );
             axum_server::bind_rustls(bind_addr.parse()?, tls_config)
                 .serve(app.into_make_service())
@@ -217,7 +278,7 @@ async fn main() -> anyhow::Result<()> {
             }
             let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
             info!(
-                "pqmsg-server listening without TLS on {bind_addr} profile={} db_backend={} max_conn={} min_conn={} push_enabled={} audit_enabled={} limiter_mode={} registration_pow_bits={} prekey_publish_min_interval_seconds={} prekey_bundle_reserve_count={}",
+                "pqmsg-server listening without TLS on {bind_addr} profile={} db_backend={} max_conn={} min_conn={} push_enabled={} audit_enabled={} limiter_mode={} registration_pow_bits={} prekey_publish_min_interval_seconds={} prekey_bundle_reserve_count={} sentry_enabled={}",
                 security_profile.as_str(),
                 db_backend.as_str(),
                 db_max_connections,
@@ -227,7 +288,8 @@ async fn main() -> anyhow::Result<()> {
                 rate_limiter_mode,
                 dos_policy.registration_pow_bits(),
                 dos_policy.prekey_publish_min_interval_seconds(),
-                dos_policy.prekey_bundle_reserve_count()
+                dos_policy.prekey_bundle_reserve_count(),
+                sentry_enabled
             );
             axum::serve(listener, app).await?;
         }

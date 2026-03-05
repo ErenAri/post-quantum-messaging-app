@@ -1,0 +1,6 @@
+apiVersion: v2
+name: pqmsg-server
+description: pqmsg-server high-assurance deployment
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

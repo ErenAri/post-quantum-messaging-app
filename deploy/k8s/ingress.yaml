@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pqmsg-server
+  namespace: pqmsg
+  labels:
+    app.kubernetes.io/name: pqmsg-server
+spec:
+  tls:
+    - hosts:
+        - pqmsg.example.com
+      secretName: pqmsg-server-ingress-tls
+  rules:
+    - host: pqmsg.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pqmsg-server
+                port:
+                  number: 443

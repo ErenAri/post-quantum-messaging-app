@@ -74,6 +74,8 @@ flowchart TD
 | `mobile/android` | Minimal Kotlin demo UI and transport layer |
 | `mobile/ios` | Minimal SwiftUI demo UI and iOS build scripts |
 | `mobile/web` | Progressive web app shell with WebCrypto fallback mode |
+| `deploy` | Container, Kubernetes, and Helm deployment assets |
+| `observability` | Prometheus, Grafana, Loki, and Promtail stack assets |
 | `docs` | Normative and security documentation corpus |
 | `verification/proverif` | Symbolic protocol verification model |
 | `scripts/security` | Formal-verification and penetration smoke helper scripts |
@@ -85,6 +87,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+CI/CD quality gates additionally enforce dependency policy checks (`cargo-audit`, `cargo-deny`), workspace coverage thresholds, Android debug build assembly, and tag-triggered signed release artifacts.
 
 ### Security Profile Runtime Controls
 
@@ -255,6 +259,29 @@ The Android emulator endpoint pattern (`http://10.0.2.2:...`) is demonstration-o
 Operational deployment requires TLS and should include certificate pinning.  
 Set `PQMSG_SECURITY_PROFILE=high_assurance` (or `nss_aligned`) with `PQMSG_TLS_CERT_PATH` and `PQMSG_TLS_KEY_PATH` on the server.
 
+## Containerization and Kubernetes
+
+Production artifacts now include:
+
+- root multi-stage `Dockerfile`,
+- raw Kubernetes manifests under `deploy/k8s`,
+- Helm chart under `deploy/helm/pqmsg-server`,
+- autoscaling policy via HPA (`min=2`, `max=10`, CPU and memory targets).
+
+Quick commands:
+
+```bash
+docker build -t pqmsg-server:0.1.0 .
+kubectl create namespace pqmsg
+kubectl create secret generic pqmsg-server-secrets --namespace pqmsg \
+  --from-literal=PQMSG_DATABASE_URL='postgres://pqmsg:change-me@postgres.pqmsg.svc.cluster.local:5432/pqmsg' \
+  --from-literal=PQMSG_RATE_LIMIT_REDIS_URL='redis://redis.pqmsg.svc.cluster.local:6379/'
+kubectl create secret tls pqmsg-server-tls --namespace pqmsg --cert=server.crt --key=server.key
+kubectl apply -k deploy/k8s
+helm upgrade --install pqmsg-server deploy/helm/pqmsg-server --namespace pqmsg --create-namespace
+docker compose -f docker-compose.observability.yml up -d --build
+```
+
 ## SQLite to PostgreSQL Data Migration
 
 ```powershell
@@ -269,6 +296,8 @@ cargo run -p pqmsg-server --bin migrate_sqlite_to_postgres -- --sqlite-url "sqli
 - [CRYPTO_AGILITY](docs/CRYPTO_AGILITY.md)
 - [API](docs/API.md)
 - [SECURITY_GATES](docs/SECURITY_GATES.md)
+- [DEPLOYMENT](docs/DEPLOYMENT.md)
+- [OBSERVABILITY](docs/OBSERVABILITY.md)
 - [ANDROID](docs/ANDROID.md)
 - [IOS](docs/IOS.md)
 - [WEB](docs/WEB.md)

@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: pqmsg-dashboards
+    orgId: 1
+    folder: PQMSG
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

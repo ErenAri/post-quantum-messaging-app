@@ -1618,6 +1618,16 @@ async fn observability_middleware(
         } else {
             "client_error"
         };
+        if status >= 500 {
+            tracing::error!(
+                target: "pqmsg_server::http",
+                request_id,
+                method,
+                path,
+                status,
+                latency_ms = duration.as_secs_f64() * 1000.0
+            );
+        }
         record_security_event(
             &state,
             event,

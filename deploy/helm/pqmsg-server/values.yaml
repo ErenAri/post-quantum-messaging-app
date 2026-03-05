@@ -1,0 +1,74 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/your-org/pqmsg-server
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 443
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  host: pqmsg.example.com
+  tls:
+    enabled: true
+    secretName: pqmsg-server-ingress-tls
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 75
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1024Mi
+
+env:
+  PQMSG_BIND: 0.0.0.0:8080
+  PQMSG_SECURITY_PROFILE: high_assurance
+  PQMSG_LOG_FORMAT: json
+  RUST_LOG: pqmsg_server=info
+  PQMSG_DB_MAX_CONNECTIONS: "30"
+  PQMSG_DB_MIN_CONNECTIONS: "5"
+  PQMSG_DB_ACQUIRE_TIMEOUT_SECS: "5"
+  PQMSG_DB_IDLE_TIMEOUT_SECS: "300"
+  PQMSG_RATE_LIMIT_CAPACITY: "120"
+  PQMSG_RATE_LIMIT_REFILL_PER_SECOND: "4"
+  PQMSG_RATE_LIMIT_MAX_ENTRIES: "50000"
+  PQMSG_RATE_LIMIT_BUCKET_TTL_SECS: "600"
+  PQMSG_REGISTRATION_POW_BITS: "18"
+  PQMSG_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS: "30"
+  PQMSG_PREKEY_BUNDLE_RESERVE_COUNT: "2"
+  PQMSG_TLS_CERT_PATH: /etc/pqmsg/tls/tls.crt
+  PQMSG_TLS_KEY_PATH: /etc/pqmsg/tls/tls.key
+  PQMSG_SENTRY_TRACES_SAMPLE_RATE: "0.1"
+
+secretEnv:
+  PQMSG_DATABASE_URL: postgres://pqmsg:change-me@postgres.pqmsg.svc.cluster.local:5432/pqmsg
+  PQMSG_RATE_LIMIT_REDIS_URL: redis://redis.pqmsg.svc.cluster.local:6379/
+  PQMSG_FCM_SERVER_KEY: ""
+  PQMSG_SENTRY_DSN: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+tlsSecretName: pqmsg-server-tls
