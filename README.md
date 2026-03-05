@@ -24,10 +24,12 @@ The strongest contributions are:
 
 ```mermaid
 flowchart LR
-    C[pqmsg-cli / Android Client] -->|HTTP JSON transport| S[pqmsg-server]
+    C[pqmsg-cli / Android Client / iOS Client] -->|HTTP JSON transport| S[pqmsg-server]
     S -->|WebSocket inbox stream| C
     C -->|UniFFI bridge| A[pqmsg-android]
+    C -->|UniFFI bridge| I[pqmsg-ios]
     A --> CORE[pqmsg-core]
+    I --> CORE
     C --> CORE
     S --> DB[(SQLite)]
 ```
@@ -68,7 +70,10 @@ flowchart TD
 | `crates/pqmsg-server` | Prekey publication and opaque ciphertext relay service |
 | `crates/pqmsg-cli` | Local operator workflow (keygen, register, publish, send, poll) |
 | `crates/pqmsg-android` | UniFFI-facing Rust bridge for Android clients |
+| `crates/pqmsg-ios` | UniFFI-facing Rust bridge for iOS clients |
 | `mobile/android` | Minimal Kotlin demo UI and transport layer |
+| `mobile/ios` | Minimal SwiftUI demo UI and iOS build scripts |
+| `mobile/web` | Progressive web app shell with WebCrypto fallback mode |
 | `docs` | Normative and security documentation corpus |
 | `verification/proverif` | Symbolic protocol verification model |
 | `scripts/security` | Formal-verification and penetration smoke helper scripts |
@@ -202,6 +207,23 @@ cd mobile/android
 .\gradlew.bat :app:assembleDebug
 ```
 
+Optional iOS bridge + Xcode project generation (macOS):
+
+```bash
+cd mobile/ios
+./scripts/build_rust_ios.sh
+./scripts/generate_project.sh
+open PQMsgDemo.xcodeproj
+```
+
+Web client fallback mode:
+
+```bash
+cd mobile/web
+npm install
+npm run dev
+```
+
 3. In Android Studio:
 
 - open `mobile/android`,
@@ -248,4 +270,6 @@ cargo run -p pqmsg-server --bin migrate_sqlite_to_postgres -- --sqlite-url "sqli
 - [API](docs/API.md)
 - [SECURITY_GATES](docs/SECURITY_GATES.md)
 - [ANDROID](docs/ANDROID.md)
+- [IOS](docs/IOS.md)
+- [WEB](docs/WEB.md)
 - [TLS_ROTATION](docs/TLS_ROTATION.md)

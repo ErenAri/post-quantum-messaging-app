@@ -72,6 +72,16 @@ const AUTH_TAG_GROUP_MEMBER_USER_ID: u16 = critical_type(0x321E);
 const AUTH_TAG_GROUP_MEMBERS_HASH: u16 = critical_type(0x321F);
 const AUTH_TAG_GROUP_SENDER_USER_ID: u16 = critical_type(0x3220);
 const AUTH_TAG_GROUP_MESSAGE_BLOB_HASH: u16 = critical_type(0x3221);
+const AUTH_TAG_FILE_ID: u16 = critical_type(0x3222);
+const AUTH_TAG_FILE_RECIPIENT_ID: u16 = critical_type(0x3223);
+const AUTH_TAG_FILE_BLOB_HASH: u16 = critical_type(0x3224);
+const AUTH_TAG_FILE_MIME_HASH: u16 = critical_type(0x3225);
+const AUTH_TAG_PROFILE_DISPLAY_NAME_HASH: u16 = critical_type(0x3226);
+const AUTH_TAG_PROFILE_AVATAR_HASH: u16 = critical_type(0x3227);
+const AUTH_TAG_PROFILE_AVATAR_MIME_HASH: u16 = critical_type(0x3228);
+const AUTH_TAG_PRESENCE_STATUS: u16 = critical_type(0x3229);
+const AUTH_TAG_TYPING_PEER_ID: u16 = critical_type(0x322A);
+const AUTH_TAG_TYPING_STATE_FLAG: u16 = critical_type(0x322B);
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 async fn test_app() -> axum::Router {
@@ -1186,6 +1196,266 @@ fn push_token_auth_headers(
         value: hasher.finalize().to_vec(),
     });
     let message = encode(&records).expect("push-token auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn files_upload_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    recipient_user_id: &str,
+    file_blob: &[u8],
+    mime_type: &str,
+) -> Vec<(&'static str, String)> {
+    use sha2::{Digest, Sha256};
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "files-upload-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("files-upload", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_FILE_RECIPIENT_ID,
+        value: recipient_user_id.as_bytes().to_vec(),
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(file_blob);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_FILE_BLOB_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(mime_type.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_FILE_MIME_HASH,
+        value: hasher.finalize().to_vec(),
+    });
+    let message = encode(&records).expect("files-upload auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn files_download_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    file_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "files-download-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("files-download", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_FILE_ID,
+        value: file_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("files-download auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn profile_upsert_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    target_user_id: &str,
+    display_name: Option<&str>,
+    avatar_mime: Option<&str>,
+    avatar_blob: Option<&[u8]>,
+) -> Vec<(&'static str, String)> {
+    use sha2::{Digest, Sha256};
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "profile-upsert-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("profile-upsert", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: target_user_id.as_bytes().to_vec(),
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(display_name.unwrap_or_default().as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PROFILE_DISPLAY_NAME_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(avatar_blob.unwrap_or_default());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PROFILE_AVATAR_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(avatar_mime.unwrap_or_default().as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PROFILE_AVATAR_MIME_HASH,
+        value: hasher.finalize().to_vec(),
+    });
+    let message = encode(&records).expect("profile-upsert auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn profile_get_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    target_user_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "profile-get-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("profile-get", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: target_user_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("profile-get auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn presence_update_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    target_user_id: &str,
+    status: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "presence-update-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("presence-update", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: target_user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PRESENCE_STATUS,
+        value: status.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("presence-update auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn presence_get_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    target_user_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "presence-get-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("presence-get", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: target_user_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("presence-get auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn typing_update_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    peer_user_id: &str,
+    is_typing: bool,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "typing-update-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("typing-update", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_TYPING_PEER_ID,
+        value: peer_user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_TYPING_STATE_FLAG,
+        value: vec![if is_typing { 1 } else { 0 }],
+    });
+    let message = encode(&records).expect("typing-update auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn typing_get_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    target_user_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "typing-get-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("typing-get", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: target_user_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("typing-get auth transcript");
     let signature = signing_key.sign(&message).to_bytes();
     vec![
         (AUTH_HEADER_USER, user_id.to_string()),
@@ -3245,4 +3515,290 @@ async fn bundle_reserve_prevents_full_prekey_exhaustion() {
         Some(2)
     );
     assert_eq!(bundle_2["last_resort_prekey_only"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+async fn rich_media_profile_presence_typing_flow() {
+    let app = test_app().await;
+    let alice_sig = signing_key(171);
+    let bob_sig = signing_key(172);
+    let carol_sig = signing_key(173);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", [81u8; 32], &alice_sig);
+    let reg_bob = register_payload("bob", "bob-dev-1", [82u8; 32], &bob_sig);
+    let reg_carol = register_payload("carol", "carol-dev-1", [83u8; 32], &carol_sig);
+    let (status_reg_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_reg_alice, StatusCode::OK);
+    let (status_reg_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_reg_bob, StatusCode::OK);
+    let (status_reg_carol, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_carol).await;
+    assert_eq!(status_reg_carol, StatusCode::OK);
+
+    let file_blob = b"opaque-encrypted-media".to_vec();
+    let mime_type = "application/octet-stream";
+    let upload_body = json!({
+        "recipient_user_id": "bob",
+        "device_id": "alice-dev-1",
+        "mime_type": mime_type,
+        "file_bytes_base64": B64.encode(&file_blob)
+    });
+    let upload_headers = files_upload_auth_headers(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "bob",
+        &file_blob,
+        mime_type,
+    );
+    let (status_upload, upload_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/files/upload",
+        upload_body,
+        &upload_headers,
+    )
+    .await;
+    assert_eq!(status_upload, StatusCode::OK);
+    let file_id = upload_payload["file_id"].as_str().expect("file_id");
+
+    let bob_download_headers = files_download_auth_headers(&bob_sig, "bob", "bob-dev-1", file_id);
+    let (status_download_bob, download_payload_bob) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/files/{file_id}"),
+        json!({}),
+        &bob_download_headers,
+    )
+    .await;
+    assert_eq!(status_download_bob, StatusCode::OK);
+    assert_eq!(
+        download_payload_bob["file_bytes_base64"].as_str(),
+        Some(B64.encode(&file_blob).as_str())
+    );
+
+    let carol_download_headers =
+        files_download_auth_headers(&carol_sig, "carol", "carol-dev-1", file_id);
+    let (status_download_carol, _) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/files/{file_id}"),
+        json!({}),
+        &carol_download_headers,
+    )
+    .await;
+    assert_eq!(status_download_carol, StatusCode::NOT_FOUND);
+
+    let avatar = vec![1u8, 2, 3, 4];
+    let profile_body = json!({
+        "display_name": "Alice Example",
+        "avatar_mime": "image/png",
+        "avatar_bytes_base64": B64.encode(&avatar)
+    });
+    let profile_headers = profile_upsert_auth_headers(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "alice",
+        Some("Alice Example"),
+        Some("image/png"),
+        Some(&avatar),
+    );
+    let (status_profile_upsert, profile_upsert_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/profile",
+        profile_body,
+        &profile_headers,
+    )
+    .await;
+    assert_eq!(status_profile_upsert, StatusCode::OK);
+    assert_eq!(
+        profile_upsert_payload["display_name"].as_str(),
+        Some("Alice Example")
+    );
+
+    let profile_get_headers = profile_get_auth_headers(&bob_sig, "bob", "bob-dev-1", "alice");
+    let (status_profile_get, profile_get_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/alice/profile",
+        json!({}),
+        &profile_get_headers,
+    )
+    .await;
+    assert_eq!(status_profile_get, StatusCode::OK);
+    assert_eq!(
+        profile_get_payload["display_name"].as_str(),
+        Some("Alice Example")
+    );
+    assert_eq!(
+        profile_get_payload["avatar_bytes_base64"].as_str(),
+        Some(B64.encode(avatar).as_str())
+    );
+
+    let presence_update_headers =
+        presence_update_auth_headers(&alice_sig, "alice", "alice-dev-1", "alice", "online");
+    let (status_presence_update, presence_update_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/presence",
+        json!({ "status": "online" }),
+        &presence_update_headers,
+    )
+    .await;
+    assert_eq!(status_presence_update, StatusCode::OK);
+    assert_eq!(presence_update_payload["status"].as_str(), Some("online"));
+    assert_eq!(presence_update_payload["active"].as_bool(), Some(true));
+
+    let presence_get_headers = presence_get_auth_headers(&bob_sig, "bob", "bob-dev-1", "alice");
+    let (status_presence_get, presence_get_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/alice/presence",
+        json!({}),
+        &presence_get_headers,
+    )
+    .await;
+    assert_eq!(status_presence_get, StatusCode::OK);
+    assert_eq!(presence_get_payload["status"].as_str(), Some("online"));
+    assert_eq!(presence_get_payload["active"].as_bool(), Some(true));
+
+    let typing_on_headers =
+        typing_update_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob", true);
+    let (status_typing_on, typing_on_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/typing/bob",
+        json!({ "is_typing": true }),
+        &typing_on_headers,
+    )
+    .await;
+    assert_eq!(status_typing_on, StatusCode::OK);
+    assert_eq!(typing_on_payload["is_typing"].as_bool(), Some(true));
+
+    let typing_get_headers = typing_get_auth_headers(&bob_sig, "bob", "bob-dev-1", "bob");
+    let (status_typing_get, typing_get_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/typing/bob",
+        json!({}),
+        &typing_get_headers,
+    )
+    .await;
+    assert_eq!(status_typing_get, StatusCode::OK);
+    let typing_entries = typing_get_payload["typing"]
+        .as_array()
+        .expect("typing array");
+    assert_eq!(typing_entries.len(), 1);
+    assert_eq!(typing_entries[0]["sender_user_id"].as_str(), Some("alice"));
+
+    let typing_off_headers =
+        typing_update_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob", false);
+    let (status_typing_off, typing_off_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/typing/bob",
+        json!({ "is_typing": false }),
+        &typing_off_headers,
+    )
+    .await;
+    assert_eq!(status_typing_off, StatusCode::OK);
+    assert_eq!(typing_off_payload["is_typing"].as_bool(), Some(false));
+
+    let typing_get_headers_after_off = typing_get_auth_headers(&bob_sig, "bob", "bob-dev-1", "bob");
+    let (status_typing_get_after_off, typing_get_payload_after_off) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/typing/bob",
+        json!({}),
+        &typing_get_headers_after_off,
+    )
+    .await;
+    assert_eq!(status_typing_get_after_off, StatusCode::OK);
+    assert_eq!(
+        typing_get_payload_after_off["typing"]
+            .as_array()
+            .expect("typing array")
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn rich_media_profile_presence_typing_reject_invalid_inputs() {
+    let app = test_app().await;
+    let alice_sig = signing_key(174);
+    let bob_sig = signing_key(175);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", [84u8; 32], &alice_sig);
+    let reg_bob = register_payload("bob", "bob-dev-1", [85u8; 32], &bob_sig);
+    let (status_reg_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_reg_alice, StatusCode::OK);
+    let (status_reg_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_reg_bob, StatusCode::OK);
+
+    let bad_mime = "not-a-mime";
+    let file_blob = b"opaque-bytes".to_vec();
+    let upload_body = json!({
+        "recipient_user_id": "bob",
+        "device_id": "alice-dev-1",
+        "mime_type": bad_mime,
+        "file_bytes_base64": B64.encode(&file_blob)
+    });
+    let upload_headers = files_upload_auth_headers(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "bob",
+        &file_blob,
+        bad_mime,
+    );
+    let (status_upload, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/files/upload",
+        upload_body,
+        &upload_headers,
+    )
+    .await;
+    assert_eq!(status_upload, StatusCode::BAD_REQUEST);
+
+    let profile_headers = profile_upsert_auth_headers(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "alice",
+        Some("Alice"),
+        Some("image/png"),
+        None,
+    );
+    let (status_profile, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/profile",
+        json!({
+            "display_name": "Alice",
+            "avatar_mime": "image/png"
+        }),
+        &profile_headers,
+    )
+    .await;
+    assert_eq!(status_profile, StatusCode::BAD_REQUEST);
+
+    let typing_headers =
+        typing_update_auth_headers(&alice_sig, "alice", "alice-dev-1", "alice", true);
+    let (status_typing_self, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/typing/alice",
+        json!({"is_typing": true}),
+        &typing_headers,
+    )
+    .await;
+    assert_eq!(status_typing_self, StatusCode::BAD_REQUEST);
 }

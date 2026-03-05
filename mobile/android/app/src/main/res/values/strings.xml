@@ -3,6 +3,8 @@
     <string name="app_name">PQMsg Android Demo</string>
     <string name="setup_title">Setup</string>
     <string name="chat_title">Chat</string>
+    <string name="conversations_title">Conversations</string>
+    <string name="security_title">Security Center</string>
     <string name="hint_server">Server URL</string>
     <string name="hint_user">User ID</string>
     <string name="hint_device">Device ID</string>
@@ -14,13 +16,20 @@
     <string name="button_register">Register User</string>
     <string name="button_publish">Publish Prekeys</string>
     <string name="button_verify_server">Verify Server</string>
-    <string name="button_open_chat">Open Chat</string>
+    <string name="button_open_chat">Open Conversations</string>
     <string name="button_preset_alice">Preset Alice</string>
     <string name="button_preset_bob">Preset Bob</string>
     <string name="button_fetch_bundle">Fetch Peer Bundle</string>
+    <string name="button_attach_media">Attach Media</string>
+    <string name="button_clear_attachment">Clear Attachment</string>
     <string name="button_send">Send Encrypted</string>
     <string name="button_poll">Poll Inbox</string>
     <string name="button_back_setup">Back To Setup</string>
+    <string name="button_back_conversations">Back To Conversations</string>
+    <string name="button_open_peer_chat">Open Peer Chat</string>
+    <string name="button_refresh_conversations">Refresh List</string>
+    <string name="button_open_security_center">Open Security Center</string>
+    <string name="button_refresh_security">Refresh Security Snapshot</string>
     <string name="button_show_error_details">Show technical details</string>
     <string name="setup_crypto_profile_loading">Crypto profile: checking...</string>
     <string name="setup_step_keys_pending">1) Generate keys: pending</string>
@@ -28,6 +37,13 @@
     <string name="setup_step_publish_pending">3) Publish prekeys: pending</string>
     <string name="setup_step_verify_pending">4) Verify server: pending</string>
     <string name="chat_meta_default">Cursor: 0&#10;Last bundle fetch: none</string>
+    <string name="chat_attachment_none">No attachment selected</string>
+    <string name="conversations_status_default">No conversations loaded.</string>
+    <string name="conversations_empty">No conversations found for this user.</string>
+    <string name="security_profile_default">Active Crypto Profile&#10;Unavailable</string>
+    <string name="security_transport_default">Transport Security&#10;Unavailable</string>
+    <string name="security_pins_default">Pinned Identities&#10;None</string>
+    <string name="security_local_state_default">Local Security State&#10;Unavailable</string>
     <string name="status_ready">Ready</string>
     <string name="chat_log_empty">No messages yet</string>
 </resources>

@@ -8,7 +8,7 @@ This document specifies a reproducible Android demonstration workflow for the PQ
 
 ```mermaid
 flowchart LR
-    UI[Kotlin Setup/Chat UI] --> NET[Retrofit + OkHttp]
+    UI[Kotlin Setup + Conversations + Chat + Security UI] --> NET[Retrofit + OkHttp]
     UI --> UNI[UniFFI Kotlin bindings]
     UNI --> SO[libpqmsg_android.so]
     SO --> CORE[pqmsg-core]
@@ -29,7 +29,20 @@ stateDiagram-v2
 
 The Android Setup screen enforces the ordering above and persists progress per user id.
 
-## 3.1 Security Enforcement in Client
+## 3.2 Runtime Navigation Model
+
+```mermaid
+flowchart TD
+    A[Setup] --> B[Conversations]
+    B --> C[Chat]
+    B --> D[Security Center]
+    C --> B
+    D --> B
+```
+
+The Conversations screen now acts as the runtime hub after provisioning is complete.
+
+## 3.3 Security Enforcement in Client
 
 - first-seen peer identity fingerprints are pinned locally,
 - detected peer identity key changes trigger explicit user confirmation before send,
@@ -39,7 +52,9 @@ The Android Setup screen enforces the ordering above and persists progress per u
 - inbox processing enforces per-peer monotonic transport message IDs and local seen-ciphertext replay rejection,
 - chat send/poll flows perform authenticated prekey-inventory checks and auto-replenish one-time prekeys when inventory is low,
 - optional push-token registration uses Ed25519-signed auth headers and binds token updates to the authenticated user/device pair,
-- local key/session files are persisted through Android keystore-backed encrypted file storage.
+- local key/session files are persisted through Android keystore-backed encrypted file storage,
+- local conversation metadata tracks unread counters and transport-safe message previews,
+- optional media attachments are encapsulated in the encrypted payload path and remain opaque to the server.
 
 ## 4. Prerequisites
 
@@ -110,8 +125,8 @@ cargo run -p pqmsg-server
 4. Keep server URL as `http://10.0.2.2:3000`.
 5. Execute setup in order on both devices.
 6. Optionally paste an FCM token in the Setup screen before `Verify Server` to register wake-signal push routing.
-7. Alice sends a message in Chat screen.
-8. Bob polls inbox and decrypts.
+7. Alice opens Conversations, selects Bob, and sends a text or media-backed encrypted message.
+8. Bob opens Conversations, enters Bob chat with Alice, polls inbox, and decrypts.
 
 ## 9. End-to-End Sequence
 

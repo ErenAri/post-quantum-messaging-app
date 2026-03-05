@@ -3,7 +3,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="20dp">
+    android:padding="16dp">
 
     <TextView
         android:layout_width="wrap_content"
@@ -15,14 +15,14 @@
         android:id="@+id/textChatMeta"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="6dp"
         android:text="@string/chat_meta_default" />
 
     <EditText
         android:id="@+id/editChatServer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="10dp"
         android:hint="@string/hint_server"
         android:inputType="textUri" />
 
@@ -30,7 +30,7 @@
         android:id="@+id/editChatUser"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="6dp"
         android:hint="@string/hint_user"
         android:inputType="text" />
 
@@ -38,45 +38,82 @@
         android:id="@+id/editChatPeer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="6dp"
         android:hint="@string/hint_peer"
         android:inputType="text" />
 
-    <Button
-        android:id="@+id/buttonFetchBundle"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="@string/button_fetch_bundle" />
+        android:layout_marginTop="6dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/buttonFetchBundle"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/button_fetch_bundle" />
+
+        <Button
+            android:id="@+id/buttonPoll"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:text="@string/button_poll" />
+    </LinearLayout>
 
     <EditText
         android:id="@+id/editMessage"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="6dp"
         android:hint="@string/hint_message"
         android:inputType="textMultiLine" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/buttonAttachMedia"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/button_attach_media" />
+
+        <Button
+            android:id="@+id/buttonClearAttachment"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:text="@string/button_clear_attachment" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/textAttachmentInfo"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="@string/chat_attachment_none" />
 
     <Button
         android:id="@+id/buttonSend"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="6dp"
         android:text="@string/button_send" />
-
-    <Button
-        android:id="@+id/buttonPoll"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="@string/button_poll" />
 
     <Button
         android:id="@+id/buttonBackSetup"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="@string/button_back_setup" />
+        android:layout_marginTop="6dp"
+        android:text="@string/button_back_conversations" />
 
     <TextView
         android:id="@+id/textErrorSummaryChat"
@@ -108,9 +145,9 @@
         android:id="@+id/textChatLog"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="10dp"
         android:layout_weight="1"
-        android:background="#EEE"
+        android:background="#EEEEEE"
         android:padding="12dp"
         android:text="@string/chat_log_empty"
         android:textIsSelectable="true" />

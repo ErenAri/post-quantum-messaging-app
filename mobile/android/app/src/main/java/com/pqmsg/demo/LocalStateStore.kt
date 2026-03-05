@@ -22,6 +22,18 @@ data class IdentityPin(
     val observedAt: String,
 )
 
+data class ConversationSummary(
+    val peerUserId: String,
+    val lastPreview: String,
+    val updatedAtMillis: Long,
+    val unreadCount: Int,
+)
+
+data class IdentityPinRecord(
+    val peerUserId: String,
+    val pin: IdentityPin,
+)
+
 class LocalStateStore(context: Context) {
     private val prefs = context.getSharedPreferences("pqmsg_android_setup", Context.MODE_PRIVATE)
     private val rootDir = File(context.filesDir, "pqmsg")
@@ -185,5 +197,106 @@ class LocalStateStore(context: Context) {
             .putString("${keyBase}_sig", pin.identitySigPub)
             .putString("${keyBase}_at", pin.observedAt)
             .apply()
+    }
+
+    fun upsertConversation(
+        userId: String,
+        peerUserId: String,
+        lastPreview: String,
+        incrementUnread: Boolean,
+    ) {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return
+        }
+        val keyBase = "conv_${userId}_$peerUserId"
+        val peers = readConversationPeers(userId)
+        peers.add(peerUserId)
+        val cleanPreview = lastPreview.trim().ifBlank { "(empty)" }
+        val normalizedPreview = if (cleanPreview.length > 160) {
+            cleanPreview.take(157) + "..."
+        } else {
+            cleanPreview
+        }
+        val nextUnread = if (incrementUnread) {
+            prefs.getInt("${keyBase}_unread", 0) + 1
+        } else {
+            prefs.getInt("${keyBase}_unread", 0)
+        }
+        prefs.edit()
+            .putStringSet(conversationPeersKey(userId), LinkedHashSet(peers))
+            .putString("${keyBase}_preview", normalizedPreview)
+            .putLong("${keyBase}_updated_ms", System.currentTimeMillis())
+            .putInt("${keyBase}_unread", nextUnread)
+            .apply()
+    }
+
+    fun markConversationRead(userId: String, peerUserId: String) {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return
+        }
+        val keyBase = "conv_${userId}_$peerUserId"
+        prefs.edit()
+            .putInt("${keyBase}_unread", 0)
+            .apply()
+    }
+
+    fun listConversations(userId: String): List<ConversationSummary> {
+        if (userId.isBlank()) {
+            return emptyList()
+        }
+        return readConversationPeers(userId)
+            .map { peer ->
+                val keyBase = "conv_${userId}_$peer"
+                ConversationSummary(
+                    peerUserId = peer,
+                    lastPreview = prefs.getString("${keyBase}_preview", "No messages yet") ?: "No messages yet",
+                    updatedAtMillis = prefs.getLong("${keyBase}_updated_ms", 0L),
+                    unreadCount = prefs.getInt("${keyBase}_unread", 0),
+                )
+            }
+            .sortedByDescending { it.updatedAtMillis }
+    }
+
+    fun listIdentityPins(userId: String): List<IdentityPinRecord> {
+        if (userId.isBlank()) {
+            return emptyList()
+        }
+        val prefix = "pin_${userId}_"
+        val suffix = "_fp"
+        return prefs.all.keys
+            .asSequence()
+            .filter { it.startsWith(prefix) && it.endsWith(suffix) }
+            .map { key ->
+                key.removePrefix(prefix).removeSuffix(suffix)
+            }
+            .mapNotNull { peer ->
+                readIdentityPin(userId, peer)?.let { pin ->
+                    IdentityPinRecord(peerUserId = peer, pin = pin)
+                }
+            }
+            .sortedBy { it.peerUserId }
+            .toList()
+    }
+
+    fun countSessions(userId: String): Int {
+        if (userId.isBlank()) {
+            return 0
+        }
+        val sessionsDir = File(rootDir, "sessions/$userId")
+        if (!sessionsDir.exists() || !sessionsDir.isDirectory) {
+            return 0
+        }
+        return sessionsDir.listFiles()
+            ?.count { it.isFile && it.name.endsWith(".json") }
+            ?: 0
+    }
+
+    private fun readConversationPeers(userId: String): LinkedHashSet<String> {
+        val stored = prefs.getStringSet(conversationPeersKey(userId), emptySet()) ?: emptySet()
+        return LinkedHashSet(stored)
+    }
+
+    private fun conversationPeersKey(userId: String): String {
+        return "conv_peers_$userId"
     }
 }

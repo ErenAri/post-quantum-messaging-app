@@ -50,7 +50,7 @@ data class SetupProgress(
         return keysGenerated && userRegistered && prekeysPublished
     }
 
-    fun canOpenChat(peerUserId: String): Boolean {
-        return keysGenerated && userRegistered && prekeysPublished && serverVerified && peerUserId.isNotBlank()
+    fun canOpenChat(): Boolean {
+        return keysGenerated && userRegistered && prekeysPublished && serverVerified
     }
 }

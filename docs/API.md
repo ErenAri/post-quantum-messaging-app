@@ -27,6 +27,14 @@ sequenceDiagram
     C->>S: POST /users/{id}/prekeys
     C->>S: GET /users/{id}/prekeys/status
     C->>S: POST /users/{id}/push-token
+    C->>S: POST /files/upload
+    C->>S: GET /files/{file_id}
+    C->>S: POST /users/{id}/profile
+    C->>S: GET /users/{id}/profile
+    C->>S: POST /users/{id}/presence
+    C->>S: GET /users/{id}/presence
+    C->>S: POST /typing/{peer_id}
+    C->>S: GET /typing/{id}
     C->>S: GET /users/{peer}/bundle
     C->>S: GET /anon/users/{peer}/bundle
     C->>S: POST /users/{id}/rotate/init
@@ -110,6 +118,14 @@ The following endpoints require request authentication headers:
 - `POST /v1/groups/{group_id}/members/remove`
 - `POST /v1/groups/{group_id}/relay`
 - `POST /v1/relay/{recipient_user_id}`
+- `POST /v1/files/upload`
+- `GET /v1/files/{file_id}`
+- `POST /v1/users/{user_id}/profile`
+- `GET /v1/users/{user_id}/profile`
+- `POST /v1/users/{user_id}/presence`
+- `GET /v1/users/{user_id}/presence`
+- `POST /v1/typing/{peer_user_id}`
+- `GET /v1/typing/{user_id}`
 - `GET /v1/inbox/{user_id}`
 - `GET /v1/sealed-inbox/{user_id}`
 - `POST /v1/inbox/{user_id}/delete`
@@ -693,6 +709,161 @@ Response:
       "received_at": "2026-03-05T12:00:00Z"
     }
   ]
+}
+```
+
+### 4.8D Rich Media, Profiles, Presence, and Typing
+
+`POST /v1/files/upload`
+
+Requires authenticated transport headers (Section 3.1).
+
+Request:
+
+```json
+{
+  "recipient_user_id": "bob",
+  "device_id": "alice-device-1",
+  "mime_type": "application/octet-stream",
+  "file_bytes_base64": "base64(opaque_encrypted_file_blob)"
+}
+```
+
+Response:
+
+```json
+{
+  "file_id": "f91e8bc80b4f4f149c2f2cb34b56d3dd",
+  "owner_user_id": "alice",
+  "recipient_user_id": "bob",
+  "mime_type": "application/octet-stream",
+  "byte_len": 4217,
+  "uploaded_at": "2026-03-05T12:00:00Z"
+}
+```
+
+File-upload auth signature transcript fields:
+
+1. endpoint label (`files-upload`),
+2. auth user id,
+3. auth device id,
+4. auth timestamp,
+5. auth nonce,
+6. recipient user id,
+7. SHA-256 hash of decoded file blob bytes,
+8. SHA-256 hash of MIME string.
+
+`GET /v1/files/{file_id}`
+
+Requires authenticated transport headers. Access is restricted to `owner_user_id` and `recipient_user_id`.
+
+Response:
+
+```json
+{
+  "file_id": "f91e8bc80b4f4f149c2f2cb34b56d3dd",
+  "owner_user_id": "alice",
+  "recipient_user_id": "bob",
+  "mime_type": "application/octet-stream",
+  "file_bytes_base64": "base64(opaque_encrypted_file_blob)",
+  "uploaded_at": "2026-03-05T12:00:00Z"
+}
+```
+
+`POST /v1/users/{user_id}/profile`
+
+Requires authenticated transport headers and `auth.user_id == {user_id}`.
+
+Request:
+
+```json
+{
+  "display_name": "Alice Example",
+  "avatar_mime": "image/png",
+  "avatar_bytes_base64": "base64(opaque_avatar_blob)"
+}
+```
+
+Both `avatar_mime` and `avatar_bytes_base64` MUST be supplied together or omitted together.
+
+`GET /v1/users/{user_id}/profile`
+
+Requires authenticated transport headers.
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "display_name": "Alice Example",
+  "avatar_mime": "image/png",
+  "avatar_bytes_base64": "base64(opaque_avatar_blob)",
+  "updated_at": "2026-03-05T12:00:00Z"
+}
+```
+
+`POST /v1/users/{user_id}/presence`
+
+Requires authenticated transport headers and `auth.user_id == {user_id}`.
+
+Request:
+
+```json
+{
+  "status": "online"
+}
+```
+
+Allowed status values: `offline`, `online`, `away`, `busy`.
+
+`GET /v1/users/{user_id}/presence`
+
+Requires authenticated transport headers.
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "status": "online",
+  "active": true,
+  "updated_at": "2026-03-05T12:00:00Z",
+  "expires_at": "2026-03-05T12:03:00Z"
+}
+```
+
+`POST /v1/typing/{peer_user_id}`
+
+Requires authenticated transport headers.
+
+Request:
+
+```json
+{
+  "is_typing": true
+}
+```
+
+`peer_user_id` MUST differ from authenticated `user_id`.
+
+`GET /v1/typing/{user_id}`
+
+Requires authenticated transport headers and `auth.user_id == {user_id}`.
+
+Response:
+
+```json
+{
+  "user_id": "bob",
+  "typing": [
+    {
+      "sender_user_id": "alice",
+      "sender_device_id": "alice-device-1",
+      "updated_at": "2026-03-05T12:00:00Z",
+      "expires_at": "2026-03-05T12:00:15Z"
+    }
+  ],
+  "checked_at": "2026-03-05T12:00:01Z"
 }
 ```
 

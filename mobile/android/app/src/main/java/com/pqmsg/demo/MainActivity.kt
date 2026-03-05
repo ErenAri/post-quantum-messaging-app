@@ -13,12 +13,12 @@ import kotlinx.coroutines.launch
 import uniffi.pqmsg_android.Suite
 import uniffi.pqmsg_android.activeCryptoProfile
 import uniffi.pqmsg_android.buildInboxAuthHeaders
+import uniffi.pqmsg_android.buildPrekeysAuthHeaders
 import uniffi.pqmsg_android.buildPublishPrekeysPayload
 import uniffi.pqmsg_android.buildPushTokenAuthHeaders
 import uniffi.pqmsg_android.buildRegisterPayload
 import uniffi.pqmsg_android.generateIdentityKeys
 import uniffi.pqmsg_android.loadUserProfile
-import uniffi.pqmsg_android.RequestAuthHeaders
 
 class MainActivity : AppCompatActivity() {
     private lateinit var store: LocalStateStore
@@ -147,8 +147,10 @@ class MainActivity : AppCompatActivity() {
                     val keysJson = requireKeys(user)
                     val payload = buildPublishPrekeysPayload(keysJson)
                     val api = ApiClientFactory.create(serverInput.text.toString())
+                    val auth = buildPrekeysAuthHeaders(keysJson, user)
                     api.publishPrekeys(
                         user,
+                        auth.toHeaderMap(),
                         PublishPrekeysRequest(
                             signed_prekey_x25519_pub = payload.signedPrekeyX25519Pub,
                             sig_over_spk = payload.sigOverSpk,
@@ -217,14 +219,14 @@ class MainActivity : AppCompatActivity() {
             saveSetup()
             syncProgressUser()
             val peer = peerInput.text.toString().trim()
-            if (!progress.canOpenChat(peer)) {
+            if (!progress.canOpenChat()) {
                 statusText.text = "Complete setup steps 1-4 before opening chat."
                 return@setOnClickListener
             }
-            val intent = Intent(this, ChatActivity::class.java).apply {
+            val intent = Intent(this, ConversationsActivity::class.java).apply {
                 putExtra("server", serverInput.text.toString().trim())
                 putExtra("user", userInput.text.toString().trim())
-                putExtra("peer", peer)
+                putExtra("peer_seed", peer)
             }
             startActivity(intent)
         }
@@ -326,7 +328,7 @@ class MainActivity : AppCompatActivity() {
         registerButton.isEnabled = progress.canRegister()
         publishButton.isEnabled = progress.canPublishPrekeys()
         verifyButton.isEnabled = progress.canVerifyServer()
-        openChatButton.isEnabled = progress.canOpenChat(peerInput.text.toString().trim())
+        openChatButton.isEnabled = progress.canOpenChat()
     }
 
     private fun stepLabel(title: String, complete: Boolean): String {
@@ -385,13 +387,4 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun RequestAuthHeaders.toHeaderMap(): Map<String, String> {
-        return mapOf(
-            "x-pqmsg-auth-user" to authUser,
-            "x-pqmsg-auth-device" to authDevice,
-            "x-pqmsg-auth-timestamp" to authTimestamp,
-            "x-pqmsg-auth-nonce" to authNonce,
-            "x-pqmsg-auth-signature" to authSignature,
-        )
-    }
 }

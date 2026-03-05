@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/security_title"
+            android:textSize="24sp" />
+
+        <EditText
+            android:id="@+id/editSecurityServer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:hint="@string/hint_server"
+            android:inputType="textUri" />
+
+        <EditText
+            android:id="@+id/editSecurityUser"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:hint="@string/hint_user"
+            android:inputType="text" />
+
+        <Button
+            android:id="@+id/buttonRefreshSecurityInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/button_refresh_security" />
+
+        <TextView
+            android:id="@+id/textSecurityProfile"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/security_profile_default" />
+
+        <TextView
+            android:id="@+id/textSecurityTransport"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/security_transport_default" />
+
+        <TextView
+            android:id="@+id/textSecurityPins"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/security_pins_default" />
+
+        <TextView
+            android:id="@+id/textSecurityLocalState"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/security_local_state_default" />
+
+        <Button
+            android:id="@+id/buttonBackConversationsFromSecurity"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/button_back_conversations" />
+    </LinearLayout>
+</ScrollView>

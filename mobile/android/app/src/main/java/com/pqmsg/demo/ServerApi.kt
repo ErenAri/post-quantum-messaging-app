@@ -124,6 +124,7 @@ interface PqmsgApi {
     @POST("/v1/users/{user_id}/prekeys")
     suspend fun publishPrekeys(
         @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
         @Body request: PublishPrekeysRequest,
     ): PublishPrekeysResponse
 

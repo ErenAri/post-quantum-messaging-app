@@ -19,5 +19,11 @@
         <activity
             android:name=".ChatActivity"
             android:exported="false" />
+        <activity
+            android:name=".ConversationsActivity"
+            android:exported="false" />
+        <activity
+            android:name=".SecurityInfoActivity"
+            android:exported="false" />
     </application>
 </manifest>

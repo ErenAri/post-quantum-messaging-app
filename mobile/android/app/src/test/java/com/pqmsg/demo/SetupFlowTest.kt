@@ -11,7 +11,7 @@ class SetupFlowTest {
         assertFalse(progress.canRegister())
         assertFalse(progress.canPublishPrekeys())
         assertFalse(progress.canVerifyServer())
-        assertFalse(progress.canOpenChat("bob"))
+        assertFalse(progress.canOpenChat())
 
         progress = progress.afterKeysGenerated()
         assertTrue(progress.canRegister())
@@ -24,11 +24,10 @@ class SetupFlowTest {
 
         progress = progress.afterPrekeysPublished()
         assertTrue(progress.canVerifyServer())
-        assertFalse(progress.canOpenChat("bob"))
+        assertFalse(progress.canOpenChat())
 
         progress = progress.afterServerVerified()
-        assertTrue(progress.canOpenChat("bob"))
-        assertFalse(progress.canOpenChat(""))
+        assertTrue(progress.canOpenChat())
     }
 
     @Test

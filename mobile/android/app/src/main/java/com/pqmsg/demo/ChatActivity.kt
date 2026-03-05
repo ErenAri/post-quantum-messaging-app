@@ -1,48 +1,73 @@
 package com.pqmsg.demo
 
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
-import uniffi.pqmsg_android.RequestAuthHeaders
+import uniffi.pqmsg_android.ServerBundle
 import uniffi.pqmsg_android.buildInboxAuthHeaders
+import uniffi.pqmsg_android.buildPrekeysAuthHeaders
 import uniffi.pqmsg_android.buildPrekeysStatusAuthHeaders
 import uniffi.pqmsg_android.buildPublishPrekeysPayload
 import uniffi.pqmsg_android.buildRelayAuthHeaders
-import uniffi.pqmsg_android.ServerBundle
 import uniffi.pqmsg_android.decryptMessage
 import uniffi.pqmsg_android.encryptWithSession
 import uniffi.pqmsg_android.initiateSessionAndEncrypt
 import uniffi.pqmsg_android.loadUserProfile
 import uniffi.pqmsg_android.replenishOneTimePrekeys
+import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.Base64
 import kotlin.coroutines.resume
 
 class ChatActivity : AppCompatActivity() {
     private val maxSeenCipherHashesPerPeer = 512
+    private val maxAttachmentBytes = 128 * 1024
     private lateinit var store: LocalStateStore
     private lateinit var serverInput: EditText
     private lateinit var userInput: EditText
     private lateinit var peerInput: EditText
     private lateinit var messageInput: EditText
     private lateinit var fetchBundleButton: Button
+    private lateinit var attachMediaButton: Button
+    private lateinit var clearAttachmentButton: Button
     private lateinit var sendButton: Button
     private lateinit var pollButton: Button
     private lateinit var chatLog: TextView
     private lateinit var chatMeta: TextView
+    private lateinit var attachmentInfo: TextView
     private lateinit var errorSummaryText: TextView
     private lateinit var errorDetailsText: TextView
     private lateinit var errorToggleButton: Button
     private var latestBundle: BundleResponse? = null
     private var errorExpanded = false
+    private var pendingAttachment: PendingAttachment? = null
+
+    private val pickAttachmentLauncher =
+        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+            if (uri == null) {
+                return@registerForActivityResult
+            }
+            runCatching {
+                pendingAttachment = readAttachment(uri)
+                renderAttachmentInfo()
+                syncActionAvailability()
+                appendLog("attachment loaded: ${pendingAttachment?.fileName}")
+            }.onFailure {
+                renderError(UiErrorMapper.fromThrowable(it, "Read attachment"))
+                appendLog("attachment load failed")
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,10 +79,13 @@ class ChatActivity : AppCompatActivity() {
         peerInput = findViewById(R.id.editChatPeer)
         messageInput = findViewById(R.id.editMessage)
         fetchBundleButton = findViewById(R.id.buttonFetchBundle)
+        attachMediaButton = findViewById(R.id.buttonAttachMedia)
+        clearAttachmentButton = findViewById(R.id.buttonClearAttachment)
         sendButton = findViewById(R.id.buttonSend)
         pollButton = findViewById(R.id.buttonPoll)
         chatLog = findViewById(R.id.textChatLog)
         chatMeta = findViewById(R.id.textChatMeta)
+        attachmentInfo = findViewById(R.id.textAttachmentInfo)
         errorSummaryText = findViewById(R.id.textErrorSummaryChat)
         errorDetailsText = findViewById(R.id.textErrorDetailsChat)
         errorToggleButton = findViewById(R.id.buttonToggleErrorDetailsChat)
@@ -66,10 +94,16 @@ class ChatActivity : AppCompatActivity() {
         serverInput.setText(intent.getStringExtra("server") ?: setup.serverUrl)
         userInput.setText(intent.getStringExtra("user") ?: setup.userId)
         peerInput.setText(intent.getStringExtra("peer") ?: setup.peerUserId)
+        store.markConversationRead(
+            userInput.text.toString().trim(),
+            peerInput.text.toString().trim(),
+        )
 
         configureInputObservers()
         configureErrorToggle()
+        configureAttachmentButtons()
         refreshMeta()
+        renderAttachmentInfo()
         syncActionAvailability()
 
         fetchBundleButton.setOnClickListener {
@@ -81,6 +115,7 @@ class ChatActivity : AppCompatActivity() {
                     latestBundle = api.getBundle(peer)
                     val me = userInput.text.toString().trim()
                     store.writeBundleFetchedAt(me, peer, latestBundle!!.bundle_generated_at)
+                    store.upsertConversation(me, peer, "Bundle fetched for $peer", incrementUnread = false)
                     refreshMeta()
                     appendLog("bundle fetched for $peer")
                     "Bundle fetched for $peer"
@@ -120,6 +155,9 @@ class ChatActivity : AppCompatActivity() {
         peerInput.doAfterTextChanged {
             syncActionAvailability()
             refreshMeta()
+            val user = userInput.text.toString().trim()
+            val peer = peerInput.text.toString().trim()
+            store.markConversationRead(user, peer)
         }
         messageInput.doAfterTextChanged { syncActionAvailability() }
     }
@@ -130,6 +168,17 @@ class ChatActivity : AppCompatActivity() {
             refreshErrorDetailsVisibility()
         }
         renderError(null)
+    }
+
+    private fun configureAttachmentButtons() {
+        attachMediaButton.setOnClickListener {
+            pickAttachmentLauncher.launch("*/*")
+        }
+        clearAttachmentButton.setOnClickListener {
+            pendingAttachment = null
+            renderAttachmentInfo()
+            syncActionAvailability()
+        }
     }
 
     private suspend fun runAction(action: String, block: suspend () -> String) {
@@ -154,8 +203,9 @@ class ChatActivity : AppCompatActivity() {
         require(server.isNotBlank()) { "server URL is empty" }
         require(fromUser.isNotBlank()) { "user id is empty" }
         require(peerUser.isNotBlank()) { "peer user id is empty" }
-        require(text.isNotBlank()) { "message is empty" }
+        require(text.isNotBlank() || pendingAttachment != null) { "message and attachment are both empty" }
 
+        val outbound = composeOutboundPayload(text)
         var keysJson = store.readKeys(fromUser) ?: error("missing keys for $fromUser")
         val api = ApiClientFactory.create(server)
         keysJson = ensurePrekeysReplenished(api, fromUser, keysJson)
@@ -173,7 +223,7 @@ class ChatActivity : AppCompatActivity() {
                 fromUserId = fromUser,
                 peerUserId = peerUser,
                 peerBundle = fetched.toRustBundle(),
-                plaintextUtf8 = text,
+                plaintextUtf8 = outbound.plaintext,
                 suiteOverride = null,
             )
         } else {
@@ -181,7 +231,7 @@ class ChatActivity : AppCompatActivity() {
                 sessionJson = existingSession,
                 senderUserId = fromUser,
                 peerUserId = peerUser,
-                plaintextUtf8 = text,
+                plaintextUtf8 = outbound.plaintext,
             )
         }
 
@@ -200,8 +250,12 @@ class ChatActivity : AppCompatActivity() {
                 message_bytes_base64 = sendResult.messageBytesBase64,
             ),
         )
-        appendLog("me->$peerUser: $text [message_id=${relay.message_id}]")
+        appendLog("me->$peerUser: ${outbound.preview} [message_id=${relay.message_id}]")
+        store.upsertConversation(fromUser, peerUser, "You: ${outbound.preview}", incrementUnread = false)
+        store.markConversationRead(fromUser, peerUser)
         messageInput.setText("")
+        pendingAttachment = null
+        renderAttachmentInfo()
         syncActionAvailability()
     }
 
@@ -324,6 +378,7 @@ class ChatActivity : AppCompatActivity() {
     private suspend fun pollFlow() {
         val server = serverInput.text.toString().trim()
         val user = userInput.text.toString().trim()
+        val activePeer = peerInput.text.toString().trim()
         require(server.isNotBlank()) { "server URL is empty" }
         require(user.isNotBlank()) { "user id is empty" }
         var keysJson = store.readKeys(user) ?: error("missing keys for $user")
@@ -361,17 +416,28 @@ class ChatActivity : AppCompatActivity() {
                 cursor = maxOf(cursor, item.message_id)
                 continue
             }
-            val existingSession = store.readSession(user, item.sender_user_id)
             runCatching {
+                val existingSession = store.readSession(user, peer)
                 val result = decryptMessage(
                     keysJson = keysJson,
                     recipientUserId = user,
-                    senderUserId = item.sender_user_id,
+                    senderUserId = peer,
                     messageBytesBase64 = item.message_bytes_base64,
                     existingSessionJson = existingSession,
                 )
-                store.writeSession(user, item.sender_user_id, result.sessionJson)
-                appendLog("${item.sender_user_id}: ${result.plaintextUtf8}")
+                store.writeSession(user, peer, result.sessionJson)
+                val rendered = renderInboundPlaintext(result.plaintextUtf8)
+                appendLog("$peer: $rendered")
+                val incrementUnread = peer != activePeer
+                store.upsertConversation(
+                    userId = user,
+                    peerUserId = peer,
+                    lastPreview = "$peer: $rendered",
+                    incrementUnread = incrementUnread,
+                )
+                if (!incrementUnread) {
+                    store.markConversationRead(user, peer)
+                }
             }.onFailure {
                 val mapped = UiErrorMapper.fromThrowable(it, "Decrypt message")
                 renderError(mapped)
@@ -410,8 +476,10 @@ class ChatActivity : AppCompatActivity() {
             val target = maxOf(status.minimum_recommended_one_time_prekeys, 16)
             val refreshedKeysJson = replenishOneTimePrekeys(keysJson, target.toUInt())
             val payload = buildPublishPrekeysPayload(refreshedKeysJson)
+            val prekeysAuth = buildPrekeysAuthHeaders(refreshedKeysJson, user)
             api.publishPrekeys(
                 user,
+                prekeysAuth.toHeaderMap(),
                 PublishPrekeysRequest(
                     signed_prekey_x25519_pub = payload.signedPrekeyX25519Pub,
                     sig_over_spk = payload.sigOverSpk,
@@ -449,10 +517,12 @@ class ChatActivity : AppCompatActivity() {
         val user = userInput.text.toString().trim()
         val peer = peerInput.text.toString().trim()
         val message = messageInput.text.toString()
+        val hasPayload = message.isNotBlank() || pendingAttachment != null
         val keysReady = hasKeys(user)
         fetchBundleButton.isEnabled = server.isNotBlank() && peer.isNotBlank()
-        sendButton.isEnabled = server.isNotBlank() && user.isNotBlank() && peer.isNotBlank() && message.isNotBlank() && keysReady
+        sendButton.isEnabled = server.isNotBlank() && user.isNotBlank() && peer.isNotBlank() && hasPayload && keysReady
         pollButton.isEnabled = server.isNotBlank() && user.isNotBlank() && keysReady
+        clearAttachmentButton.isEnabled = pendingAttachment != null
     }
 
     private fun hasKeys(userId: String): Boolean {
@@ -460,6 +530,82 @@ class ChatActivity : AppCompatActivity() {
             return false
         }
         return !store.readKeys(userId).isNullOrBlank()
+    }
+
+    private fun composeOutboundPayload(text: String): OutboundPayload {
+        val attachment = pendingAttachment
+        if (attachment == null) {
+            return OutboundPayload(plaintext = text, preview = text)
+        }
+        val envelope = MessageEnvelopeCodec.encodeMediaEnvelope(
+            fileName = attachment.fileName,
+            mimeType = attachment.mimeType,
+            noteText = text,
+            dataBase64 = attachment.dataBase64,
+        )
+        val mediaTag = "[media:${attachment.fileName} ${attachment.byteLength}B]"
+        val preview = if (text.isBlank()) mediaTag else "$mediaTag $text"
+        return OutboundPayload(plaintext = envelope, preview = preview)
+    }
+
+    private fun renderInboundPlaintext(plaintext: String): String {
+        val decoded = MessageEnvelopeCodec.decodeMediaEnvelope(plaintext) ?: return plaintext
+        val mediaTag = "[media:${decoded.fileName} ${decoded.mimeType} ${decoded.byteLength}B]"
+        return if (decoded.noteText.isBlank()) {
+            mediaTag
+        } else {
+            "$mediaTag ${decoded.noteText}"
+        }
+    }
+
+    private fun renderAttachmentInfo() {
+        val attachment = pendingAttachment
+        if (attachment == null) {
+            attachmentInfo.text = "No attachment selected"
+            return
+        }
+        attachmentInfo.text =
+            "Attachment: ${attachment.fileName} (${attachment.mimeType}, ${attachment.byteLength} bytes)"
+    }
+
+    private fun readAttachment(uri: Uri): PendingAttachment {
+        val resolver = contentResolver
+        val mimeType = resolver.getType(uri) ?: "application/octet-stream"
+        val fileName = resolveFileName(uri) ?: "attachment.bin"
+        val bytes = resolver.openInputStream(uri)?.use { input ->
+            val output = ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            var total = 0
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) {
+                    break
+                }
+                total += read
+                if (total > maxAttachmentBytes) {
+                    error("attachment exceeds ${maxAttachmentBytes} bytes")
+                }
+                output.write(buffer, 0, read)
+            }
+            output.toByteArray()
+        } ?: error("unable to read attachment stream")
+        val encoded = Base64.getEncoder().encodeToString(bytes)
+        return PendingAttachment(
+            fileName = fileName,
+            mimeType = mimeType,
+            dataBase64 = encoded,
+            byteLength = bytes.size,
+        )
+    }
+
+    private fun resolveFileName(uri: Uri): String? {
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) {
+                return cursor.getString(index)
+            }
+        }
+        return uri.lastPathSegment
     }
 
     private fun appendLog(line: String) {
@@ -513,13 +659,15 @@ class ChatActivity : AppCompatActivity() {
         )
     }
 
-    private fun RequestAuthHeaders.toHeaderMap(): Map<String, String> {
-        return mapOf(
-            "x-pqmsg-auth-user" to authUser,
-            "x-pqmsg-auth-device" to authDevice,
-            "x-pqmsg-auth-timestamp" to authTimestamp,
-            "x-pqmsg-auth-nonce" to authNonce,
-            "x-pqmsg-auth-signature" to authSignature,
-        )
-    }
+    private data class PendingAttachment(
+        val fileName: String,
+        val mimeType: String,
+        val dataBase64: String,
+        val byteLength: Int,
+    )
+
+    private data class OutboundPayload(
+        val plaintext: String,
+        val preview: String,
+    )
 }

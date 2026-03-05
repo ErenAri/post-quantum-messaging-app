@@ -34,6 +34,8 @@ const AUTH_TAG_NONCE: u16 = critical_type(0x3205);
 const AUTH_TAG_RECIPIENT_ID: u16 = critical_type(0x3206);
 const AUTH_TAG_SINCE: u16 = critical_type(0x3207);
 const AUTH_TAG_MESSAGE_BLOB: u16 = critical_type(0x3208);
+const AUTH_TAG_PREKEY_SPK_HASH: u16 = critical_type(0x3209);
+const AUTH_TAG_PREKEY_PQSPK_HASH: u16 = critical_type(0x320A);
 const AUTH_TAG_PUSH_DEVICE_ID: u16 = critical_type(0x3210);
 const AUTH_TAG_PUSH_TOKEN_HASH: u16 = critical_type(0x3211);
 
@@ -627,6 +629,45 @@ pub fn build_prekeys_status_auth_headers(
     });
     let transcript = encode(&records)
         .map_err(|_| operation_failed("failed to encode prekeys-status auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_prekeys_auth_headers(
+    keys_json: String,
+    user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("prekeys", &user_id, &keys.device_id, timestamp, &nonce);
+    let mut hasher = Sha256::new();
+    hasher.update(keys.signed_prekey_x25519_pub_b64.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PREKEY_SPK_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(keys.pq_signed_prekey_pub_b64.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PREKEY_PQSPK_HASH,
+        value: hasher.finalize().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode prekeys auth transcript"))?;
     let signature = signing_key.sign(&transcript).to_bytes();
     Ok(RequestAuthHeaders {
         auth_user: user_id,

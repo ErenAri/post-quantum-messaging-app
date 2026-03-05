@@ -1,0 +1,27 @@
+name: PQMsgDemo
+options:
+  minimumXcodeGenVersion: 2.38.0
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: 5.9
+targets:
+  PQMsgDemo:
+    type: application
+    platform: iOS
+    sources:
+      - path: PQMsgDemo/Sources
+      - path: PQMsgDemo/Generated
+    resources:
+      - path: PQMsgDemo/Resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pqmsg.demo.ios
+        INFOPLIST_FILE: PQMsgDemo/Info.plist
+        CODE_SIGN_ENTITLEMENTS: PQMsgDemo/PQMsgDemo.entitlements
+        OTHER_LDFLAGS:
+          - -lc++
+          - -lz
+    dependencies:
+      - framework: Frameworks/pqmsg_iosFFI.xcframework
