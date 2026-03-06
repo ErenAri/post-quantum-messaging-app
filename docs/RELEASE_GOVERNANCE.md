@@ -11,7 +11,12 @@ The policy objective is to prevent uncontrolled security regressions and ensure 
 ```mermaid
 flowchart LR
     A[Code Freeze Candidate] --> B[CI Security Gates]
-    B --> C[Formal/Pentest Evidence]
+    B --> PV[ProVerif Gate]
+    B --> FG[FIPS Build Gate]
+    B --> IT[Interop Tests]
+    PV --> C[Formal/Pentest Evidence]
+    FG --> C
+    IT --> C
     C --> D[Security Review Board]
     D --> E[Signed Artifact Promotion]
     E --> F[Post-Deploy Verification]

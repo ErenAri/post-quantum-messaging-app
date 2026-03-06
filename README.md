@@ -24,14 +24,19 @@ The strongest contributions are:
 
 ```mermaid
 flowchart LR
-    C[pqmsg-cli / Android Client / iOS Client] -->|HTTP JSON transport| S[pqmsg-server]
+    C[pqmsg-cli / Android / iOS / Web] -->|HTTP JSON + TLS| S[pqmsg-server]
     S -->|WebSocket inbox stream| C
     C -->|UniFFI bridge| A[pqmsg-android]
     C -->|UniFFI bridge| I[pqmsg-ios]
     A --> CORE[pqmsg-core]
     I --> CORE
     C --> CORE
-    S --> DB[(SQLite)]
+    CORE -.->|optional| HSM[PKCS#11 HSM]
+    S --> DB[(PostgreSQL / SQLite)]
+    S --> RD[(Redis rate limiter)]
+    S --> OBS[Prometheus + Loki + Alertmanager]
+    PV[ProVerif model] -.-> V{CI verification gate}
+    TM[Tamarin model] -.-> V
 ```
 
 ## Security-Critical Design Decisions
@@ -43,8 +48,22 @@ flowchart TD
     R3[Version + suite + ratchet metadata in AEAD AD] --> H[Downgrade and tamper resistance]
     R4[Strict TLV decoding, unknown critical rejection] --> P[Parser safety]
     R5[Runtime PQ backend profile check] --> Q[Fail-closed operational posture]
+    R6[FIPS feature gate: ML-KEM-768 only] --> H
+    R7[Zeroize on drop for all secret-bearing structs] --> M[Memory safety]
+    R8[PKCS#11 HSM signing abstraction] --> M
+    R9[Sealed sender IP rate limiting] --> D[Anonymous abuse resistance]
+    R10[Push circuit breaker + audit events] --> D
+    R11[PII scrubbing in structured logs] --> L[Operational data hygiene]
+    R12[ProVerif + Tamarin CI gate] --> V[Verified protocol correctness]
 ```
 
+- FIPS feature gate (`--features fips`) restricts algorithm suite to ML-KEM-768 only; compile-time conflict with `classical-only-INSECURE`.
+- PKCS#11 HSM signing abstraction in `pqmsg-core::hsm` supports software and hardware-backed key handles.
+- All secret key material is zeroized on drop via explicit `Drop` implementations (`DhKeyPair`, `SessionState`, `SessionSnapshot`, `RootStepOutput`, `PqStepOutput`, `SkippedMessageKeys`).
+- Sealed sender relay enforces IP-based rate limiting extracted from `X-Forwarded-For`/`X-Real-IP` headers alongside per-recipient rate limiting.
+- Push notification dispatch uses circuit-breaker pattern; circuit-open events emit security audit events.
+- Structured logs undergo PII scrubbing (user IDs and device IDs replaced with SHA-256 hash prefixes).
+- Server auto-migrates database schema on startup.
 - Server registration is identity-immutable after first successful bind.
 - Server prekey uploads require valid Ed25519 signatures under registered identity signature keys.
 - Server provides authenticated identity rotation challenge/confirm endpoints and a versioned identity event log.
@@ -77,7 +96,8 @@ flowchart TD
 | `deploy` | Container, Kubernetes, and Helm deployment assets |
 | `observability` | Prometheus, Grafana, Loki, and Promtail stack assets |
 | `docs` | Normative and security documentation corpus |
-| `verification/proverif` | Symbolic protocol verification model |
+| `verification/proverif` | Symbolic protocol verification model (ProVerif) |
+| `verification/tamarin` | Multiset rewriting protocol model (Tamarin Prover) |
 | `scripts/security` | Formal-verification and penetration smoke helper scripts |
 
 ## Build and Verification
@@ -94,8 +114,11 @@ CI/CD quality gates additionally enforce:
 - **Coverage**: `cargo-llvm-cov` with a minimum 50% line-coverage threshold,
 - **SBOM**: CycloneDX JSON bill-of-materials generated and uploaded as artifact,
 - **Benchmarks**: Criterion performance benchmarks for all crypto primitives (results as CI artifact),
+- **ProVerif gate**: blocking CI job verifying all symbolic protocol queries pass on every push/PR,
+- **FIPS build gate**: CI job confirming the `fips` feature flag compiles cleanly,
 - **Android build**: full APK assembly,
 - **Fuzz smoke** (nightly): 5 libFuzzer targets covering TLV, wire, handshake, sealed-sender, and algorithm dispatch,
+- **Interop tests**: 16 cross-platform protocol interoperability tests (wire format, snapshot persistence, bidirectional exchange, AD mismatch, suite tampering),
 - **Signed releases**: cosign-signed checksums with SBOM attached.
 
 ### Security Profile Runtime Controls
@@ -329,5 +352,6 @@ cargo run -p pqmsg-server --bin migrate_sqlite_to_postgres -- --sqlite-url "sqli
 | [IOS](docs/IOS.md) | iOS build and integration guide |
 | [WEB](docs/WEB.md) | Web client fallback mode |
 | [TLS_ROTATION](docs/TLS_ROTATION.md) | TLS certificate rotation procedures |
+| [AUDIT_READINESS](docs/AUDIT_READINESS.md) | Comprehensive audit readiness package |
 | [SECURITY](SECURITY.md) | Vulnerability disclosure policy |
 | [CONTRIBUTING](CONTRIBUTING.md) | Contributor guide and code conventions |

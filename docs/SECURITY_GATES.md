@@ -59,13 +59,33 @@ This document defines minimum security quality gates for ongoing development and
 
 ```mermaid
 flowchart LR
-    B[Build profile] --> R[Runtime profile check]
+    B[Build profile] --> F{fips feature?}
+    F -->|yes| FIPS[ML-KEM-768 only]
+    F -->|no| R[Runtime profile check]
+    FIPS --> R
     R -->|pq_oqs_enabled=true| OK[Operational mode]
     R -->|pq_oqs_enabled=false| FAIL[Fail closed for client operations]
+    OK -.->|optional| HSM[PKCS#11 HSM signer]
 ```
 
 Client applications MUST expose the active crypto profile and fail closed when PQ backend support is unavailable.
 PQ ratchet support MUST be compiled in all builds; feature-flag disable paths are not permitted for release artifacts.
+
+## 7A. FIPS Feature Gate Policy
+
+The `fips` feature flag restricts the algorithm suite registry to ML-KEM-768 only.
+
+1. `fips` depends on `pq-oqs` — it cannot be enabled without PQ backend support.
+2. `fips` and `classical-only-INSECURE` are mutually exclusive at compile time.
+3. CI includes a dedicated `fips-build-gate` job verifying clean compilation under `--features fips`.
+4. Runtime suite selection under `fips` rejects Kyber-768 and any non-NIST-approved algorithm.
+
+## 7B. HSM Policy
+
+1. The `pqmsg-core::hsm` module defines a `Signer` trait for pluggable signing backends.
+2. `KeyHandle` enum distinguishes `Software` (in-process zeroizing) and `Hsm` (PKCS#11 slot/label) key handles.
+3. Production deployments SHOULD use HSM-backed signing for identity keys when available.
+4. Software fallback MUST be available for development and testing environments.
 
 ## 8. Test Policy
 
@@ -81,7 +101,10 @@ Required coverage:
 - stable path: `fmt`, `clippy`, `test`,
 - dependency policy path (scheduled/manual): `cargo-audit` and `cargo-deny`,
 - coverage path: enforced minimum line coverage threshold in CI,
+- ProVerif gate: blocking job on every push/PR verifying all symbolic protocol queries pass,
+- FIPS build gate: CI job confirming `--features fips` compiles cleanly,
 - Android path: Rust bridge + APK assembly verification in CI,
+- interop test path: 16 cross-platform protocol interoperability tests run on every push,
 - optional nightly/manual path: fuzz smoke.
 
 Release artifacts published from tagged commits MUST include a signed checksum manifest.
@@ -103,8 +126,12 @@ A change that weakens these controls requires explicit security rationale.
 2. Formal model queries MUST at minimum cover:
    - session-key secrecy,
    - authentication correspondence between initiator and responder,
-   - confidentiality of encrypted payload abstraction.
+   - confidentiality of encrypted payload abstraction,
+   - forward secrecy (secrecy after ephemeral key reveal),
+   - identity misbinding resistance (session binding to correct identity keys).
 3. Model updates MUST accompany protocol-level changes to handshake transcripts or key schedule composition.
+4. The ProVerif model (`verification/proverif/pqxdh_hybrid_model.pv`) runs as a blocking CI gate (`proverif-gate`).
+5. The Tamarin Prover model (`verification/tamarin/pqxdh_hybrid.spthy`) provides complementary verification with compromise rules and 4 security lemmas.
 
 ## 12. Penetration Testing Policy
 

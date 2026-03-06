@@ -85,3 +85,21 @@ A conforming decoder MUST:
 2. reject unknown critical TLV types in strict mode,
 3. reject duplicate critical fields in strict mode,
 4. return typed errors without panic on adversarial input.
+
+## 7. Algorithm Suite Negotiation (SupportedSuites)
+
+Bundle metadata includes a `SupportedSuites` field encoded as a contiguous sequence of big-endian `u16` suite IDs:
+
+| Byte offset | Field | Type |
+|---|---|---|
+| `0..2` | `suite_id[0]` | `u16` |
+| `2..4` | `suite_id[1]` | `u16` |
+| ... | ... | ... |
+
+Decoding rules:
+
+1. input length MUST be a multiple of 2,
+2. each `u16` MUST correspond to a recognized suite ID,
+3. unknown suite IDs are rejected.
+
+Negotiation selects the first local preference that also appears in the remote list (`SupportedSuites::negotiate()`).

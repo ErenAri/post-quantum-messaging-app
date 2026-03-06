@@ -16,10 +16,13 @@ Primary goals:
 flowchart LR
     A[pqmsg-server replicas] --> B[Prometheus]
     A --> C[Loki / Audit Logs]
-    B --> D[Alert Rules]
-    D --> E[On-call Escalation]
+    A -->|PII-scrubbed| C
+    B --> D[11 Alert Rules]
+    D --> AM[Alertmanager]
+    AM --> E[On-call Escalation]
     A --> F[PostgreSQL]
     A --> G[Redis Rate Limiter]
+    A -->|circuit breaker| PN[FCM / APNS Push]
     F --> H[Encrypted Backups]
 ```
 
@@ -35,12 +38,19 @@ Prometheus alert rules are defined in:
 
 - `observability/prometheus/alert-rules.yml`
 
-Current baseline alerts:
+Current baseline alerts (11 rules):
 
-1. sustained 5xx ratio above `2%` for `10m`,
-2. auth reject spike for signature/replay/skew events,
-3. sustained rate-limit reject spike,
-4. sustained high in-flight request pressure.
+1. sustained 5xx ratio above `2%` for `10m` (critical),
+2. auth reject spike for signature/replay/skew events (high),
+3. sustained rate-limit reject spike (high),
+4. sustained high in-flight request pressure (medium),
+5. push circuit breaker open — FCM/APNS (critical),
+6. signed prekey staleness — rotation failures (high),
+7. PQ prekey pool depletion — last-resort bundle served (high),
+8. device revocation spike (high),
+9. PQ ratchet stall — no progress while messages flow (high),
+10. nonce replay burst — active attack signal (critical),
+11. registration spike — bot activity (medium).
 
 Escalation routing is defined in:
 

@@ -72,10 +72,17 @@ Prometheus rule groups:
 
 The default rules cover:
 
-1. sustained 5xx ratio breach,
-2. authentication reject spikes,
-3. rate-limit reject spikes,
-4. sustained high in-flight request load.
+1. sustained 5xx ratio breach (`PQMSGHighServerErrorRate`, critical),
+2. authentication reject spikes (`PQMSGAuthRejectSpike`, high),
+3. rate-limit reject spikes (`PQMSGRatelimitRejectSpike`, high),
+4. sustained high in-flight request load (`PQMSGHighInflightRequests`, medium),
+5. push circuit breaker open (`PQMSGPushCircuitBreakerOpen`, critical) — fires on `fcm_circuit_open` or `apns_circuit_open` security events,
+6. signed prekey staleness (`PQMSGSignedPrekeyStaleness`, high) — detects signed prekey rotation failures,
+7. PQ prekey pool depletion (`PQMSGPQBundleLastResortServed`, high) — alerts when bundles serve last-resort PQ prekeys,
+8. device revocation spike (`PQMSGDeviceRevocationSpike`, high) — abnormal burst of device revocations,
+9. PQ ratchet stall (`PQMSGPQRatchetStall`, high) — detects cessation of PQ ratchet steps while messages continue flowing,
+10. nonce replay burst (`PQMSGNonceReplayBurst`, critical) — spikes in `auth_nonce_replay` events indicating active attack,
+11. registration spike (`PQMSGRegistrationSpike`, medium) — abnormal burst of user registrations indicating bot activity.
 
 The default Alertmanager routing maps:
 

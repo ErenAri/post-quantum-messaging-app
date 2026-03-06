@@ -18,7 +18,9 @@ The following artifacts are expected to be delivered to an external assessor at 
 4. security gate policy: `docs/SECURITY_GATES.md`,
 5. API contract: `docs/API.md`,
 6. formal verification model: `verification/proverif/pqxdh_hybrid_model.pv`,
-7. test evidence:
+7. Tamarin Prover model: `verification/tamarin/pqxdh_hybrid.spthy`,
+8. audit readiness package: `docs/AUDIT_READINESS.md`,
+9. test evidence:
    - `cargo test --workspace`,
    - `cargo clippy --workspace --all-targets -- -D warnings`,
    - fuzz smoke outputs from CI.
@@ -37,6 +39,10 @@ Mandatory scope:
    - `crates/pqmsg-cli/src/main.rs`,
    - `crates/pqmsg-core/src/storage.rs`,
 5. Android binding boundary in `crates/pqmsg-android`.
+
+## 3A. Formal Verification CI Gate
+
+The `proverif-gate` CI job runs on every push and pull request. It installs ProVerif, executes the symbolic model, and blocks merge if any query returns `false`. The Tamarin model (`verification/tamarin/pqxdh_hybrid.spthy`) provides complementary verification with compromise rules (`RevealLtk`, `RevealEph`) and four security lemmas: session key secrecy, authentication, forward secrecy, and no key reuse.
 
 ## 4. Acceptance Criteria
 

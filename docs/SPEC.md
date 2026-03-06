@@ -81,7 +81,29 @@ The implementation supports a sealed-sender transport mode with the following pr
 1. sender identifiers are encrypted inside a sealed envelope payload,
 2. server-side sealed relay routing uses only `recipient_user_id`,
 3. sealed relay persistence stores only recipient addressing and opaque blob bytes,
-4. sealed inbox retrieval is authenticated with the same signed request-header model, using endpoint label `sealed-inbox`.
+4. sealed inbox retrieval is authenticated with the same signed request-header model, using endpoint label `sealed-inbox`,
+5. sealed relay enforces IP-based rate limiting (extracted from `X-Forwarded-For`/`X-Real-IP`) alongside per-recipient rate limiting to mitigate anonymous abuse.
+
+## 6B. Memory Protection
+
+All secret key material is zeroized on drop via explicit `Drop` implementations:
+
+- `DhKeyPair`: zeroizes DH secret key,
+- `SessionState`: zeroizes root key,
+- `SessionSnapshot`: zeroizes root key, sending/receiving chain keys, and local DH secret,
+- `RootStepOutput`: zeroizes root key and chain key,
+- `PqStepOutput`: zeroizes root key,
+- `SkippedMessageKeys`: zeroizes all cached message keys,
+- `SkippedMessageKeySnapshot`: zeroizes message key.
+
+## 6C. HSM Integration
+
+The `pqmsg-core::hsm` module provides a PKCS#11 signing abstraction:
+
+- `Signer` trait with `sign()` and `public_key()` methods,
+- `KeyHandle` enum supporting `Software` (in-process) and `Hsm` (slot/label reference) variants,
+- `SoftwareSigner` implementation for Ed25519 software keys,
+- `Pkcs11Signer` placeholder for hardware security module integration.
 
 ## 7. Ratchet Metadata Authentication
 
@@ -128,5 +150,7 @@ Current verification set:
 - deterministic handshake KAT transcript,
 - fuzz targets for TLV and wire decoding,
 - integration tests for server endpoint behavior and input validation,
-- symbolic handshake model in `verification/proverif/pqxdh_hybrid_model.pv`,
+- symbolic handshake model in `verification/proverif/pqxdh_hybrid_model.pv` (6 security queries including forward secrecy and identity misbinding),
+- Tamarin Prover model in `verification/tamarin/pqxdh_hybrid.spthy` (4 security lemmas with compromise rules),
+- cross-platform interoperability test suite in `crates/pqmsg-core/tests/interop.rs` (16 tests: wire format round-trip, snapshot persistence, bidirectional exchange, suite tampering, AD mismatch, large/empty messages),
 - penetration smoke runbooks and scripts under `docs/PENETRATION_TESTING.md` and `scripts/security/`.

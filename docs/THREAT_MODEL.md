@@ -30,7 +30,12 @@ flowchart LR
     B[Client B] -->|Ciphertext + protocol headers| R
     A -->|Local secrets| SA[(Client Storage A)]
     B -->|Local secrets| SB[(Client Storage B)]
-    R --> DB[(SQLite: public keys + opaque blobs)]
+    A -.->|optional| HSM[PKCS#11 HSM]
+    B -.->|optional| HSM
+    R --> DB[(PostgreSQL / SQLite)]
+    R --> RD[(Redis: rate limits)]
+    R --> AL[Audit Log + PII Scrubbing]
+    R -->|circuit breaker| PN[FCM / APNS Push]
 ```
 
 The server is explicitly not trusted with plaintext.
@@ -47,8 +52,12 @@ The server is explicitly not trusted with plaintext.
 | Suite/version downgrade | AD binding plus strict suite continuity checks |
 | Ratchet metadata tampering (`pq_step_ct`, counters) | Ratchet header fields included in AEAD associated data |
 | Parser-driven DoS | Strict TLV decode, critical-tag rejection, fuzz targets |
-| Secret retention in memory | `zeroize` and zeroizing containers for keying material |
+| Secret retention in memory | `zeroize` and zeroizing containers for keying material; explicit `Drop` implementations on all secret-bearing structs |
 | Secret leakage from local state files | Encrypted-at-rest key/session persistence in CLI and Android client stores |
+| Sealed sender anonymous abuse | IP-based rate limiting via `X-Forwarded-For`/`X-Real-IP` alongside per-recipient rate limiting |
+| Push provider outage cascade | Circuit-breaker pattern on FCM/APNS dispatch; emits security audit events on circuit open |
+| PII leakage in structured logs | Runtime PII scrubbing replaces user/device IDs with SHA-256 hash prefixes in log output |
+| Algorithm downgrade via FIPS bypass | `fips` feature gate restricts suite to ML-KEM-768 only; compile-time conflict with `classical-only-INSECURE` |
 
 ## 6. Residual Risk
 
