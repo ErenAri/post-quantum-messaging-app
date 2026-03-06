@@ -26,6 +26,17 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-targets
 
+  fips-build-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy (FIPS)
+        run: cargo clippy -p pqmsg-core --features fips -- -D warnings
+      - name: cargo test (FIPS)
+        run: cargo test -p pqmsg-core --features fips
+
   benchmarks:
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
@@ -157,6 +168,24 @@ jobs:
             exit 0
           fi
           proverif verification/proverif/pqxdh_hybrid_model.pv
+
+  proverif-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install proverif
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y proverif
+      - name: verify PQXDH hybrid model
+        run: |
+          proverif verification/proverif/pqxdh_hybrid_model.pv 2>&1 | tee /tmp/proverif.log
+          if grep -q "RESULT.*is true" /tmp/proverif.log && ! grep -q "RESULT.*is false" /tmp/proverif.log; then
+            echo "ProVerif: all queries verified"
+          else
+            echo "ProVerif: one or more queries FAILED"
+            exit 1
+          fi
 
   pentest-smoke:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}

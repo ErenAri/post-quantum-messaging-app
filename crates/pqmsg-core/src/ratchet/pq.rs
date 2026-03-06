@@ -2,8 +2,14 @@ use crate::kdf::hkdf_sha256_32;
 use crate::kem::KemProvider;
 use crate::keys::SecretBytes;
 use crate::CoreError;
+use zeroize::Zeroize;
 
 const INFO_PQ_STEP: &[u8] = b"pqmsg-ratchet-pq-step";
+
+/// Default PQ ratchet step interval: every 50 messages, perform a KEM re-key.
+/// This bounds the window during which a compromised classical DH key alone
+/// could decrypt traffic, without excessive KEM overhead.
+pub const DEFAULT_PQ_RATCHET_INTERVAL: u32 = 50;
 
 #[derive(Clone, Debug)]
 pub struct PqRatchetState {
@@ -16,6 +22,12 @@ pub struct PqRatchetState {
 pub struct PqStepOutput {
     pub ciphertext: Vec<u8>,
     pub root_key: [u8; 32],
+}
+
+impl Drop for PqStepOutput {
+    fn drop(&mut self) {
+        self.root_key.zeroize();
+    }
 }
 
 impl PqRatchetState {

@@ -700,4 +700,112 @@ mod tests {
             expected_session_key_hex
         );
     }
+
+    #[test]
+    fn handshake_kat_second_seed_vector() {
+        let kem = MockKem;
+        let verifier = TestSignatureVerifier;
+        let mut rng = ChaCha20Rng::from_seed([42u8; 32]);
+        let alice_identity = IdentityKeyPair::generate("alice-ik", &mut rng);
+        let bob_identity = IdentityKeyPair::generate("bob-ik", &mut rng);
+        let bob_spk = OneTimePreKey::generate("bob-spk", &mut rng);
+
+        let mut pq_prekey = [0u8; 32];
+        rng.fill_bytes(&mut pq_prekey);
+        let bob_pq_spk = KEMPreKey {
+            key_id: "bob-pqspk".to_string(),
+            public_key: pq_prekey.to_vec(),
+            secret_key: SecretBytes::from(pq_prekey.to_vec()),
+        };
+
+        let signature_public_key = b"deterministic-signature-key".to_vec();
+        let spk_msg = signed_prekey_signature_message(1, &bob_spk.public_key).expect("spk msg");
+        let pq_msg =
+            pq_signed_prekey_signature_message(1, &bob_pq_spk.public_key).expect("pq msg");
+        let bundle = PreKeyBundle::new(
+            "bob",
+            bob_identity.public_key,
+            bob_spk.public_key,
+            bob_pq_spk.public_key.clone(),
+            test_signature(&signature_public_key, &spk_msg),
+            test_signature(&signature_public_key, &pq_msg),
+            signature_public_key,
+        );
+
+        let initiator = alice_initiate(
+            &mut rng,
+            &verifier,
+            &kem,
+            "alice",
+            "bob",
+            &alice_identity,
+            &bundle,
+            b"kat-vector-2",
+        )
+        .expect("alice initiate");
+        let responder = bob_receive(
+            &kem,
+            &bob_identity,
+            &bob_spk,
+            &bob_pq_spk,
+            &initiator.initial_message,
+        )
+        .expect("bob receive");
+
+        assert_eq!(responder.plaintext, b"kat-vector-2");
+        assert_eq!(initiator.session_key, responder.session_key);
+
+        // Snapshot session key so any change in crypto primitives is detected
+        let session_key_hex = hex_encode(initiator.session_key.as_bytes());
+        let encoded = initiator.initial_message.encode().expect("encode");
+        let transcript_hex = hex_encode(&encoded);
+
+        // Pinned deterministic values — must not change across builds
+        assert_eq!(
+            session_key_hex,
+            "99a0051e1020814d47519fa9f547908762c1badc89d9fe0e4cf2759f98ffe63e"
+        );
+        assert_eq!(
+            transcript_hex,
+            "81010002000181090002000181020005616c69636581030003626f62810400207638d04176f97ced442a413e0d61ba20c71e5d3ecf5bf7e822f562db9c7e9e5181050020fdbbeb429f42522da9c1563623ccc647c4d1ed594648891b4e7508717d67140081060020b159c62fbbaa1c0bd278a7a97f426c0102ab5290805e884fa4bfbdb00f0051d48107000c15734c6700fe3cae0d92b72f8108001c38e86c127ab840ee286d7bd7ea862b09e9924430241cbd14b694f4d3"
+        );
+    }
+
+    #[test]
+    fn handshake_kat_encode_decode_roundtrip() {
+        let kem = MockKem;
+        let verifier = TestSignatureVerifier;
+        let mut rng = ChaCha20Rng::from_seed([99u8; 32]);
+        let alice_identity = IdentityKeyPair::generate("alice-ik", &mut rng);
+        let (bob_identity, bob_spk, bob_pq_spk, bundle, _) = setup_bundle();
+
+        let initiator = alice_initiate(
+            &mut rng,
+            &verifier,
+            &kem,
+            "alice",
+            "bob",
+            &alice_identity,
+            &bundle,
+            b"roundtrip-test",
+        )
+        .expect("alice initiate");
+
+        let encoded = initiator.initial_message.encode().expect("encode");
+        let decoded = InitialMessage::decode(&encoded).expect("decode");
+        assert_eq!(decoded.protocol_version, initiator.initial_message.protocol_version);
+        assert_eq!(decoded.suite_id, initiator.initial_message.suite_id);
+        assert_eq!(decoded.sender_id, "alice");
+        assert_eq!(decoded.recipient_id, "bob");
+        assert_eq!(decoded.ik_a_pub, initiator.initial_message.ik_a_pub);
+        assert_eq!(decoded.ek_a_pub, initiator.initial_message.ek_a_pub);
+        assert_eq!(decoded.pq_ct, initiator.initial_message.pq_ct);
+        assert_eq!(decoded.nonce, initiator.initial_message.nonce);
+        assert_eq!(decoded.ciphertext, initiator.initial_message.ciphertext);
+
+        let responder =
+            bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq_spk, &decoded).expect("bob receive");
+        assert_eq!(responder.plaintext, b"roundtrip-test");
+        assert_eq!(initiator.session_key, responder.session_key);
+    }
 }

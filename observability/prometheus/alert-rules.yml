@@ -47,3 +47,89 @@ groups:
         annotations:
           summary: "High in-flight request pressure"
           description: "In-flight requests exceeded 200 for 10m."
+
+      # ── Circuit Breaker ──────────────────────────────────────────────
+      - alert: PQMSGPushCircuitBreakerOpen
+        expr: |
+          sum(rate(pqmsg_security_events_total{event=~"fcm_circuit_open|apns_circuit_open"}[5m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+          service: pqmsg-server
+        annotations:
+          summary: "Push circuit breaker is open"
+          description: "One or more push providers have tripped the circuit breaker indicating persistent delivery failures."
+
+      # ── Signed Prekey Staleness ──────────────────────────────────────
+      - alert: PQMSGSignedPrekeyStaleness
+        expr: |
+          sum(rate(pqmsg_security_events_total{event="signed_prekey_stale"}[15m])) > 1
+        for: 15m
+        labels:
+          severity: high
+          service: pqmsg-server
+        annotations:
+          summary: "Stale signed prekeys being served"
+          description: "Clients are receiving signed prekeys that exceed the maximum allowed age, indicating rotation failure."
+
+      # ── PQ Prekey Depletion ──────────────────────────────────────────
+      - alert: PQMSGPQBundleLastResortServed
+        expr: |
+          sum(rate(pqmsg_security_events_total{event="pq_bundle_last_resort_served"}[15m])) > 0
+        for: 5m
+        labels:
+          severity: high
+          service: pqmsg-server
+        annotations:
+          summary: "PQ prekey pool depleted – last-resort keys in use"
+          description: "All one-time PQ prekeys for one or more users are exhausted; protocol is falling back to last-resort keys, reducing forward secrecy."
+
+      # ── Device Revocation Spike ──────────────────────────────────────
+      - alert: PQMSGDeviceRevocationSpike
+        expr: |
+          sum(rate(pqmsg_security_events_total{event="device_revoked"}[5m])) > 3
+        for: 5m
+        labels:
+          severity: high
+          service: pqmsg-server
+        annotations:
+          summary: "Abnormal device revocation rate"
+          description: "Elevated device revocation rate may indicate account compromise or credential stuffing."
+
+      # ── PQ Ratchet Stall ─────────────────────────────────────────────
+      - alert: PQMSGPQRatchetStall
+        expr: |
+          rate(pqmsg_pq_ratchet_steps_total[30m]) == 0
+            and
+          rate(pqmsg_http_requests_total{path="/v1/messages"}[30m]) > 0
+        for: 30m
+        labels:
+          severity: high
+          service: pqmsg-server
+        annotations:
+          summary: "PQ ratchet re-key has stalled"
+          description: "Messages are flowing but no PQ ratchet re-key steps have been observed for 30 minutes."
+
+      # ── Nonce Replay Burst ───────────────────────────────────────────
+      - alert: PQMSGNonceReplayBurst
+        expr: |
+          sum(rate(pqmsg_security_events_total{event="auth_nonce_replay"}[5m])) > 10
+        for: 2m
+        labels:
+          severity: critical
+          service: pqmsg-server
+        annotations:
+          summary: "Nonce replay attack detected"
+          description: "High rate of nonce replay rejections may indicate an active replay attack."
+
+      # ── Registration Spike ───────────────────────────────────────────
+      - alert: PQMSGRegistrationSpike
+        expr: |
+          sum(rate(pqmsg_security_events_total{event="user_registered"}[5m])) > 10
+        for: 5m
+        labels:
+          severity: medium
+          service: pqmsg-server
+        annotations:
+          summary: "Elevated registration rate"
+          description: "Registration rate exceeds normal baseline; may indicate bot activity."

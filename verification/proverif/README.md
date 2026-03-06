@@ -21,9 +21,12 @@ The model encodes:
 
 The model asks ProVerif to evaluate:
 
-1. secrecy of application plaintext,
-2. secrecy of the derived handshake key for completed Alice sessions,
-3. authentication correspondence between Bob and Alice completion events.
+1. **Plaintext secrecy** — application plaintext is never leaked to the Dolev–Yao attacker.
+2. **Session key secrecy** — the derived handshake key for completed Alice sessions cannot be recovered by the attacker.
+3. **Authentication (Alice → Bob)** — Bob's completion event implies a matching Alice completion.
+4. **Bundle acceptance** — Bob's completion event implies Alice accepted the published bundle.
+5. **Forward secrecy** — a second plaintext (`plaintext_fs`) remains secret even after the ephemeral DH key is revealed to the attacker post-session.
+6. **Identity misbinding resistance** — if two `SessionBound` events share the same session key, they must agree on the identity key pair.
 
 ## Run
 

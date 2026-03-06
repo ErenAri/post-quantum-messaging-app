@@ -7,6 +7,7 @@ pub mod aead;
 pub mod alg;
 pub mod dh;
 pub mod handshake;
+pub mod hsm;
 pub mod kdf;
 pub mod kem;
 pub mod keys;

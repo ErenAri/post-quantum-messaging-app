@@ -30,6 +30,30 @@ pub(crate) fn record_security_event(
     );
 }
 
+/// Extract the originating client IP from reverse-proxy headers.
+/// Checks `X-Forwarded-For` (first entry) then `X-Real-IP`.
+pub(crate) fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
+    if let Some(val) = headers.get("x-forwarded-for") {
+        if let Ok(s) = val.to_str() {
+            if let Some(first) = s.split(',').next() {
+                let ip = first.trim();
+                if !ip.is_empty() {
+                    return Some(ip.to_owned());
+                }
+            }
+        }
+    }
+    if let Some(val) = headers.get("x-real-ip") {
+        if let Ok(s) = val.to_str() {
+            let ip = s.trim();
+            if !ip.is_empty() {
+                return Some(ip.to_owned());
+            }
+        }
+    }
+    None
+}
+
 pub(crate) fn check_rate_limit(state: &AppState, key: &str) -> Result<(), AppError> {
     if state.rate_limiter.allow(key) {
         Ok(())
@@ -218,10 +242,25 @@ pub(crate) async fn dispatch_push_wake_signals(
             );
             continue;
         };
-        state
+        let result = state
             .push_notifier()
             .send_wake_signal(provider, &token)
-            .await?;
+            .await;
+        if let Err(ref e) = result {
+            if e.contains("circuit breaker open") {
+                let event = format!("{}_circuit_open", provider.as_str());
+                record_security_event(
+                    state,
+                    &event,
+                    "fail",
+                    None,
+                    Some(recipient_user_id),
+                    None,
+                    Some(e.clone()),
+                );
+            }
+            return Err(result.unwrap_err());
+        }
     }
     Ok(())
 }

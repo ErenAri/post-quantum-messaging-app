@@ -2,14 +2,15 @@ use anyhow::Context;
 use axum_server::tls_rustls::RustlsConfig;
 use pqmsg_core::alg::SecurityProfile;
 use pqmsg_server::{
-    build_router, init_db, parse_db_backend, AppState, AuditLogger, DosHardeningPolicy,
-    PushNotifier, RateLimiter,
+    build_router, init_db, parse_db_backend, AppState, AuditLogger, AuthReplayCache,
+    DosHardeningPolicy, PushNotifier, RateLimiter,
 };
 use sentry::ClientOptions;
 use sqlx::any::AnyPoolOptions;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
+use tower_http::timeout::TimeoutLayer;
 use tracing::info;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
@@ -170,6 +171,11 @@ async fn main() -> anyhow::Result<()> {
     if let Some(reserve) = parse_env_optional_i64("PQMSG_PREKEY_BUNDLE_RESERVE_COUNT")? {
         dos_policy = dos_policy.with_prekey_bundle_reserve_count(reserve);
     }
+    if let Some(interval) = parse_env_optional_i64("PQMSG_PQ_RATCHET_INTERVAL")? {
+        let interval = u32::try_from(interval)
+            .with_context(|| format!("invalid PQMSG_PQ_RATCHET_INTERVAL '{interval}': must be 0..4294967295"))?;
+        dos_policy = dos_policy.with_pq_ratchet_interval(interval);
+    }
     let fcm_server_key = env::var("PQMSG_FCM_SERVER_KEY").ok();
     let fcm_endpoint = env::var("PQMSG_FCM_ENDPOINT")
         .unwrap_or_else(|_| "https://fcm.googleapis.com/fcm/send".to_string());
@@ -196,7 +202,15 @@ async fn main() -> anyhow::Result<()> {
         .connect(&database_url)
         .await
         .with_context(|| format!("failed to connect to {database_url}"))?;
-    init_db(&pool, db_backend).await?;
+    let skip_auto_migrate = env::var("PQMSG_SKIP_AUTO_MIGRATE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if skip_auto_migrate {
+        info!("auto-migration skipped (PQMSG_SKIP_AUTO_MIGRATE=true)");
+    } else {
+        init_db(&pool, db_backend).await?;
+        info!("database migrations applied successfully");
+    }
 
     let rate_limiter = if let Some(redis_url) = &rate_limit_redis_url {
         Arc::new(
@@ -239,12 +253,36 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(AuditLogger::disabled())
     };
     let audit_enabled = audit_logger.is_enabled();
+    if security_profile.requires_tls() && !audit_enabled {
+        anyhow::bail!(
+            "PQMSG_AUDIT_LOG_PATH is required for {} profile. \
+             Set the environment variable to enable mandatory audit logging.",
+            security_profile.as_str()
+        );
+    }
+    let auth_replay = if let Some(redis_url) = &rate_limit_redis_url {
+        Arc::new(
+            AuthReplayCache::with_redis(
+                100_000,
+                StdDuration::from_secs(600),
+                redis_url,
+                rate_limit_redis_key_prefix.clone(),
+            )
+            .with_context(|| {
+                format!("failed to initialize redis replay cache with url '{redis_url}'")
+            })?,
+        )
+    } else {
+        Arc::new(AuthReplayCache::new(100_000, StdDuration::from_secs(600)))
+    };
     let state =
         AppState::with_security_profile(pool, db_backend, rate_limiter.clone(), security_profile)
             .with_dos_policy(dos_policy)
             .with_audit_logger(audit_logger)
-            .with_push_notifier(push_notifier);
-    let app = build_router(state);
+            .with_push_notifier(push_notifier)
+            .with_auth_replay(auth_replay);
+    let app = build_router(state)
+        .layer(TimeoutLayer::with_status_code(axum::http::StatusCode::REQUEST_TIMEOUT, StdDuration::from_secs(30)));
     let rate_limiter_mode = if rate_limiter.is_distributed() {
         "redis"
     } else {
@@ -261,7 +299,7 @@ async fn main() -> anyhow::Result<()> {
                     )
                 })?;
             info!(
-                "pqmsg-server listening with TLS on {bind_addr} profile={} db_backend={} max_conn={} min_conn={} push_enabled={} audit_enabled={} limiter_mode={} registration_pow_bits={} prekey_publish_min_interval_seconds={} prekey_bundle_reserve_count={} sentry_enabled={}",
+                "pqmsg-server listening with TLS on {bind_addr} profile={} db_backend={} max_conn={} min_conn={} push_enabled={} audit_enabled={} limiter_mode={} registration_pow_bits={} prekey_publish_min_interval_seconds={} prekey_bundle_reserve_count={} pq_ratchet_interval={} sentry_enabled={}",
                 security_profile.as_str(),
                 db_backend.as_str(),
                 db_max_connections,
@@ -272,10 +310,19 @@ async fn main() -> anyhow::Result<()> {
                 dos_policy.registration_pow_bits(),
                 dos_policy.prekey_publish_min_interval_seconds(),
                 dos_policy.prekey_bundle_reserve_count(),
+                dos_policy.pq_ratchet_interval(),
                 sentry_enabled
             );
             info!("enabled_push_providers={}", push_providers.join(","));
+            let handle = axum_server::Handle::new();
+            let shutdown_handle = handle.clone();
+            tokio::spawn(async move {
+                shutdown_signal().await;
+                info!("graceful shutdown initiated, draining connections...");
+                shutdown_handle.graceful_shutdown(Some(StdDuration::from_secs(30)));
+            });
             axum_server::bind_rustls(bind_addr.parse()?, tls_config)
+                .handle(handle)
                 .serve(app.into_make_service())
                 .await?;
         }
@@ -288,7 +335,7 @@ async fn main() -> anyhow::Result<()> {
             }
             let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
             info!(
-                "pqmsg-server listening without TLS on {bind_addr} profile={} db_backend={} max_conn={} min_conn={} push_enabled={} audit_enabled={} limiter_mode={} registration_pow_bits={} prekey_publish_min_interval_seconds={} prekey_bundle_reserve_count={} sentry_enabled={}",
+                "pqmsg-server listening without TLS on {bind_addr} profile={} db_backend={} max_conn={} min_conn={} push_enabled={} audit_enabled={} limiter_mode={} registration_pow_bits={} prekey_publish_min_interval_seconds={} prekey_bundle_reserve_count={} pq_ratchet_interval={} sentry_enabled={}",
                 security_profile.as_str(),
                 db_backend.as_str(),
                 db_max_connections,
@@ -299,14 +346,43 @@ async fn main() -> anyhow::Result<()> {
                 dos_policy.registration_pow_bits(),
                 dos_policy.prekey_publish_min_interval_seconds(),
                 dos_policy.prekey_bundle_reserve_count(),
+                dos_policy.pq_ratchet_interval(),
                 sentry_enabled
             );
             info!("enabled_push_providers={}", push_providers.join(","));
-            axum::serve(listener, app).await?;
+            axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown_signal())
+                .await?;
         }
         _ => {
             anyhow::bail!("set both PQMSG_TLS_CERT_PATH and PQMSG_TLS_KEY_PATH, or neither");
         }
     }
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    info!("shutdown signal received");
 }

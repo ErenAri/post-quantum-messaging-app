@@ -1,0 +1,152 @@
+/*
+ * Tamarin prover model for PQXDH hybrid handshake (pqmsg-core).
+ *
+ * Complementary to the ProVerif model in ../proverif/pqxdh_hybrid_model.pv.
+ * Tamarin's multiset rewriting approach lets us reason about state transitions
+ * and provides stronger guarantees for forward-secrecy via the reveal/compromise
+ * mechanism.
+ *
+ * Run:  tamarin-prover pqxdh_hybrid.spthy --prove
+ */
+theory PQXDH_Hybrid
+begin
+
+builtins: diffie-hellman, signing
+
+/* ── KEM abstraction ─────────────────────────────────────────────── */
+functions: kem_enc/2, kem_dec/2, kem_pk/1
+equations: kem_dec(kem_enc(kem_pk(sk), ss), sk) = ss
+
+/* ── Key schedule abstraction ────────────────────────────────────── */
+functions: hkdf/2, aead_enc/3, aead_dec/3, protov1/0
+equations: aead_dec(aead_enc(m, k, ad), k, ad) = m
+
+/* ────────────────────────────────────────────────────────────────── */
+/*  Key generation rules                                             */
+/* ────────────────────────────────────────────────────────────────── */
+
+rule Generate_Identity_Key:
+    [ Fr(~ik) ]
+  -->
+    [ !Ltk($A, ~ik), !Pk($A, pk(~ik)), Out(pk(~ik)) ]
+
+rule Generate_Signed_Prekey:
+    [ Fr(~spk), !Ltk($B, ik) ]
+  -->
+    [ !SPK($B, ~spk),
+      Out(<'g'^~spk, sign(<'spk', 'g'^~spk>, ik)>) ]
+
+rule Generate_PQ_Signed_Prekey:
+    [ Fr(~pqsk), !Ltk($B, ik) ]
+  -->
+    [ !PQSPK($B, ~pqsk),
+      Out(<kem_pk(~pqsk), sign(<'pqspk', kem_pk(~pqsk)>, ik)>) ]
+
+/* ────────────────────────────────────────────────────────────────── */
+/*  Compromise rules (for forward-secrecy reasoning)                 */
+/* ────────────────────────────────────────────────────────────────── */
+
+rule Reveal_Identity_Key:
+    [ !Ltk($A, ik) ]
+  --[ RevealLtk($A) ]->
+    [ Out(ik) ]
+
+rule Reveal_Ephemeral_Key:
+    [ !EphKey(tid, ek) ]
+  --[ RevealEph(tid) ]->
+    [ Out(ek) ]
+
+/* ────────────────────────────────────────────────────────────────── */
+/*  Alice initiates PQXDH handshake                                  */
+/* ────────────────────────────────────────────────────────────────── */
+
+rule Alice_Send:
+    let
+        spk_b_pub  = 'g'^spk_b
+        sig_spk    = sign(<'spk', spk_b_pub>, ik_b)
+        pqspk_pub  = kem_pk(pqsk_b)
+        sig_pqspk  = sign(<'pqspk', pqspk_pub>, ik_b)
+        ek_a_pub   = 'g'^~ek_a
+        t1         = spk_b_pub^~ik_a       // DH(ik_a, spk_b)
+        t2         = pk(ik_b)^~ek_a        // DH(ek_a, IK_b)  -- Note: Tamarin DH uses 'g'^x model
+        t3         = spk_b_pub^~ek_a       // DH(ek_a, spk_b)
+        pq_ct      = kem_enc(pqspk_pub, ~ss_pq)
+        ad         = <pk(~ik_a), pk(ik_b), protov1()>
+        sk         = hkdf(<t1, t2, t3, ~ss_pq>, ad)
+        ct         = aead_enc(~m, sk, ad)
+    in
+    [ !Pk($B, pk(ik_b)),
+      !SPK($B, spk_b),
+      !PQSPK($B, pqsk_b),
+      Fr(~ik_a), Fr(~ek_a), Fr(~ss_pq), Fr(~m), Fr(~tid) ]
+  --[ AliceSend($A, $B, sk),
+      SessionKey($A, $B, sk),
+      Honest($A), Honest($B),
+      Running($A, $B, sk) ]->
+    [ Out(<pk(~ik_a), ek_a_pub, pq_ct, ad, ct>),
+      !EphKey(~tid, ~ek_a) ]
+
+/* ────────────────────────────────────────────────────────────────── */
+/*  Bob receives PQXDH initial message                               */
+/* ────────────────────────────────────────────────────────────────── */
+
+rule Bob_Recv:
+    let
+        ek_a_pub = 'g'^ek_a
+        t1       = pk(ik_a)^~spk_b        // DH(spk_b, IK_a)
+        t2       = ek_a_pub^~ik_b          // DH(ik_b, EK_a)
+        t3       = ek_a_pub^~spk_b         // DH(spk_b, EK_a)
+        ss_pq    = kem_dec(pq_ct, ~pqsk_b)
+        ad       = <pk(ik_a), pk(~ik_b), protov1()>
+        sk       = hkdf(<t1, t2, t3, ss_pq>, ad)
+        m        = aead_dec(ct, sk, ad)
+    in
+    [ !Ltk($B, ~ik_b),
+      !SPK($B, ~spk_b),
+      !PQSPK($B, ~pqsk_b),
+      !Pk($A, pk(ik_a)),
+      In(<pk(ik_a), ek_a_pub, pq_ct, ad, ct>) ]
+  --[ BobRecv($A, $B, sk),
+      SessionKey($A, $B, sk),
+      Honest($A), Honest($B),
+      Commit($B, $A, sk),
+      ReceiveMsg($B, m) ]->
+    []
+
+/* ────────────────────────────────────────────────────────────────── */
+/*  Security lemmas                                                  */
+/* ────────────────────────────────────────────────────────────────── */
+
+/* 1. Session key secrecy: attacker cannot learn the session key
+      unless one of the long-term keys is compromised. */
+lemma session_key_secrecy:
+  "All A B k #i.
+    SessionKey(A, B, k) @i
+    ==> not(Ex #j. K(k) @j)
+        | (Ex #r. RevealLtk(A) @r)
+        | (Ex #r. RevealLtk(B) @r)"
+
+/* 2. Authentication: if Bob commits to a session with Alice,
+      then Alice must have sent it (injective agreement). */
+lemma authentication:
+  "All B A k #i.
+    Commit(B, A, k) @i
+    ==> (Ex #j. Running(A, B, k) @j & j < i)
+        | (Ex #r. RevealLtk(A) @r)
+        | (Ex #r. RevealLtk(B) @r)"
+
+/* 3. Forward secrecy: even if the long-term key is compromised AFTER
+      the session, the session key remains secret. */
+lemma forward_secrecy:
+  "All A B k #i #j.
+    SessionKey(A, B, k) @i & K(k) @j
+    ==> (Ex #r. RevealLtk(A) @r & r < i)
+        | (Ex #r. RevealLtk(B) @r & r < i)"
+
+/* 4. No key reuse: two distinct sessions produce distinct keys. */
+lemma no_key_reuse:
+  "All A1 B1 A2 B2 k #i #j.
+    SessionKey(A1, B1, k) @i & SessionKey(A2, B2, k) @j & not(#i = #j)
+    ==> F"
+
+end

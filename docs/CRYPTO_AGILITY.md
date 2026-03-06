@@ -46,7 +46,25 @@ This behavior is intentional to prevent permissive downgrade paths.
 
 Client front-ends use this profile to enforce fail-closed startup behavior when PQ backend support is unavailable.
 
-## 6. Migration Strategy (Prototype Guidance)
+## 6. Suite Negotiation
+
+The `SupportedSuites` type encodes a preference-ordered list of suite IDs that can be included in bundle metadata. Suite negotiation is deterministic and fail-closed:
+
+1. Each party advertises a `SupportedSuites` list filtered by their `SecurityProfile`.
+2. `negotiate()` returns the first locally-preferred suite that also appears in the remote list.
+3. If no common suite exists, negotiation fails (no silent downgrade).
+4. In FIPS mode, only FIPS-approved suite IDs (ML-KEM-768) are permitted regardless of profile.
+
+## 7. FIPS Mode
+
+When compiled with `--features fips`:
+
+- Only ML-KEM-768 suite (ID `1`) is permitted; Kyber768Alias is rejected at construction time.
+- `FipsKemWrapper` enforces public key validation on every encapsulate call.
+- `RuntimeCryptoProfile.fips_mode` reports FIPS status.
+- The `classical-only-INSECURE` feature is compile-time incompatible with `fips`.
+
+## 8. Migration Strategy (Prototype Guidance)
 
 A migration SHOULD proceed through:
 

@@ -1,3 +1,4 @@
+use crate::alg::{AlgorithmSuite, SecurityProfile};
 use crate::tlv::{critical_type, decode_strict, encode, require, TlvRecord};
 use crate::CoreError;
 
@@ -12,6 +13,64 @@ const TAG_PREV_CHAIN_LEN: u16 = critical_type(0x1005);
 const TAG_PQ_STEP_CT: u16 = critical_type(0x1006);
 const TAG_AEAD_NONCE: u16 = critical_type(0x1007);
 const TAG_CIPHERTEXT: u16 = critical_type(0x1008);
+
+/// Advertised suite list for algorithm negotiation in bundle metadata.
+/// Encoded as a sequence of big-endian `u16` suite IDs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SupportedSuites {
+    pub suite_ids: Vec<u16>,
+}
+
+impl SupportedSuites {
+    /// Build a `SupportedSuites` containing all suites allowed by the given profile.
+    pub fn for_profile(profile: SecurityProfile) -> Self {
+        let all_known = [
+            crate::alg::SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+            crate::alg::SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+        ];
+        let suite_ids: Vec<u16> = all_known
+            .iter()
+            .copied()
+            .filter(|&id| profile.allows_suite_id(id))
+            .collect();
+        Self { suite_ids }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        self.suite_ids
+            .iter()
+            .flat_map(|id| id.to_be_bytes())
+            .collect()
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, CoreError> {
+        if input.len() % 2 != 0 {
+            return Err(CoreError::InvalidLength {
+                field: "supported_suites",
+                expected: 0,
+                actual: input.len(),
+            });
+        }
+        let suite_ids: Vec<u16> = input
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        // Validate each suite ID is recognized.
+        for &id in &suite_ids {
+            AlgorithmSuite::from_suite_id(id)?;
+        }
+        Ok(Self { suite_ids })
+    }
+
+    /// Select the best mutually-supported suite between local and remote.
+    /// Returns the first local preference that also appears in `remote`.
+    pub fn negotiate(&self, remote: &SupportedSuites) -> Option<u16> {
+        self.suite_ids
+            .iter()
+            .find(|id| remote.suite_ids.contains(id))
+            .copied()
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WireMessage {
@@ -119,6 +178,11 @@ impl WireMessage {
             ciphertext,
         })
     }
+
+    /// Validate the message's suite_id against a security profile (fail-closed).
+    pub fn validate_suite(&self, profile: SecurityProfile) -> Result<(), CoreError> {
+        profile.enforce_suite_id(self.suite_id)
+    }
 }
 
 fn parse_u16(input: &[u8], field: &'static str) -> Result<u16, CoreError> {
@@ -167,4 +231,110 @@ fn parse_12(input: &[u8], field: &'static str) -> Result<[u8; 12], CoreError> {
     let mut out = [0u8; 12];
     out.copy_from_slice(input);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::alg::{
+        SecurityProfile, SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+        SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+    };
+
+    fn sample_message(suite_id: u16) -> WireMessage {
+        WireMessage {
+            version: WIRE_VERSION,
+            suite_id,
+            sender_dh_pub: [0xAA; 32],
+            msg_num: 1,
+            prev_chain_len: 0,
+            pq_step_ct: None,
+            aead_nonce: [0xBB; 12],
+            ciphertext: vec![0xCC; 48],
+        }
+    }
+
+    #[test]
+    fn wire_message_roundtrip() {
+        let msg = sample_message(DEFAULT_SUITE_ID);
+        let encoded = msg.encode().expect("encode");
+        let decoded = WireMessage::decode(&encoded).expect("decode");
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn wire_message_validate_suite_pass() {
+        let msg = sample_message(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305);
+        assert!(msg.validate_suite(SecurityProfile::HighAssurance).is_ok());
+        assert!(msg.validate_suite(SecurityProfile::NssAligned).is_ok());
+    }
+
+    #[test]
+    fn wire_message_validate_suite_reject() {
+        let msg = sample_message(SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305);
+        assert!(msg.validate_suite(SecurityProfile::NssAligned).is_err());
+    }
+
+    #[test]
+    fn supported_suites_encode_decode_roundtrip() {
+        let suites = SupportedSuites {
+            suite_ids: vec![
+                SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+                SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+            ],
+        };
+        let encoded = suites.encode();
+        assert_eq!(encoded.len(), 4); // 2 suite IDs * 2 bytes each
+        let decoded = SupportedSuites::decode(&encoded).expect("decode");
+        assert_eq!(suites, decoded);
+    }
+
+    #[test]
+    fn supported_suites_for_nss_profile() {
+        let suites = SupportedSuites::for_profile(SecurityProfile::NssAligned);
+        assert_eq!(suites.suite_ids.len(), 1);
+        assert_eq!(
+            suites.suite_ids[0],
+            SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305
+        );
+    }
+
+    #[test]
+    fn supported_suites_negotiate_finds_common() {
+        let local = SupportedSuites {
+            suite_ids: vec![SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305],
+        };
+        let remote = SupportedSuites {
+            suite_ids: vec![
+                SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+                SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+            ],
+        };
+        assert_eq!(
+            local.negotiate(&remote),
+            Some(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305)
+        );
+    }
+
+    #[test]
+    fn supported_suites_negotiate_no_common() {
+        let local = SupportedSuites {
+            suite_ids: vec![SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305],
+        };
+        let remote = SupportedSuites {
+            suite_ids: vec![SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305],
+        };
+        assert_eq!(local.negotiate(&remote), None);
+    }
+
+    #[test]
+    fn supported_suites_decode_rejects_odd_length() {
+        assert!(SupportedSuites::decode(&[0x00, 0x01, 0x00]).is_err());
+    }
+
+    #[test]
+    fn supported_suites_decode_rejects_unknown_suite() {
+        let bad = 0xFFFFu16.to_be_bytes();
+        assert!(SupportedSuites::decode(&bad).is_err());
+    }
 }

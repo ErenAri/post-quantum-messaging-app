@@ -6,6 +6,14 @@ pub const ALGORITHM_REGISTRY_V1: u16 = 1;
 pub const SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305: u16 = 1;
 pub const SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305: u16 = 2;
 
+/// Returns `true` when the crate is compiled with the `fips` feature flag.
+pub const fn is_fips_mode() -> bool {
+    cfg!(feature = "fips")
+}
+
+/// FIPS-approved suite IDs. In FIPS mode only these suites are permitted.
+const FIPS_APPROVED_SUITE_IDS: &[u16] = &[SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SecurityProfile {
@@ -46,6 +54,9 @@ impl SecurityProfile {
     }
 
     pub fn allows_suite_id(self, suite_id: u16) -> bool {
+        if is_fips_mode() {
+            return FIPS_APPROVED_SUITE_IDS.contains(&suite_id);
+        }
         match self {
             Self::Research => AlgorithmSuite::from_suite_id(suite_id).is_ok(),
             Self::HighAssurance => matches!(
@@ -231,6 +242,7 @@ pub struct RuntimeCryptoProfile {
     pub aead: AeadAlgorithm,
     pub signature: SignatureAlgorithm,
     pub pq_oqs_enabled: bool,
+    pub fips_mode: bool,
 }
 
 pub fn runtime_crypto_profile() -> Result<RuntimeCryptoProfile, CoreError> {
@@ -244,6 +256,7 @@ pub fn runtime_crypto_profile() -> Result<RuntimeCryptoProfile, CoreError> {
         aead: suite.aead,
         signature: suite.signature,
         pq_oqs_enabled: cfg!(feature = "pq-oqs"),
+        fips_mode: is_fips_mode(),
     })
 }
 
@@ -338,5 +351,37 @@ mod tests {
                 enforce_runtime_security_profile(SecurityProfile::HighAssurance, None).is_err()
             );
         }
+    }
+
+    #[test]
+    fn runtime_crypto_profile_reports_fips_flag() {
+        let runtime = runtime_crypto_profile().expect("runtime profile");
+        assert_eq!(runtime.fips_mode, super::is_fips_mode());
+    }
+
+    #[test]
+    fn is_fips_mode_matches_feature() {
+        if cfg!(feature = "fips") {
+            assert!(super::is_fips_mode());
+        } else {
+            assert!(!super::is_fips_mode());
+        }
+    }
+
+    #[test]
+    fn mlkem_suite_always_allowed() {
+        // ML-KEM-768 suite is approved in all profiles and FIPS mode.
+        assert!(
+            SecurityProfile::Research
+                .allows_suite_id(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305)
+        );
+        assert!(
+            SecurityProfile::HighAssurance
+                .allows_suite_id(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305)
+        );
+        assert!(
+            SecurityProfile::NssAligned
+                .allows_suite_id(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305)
+        );
     }
 }

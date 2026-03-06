@@ -136,6 +136,8 @@ pub(crate) const DEFAULT_REGISTRATION_POW_BITS_RESEARCH: u8 = 0;
 pub(crate) const DEFAULT_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS_RESEARCH: i64 = 0;
 pub(crate) const DEFAULT_PREKEY_BUNDLE_RESERVE_COUNT_RESEARCH: i64 = 0;
 pub(crate) const DEFAULT_RATE_LIMIT_REDIS_KEY_PREFIX: &str = "pqmsg:ratelimit:";
+/// Maximum age for signed prekeys before the server flags them as stale (7 days).
+pub(crate) const SIGNED_PREKEY_MAX_AGE_SECONDS: i64 = 7 * 24 * 3600;
 pub(crate) const REDIS_RATE_LIMIT_SCRIPT: &str = r#"
 local key = KEYS[1]
 local now_ms = tonumber(ARGV[1])
@@ -174,6 +176,7 @@ pub struct DosHardeningPolicy {
     registration_pow_bits: u8,
     prekey_publish_min_interval_seconds: i64,
     prekey_bundle_reserve_count: i64,
+    pq_ratchet_interval: u32,
 }
 
 impl DosHardeningPolicy {
@@ -184,12 +187,14 @@ impl DosHardeningPolicy {
                 prekey_publish_min_interval_seconds:
                     DEFAULT_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS_RESEARCH,
                 prekey_bundle_reserve_count: DEFAULT_PREKEY_BUNDLE_RESERVE_COUNT_RESEARCH,
+                pq_ratchet_interval: 0,
             },
             SecurityProfile::HighAssurance | SecurityProfile::NssAligned => Self {
                 registration_pow_bits: DEFAULT_REGISTRATION_POW_BITS_HARDENED,
                 prekey_publish_min_interval_seconds:
                     DEFAULT_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS_HARDENED,
                 prekey_bundle_reserve_count: DEFAULT_PREKEY_BUNDLE_RESERVE_COUNT_HARDENED,
+                pq_ratchet_interval: pqmsg_core::ratchet::pq::DEFAULT_PQ_RATCHET_INTERVAL,
             },
         }
     }
@@ -218,6 +223,15 @@ impl DosHardeningPolicy {
 
     pub fn with_prekey_bundle_reserve_count(mut self, count: i64) -> Self {
         self.prekey_bundle_reserve_count = count.max(0);
+        self
+    }
+
+    pub fn pq_ratchet_interval(self) -> u32 {
+        self.pq_ratchet_interval
+    }
+
+    pub fn with_pq_ratchet_interval(mut self, interval: u32) -> Self {
+        self.pq_ratchet_interval = interval;
         self
     }
 }
@@ -329,6 +343,11 @@ impl AppState {
         self.audit_logger = audit_logger;
         self
     }
+
+    pub fn with_auth_replay(mut self, auth_replay: Arc<AuthReplayCache>) -> Self {
+        self.auth_replay = auth_replay;
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -351,6 +370,46 @@ pub struct PushNotifier {
     apns_bearer_token: Option<String>,
     apns_topic: Option<String>,
     apns_endpoint: String,
+    fcm_circuit: Arc<std::sync::Mutex<CircuitBreakerState>>,
+    apns_circuit: Arc<std::sync::Mutex<CircuitBreakerState>>,
+}
+
+const CIRCUIT_FAILURE_THRESHOLD: u32 = 5;
+const CIRCUIT_COOLDOWN_SECS: u64 = 30;
+
+#[derive(Debug)]
+struct CircuitBreakerState {
+    consecutive_failures: u32,
+    opened_at: Option<std::time::Instant>,
+}
+
+impl CircuitBreakerState {
+    fn new() -> Self {
+        Self {
+            consecutive_failures: 0,
+            opened_at: None,
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        if let Some(opened_at) = self.opened_at {
+            opened_at.elapsed().as_secs() < CIRCUIT_COOLDOWN_SECS
+        } else {
+            false
+        }
+    }
+
+    fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.opened_at = None;
+    }
+
+    fn record_failure(&mut self) {
+        self.consecutive_failures += 1;
+        if self.consecutive_failures >= CIRCUIT_FAILURE_THRESHOLD {
+            self.opened_at = Some(std::time::Instant::now());
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -389,6 +448,7 @@ pub struct MetricsRegistry {
     request_duration_sum_seconds: Arc<Mutex<HashMap<HttpMetricKey, f64>>>,
     security_events_total: Arc<Mutex<HashMap<String, u64>>>,
     in_flight_requests: Arc<AtomicU64>,
+    pq_ratchet_steps_total: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -423,6 +483,14 @@ pub struct AuthReplayCache {
     max_entries: usize,
     ttl: StdDuration,
     inner: Arc<Mutex<HashMap<String, Instant>>>,
+    redis_backend: Option<RedisReplayBackend>,
+}
+
+#[derive(Clone)]
+struct RedisReplayBackend {
+    client: redis::Client,
+    key_prefix: String,
+    ttl_seconds: u64,
 }
 
 impl MetricsRegistry {
@@ -432,6 +500,7 @@ impl MetricsRegistry {
             request_duration_sum_seconds: Arc::new(Mutex::new(HashMap::new())),
             security_events_total: Arc::new(Mutex::new(HashMap::new())),
             in_flight_requests: Arc::new(AtomicU64::new(0)),
+            pq_ratchet_steps_total: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -468,6 +537,11 @@ impl MetricsRegistry {
         if let Ok(mut events) = self.security_events_total.lock() {
             *events.entry(event.to_string()).or_insert(0) += 1;
         }
+    }
+
+    pub fn record_pq_ratchet_step(&self) {
+        self.pq_ratchet_steps_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn render_prometheus(&self) -> String {
@@ -544,6 +618,12 @@ impl MetricsRegistry {
                 prometheus_escape_label(&key)
             ));
         }
+        let pq_steps = self.pq_ratchet_steps_total.load(Ordering::Relaxed);
+        body.push_str(
+            "# HELP pqmsg_pq_ratchet_steps_total Total PQ ratchet re-key steps observed\n",
+        );
+        body.push_str("# TYPE pqmsg_pq_ratchet_steps_total counter\n");
+        body.push_str(&format!("pqmsg_pq_ratchet_steps_total {pq_steps}\n"));
         body
     }
 }
@@ -588,13 +668,14 @@ impl AuditLogger {
             "device_id": device_id,
             "detail": detail,
         });
+        // Emit scrubbed PII to structured logs — full values stay in the audit file only.
         info!(
             target: "pqmsg_server::audit",
             event,
             outcome,
             request_id = request_id.unwrap_or_default(),
-            user_id = user_id.unwrap_or_default(),
-            device_id = device_id.unwrap_or_default(),
+            user_id = scrub_pii(user_id.unwrap_or_default()),
+            device_id = scrub_pii(device_id.unwrap_or_default()),
             detail = detail.unwrap_or_default()
         );
         let Some(file) = &self.file else {
@@ -615,6 +696,17 @@ impl AuditLogger {
             warn!("failed to append audit log event: {error}");
         }
     }
+}
+
+/// Replace PII values with a truncated SHA-256 prefix for structured log output.
+/// The full value is preserved in the audit log file only.
+fn scrub_pii(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(value.as_bytes());
+    format!("sha256:{}", hex::encode(&hash[..8]))
 }
 
 fn prometheus_escape_label(value: &str) -> String {
@@ -746,17 +838,48 @@ impl AuthReplayCache {
             max_entries,
             ttl,
             inner: Arc::new(Mutex::new(HashMap::new())),
+            redis_backend: None,
         }
     }
 
+    pub fn with_redis(
+        max_entries: usize,
+        ttl: StdDuration,
+        redis_url: &str,
+        key_prefix: String,
+    ) -> Result<Self, redis::RedisError> {
+        let client = redis::Client::open(redis_url)?;
+        Ok(Self {
+            max_entries,
+            ttl,
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            redis_backend: Some(RedisReplayBackend {
+                client,
+                key_prefix,
+                ttl_seconds: ttl.as_secs().max(1),
+            }),
+        })
+    }
+
+    pub fn is_distributed(&self) -> bool {
+        self.redis_backend.is_some()
+    }
+
     pub fn observe(&self, user_id: &str, nonce: &str) -> bool {
+        let key = format!("{user_id}:{nonce}");
+        if let Some(redis_backend) = &self.redis_backend {
+            return self.observe_redis(redis_backend, &key);
+        }
+        self.observe_in_memory(&key)
+    }
+
+    fn observe_in_memory(&self, key: &str) -> bool {
         let Ok(mut map) = self.inner.lock() else {
             return false;
         };
         let now = Instant::now();
         map.retain(|_, seen| now.duration_since(*seen) <= self.ttl);
-        let key = format!("{user_id}:{nonce}");
-        if map.contains_key(&key) {
+        if map.contains_key(key) {
             return false;
         }
         if map.len() >= self.max_entries {
@@ -768,8 +891,27 @@ impl AuthReplayCache {
                 map.remove(&evict_key);
             }
         }
-        map.insert(key, now);
+        map.insert(key.to_string(), now);
         true
+    }
+
+    fn observe_redis(&self, backend: &RedisReplayBackend, key: &str) -> bool {
+        let redis_key = format!("{}replay:{}", backend.key_prefix, key);
+        let mut connection = match backend.client.get_connection() {
+            Ok(connection) => connection,
+            Err(_) => return self.observe_in_memory(key),
+        };
+        let result: redis::RedisResult<bool> = redis::cmd("SET")
+            .arg(&redis_key)
+            .arg("1")
+            .arg("NX")
+            .arg("EX")
+            .arg(backend.ttl_seconds)
+            .query(&mut connection);
+        match result {
+            Ok(was_set) => was_set,
+            Err(_) => self.observe_in_memory(key),
+        }
     }
 }
 
@@ -840,6 +982,8 @@ impl PushNotifier {
             apns_bearer_token: None,
             apns_topic: None,
             apns_endpoint: "https://api.push.apple.com".to_string(),
+            fcm_circuit: Arc::new(std::sync::Mutex::new(CircuitBreakerState::new())),
+            apns_circuit: Arc::new(std::sync::Mutex::new(CircuitBreakerState::new())),
         }
     }
 
@@ -891,6 +1035,8 @@ impl PushNotifier {
             apns_bearer_token: apns_token,
             apns_topic,
             apns_endpoint,
+            fcm_circuit: Arc::new(std::sync::Mutex::new(CircuitBreakerState::new())),
+            apns_circuit: Arc::new(std::sync::Mutex::new(CircuitBreakerState::new())),
         }
     }
 
@@ -911,10 +1057,32 @@ impl PushNotifier {
     }
 
     async fn send_wake_signal(&self, provider: PushProvider, token: &str) -> Result<(), String> {
-        match provider {
+        let circuit = match provider {
+            PushProvider::Fcm => &self.fcm_circuit,
+            PushProvider::Apns => &self.apns_circuit,
+        };
+        {
+            let state = circuit.lock().unwrap_or_else(|e| e.into_inner());
+            if state.is_open() {
+                return Err(format!(
+                    "{} circuit breaker open, skipping push",
+                    provider.as_str()
+                ));
+            }
+        }
+        let result = match provider {
             PushProvider::Fcm => self.send_fcm_wake_signal(token).await,
             PushProvider::Apns => self.send_apns_wake_signal(token).await,
+        };
+        {
+            let mut state = circuit.lock().unwrap_or_else(|e| e.into_inner());
+            if result.is_ok() {
+                state.record_success();
+            } else {
+                state.record_failure();
+            }
         }
+        result
     }
 
     async fn send_fcm_wake_signal(&self, token: &str) -> Result<(), String> {

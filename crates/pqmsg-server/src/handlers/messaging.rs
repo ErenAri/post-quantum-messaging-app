@@ -1,3 +1,5 @@
+use std::time::Duration as StdDuration;
+
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
@@ -152,8 +154,7 @@ pub(crate) async fn relay_message(
             dispatch_push_wake_signals(&push_state, &push_recipient, &push_excluded_device).await
         {
             tracing::warn!(
-                "push wake dispatch failed recipient={} reason={}",
-                push_recipient,
+                "push wake dispatch failed reason={}",
                 error
             );
         }
@@ -171,9 +172,14 @@ pub(crate) async fn relay_message(
 
 pub(crate) async fn relay_sealed_message(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(recipient_user_id): Path<String>,
     Json(request): Json<SealedRelayRequest>,
 ) -> Result<Json<SealedRelayResponse>, AppError> {
+    // IP-based rate limit: sealed sender has no auth, so IP is the only abuse signal
+    if let Some(ip) = extract_client_ip(&headers) {
+        check_rate_limit(&state, &format!("sealed-ip:{ip}"))?;
+    }
     check_rate_limit(&state, &format!("sealed-relay:{recipient_user_id}"))?;
     validate_id("recipient_user_id", &recipient_user_id)?;
     let blob = decode_base64_range(
@@ -231,8 +237,7 @@ pub(crate) async fn relay_sealed_message(
     tokio::spawn(async move {
         if let Err(error) = dispatch_push_wake_signals(&push_state, &push_recipient, "").await {
             tracing::warn!(
-                "push wake dispatch failed recipient={} reason={}",
-                push_recipient,
+                "sealed push wake dispatch failed reason={}",
                 error
             );
         }
@@ -445,54 +450,107 @@ pub(crate) async fn handle_ws_inbox_socket(
         return;
     }
 
+    let mut ping_interval = tokio::time::interval(StdDuration::from_secs(30));
+    ping_interval.tick().await; // consume the immediate first tick
+    let idle_timeout = StdDuration::from_secs(90);
+    let mut last_activity = tokio::time::Instant::now();
+
     loop {
-        tokio::select! {
-            maybe_inbound = client_stream.next() => {
-                match maybe_inbound {
-                    Some(Ok(WsMessage::Close(_))) => break,
-                    Some(Ok(WsMessage::Ping(payload))) => {
-                        if sender.send(WsMessage::Pong(payload)).await.is_err() {
-                            break;
+            tokio::select! {
+                maybe_inbound = client_stream.next() => {
+                    match maybe_inbound {
+                        Some(Ok(WsMessage::Close(_))) => {
+                            state
+                                .realtime_hub()
+                                .unsubscribe(&user_id, &device_id, subscriber_id);
+                            return;
+                        }
+                        Some(Ok(WsMessage::Ping(payload))) => {
+                            last_activity = tokio::time::Instant::now();
+                            if sender.send(WsMessage::Pong(payload)).await.is_err() {
+                                state
+                                    .realtime_hub()
+                                    .unsubscribe(&user_id, &device_id, subscriber_id);
+                                return;
+                            }
+                        }
+                        Some(Ok(WsMessage::Pong(_))) => {
+                            last_activity = tokio::time::Instant::now();
+                        }
+                        Some(Ok(_)) => {
+                            last_activity = tokio::time::Instant::now();
+                        }
+                        Some(Err(_)) => {
+                            state
+                                .realtime_hub()
+                                .unsubscribe(&user_id, &device_id, subscriber_id);
+                            return;
+                        }
+                        None => {
+                            state
+                                .realtime_hub()
+                                .unsubscribe(&user_id, &device_id, subscriber_id);
+                            return;
                         }
                     }
-                    Some(Ok(_)) => {}
-                    Some(Err(_)) => break,
-                    None => break,
                 }
-            }
-            maybe_message = receiver.recv() => {
-                let Some(message) = maybe_message else {
-                    break;
-                };
-                if message.message_id <= last_message_id {
-                    continue;
+                maybe_message = receiver.recv() => {
+                    let Some(message) = maybe_message else {
+                        state
+                            .realtime_hub()
+                            .unsubscribe(&user_id, &device_id, subscriber_id);
+                        return;
+                    };
+                    if message.message_id <= last_message_id {
+                        continue;
+                    }
+                    last_message_id = message.message_id;
+                    let payload = WsInboxEnvelope {
+                        event: "relay",
+                        user_id: user_id.clone(),
+                        messages: vec![message],
+                    };
+                    let Ok(text) = serde_json::to_string(&payload) else {
+                        state
+                            .realtime_hub()
+                            .unsubscribe(&user_id, &device_id, subscriber_id);
+                        return;
+                    };
+                    if sender.send(WsMessage::Text(text)).await.is_err() {
+                        state
+                            .realtime_hub()
+                            .unsubscribe(&user_id, &device_id, subscriber_id);
+                        return;
+                    }
+                    if update_inbox_cursor(&state, &user_id, &device_id, last_message_id)
+                        .await
+                        .is_err()
+                    {
+                        state
+                            .realtime_hub()
+                            .unsubscribe(&user_id, &device_id, subscriber_id);
+                        return;
+                    }
+                    last_activity = tokio::time::Instant::now();
                 }
-                last_message_id = message.message_id;
-                let payload = WsInboxEnvelope {
-                    event: "relay",
-                    user_id: user_id.clone(),
-                    messages: vec![message],
-                };
-                let Ok(text) = serde_json::to_string(&payload) else {
-                    break;
-                };
-                if sender.send(WsMessage::Text(text)).await.is_err() {
-                    break;
-                }
-                if update_inbox_cursor(&state, &user_id, &device_id, last_message_id)
-                    .await
-                    .is_err()
-                {
-                    break;
+                _ = ping_interval.tick() => {
+                    if last_activity.elapsed() > idle_timeout {
+                        let _ = sender.send(WsMessage::Close(None)).await;
+                        state
+                            .realtime_hub()
+                            .unsubscribe(&user_id, &device_id, subscriber_id);
+                        return;
+                    }
+                    if sender.send(WsMessage::Ping(vec![].into())).await.is_err() {
+                        state
+                            .realtime_hub()
+                            .unsubscribe(&user_id, &device_id, subscriber_id);
+                        return;
+                    }
                 }
             }
         }
     }
-
-    state
-        .realtime_hub()
-        .unsubscribe(&user_id, &device_id, subscriber_id);
-}
 
 pub(crate) async fn load_inbox_messages(
     pool: &AnyPool,

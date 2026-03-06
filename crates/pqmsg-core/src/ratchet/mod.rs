@@ -9,6 +9,10 @@ pub mod pq;
 const INFO_CHAIN_STEP: &[u8] = b"pqmsg-ratchet-chain-step";
 const INFO_ROOT_STEP: &[u8] = b"pqmsg-ratchet-root-step";
 
+/// Hard upper bound on skipped message key cache entries.
+/// Prevents unbounded memory growth from adversarial out-of-order delivery.
+pub const MAX_SKIPPED_KEYS_UPPER_BOUND: usize = 2048;
+
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct ChainState {
     chain_key: [u8; 32],
@@ -72,8 +76,9 @@ pub struct SkippedMessageKeys {
 
 impl SkippedMessageKeys {
     pub fn new(max_entries: usize) -> Self {
+        let clamped = max_entries.min(MAX_SKIPPED_KEYS_UPPER_BOUND);
         Self {
-            max_entries,
+            max_entries: clamped,
             order: VecDeque::new(),
             map: HashMap::new(),
         }
@@ -127,10 +132,25 @@ impl SkippedMessageKeys {
     }
 }
 
-#[derive(Clone, Copy)]
+impl Drop for SkippedMessageKeys {
+    fn drop(&mut self) {
+        for key in self.map.values_mut() {
+            key.zeroize();
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct RootStepOutput {
     pub root_key: [u8; 32],
     pub chain_key: [u8; 32],
+}
+
+impl Drop for RootStepOutput {
+    fn drop(&mut self) {
+        self.root_key.zeroize();
+        self.chain_key.zeroize();
+    }
 }
 
 pub fn kdf_root_step(
@@ -155,4 +175,40 @@ pub fn dh_root_step(
 ) -> Result<RootStepOutput, CoreError> {
     let dh_output = diffie_hellman(local_secret, remote_public);
     kdf_root_step(root_key, &dh_output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skipped_keys_clamps_to_upper_bound() {
+        let cache = SkippedMessageKeys::new(999_999);
+        assert_eq!(cache.max_entries(), MAX_SKIPPED_KEYS_UPPER_BOUND);
+    }
+
+    #[test]
+    fn skipped_keys_evicts_oldest_first() {
+        let mut cache = SkippedMessageKeys::new(2);
+        let k1 = SkippedKeyId { dh_pub: [1u8; 32], msg_num: 0 };
+        let k2 = SkippedKeyId { dh_pub: [1u8; 32], msg_num: 1 };
+        let k3 = SkippedKeyId { dh_pub: [1u8; 32], msg_num: 2 };
+
+        cache.insert(k1, [0xAA; 32]);
+        cache.insert(k2, [0xBB; 32]);
+        cache.insert(k3, [0xCC; 32]);
+
+        // k1 should have been evicted
+        assert!(cache.take(k1).is_none());
+        assert!(cache.take(k2).is_some());
+        assert!(cache.take(k3).is_some());
+    }
+
+    #[test]
+    fn skipped_keys_zero_max_entries_drops_all() {
+        let mut cache = SkippedMessageKeys::new(0);
+        let key_id = SkippedKeyId { dh_pub: [1u8; 32], msg_num: 0 };
+        cache.insert(key_id, [0xAA; 32]);
+        assert!(cache.take(key_id).is_none());
+    }
 }

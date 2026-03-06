@@ -46,4 +46,6 @@ pub enum CoreError {
     InvalidStorageBase64(&'static str),
     #[error("storage decryption failed")]
     StorageDecryptionFailed,
+    #[error("HSM operation failed: {0}")]
+    HsmOperation(String),
 }

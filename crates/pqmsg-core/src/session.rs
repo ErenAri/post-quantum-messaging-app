@@ -34,6 +34,12 @@ pub struct SkippedMessageKeySnapshot {
     pub message_key: [u8; 32],
 }
 
+impl Drop for SkippedMessageKeySnapshot {
+    fn drop(&mut self) {
+        self.message_key.zeroize();
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     pub version: u16,
@@ -51,6 +57,15 @@ pub struct SessionSnapshot {
     pub skipped: Vec<SkippedMessageKeySnapshot>,
 }
 
+impl Drop for SessionSnapshot {
+    fn drop(&mut self) {
+        self.root_key.zeroize();
+        self.sending_chain_key.zeroize();
+        self.receiving_chain_key.zeroize();
+        self.local_dh_secret.zeroize();
+    }
+}
+
 pub struct SessionState {
     version: u16,
     suite_id: u16,
@@ -63,6 +78,12 @@ pub struct SessionState {
     skipped: SkippedMessageKeys,
     pq_state: Option<PqRatchetState>,
     pq_kem: Option<Box<dyn KemProvider>>,
+}
+
+impl Drop for SessionState {
+    fn drop(&mut self) {
+        self.root_key.zeroize();
+    }
 }
 
 impl SessionState {
@@ -118,6 +139,14 @@ impl SessionState {
         self.pq_kem = Some(kem);
     }
 
+    pub fn pq_ratchet_enabled(&self) -> bool {
+        self.pq_state.is_some() && self.pq_kem.is_some()
+    }
+
+    pub fn pq_ratchet_interval(&self) -> Option<u32> {
+        self.pq_state.as_ref().map(|s| s.interval)
+    }
+
     pub fn root_key(&self) -> [u8; 32] {
         self.root_key
     }
@@ -151,9 +180,9 @@ impl SessionState {
         }
     }
 
-    pub fn from_snapshot(snapshot: SessionSnapshot) -> Self {
-        let skipped = snapshot
-            .skipped
+    pub fn from_snapshot(mut snapshot: SessionSnapshot) -> Self {
+        let skipped_items = std::mem::take(&mut snapshot.skipped);
+        let skipped = skipped_items
             .into_iter()
             .map(|item| {
                 (
@@ -166,21 +195,26 @@ impl SessionState {
             })
             .collect();
 
+        let root_key = std::mem::take(&mut snapshot.root_key);
+        let sending_chain_key = std::mem::take(&mut snapshot.sending_chain_key);
+        let receiving_chain_key = std::mem::take(&mut snapshot.receiving_chain_key);
+        let local_dh_secret = std::mem::take(&mut snapshot.local_dh_secret);
+
         Self {
             version: snapshot.version,
             suite_id: snapshot.suite_id,
-            root_key: snapshot.root_key,
+            root_key,
             sending_chain: ChainState::from_parts(
-                snapshot.sending_chain_key,
+                sending_chain_key,
                 snapshot.sending_next_msg_num,
             ),
             receiving_chain: ChainState::from_parts(
-                snapshot.receiving_chain_key,
+                receiving_chain_key,
                 snapshot.receiving_next_msg_num,
             ),
             local_dh: DhKeyPair {
                 public: DhPublicKey(snapshot.local_dh_public),
-                secret: crate::dh::DhSecretKey(snapshot.local_dh_secret),
+                secret: crate::dh::DhSecretKey(local_dh_secret),
             },
             remote_dh_pub: DhPublicKey(snapshot.remote_dh_pub),
             prev_chain_len: snapshot.prev_chain_len,
@@ -195,9 +229,9 @@ impl SessionState {
         let mut pq_step_ct = None;
 
         if let (Some(state), Some(kem)) = (&self.pq_state, &self.pq_kem) {
-            if let Some(step) = pq::sender_step(state, kem.as_ref(), &self.root_key, msg_num)? {
-                self.root_key = step.root_key;
-                pq_step_ct = Some(step.ciphertext);
+            if let Some(mut step) = pq::sender_step(state, kem.as_ref(), &self.root_key, msg_num)? {
+                self.root_key = std::mem::take(&mut step.root_key);
+                pq_step_ct = Some(std::mem::take(&mut step.ciphertext));
             }
         }
 
@@ -293,9 +327,9 @@ impl SessionState {
     }
 
     fn apply_dh_ratchet(&mut self, new_remote_dh_pub: DhPublicKey) -> Result<(), CoreError> {
-        let recv_step = dh_root_step(&self.root_key, &self.local_dh.secret, &new_remote_dh_pub)?;
-        self.root_key = recv_step.root_key;
-        self.receiving_chain.reset(recv_step.chain_key);
+        let mut recv_step = dh_root_step(&self.root_key, &self.local_dh.secret, &new_remote_dh_pub)?;
+        self.root_key = std::mem::take(&mut recv_step.root_key);
+        self.receiving_chain.reset(std::mem::take(&mut recv_step.chain_key));
 
         self.prev_chain_len = self.sending_chain.next_msg_num();
         self.remote_dh_pub = new_remote_dh_pub;
@@ -303,9 +337,9 @@ impl SessionState {
         let mut rng = OsRng;
         self.local_dh = generate_keypair(&mut rng);
 
-        let send_step = dh_root_step(&self.root_key, &self.local_dh.secret, &self.remote_dh_pub)?;
-        self.root_key = send_step.root_key;
-        self.sending_chain.reset(send_step.chain_key);
+        let mut send_step = dh_root_step(&self.root_key, &self.local_dh.secret, &self.remote_dh_pub)?;
+        self.root_key = std::mem::take(&mut send_step.root_key);
+        self.sending_chain.reset(std::mem::take(&mut send_step.chain_key));
         Ok(())
     }
 }

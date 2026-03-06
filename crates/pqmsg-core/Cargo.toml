@@ -23,12 +23,15 @@ oqs = { version = "0.11", default-features = false, features = ["vendored", "ml_
 [features]
 default = ["pq-oqs"]
 pq-oqs = ["dep:oqs"]
+fips = ["pq-oqs"]
 classical-only-INSECURE = []
 
 [dev-dependencies]
 rand.workspace = true
 rand_chacha = "0.3"
 criterion = { version = "0.5", features = ["html_reports"] }
+serde_json = "1"
+hex = "0.4"
 
 [[bench]]
 name = "crypto_benchmarks"

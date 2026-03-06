@@ -42,11 +42,17 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<StatusResponse
         } else {
             "in_memory"
         },
+        replay_cache_mode: if state.auth_replay().is_distributed() {
+            "redis"
+        } else {
+            "in_memory"
+        },
         registration_pow_bits: state.dos_policy().registration_pow_bits(),
         prekey_publish_min_interval_seconds: state
             .dos_policy()
             .prekey_publish_min_interval_seconds(),
         prekey_bundle_reserve_count: state.dos_policy().prekey_bundle_reserve_count(),
+        pq_ratchet_interval: state.dos_policy().pq_ratchet_interval(),
     })
 }
 

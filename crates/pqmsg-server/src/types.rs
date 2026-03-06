@@ -500,7 +500,9 @@ pub(crate) struct StatusResponse {
     pub(crate) push_providers: Vec<&'static str>,
     pub(crate) audit_logger_enabled: bool,
     pub(crate) rate_limiter_mode: &'static str,
+    pub(crate) replay_cache_mode: &'static str,
     pub(crate) registration_pow_bits: u8,
     pub(crate) prekey_publish_min_interval_seconds: i64,
     pub(crate) prekey_bundle_reserve_count: i64,
+    pub(crate) pq_ratchet_interval: u32,
 }

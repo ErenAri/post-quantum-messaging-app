@@ -46,6 +46,15 @@ pub(crate) async fn publish_prekeys(
         request.one_time_prekeys_mlkem768.len(),
     )?;
 
+    // Enforce PQ prekey presence when PQ ratchet interval is active
+    if state.dos_policy().pq_ratchet_interval() > 0
+        && request.one_time_prekeys_mlkem768.is_empty()
+    {
+        return Err(AppError::bad_request(
+            "PQ one-time prekeys required when pq_ratchet_interval > 0",
+        ));
+    }
+
     let signed_prekey_x = decode_base64_exact(
         "signed_prekey_x25519_pub",
         &request.signed_prekey_x25519_pub,
@@ -240,6 +249,7 @@ pub(crate) async fn get_bundle(
                 p.sig_over_spk,
                 p.pq_signed_prekey_pub_mlkem768,
                 p.sig_over_pqspk,
+                p.updated_at,
                 COALESCE((
                     SELECT MAX(ie.version)
                     FROM identity_events ie
@@ -266,6 +276,7 @@ pub(crate) async fn get_bundle(
                 p.sig_over_spk,
                 p.pq_signed_prekey_pub_mlkem768,
                 p.sig_over_pqspk,
+                p.updated_at,
                 COALESCE((
                     SELECT MAX(ie.version)
                     FROM identity_events ie
@@ -286,6 +297,28 @@ pub(crate) async fn get_bundle(
         return Err(AppError::not_found("bundle not found"));
     };
     let device_id: String = row.try_get("device_id")?;
+
+    // Check signed prekey staleness for high-assurance profiles
+    if state.security_profile().requires_tls() {
+        if let Ok(updated_str) = row.try_get::<String, _>("updated_at") {
+            if let Ok(updated_at) = chrono::DateTime::parse_from_rfc3339(&updated_str) {
+                let age = Utc::now()
+                    .signed_duration_since(updated_at)
+                    .num_seconds();
+                if age > crate::SIGNED_PREKEY_MAX_AGE_SECONDS {
+                    record_security_event(
+                        &state,
+                        "signed_prekey_stale",
+                        "warn",
+                        None,
+                        Some(&user_id),
+                        Some(&device_id),
+                        Some(format!("age_seconds={age}")),
+                    );
+                }
+            }
+        }
+    }
 
     let remaining_x_before =
         count_available_one_time_keys(&mut tx, "one_time_prekeys_x25519", &user_id, &device_id)
@@ -321,6 +354,18 @@ pub(crate) async fn get_bundle(
         .map_err(|_| AppError::internal("identity_key_version overflow"))?;
     let low_one_time_prekeys = is_prekey_inventory_low(remaining_x, remaining_pq);
     let last_resort_prekey_only = x25519_otk.is_none() || mlkem_otk.is_none();
+
+    if last_resort_prekey_only && state.dos_policy().pq_ratchet_interval() > 0 {
+        record_security_event(
+            &state,
+            "pq_bundle_last_resort_served",
+            "warn",
+            None,
+            Some(&user_id),
+            Some(&device_id),
+            None,
+        );
+    }
 
     Ok(Json(BundleResponse {
         user_id: row.try_get("user_id")?,
@@ -434,6 +479,15 @@ pub(crate) async fn rotate_init(
     .execute(&state.pool)
     .await?;
 
+    record_security_event(
+        &state,
+        "rotation_initiated",
+        "success",
+        None,
+        Some(&user_id),
+        Some(&request.new_device_id),
+        Some(format!("challenge_id={challenge_id}")),
+    );
     Ok(Json(RotateInitResponse {
         user_id,
         challenge_id,
@@ -628,6 +682,15 @@ pub(crate) async fn rotate_confirm(
 
     tx.commit().await?;
 
+    record_security_event(
+        &state,
+        "rotation_confirmed",
+        "success",
+        None,
+        Some(&user_id),
+        Some(&new_device_id),
+        Some(format!("version={next_version}")),
+    );
     Ok(Json(RotateConfirmResponse {
         user_id,
         identity_key_version: next_version,

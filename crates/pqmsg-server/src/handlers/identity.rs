@@ -127,6 +127,15 @@ pub(crate) async fn register_user(
     .execute(&state.pool)
     .await?;
 
+    record_security_event(
+        &state,
+        "user_registered",
+        "success",
+        None,
+        Some(&request.user_id),
+        Some(&request.device_id),
+        None,
+    );
     Ok(Json(RegisterUserResponse {
         user_id: request.user_id,
         device_id: request.device_id,
@@ -220,6 +229,15 @@ pub(crate) async fn link_device(
     .fetch_one(state.pool())
     .await?;
 
+    record_security_event(
+        &state,
+        "device_linked",
+        "success",
+        None,
+        Some(&user_id),
+        Some(&request.new_device_id),
+        Some(format!("by_device={}", auth.device_id)),
+    );
     Ok(Json(LinkDeviceResponse {
         user_id,
         linked_device_id: request.new_device_id,
@@ -322,6 +340,15 @@ pub(crate) async fn revoke_device(
 
     tx.commit().await?;
 
+    record_security_event(
+        &state,
+        "device_revoked",
+        "success",
+        None,
+        Some(&user_id),
+        Some(&target_device_id),
+        Some(format!("by_device={}", auth.device_id)),
+    );
     Ok(Json(RevokeDeviceResponse {
         user_id,
         revoked_device_id: target_device_id,

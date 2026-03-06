@@ -15,6 +15,12 @@ pub struct DhKeyPair {
     pub secret: DhSecretKey,
 }
 
+impl Drop for DhKeyPair {
+    fn drop(&mut self) {
+        self.secret.0.zeroize();
+    }
+}
+
 pub fn generate_keypair<R: RngCore + CryptoRng>(rng: &mut R) -> DhKeyPair {
     let secret = StaticSecret::random_from_rng(rng);
     let public = PublicKey::from(&secret);

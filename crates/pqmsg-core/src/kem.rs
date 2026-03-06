@@ -5,6 +5,12 @@ compile_error!(
      Do not build without post-quantum support unless you know what you are doing."
 );
 
+#[cfg(all(feature = "fips", feature = "classical-only-INSECURE"))]
+compile_error!(
+    "The `fips` and `classical-only-INSECURE` features are mutually exclusive. \
+     FIPS mode requires post-quantum cryptography."
+);
+
 use crate::alg::KemAlgorithm;
 use crate::keys::SecretBytes;
 use crate::CoreError;
@@ -38,6 +44,12 @@ pub struct MlKem768 {
 #[cfg(feature = "pq-oqs")]
 impl MlKem768 {
     pub fn new(algorithm: KemAlgorithm) -> Result<Self, CoreError> {
+        #[cfg(feature = "fips")]
+        if algorithm == KemAlgorithm::Kyber768Alias {
+            return Err(CoreError::PolicyViolation(
+                "fips: Kyber768Alias not permitted; use MlKem768",
+            ));
+        }
         oqs::init();
         let oqs_alg = match algorithm {
             KemAlgorithm::MlKem768 => oqs::kem::Algorithm::MlKem768,
@@ -73,6 +85,58 @@ impl MlKem768 {
             public_key: public_key.into_vec(),
             secret_key: SecretBytes::from(secret_key.into_vec()),
         })
+    }
+
+    /// Validate that a public key has the correct length for this KEM algorithm.
+    /// Returns `Ok(())` if valid, `Err` if the key is malformed.
+    pub fn validate_public_key(&self, public_key: &[u8]) -> Result<(), CoreError> {
+        if self.kem.public_key_from_bytes(public_key).is_none() {
+            return Err(CoreError::InvalidLength {
+                field: "kem.public_key",
+                expected: self.public_key_len(),
+                actual: public_key.len(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// FIPS-mode KEM wrapper that enforces ML-KEM-768-only and validates keys
+/// on every operation. When a FIPS-certified ML-KEM provider becomes available
+/// as a Rust crate, the inner `MlKem768` should be replaced with it.
+#[cfg(feature = "fips")]
+pub struct FipsKemWrapper {
+    inner: MlKem768,
+}
+
+#[cfg(feature = "fips")]
+impl FipsKemWrapper {
+    pub fn new() -> Result<Self, CoreError> {
+        let inner = MlKem768::new(KemAlgorithm::MlKem768)?;
+        Ok(Self { inner })
+    }
+
+    pub fn keypair(&self) -> Result<KemKeyPair, CoreError> {
+        let kp = self.inner.keypair()?;
+        // Validate the generated public key before returning.
+        self.inner.validate_public_key(&kp.public_key)?;
+        Ok(kp)
+    }
+}
+
+#[cfg(feature = "fips")]
+impl KemProvider for FipsKemWrapper {
+    fn encapsulate(&self, recipient_public_key: &[u8]) -> Result<KemEncapsulation, CoreError> {
+        self.inner.validate_public_key(recipient_public_key)?;
+        self.inner.encapsulate(recipient_public_key)
+    }
+
+    fn decapsulate(
+        &self,
+        recipient_secret_key: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, CoreError> {
+        self.inner.decapsulate(recipient_secret_key, ciphertext)
     }
 }
 
@@ -153,5 +217,99 @@ impl KemProvider for MlKem768 {
         _ciphertext: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, CoreError> {
         Err(CoreError::UnsupportedAlgorithm("pq-oqs feature disabled"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::alg::KemAlgorithm;
+
+    #[test]
+    #[cfg(feature = "pq-oqs")]
+    fn mlkem768_keypair_has_expected_lengths() {
+        let kem = MlKem768::new(KemAlgorithm::MlKem768).expect("kem init");
+        assert_eq!(kem.public_key_len(), 1184);
+        assert_eq!(kem.secret_key_len(), 2400);
+        assert_eq!(kem.ciphertext_len(), 1088);
+        let kp = kem.keypair().expect("keypair");
+        assert_eq!(kp.public_key.len(), 1184);
+        assert_eq!(kp.secret_key.as_slice().len(), 2400);
+    }
+
+    #[test]
+    #[cfg(feature = "pq-oqs")]
+    fn mlkem768_rejects_short_public_key() {
+        let kem = MlKem768::new(KemAlgorithm::MlKem768).expect("kem init");
+        let short_key = vec![0u8; 32];
+        let result = kem.encapsulate(&short_key);
+        assert!(matches!(result, Err(CoreError::InvalidLength { .. })));
+    }
+
+    #[test]
+    #[cfg(feature = "pq-oqs")]
+    fn mlkem768_validate_public_key_rejects_wrong_length() {
+        let kem = MlKem768::new(KemAlgorithm::MlKem768).expect("kem init");
+        assert!(kem.validate_public_key(&[0u8; 32]).is_err());
+        assert!(kem.validate_public_key(&[]).is_err());
+        assert!(kem.validate_public_key(&[0u8; 1183]).is_err());
+        assert!(kem.validate_public_key(&[0u8; 1185]).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "pq-oqs")]
+    fn mlkem768_validate_public_key_accepts_valid_key() {
+        let kem = MlKem768::new(KemAlgorithm::MlKem768).expect("kem init");
+        let kp = kem.keypair().expect("keypair");
+        assert!(kem.validate_public_key(&kp.public_key).is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "pq-oqs")]
+    fn mlkem768_encapsulate_decapsulate_roundtrip() {
+        let kem = MlKem768::new(KemAlgorithm::MlKem768).expect("kem init");
+        let kp = kem.keypair().expect("keypair");
+        let encap = kem.encapsulate(&kp.public_key).expect("encapsulate");
+        assert_eq!(encap.ciphertext.len(), 1088);
+        let ss = kem
+            .decapsulate(kp.secret_key.as_slice(), &encap.ciphertext)
+            .expect("decapsulate");
+        assert_eq!(*encap.shared_secret, *ss);
+    }
+
+    #[test]
+    #[cfg(feature = "pq-oqs")]
+    fn mlkem768_decapsulate_rejects_short_ciphertext() {
+        let kem = MlKem768::new(KemAlgorithm::MlKem768).expect("kem init");
+        let kp = kem.keypair().expect("keypair");
+        let result = kem.decapsulate(kp.secret_key.as_slice(), &[0u8; 32]);
+        assert!(matches!(result, Err(CoreError::InvalidLength { .. })));
+    }
+
+    #[test]
+    #[cfg(feature = "fips")]
+    fn fips_kem_wrapper_roundtrip() {
+        let fips_kem = FipsKemWrapper::new().expect("fips kem init");
+        let kp = fips_kem.keypair().expect("keypair");
+        let encap = fips_kem.encapsulate(&kp.public_key).expect("encapsulate");
+        let ss = fips_kem
+            .decapsulate(kp.secret_key.as_slice(), &encap.ciphertext)
+            .expect("decapsulate");
+        assert_eq!(*encap.shared_secret, *ss);
+    }
+
+    #[test]
+    #[cfg(feature = "fips")]
+    fn fips_rejects_kyber768_alias() {
+        let result = MlKem768::new(KemAlgorithm::Kyber768Alias);
+        assert!(matches!(result, Err(CoreError::PolicyViolation(_))));
+    }
+
+    #[test]
+    #[cfg(feature = "fips")]
+    fn fips_kem_wrapper_rejects_invalid_public_key() {
+        let fips_kem = FipsKemWrapper::new().expect("fips kem init");
+        let result = fips_kem.encapsulate(&[0u8; 32]);
+        assert!(result.is_err());
     }
 }
