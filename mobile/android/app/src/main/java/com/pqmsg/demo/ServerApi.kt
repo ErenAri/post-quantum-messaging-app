@@ -72,6 +72,41 @@ data class RegisterPushTokenResponse(
     val registered_at: String,
 )
 
+data class RetireCurrentDeviceResponse(
+    val user_id: String,
+    val retired_device_id: String,
+    val retired_at: String,
+    val remaining_active_devices: Int,
+)
+
+data class LinkDeviceRequest(
+    val new_device_id: String,
+)
+
+data class LinkDeviceResponse(
+    val user_id: String,
+    val linked_device_id: String,
+    val linked_at: String,
+)
+
+data class RevokeDeviceResponse(
+    val user_id: String,
+    val revoked_device_id: String,
+    val revoked_at: String,
+)
+
+data class DeviceRecord(
+    val device_id: String,
+    val active: Boolean,
+    val linked_at: String,
+    val revoked_at: String?,
+)
+
+data class DeviceListResponse(
+    val user_id: String,
+    val devices: List<DeviceRecord>,
+)
+
 data class BundleResponse(
     val user_id: String,
     val device_id: String,
@@ -116,9 +151,39 @@ data class InboxResponse(
     val messages: List<InboxMessage>,
 )
 
+data class RuntimeCryptoProfileResponse(
+    val protocol_version: Int,
+    val suite_id: Int,
+    val kem: String,
+    val dh: String,
+    val kdf: String,
+    val aead: String,
+    val signature: String,
+    val pq_oqs_enabled: Boolean,
+    val fips_mode: Boolean,
+)
+
+data class ServerCapabilitiesResponse(
+    val capability_schema_version: Int,
+    val security_profile: String,
+    val deployment_mode: String,
+    val tls_required: Boolean,
+    val tls_enabled: Boolean,
+    val supported_suite_ids: List<Int>,
+    val runtime_crypto_profile: RuntimeCryptoProfileResponse,
+    val production_baseline_met: Boolean,
+    val registration_pow_bits: Int,
+    val prekey_bundle_reserve_count: Int,
+    val pq_ratchet_interval: Int,
+    val web_client_policy: String,
+)
+
 interface PqmsgApi {
     @GET("/")
     suspend fun pingRoot(): Response<Unit>
+
+    @GET("/v1/capabilities")
+    suspend fun getCapabilities(): ServerCapabilitiesResponse
 
     @POST("/v1/users/register")
     suspend fun registerUser(@Body request: RegisterUserRequest): RegisterUserResponse
@@ -142,6 +207,32 @@ interface PqmsgApi {
         @HeaderMap headers: Map<String, String>,
         @Body request: RegisterPushTokenRequest,
     ): RegisterPushTokenResponse
+
+    @POST("/v1/users/{user_id}/devices/current/retire")
+    suspend fun retireCurrentDevice(
+        @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
+    ): RetireCurrentDeviceResponse
+
+    @GET("/v1/users/{user_id}/devices")
+    suspend fun listDevices(
+        @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
+    ): DeviceListResponse
+
+    @POST("/v1/users/{user_id}/devices/link")
+    suspend fun linkDevice(
+        @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
+        @Body request: LinkDeviceRequest,
+    ): LinkDeviceResponse
+
+    @POST("/v1/users/{user_id}/devices/{target_device_id}/revoke")
+    suspend fun revokeDevice(
+        @Path("user_id") userId: String,
+        @Path("target_device_id") targetDeviceId: String,
+        @HeaderMap headers: Map<String, String>,
+    ): RevokeDeviceResponse
 
     @GET("/v1/users/{user_id}/bundle")
     suspend fun getBundle(@Path("user_id") userId: String): BundleResponse
@@ -237,5 +328,41 @@ object ApiClientFactory {
 
     internal fun isLocalDemoHost(host: String): Boolean {
         return host == "10.0.2.2" || host == "127.0.0.1" || host == "localhost"
+    }
+
+    internal fun suiteIdForLabel(label: String): Int {
+        return if (label.trim().equals("kyber768", ignoreCase = true)) {
+            2
+        } else {
+            1
+        }
+    }
+
+    internal fun validateCapabilities(
+        capabilities: ServerCapabilitiesResponse,
+        suiteLabel: String,
+    ) {
+        require(capabilities.capability_schema_version == 1) {
+            "Unsupported server capability schema ${capabilities.capability_schema_version}"
+        }
+        val suiteId = suiteIdForLabel(suiteLabel)
+        require(capabilities.supported_suite_ids.contains(suiteId)) {
+            "Server does not support suite '${suiteLabel.trim()}'"
+        }
+        require(!capabilities.tls_required || capabilities.tls_enabled) {
+            "Server requires TLS but is not advertising an active TLS transport"
+        }
+        require(
+            capabilities.security_profile == "research" ||
+                capabilities.runtime_crypto_profile.pq_oqs_enabled
+        ) {
+            "Server is not running a PQ-enabled crypto backend"
+        }
+        require(
+            capabilities.deployment_mode == "development" ||
+                capabilities.production_baseline_met
+        ) {
+            "Server '${capabilities.deployment_mode}' deployment is missing its production baseline"
+        }
     }
 }

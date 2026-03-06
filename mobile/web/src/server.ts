@@ -73,6 +73,64 @@ export type InboxResponse = {
   messages: InboxMessage[];
 };
 
+export type RetireCurrentDeviceResponse = {
+  user_id: string;
+  retired_device_id: string;
+  retired_at: string;
+  remaining_active_devices: number;
+};
+
+export type DeviceRecord = {
+  device_id: string;
+  active: boolean;
+  linked_at: string;
+  revoked_at: string | null;
+};
+
+export type DeviceListResponse = {
+  user_id: string;
+  devices: DeviceRecord[];
+};
+
+export type LinkDeviceResponse = {
+  user_id: string;
+  linked_device_id: string;
+  linked_at: string;
+};
+
+export type RevokeDeviceResponse = {
+  user_id: string;
+  revoked_device_id: string;
+  revoked_at: string;
+};
+
+export type RuntimeCryptoProfileResponse = {
+  protocol_version: number;
+  suite_id: number;
+  kem: string;
+  dh: string;
+  kdf: string;
+  aead: string;
+  signature: string;
+  pq_oqs_enabled: boolean;
+  fips_mode: boolean;
+};
+
+export type ServerCapabilitiesResponse = {
+  capability_schema_version: number;
+  security_profile: string;
+  deployment_mode: string;
+  tls_required: boolean;
+  tls_enabled: boolean;
+  supported_suite_ids: number[];
+  runtime_crypto_profile: RuntimeCryptoProfileResponse;
+  production_baseline_met: boolean;
+  registration_pow_bits: number;
+  prekey_bundle_reserve_count: number;
+  pq_ratchet_interval: number;
+  web_client_policy: string;
+};
+
 export class PqmsgApi {
   private readonly baseUrl: string;
 
@@ -86,6 +144,10 @@ export class PqmsgApi {
 
   async pingRoot(): Promise<void> {
     await this.request<void>("GET", "/", undefined, {});
+  }
+
+  async getCapabilities(): Promise<ServerCapabilitiesResponse> {
+    return this.request<ServerCapabilitiesResponse>("GET", "/v1/capabilities", undefined, {});
   }
 
   async registerUser(payload: RegisterUserRequest): Promise<RegisterUserResponse> {
@@ -135,6 +197,56 @@ export class PqmsgApi {
     return this.request<InboxResponse>(
       "GET",
       `/v1/inbox/${encodeURIComponent(userId)}?since=${encodeURIComponent(String(since))}`,
+      undefined,
+      headers
+    );
+  }
+
+  async listDevices(
+    userId: string,
+    headers: RequestAuthHeaders
+  ): Promise<DeviceListResponse> {
+    return this.request<DeviceListResponse>(
+      "GET",
+      `/v1/users/${encodeURIComponent(userId)}/devices`,
+      undefined,
+      headers
+    );
+  }
+
+  async linkDevice(
+    userId: string,
+    newDeviceId: string,
+    headers: RequestAuthHeaders
+  ): Promise<LinkDeviceResponse> {
+    return this.request<LinkDeviceResponse>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/devices/link`,
+      { new_device_id: newDeviceId },
+      headers
+    );
+  }
+
+  async revokeDevice(
+    userId: string,
+    targetDeviceId: string,
+    headers: RequestAuthHeaders
+  ): Promise<RevokeDeviceResponse> {
+    return this.request<RevokeDeviceResponse>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/devices/${encodeURIComponent(targetDeviceId)}/revoke`,
+      undefined,
+      headers
+    );
+  }
+
+  async retireCurrentDevice(
+    userId: string,
+    headers: RequestAuthHeaders
+  ): Promise<RetireCurrentDeviceResponse> {
+    return this.request<RetireCurrentDeviceResponse>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/devices/current/retire`,
       undefined,
       headers
     );

@@ -27,14 +27,33 @@ use axum::Json;
 use crate::types::*;
 use crate::AppState;
 
+fn capabilities_response(state: &AppState) -> ServerCapabilitiesResponse {
+    ServerCapabilitiesResponse {
+        capability_schema_version: 1,
+        security_profile: state.security_profile().as_str().to_string(),
+        deployment_mode: state.deployment_mode().as_str().to_string(),
+        tls_required: state.security_profile().requires_tls(),
+        tls_enabled: state.tls_enabled(),
+        supported_suite_ids: state.supported_suite_ids(),
+        runtime_crypto_profile: state.runtime_crypto_profile(),
+        production_baseline_met: state.production_baseline_met(),
+        registration_pow_bits: state.dos_policy().registration_pow_bits(),
+        prekey_bundle_reserve_count: state.dos_policy().prekey_bundle_reserve_count(),
+        pq_ratchet_interval: state.dos_policy().pq_ratchet_interval(),
+        web_client_policy: "demo_only",
+    }
+}
+
 pub(crate) async fn health(State(state): State<AppState>) -> Json<StatusResponse> {
     let db_ready = sqlx::query_scalar::<_, i64>("SELECT 1")
         .fetch_one(state.pool())
         .await
         .is_ok();
+    let capabilities = capabilities_response(&state);
     Json(StatusResponse {
         status: if db_ready { "ok" } else { "degraded" },
-        security_profile: state.security_profile().as_str().to_string(),
+        security_profile: capabilities.security_profile,
+        deployment_mode: capabilities.deployment_mode,
         db_backend: state.db_backend().as_str().to_string(),
         db_ready,
         db_pool_size: state.pool().size(),
@@ -42,6 +61,7 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<StatusResponse
         push_enabled: state.push_notifier().is_enabled(),
         push_providers: state.push_notifier().enabled_providers(),
         audit_logger_enabled: state.audit_logger().is_enabled(),
+        tls_enabled: capabilities.tls_enabled,
         rate_limiter_mode: if state.rate_limiter.is_distributed() {
             "redis"
         } else {
@@ -52,13 +72,27 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<StatusResponse
         } else {
             "in_memory"
         },
-        registration_pow_bits: state.dos_policy().registration_pow_bits(),
+        realtime_mode: if state.realtime_hub().is_distributed() {
+            "redis"
+        } else {
+            "in_memory"
+        },
+        supported_suite_ids: capabilities.supported_suite_ids,
+        runtime_crypto_profile: capabilities.runtime_crypto_profile,
+        production_baseline_met: capabilities.production_baseline_met,
+        registration_pow_bits: capabilities.registration_pow_bits,
         prekey_publish_min_interval_seconds: state
             .dos_policy()
             .prekey_publish_min_interval_seconds(),
-        prekey_bundle_reserve_count: state.dos_policy().prekey_bundle_reserve_count(),
-        pq_ratchet_interval: state.dos_policy().pq_ratchet_interval(),
+        prekey_bundle_reserve_count: capabilities.prekey_bundle_reserve_count,
+        pq_ratchet_interval: capabilities.pq_ratchet_interval,
     })
+}
+
+pub(crate) async fn capabilities(
+    State(state): State<AppState>,
+) -> Json<ServerCapabilitiesResponse> {
+    Json(capabilities_response(&state))
 }
 
 pub(crate) async fn metrics(State(state): State<AppState>) -> Response {

@@ -6,8 +6,9 @@ use axum::Router;
 use chrono::Utc;
 use tower_http::cors::CorsLayer;
 
-use pqmsg_core::alg::SecurityProfile;
+use pqmsg_core::alg::{runtime_crypto_profile, RuntimeCryptoProfile, SecurityProfile};
 use pqmsg_core::tlv::critical_type;
+use pqmsg_core::wire::SupportedSuites;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -15,7 +16,7 @@ use sqlx::AnyPool;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 use tokio::sync::mpsc;
@@ -239,6 +240,38 @@ impl DosHardeningPolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentMode {
+    #[default]
+    Development,
+    Pilot,
+    Production,
+}
+
+impl DeploymentMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Development => "development",
+            Self::Pilot => "pilot",
+            Self::Production => "production",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, &'static str> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "development" | "dev" => Ok(Self::Development),
+            "pilot" | "enterprise_pilot" | "enterprise-pilot" => Ok(Self::Pilot),
+            "production" | "prod" => Ok(Self::Production),
+            _ => Err("deployment_mode"),
+        }
+    }
+
+    pub const fn requires_production_baseline(self) -> bool {
+        !matches!(self, Self::Development)
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pool: AnyPool,
@@ -248,6 +281,10 @@ pub struct AppState {
     realtime_hub: RealtimeHub,
     push_notifier: Arc<PushNotifier>,
     security_profile: SecurityProfile,
+    deployment_mode: DeploymentMode,
+    runtime_crypto_profile: RuntimeCryptoProfile,
+    tls_enabled: bool,
+    structured_logging: bool,
     dos_policy: DosHardeningPolicy,
     metrics: Arc<MetricsRegistry>,
     audit_logger: Arc<AuditLogger>,
@@ -269,6 +306,10 @@ impl AppState {
             realtime_hub: RealtimeHub::new(),
             push_notifier: Arc::new(PushNotifier::disabled()),
             security_profile,
+            deployment_mode: DeploymentMode::Development,
+            runtime_crypto_profile: runtime_crypto_profile().expect("runtime crypto profile"),
+            tls_enabled: false,
+            structured_logging: false,
             dos_policy: DosHardeningPolicy::for_security_profile(security_profile),
             metrics: Arc::new(MetricsRegistry::new()),
             audit_logger: Arc::new(AuditLogger::disabled()),
@@ -294,6 +335,10 @@ impl AppState {
             realtime_hub: RealtimeHub::new(),
             push_notifier: Arc::new(PushNotifier::disabled()),
             security_profile,
+            deployment_mode: DeploymentMode::Development,
+            runtime_crypto_profile: runtime_crypto_profile().expect("runtime crypto profile"),
+            tls_enabled: false,
+            structured_logging: false,
             dos_policy: DosHardeningPolicy::for_security_profile(security_profile),
             metrics: Arc::new(MetricsRegistry::new()),
             audit_logger: Arc::new(AuditLogger::disabled()),
@@ -312,6 +357,18 @@ impl AppState {
 
     pub fn security_profile(&self) -> SecurityProfile {
         self.security_profile
+    }
+
+    pub fn deployment_mode(&self) -> DeploymentMode {
+        self.deployment_mode
+    }
+
+    pub fn runtime_crypto_profile(&self) -> RuntimeCryptoProfile {
+        self.runtime_crypto_profile
+    }
+
+    pub fn tls_enabled(&self) -> bool {
+        self.tls_enabled
     }
 
     pub fn dos_policy(&self) -> DosHardeningPolicy {
@@ -338,8 +395,48 @@ impl AppState {
         &self.audit_logger
     }
 
+    pub fn production_baseline_met(&self) -> bool {
+        self.deployment_mode.requires_production_baseline()
+            && !matches!(self.security_profile, SecurityProfile::Research)
+            && self.runtime_crypto_profile.pq_oqs_enabled
+            && self.db_backend == DbBackend::Postgres
+            && self.tls_enabled
+            && self.structured_logging
+            && self.audit_logger.is_enabled()
+            && self.rate_limiter.is_distributed()
+            && self.auth_replay.is_distributed()
+            && self.realtime_hub.is_distributed()
+    }
+
+    pub fn supported_suite_ids(&self) -> Vec<u16> {
+        SupportedSuites::for_profile(self.security_profile).suite_ids
+    }
+
     pub fn with_push_notifier(mut self, push_notifier: Arc<PushNotifier>) -> Self {
         self.push_notifier = push_notifier;
+        self
+    }
+
+    pub fn with_deployment_mode(mut self, deployment_mode: DeploymentMode) -> Self {
+        self.deployment_mode = deployment_mode;
+        self
+    }
+
+    pub fn with_runtime_crypto_profile(
+        mut self,
+        runtime_crypto_profile: RuntimeCryptoProfile,
+    ) -> Self {
+        self.runtime_crypto_profile = runtime_crypto_profile;
+        self
+    }
+
+    pub fn with_transport_security(mut self, tls_enabled: bool) -> Self {
+        self.tls_enabled = tls_enabled;
+        self
+    }
+
+    pub fn with_structured_logging(mut self, structured_logging: bool) -> Self {
+        self.structured_logging = structured_logging;
         self
     }
 
@@ -396,6 +493,12 @@ struct RealtimeSubscriber {
 struct RealtimePubSubEnvelope {
     origin_instance_id: Option<String>,
     message: InboxItem,
+}
+
+#[allow(dead_code)]
+enum RedisSubscription {
+    Pattern(String),
+    Channels(Vec<String>),
 }
 
 #[derive(Clone)]
@@ -1051,6 +1154,10 @@ impl RealtimeHub {
         }
     }
 
+    pub fn is_distributed(&self) -> bool {
+        self.redis_client.is_some()
+    }
+
     fn subscribe(
         &self,
         user_id: &str,
@@ -1086,7 +1193,7 @@ impl RealtimeHub {
         // Publish to Redis channel when available so other server instances
         // can forward to their local subscribers.
         if let Some(ref client) = self.redis_client {
-            let channel = format!("pqmsg:inbox:{}", inbox_stream_key(user_id, device_id));
+            let channel = redis_inbox_channel(user_id, device_id);
             if let Ok(payload) = serde_json::to_string(&RealtimePubSubEnvelope {
                 origin_instance_id: Some(self.instance_id.as_ref().clone()),
                 message: message.clone(),
@@ -1120,25 +1227,59 @@ impl RealtimeHub {
     /// Spawn a background task that subscribes to Redis pub/sub channels and
     /// dispatches incoming messages to local WebSocket subscribers.
     pub fn spawn_redis_subscriber(&self) {
+        self.spawn_redis_subscriber_with_subscription(RedisSubscription::Pattern(
+            "pqmsg:inbox:*".to_string(),
+        ));
+    }
+
+    fn spawn_redis_subscriber_with_subscription(
+        &self,
+        subscription: RedisSubscription,
+    ) -> Arc<AtomicBool> {
         let Some(ref client) = self.redis_client else {
-            return;
+            return Arc::new(AtomicBool::new(true));
         };
         let client = client.clone();
         let inner = self.inner.clone();
         let instance_id = self.instance_id.as_ref().clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_signal = stop.clone();
         std::thread::spawn(move || {
             loop {
+                if stop_signal.load(Ordering::Relaxed) {
+                    break;
+                }
                 let mut conn = match client.get_connection() {
                     Ok(c) => c,
                     Err(e) => {
+                        if stop_signal.load(Ordering::Relaxed) {
+                            break;
+                        }
                         tracing::warn!("realtime redis subscriber connection failed: {e}");
                         std::thread::sleep(StdDuration::from_secs(2));
                         continue;
                     }
                 };
                 let mut pubsub = conn.as_pubsub();
-                if let Err(e) = pubsub.psubscribe("pqmsg:inbox:*") {
-                    tracing::warn!("realtime redis psubscribe failed: {e}");
+                let _ = pubsub.set_read_timeout(Some(StdDuration::from_millis(250)));
+                let subscribe_result = match &subscription {
+                    RedisSubscription::Pattern(pattern) => pubsub.psubscribe(pattern.as_str()),
+                    RedisSubscription::Channels(channels) => {
+                        let mut result = Ok(());
+                        for channel in channels {
+                            if let Err(err) = pubsub.subscribe(channel.as_str()) {
+                                result = Err(err);
+                                break;
+                            }
+                        }
+                        result
+                    }
+                };
+                if let Err(e) = subscribe_result {
+                    if stop_signal.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    tracing::warn!("realtime redis subscribe failed: {e}");
                     std::thread::sleep(StdDuration::from_secs(2));
                     continue;
                 }
@@ -1146,6 +1287,12 @@ impl RealtimeHub {
                     let msg: redis::Msg = match pubsub.get_message() {
                         Ok(m) => m,
                         Err(e) => {
+                            if stop_signal.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            if e.is_timeout() {
+                                continue;
+                            }
                             tracing::warn!("realtime redis get_message error: {e}");
                             break; // reconnect
                         }
@@ -1178,6 +1325,7 @@ impl RealtimeHub {
                 }
             }
         });
+        stop
     }
 }
 
@@ -1192,6 +1340,10 @@ fn decode_realtime_pubsub_envelope(payload: &str) -> Option<RealtimePubSubEnvelo
                     message,
                 })
         })
+}
+
+fn redis_inbox_channel(user_id: &str, device_id: &str) -> String {
+    format!("pqmsg:inbox:{}", inbox_stream_key(user_id, device_id))
 }
 
 fn inbox_stream_key(user_id: &str, device_id: &str) -> String {
@@ -1383,6 +1535,7 @@ pub fn build_router(state: AppState) -> Router {
     let middleware_state = state.clone();
     let router = Router::new()
         .route("/health", get(health))
+        .route("/v1/capabilities", get(capabilities))
         .route("/metrics", get(metrics))
         .route("/v1/users/register", post(register_user))
         .route("/v1/users/:user_id/prekeys", post(publish_prekeys))
@@ -1397,6 +1550,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/v1/users/:user_id/devices", get(list_devices))
         .route("/v1/users/:user_id/devices/link", post(link_device))
+        .route(
+            "/v1/users/:user_id/devices/current/retire",
+            post(retire_current_device),
+        )
         .route(
             "/v1/users/:user_id/devices/:target_device_id/revoke",
             post(revoke_device),
@@ -1610,7 +1767,13 @@ async fn security_headers_middleware(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_realtime_pubsub_envelope, InboxItem, RealtimeHub, RealtimePubSubEnvelope};
+    use super::{
+        decode_realtime_pubsub_envelope, redis_inbox_channel, InboxItem, RealtimeHub,
+        RealtimePubSubEnvelope, RedisSubscription,
+    };
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use tokio::time::timeout;
 
     fn sample_inbox_item() -> InboxItem {
         InboxItem {
@@ -1619,6 +1782,11 @@ mod tests {
             message_bytes_base64: "Y2lwaGVydGV4dA==".to_string(),
             received_at: "2026-03-07T00:00:00Z".to_string(),
         }
+    }
+
+    fn redis_test_url() -> String {
+        std::env::var("PQMSG_TEST_REDIS_URL")
+            .expect("set PQMSG_TEST_REDIS_URL to run realtime redis integration tests")
     }
 
     #[test]
@@ -1645,5 +1813,71 @@ mod tests {
         let envelope = decode_realtime_pubsub_envelope(&payload).expect("decode payload");
         assert_eq!(envelope.origin_instance_id, None);
         assert_eq!(envelope.message.message_id, 7);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PQMSG_TEST_REDIS_URL"]
+    async fn realtime_pubsub_delivers_messages_across_redis_nodes() {
+        let redis_url = redis_test_url();
+        let channel = redis_inbox_channel("bob", "bob-dev-1");
+        let hub_a = RealtimeHub::with_redis(
+            redis::Client::open(redis_url.as_str()).expect("redis client a"),
+        );
+        let hub_b = RealtimeHub::with_redis(
+            redis::Client::open(redis_url.as_str()).expect("redis client b"),
+        );
+
+        let stop_a =
+            hub_a.spawn_redis_subscriber_with_subscription(RedisSubscription::Channels(vec![
+                channel.clone(),
+            ]));
+        let stop_b = hub_b
+            .spawn_redis_subscriber_with_subscription(RedisSubscription::Channels(vec![channel]));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let (_subscriber_id, mut receiver) = hub_b.subscribe("bob", "bob-dev-1");
+        hub_a.publish("bob", "bob-dev-1", sample_inbox_item());
+
+        let received = timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("timeout waiting for redis delivery")
+            .expect("redis-delivered message");
+        assert_eq!(received.message_id, 7);
+        assert_eq!(received.sender_user_id, "alice");
+
+        stop_a.store(true, Ordering::Relaxed);
+        stop_b.store(true, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PQMSG_TEST_REDIS_URL"]
+    async fn realtime_pubsub_does_not_duplicate_on_publishing_node() {
+        let redis_url = redis_test_url();
+        let channel = redis_inbox_channel("bob", "bob-dev-1");
+        let hub =
+            RealtimeHub::with_redis(redis::Client::open(redis_url.as_str()).expect("redis client"));
+
+        let stop = hub
+            .spawn_redis_subscriber_with_subscription(RedisSubscription::Channels(vec![channel]));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let (_subscriber_id, mut receiver) = hub.subscribe("bob", "bob-dev-1");
+        hub.publish("bob", "bob-dev-1", sample_inbox_item());
+
+        let first = timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("timeout waiting for local delivery")
+            .expect("local message");
+        assert_eq!(first.message_id, 7);
+        assert!(
+            timeout(Duration::from_millis(250), receiver.recv())
+                .await
+                .is_err(),
+            "publishing node should not receive a duplicate redis echo"
+        );
+
+        stop.store(true, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 }

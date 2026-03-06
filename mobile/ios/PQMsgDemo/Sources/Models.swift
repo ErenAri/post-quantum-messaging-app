@@ -65,8 +65,21 @@ struct SetupProgress: Codable {
         )
     }
 
+    func adoptLinkedDevice() -> SetupProgress {
+        SetupProgress(
+            keysGenerated: true,
+            userRegistered: true,
+            prekeysPublished: true,
+            serverVerified: false
+        )
+    }
+
+    func isAdoptedLinkedDevice() -> Bool {
+        keysGenerated && userRegistered && prekeysPublished && !serverVerified
+    }
+
     func canRegister() -> Bool {
-        keysGenerated
+        keysGenerated && !userRegistered
     }
 
     func canPublishPrekeys() -> Bool {
@@ -193,4 +206,71 @@ struct RegisterPushTokenResponse: Codable {
     let device_id: String
     let provider: String
     let registered_at: String
+}
+
+struct RetireCurrentDeviceResponse: Codable {
+    let user_id: String
+    let retired_device_id: String
+    let retired_at: String
+    let remaining_active_devices: Int
+}
+
+struct LinkDeviceResponse: Codable {
+    let user_id: String
+    let linked_device_id: String
+    let linked_at: String
+}
+
+struct RevokeDeviceResponse: Codable {
+    let user_id: String
+    let revoked_device_id: String
+    let revoked_at: String
+}
+
+struct DeviceRecord: Codable, Hashable, Identifiable {
+    let device_id: String
+    let active: Bool
+    let linked_at: String
+    let revoked_at: String?
+
+    var id: String { device_id }
+}
+
+struct DeviceListResponse: Codable {
+    let user_id: String
+    let devices: [DeviceRecord]
+}
+
+struct OnboardingPackageRecord: Hashable {
+    let userId: String
+    let deviceId: String
+    let linkedAt: String
+    var packageText: String
+}
+
+struct RuntimeCryptoProfileResponse: Codable {
+    let protocol_version: Int
+    let suite_id: Int
+    let kem: String
+    let dh: String
+    let kdf: String
+    let aead: String
+    let signature: String
+    let pq_oqs_enabled: Bool
+    let fips_mode: Bool
+}
+
+struct ServerCapabilitiesResponse: Codable {
+    let capability_schema_version: Int
+    let security_profile: String
+    let deployment_mode: String
+    let tls_required: Bool
+    let tls_enabled: Bool
+    let supported_suite_ids: [Int]
+    let runtime_crypto_profile: RuntimeCryptoProfileResponse
+    let production_baseline_met: Bool
+    let registration_pow_bits: Int
+    let prekey_bundle_reserve_count: Int
+    let pq_ratchet_interval: Int
+    let web_client_policy: String
 }

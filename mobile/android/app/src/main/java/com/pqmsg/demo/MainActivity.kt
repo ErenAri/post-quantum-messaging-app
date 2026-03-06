@@ -1,5 +1,7 @@
 package com.pqmsg.demo
 
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.view.View
@@ -19,6 +21,7 @@ import uniffi.pqmsg_android.buildPushTokenAuthHeaders
 import uniffi.pqmsg_android.buildRegisterPayload
 import uniffi.pqmsg_android.generateIdentityKeys
 import uniffi.pqmsg_android.loadUserProfile
+import uniffi.pqmsg_android.openSecondaryDevicePackage
 
 class MainActivity : AppCompatActivity() {
     private lateinit var store: LocalStateStore
@@ -28,12 +31,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var suiteInput: EditText
     private lateinit var peerInput: EditText
     private lateinit var pushTokenInput: EditText
+    private lateinit var onboardingPassphraseInput: EditText
+    private lateinit var onboardingPackageInput: EditText
     private lateinit var presetAliceButton: Button
     private lateinit var presetBobButton: Button
     private lateinit var generateButton: Button
     private lateinit var registerButton: Button
     private lateinit var publishButton: Button
     private lateinit var verifyButton: Button
+    private lateinit var pasteOnboardingButton: Button
+    private lateinit var importOnboardingButton: Button
     private lateinit var openChatButton: Button
     private lateinit var statusText: TextView
     private lateinit var cryptoProfileText: TextView
@@ -58,12 +65,16 @@ class MainActivity : AppCompatActivity() {
         suiteInput = findViewById(R.id.editSuite)
         peerInput = findViewById(R.id.editPeer)
         pushTokenInput = findViewById(R.id.editPushToken)
+        onboardingPassphraseInput = findViewById(R.id.editOnboardingPassphrase)
+        onboardingPackageInput = findViewById(R.id.editOnboardingPackage)
         presetAliceButton = findViewById(R.id.buttonPresetAlice)
         presetBobButton = findViewById(R.id.buttonPresetBob)
         generateButton = findViewById(R.id.buttonGenerate)
         registerButton = findViewById(R.id.buttonRegister)
         publishButton = findViewById(R.id.buttonPublish)
         verifyButton = findViewById(R.id.buttonVerifyServer)
+        pasteOnboardingButton = findViewById(R.id.buttonPasteOnboardingPackage)
+        importOnboardingButton = findViewById(R.id.buttonImportOnboardingPackage)
         openChatButton = findViewById(R.id.buttonOpenChat)
         statusText = findViewById(R.id.textStatusSetup)
         cryptoProfileText = findViewById(R.id.textCryptoProfile)
@@ -122,6 +133,10 @@ class MainActivity : AppCompatActivity() {
                     val keysJson = requireKeys(user)
                     val payload = buildRegisterPayload(keysJson)
                     val api = ApiClientFactory.create(serverInput.text.toString())
+                    ApiClientFactory.validateCapabilities(
+                        api.getCapabilities(),
+                        suiteInput.text.toString(),
+                    )
                     api.registerUser(
                         RegisterUserRequest(
                             user_id = payload.userId,
@@ -147,6 +162,10 @@ class MainActivity : AppCompatActivity() {
                     val keysJson = requireKeys(user)
                     val payload = buildPublishPrekeysPayload(keysJson)
                     val api = ApiClientFactory.create(serverInput.text.toString())
+                    ApiClientFactory.validateCapabilities(
+                        api.getCapabilities(),
+                        suiteInput.text.toString(),
+                    )
                     val auth = buildPrekeysAuthHeaders(keysJson, user)
                     api.publishPrekeys(
                         user,
@@ -176,10 +195,11 @@ class MainActivity : AppCompatActivity() {
                     require(user.isNotBlank()) { "user id is empty" }
                     val keysJson = requireKeys(user)
                     val api = ApiClientFactory.create(serverInput.text.toString())
-                    val ping = api.pingRoot()
-                    if (!ping.isSuccessful && ping.code() >= 500) {
-                        error("server ping failed with status ${ping.code()}")
-                    }
+                    val capabilities = api.getCapabilities()
+                    ApiClientFactory.validateCapabilities(
+                        capabilities,
+                        suiteInput.text.toString(),
+                    )
                     val inboxAuth = buildInboxAuthHeaders(
                         keysJson = keysJson,
                         userId = user,
@@ -209,10 +229,22 @@ class MainActivity : AppCompatActivity() {
                     progress = progress.afterServerVerified()
                     store.saveProgress(progressUserId, progress)
                     if (pushToken.isEmpty()) {
-                        "Server reachable and API authenticated for $user"
+                        "Server verified for $user (${capabilities.security_profile}/${capabilities.deployment_mode})"
                     } else {
-                        "Server reachable, API authenticated, and push token registered for $user"
+                        "Server verified and push token registered for $user (${capabilities.security_profile}/${capabilities.deployment_mode})"
                     }
+                }
+            }
+        }
+
+        pasteOnboardingButton.setOnClickListener {
+            pasteOnboardingPackageFromClipboard()
+        }
+
+        importOnboardingButton.setOnClickListener {
+            lifecycleScope.launch {
+                runAction("Import secondary-device package") {
+                    importSecondaryDevicePackage()
                 }
             }
         }
@@ -373,11 +405,76 @@ class MainActivity : AppCompatActivity() {
         return store.readKeys(user) ?: throw IllegalStateException("missing keys for user '$user'")
     }
 
+    private suspend fun importSecondaryDevicePackage(): String {
+        val packagePassphrase = onboardingPassphraseInput.text.toString()
+        require(packagePassphrase.isNotBlank()) { "onboarding package passphrase is empty" }
+        val packageJson = onboardingPackageInput.text.toString().trim()
+        require(packageJson.isNotBlank()) { "onboarding package is empty" }
+
+        val imported = openSecondaryDevicePackage(packageJson, packagePassphrase)
+        val suiteLabel = suiteLabel(imported.suite)
+        val api = ApiClientFactory.create(imported.serverUrl)
+        ApiClientFactory.validateCapabilities(api.getCapabilities(), suiteLabel)
+
+        val publishPayload = buildPublishPrekeysPayload(imported.keysJson)
+        val auth = buildPrekeysAuthHeaders(imported.keysJson, imported.userId)
+        api.publishPrekeys(
+            imported.userId,
+            auth.toHeaderMap(),
+            PublishPrekeysRequest(
+                signed_prekey_x25519_pub = publishPayload.signedPrekeyX25519Pub,
+                sig_over_spk = publishPayload.sigOverSpk,
+                pq_signed_prekey_pub_mlkem768 = publishPayload.pqSignedPrekeyPubMlkem768,
+                sig_over_pqspk = publishPayload.sigOverPqspk,
+                one_time_prekeys_x25519 = publishPayload.oneTimePrekeysX25519,
+                one_time_prekeys_mlkem768 = publishPayload.oneTimePrekeysMlkem768,
+            ),
+        )
+
+        store.wipeUserState(imported.userId)
+        store.writeKeys(imported.userId, imported.keysJson)
+
+        serverInput.setText(imported.serverUrl)
+        userInput.setText(imported.userId)
+        deviceInput.setText(imported.deviceId)
+        suiteInput.setText(suiteLabel)
+        if (peerInput.text.toString().trim().isBlank()) {
+            peerInput.setText("bob")
+        }
+        saveSetup()
+        syncProgressUser()
+        progress = progress.adoptLinkedDevice()
+        store.saveProgress(progressUserId, progress)
+        onboardingPackageInput.setText("")
+        onboardingPassphraseInput.setText("")
+        return "Imported linked device ${imported.deviceId} for ${imported.userId} and published prekeys"
+    }
+
+    private fun pasteOnboardingPackageFromClipboard() {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip = clipboard.primaryClip
+        val itemText = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)
+        if (itemText.isNullOrBlank()) {
+            statusText.text = "Clipboard does not contain an onboarding package"
+            return
+        }
+        onboardingPackageInput.setText(itemText.toString())
+        statusText.text = "Pasted onboarding package from clipboard"
+    }
+
     private fun parseSuite(value: String): Suite {
         return if (value.equals("kyber768", ignoreCase = true)) {
             Suite.KYBER768
         } else {
             Suite.ML_KEM768
+        }
+    }
+
+    private fun suiteLabel(suite: Suite): String {
+        return if (suite == Suite.KYBER768) {
+            "kyber768"
+        } else {
+            "ml-kem-768"
         }
     }
 

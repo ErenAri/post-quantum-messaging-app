@@ -1,8 +1,11 @@
 import SwiftUI
+import UIKit
 
 struct SetupView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var pushManager: PushManager
+    @State private var onboardingPassphrase = ""
+    @State private var onboardingPackageText = ""
 
     var body: some View {
         NavigationStack {
@@ -75,6 +78,44 @@ struct SetupView: View {
                     Text("2) Register user: \(flag(appState.progress.userRegistered))")
                     Text("3) Publish prekeys: \(flag(appState.progress.prekeysPublished))")
                     Text("4) Verify server: \(flag(appState.progress.serverVerified))")
+                    if appState.progress.isAdoptedLinkedDevice() {
+                        Text("Linked device imported. Verify server to finish local trust bootstrap.")
+                            .font(.caption)
+                    }
+                }
+
+                Section("Import Linked Device") {
+                    SecureField("Package Passphrase", text: $onboardingPassphrase)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextEditor(text: $onboardingPackageText)
+                        .font(.caption.monospaced())
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .frame(minHeight: 200)
+                    HStack {
+                        Button("Paste Package") {
+                            onboardingPackageText = UIPasteboard.general.string ?? ""
+                        }
+                        Button("Import Package") {
+                            Task {
+                                await appState.importLinkedDeviceOnboarding(
+                                    packageText: onboardingPackageText,
+                                    passphrase: onboardingPassphrase
+                                )
+                                if appState.errorLine.isEmpty && appState.progress.isAdoptedLinkedDevice() {
+                                    onboardingPassphrase = ""
+                                    onboardingPackageText = ""
+                                }
+                            }
+                        }
+                        .disabled(
+                            onboardingPackageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                            onboardingPassphrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        )
+                    }
+                    Text("Use the sealed package text from the primary device, then publish this device's prekeys automatically.")
+                        .font(.caption)
                 }
 
                 Section("Actions") {

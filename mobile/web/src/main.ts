@@ -1,5 +1,9 @@
 import "./styles.css";
 import {
+  buildLinkDeviceAuthHeaders,
+  buildListDevicesAuthHeaders,
+  buildRevokeDeviceAuthHeaders,
+  buildRetireDeviceAuthHeaders,
   buildInboxAuthHeaders,
   buildPrekeysAuthHeaders,
   buildPublishPrekeysPayload,
@@ -11,9 +15,14 @@ import {
   generateIdentityKeys,
   identityFingerprint
 } from "./crypto";
-import { PqmsgApi } from "./server";
+import {
+  PqmsgApi,
+  type DeviceListResponse,
+  type ServerCapabilitiesResponse
+} from "./server";
 import {
   DEFAULT_SETUP,
+  hasLocalKeys,
   listIdentityPins,
   loadConversations,
   readIdentityPin,
@@ -24,6 +33,7 @@ import {
   saveKeys,
   saveSetup,
   upsertConversation,
+  wipeLocalState,
   writeCursor,
   writeIdentityPin,
   type SetupConfig
@@ -66,6 +76,15 @@ appRoot.innerHTML = `
         <button id="publishPrekeys">Publish Prekeys</button>
         <button id="fetchBundle">Fetch Bundle</button>
       </div>
+      <label>Managed Device ID<input id="managedDeviceId" type="text" placeholder="alice-web-2" /></label>
+      <div class="row">
+        <button id="listDevices">List Devices</button>
+        <button id="linkDevice">Link Device</button>
+        <button id="revokeDevice">Revoke Device</button>
+      </div>
+      <div class="row">
+        <button id="resetLocalState">Reset Local State</button>
+      </div>
     </article>
     <article class="card">
       <h2>Chat</h2>
@@ -98,11 +117,14 @@ let lastFetchedBundle: {
   observedAt: string;
   identityVersion: number;
 } | null = null;
+let lastCapabilities: ServerCapabilitiesResponse | null = null;
+let lastDeviceList: DeviceListResponse | null = null;
 
 const elements = {
   serverUrl: byId<HTMLInputElement>("serverUrl"),
   userId: byId<HTMLInputElement>("userId"),
   deviceId: byId<HTMLInputElement>("deviceId"),
+  managedDeviceId: byId<HTMLInputElement>("managedDeviceId"),
   suiteLabel: byId<HTMLSelectElement>("suiteLabel"),
   peerUserId: byId<HTMLInputElement>("peerUserId"),
   passphrase: byId<HTMLInputElement>("passphrase"),
@@ -134,6 +156,8 @@ function bindSetupInputs(): void {
       suiteLabel: normalizeSuite(elements.suiteLabel.value),
       peerUserId: elements.peerUserId.value.trim() || DEFAULT_SETUP.peerUserId
     };
+    lastCapabilities = null;
+    lastDeviceList = null;
     saveSetup(setup);
     renderSecuritySnapshot();
   };
@@ -164,11 +188,23 @@ function bindActions(): void {
   byId<HTMLButtonElement>("fetchBundle").addEventListener("click", () => {
     runAction("Fetch bundle", actionFetchBundle);
   });
+  byId<HTMLButtonElement>("listDevices").addEventListener("click", () => {
+    runAction("List devices", actionListDevices);
+  });
+  byId<HTMLButtonElement>("linkDevice").addEventListener("click", () => {
+    runAction("Link device", actionLinkDevice);
+  });
+  byId<HTMLButtonElement>("revokeDevice").addEventListener("click", () => {
+    runAction("Revoke device", actionRevokeDevice);
+  });
   byId<HTMLButtonElement>("sendMessage").addEventListener("click", () => {
     runAction("Send message", actionSendMessage);
   });
   byId<HTMLButtonElement>("pollInbox").addEventListener("click", () => {
     runAction("Poll inbox", actionPollInbox);
+  });
+  byId<HTMLButtonElement>("resetLocalState").addEventListener("click", () => {
+    runAction("Reset local state", actionResetLocalState);
   });
 }
 
@@ -187,6 +223,7 @@ async function actionGenerateKeys(): Promise<void> {
 async function actionRegisterUser(): Promise<void> {
   const keys = await readKeys();
   const api = new PqmsgApi(setup.serverUrl);
+  await ensureServerCompatibleForWeb(api);
   await api.registerUser({
     user_id: keys.userId,
     identity_x25519_pub: keys.identityX25519Pub,
@@ -199,6 +236,7 @@ async function actionRegisterUser(): Promise<void> {
 async function actionPublishPrekeys(): Promise<void> {
   const keys = await readKeys();
   const api = new PqmsgApi(setup.serverUrl);
+  await ensureServerCompatibleForWeb(api);
   const payload = buildPublishPrekeysPayload(keys);
   const headers = buildPrekeysAuthHeaders(keys, payload);
   await api.publishPrekeys(keys.userId, payload, headers);
@@ -208,6 +246,7 @@ async function actionPublishPrekeys(): Promise<void> {
 async function actionFetchBundle(): Promise<void> {
   requireNonEmpty(setup.peerUserId, "peer user id is empty");
   const api = new PqmsgApi(setup.serverUrl);
+  await ensureServerCompatibleForWeb(api);
   const bundle = await api.getBundle(setup.peerUserId);
   const fingerprint = bundle.identity_fingerprint_sha256 || identityFingerprint(bundle.identity_x25519_pub);
   lastFetchedBundle = {
@@ -228,6 +267,7 @@ async function actionSendMessage(): Promise<void> {
   requireNonEmpty(message, "message is empty");
   const keys = await readKeys();
   const api = new PqmsgApi(setup.serverUrl);
+  await ensureServerCompatibleForWeb(api);
   if (!lastFetchedBundle || lastFetchedBundle.userId !== setup.peerUserId) {
     await actionFetchBundle();
   }
@@ -255,6 +295,7 @@ async function actionSendMessage(): Promise<void> {
 async function actionPollInbox(): Promise<void> {
   const keys = await readKeys();
   const api = new PqmsgApi(setup.serverUrl);
+  await ensureServerCompatibleForWeb(api);
   const since = readCursor(keys.userId);
   const headers = buildInboxAuthHeaders(keys, since);
   const inbox = await api.inbox(keys.userId, since, headers);
@@ -294,10 +335,114 @@ async function actionPollInbox(): Promise<void> {
   setStatus("Inbox polling completed");
 }
 
+async function actionListDevices(): Promise<void> {
+  const api = new PqmsgApi(setup.serverUrl);
+  await ensureServerCompatibleForWeb(api);
+  const keys = await readKeys();
+  const response = await api.listDevices(keys.userId, buildListDevicesAuthHeaders(keys));
+  lastDeviceList = response;
+  renderSecuritySnapshot();
+  setStatus(`Loaded ${response.devices.length} device record(s) for ${response.user_id}`);
+}
+
+async function actionLinkDevice(): Promise<void> {
+  const newDeviceId = requireNonEmpty(elements.managedDeviceId.value, "managed device id is empty");
+  const api = new PqmsgApi(setup.serverUrl);
+  await ensureServerCompatibleForWeb(api);
+  const keys = await readKeys();
+  if (newDeviceId === keys.deviceId) {
+    throw new Error("managed device id must differ from the authenticated device id");
+  }
+  const response = await api.linkDevice(
+    keys.userId,
+    newDeviceId,
+    buildLinkDeviceAuthHeaders(keys, newDeviceId)
+  );
+  await actionListDevices();
+  setStatus(`Linked device ${response.linked_device_id} for ${response.user_id}`);
+}
+
+async function actionRevokeDevice(): Promise<void> {
+  const targetDeviceId = requireNonEmpty(
+    elements.managedDeviceId.value,
+    "managed device id is empty"
+  );
+  const api = new PqmsgApi(setup.serverUrl);
+  await ensureServerCompatibleForWeb(api);
+  const keys = await readKeys();
+  if (targetDeviceId === keys.deviceId) {
+    throw new Error("managed device id matches the current device; use Reset Local State for self-retirement");
+  }
+  const response = await api.revokeDevice(
+    keys.userId,
+    targetDeviceId,
+    buildRevokeDeviceAuthHeaders(keys, targetDeviceId)
+  );
+  await actionListDevices();
+  setStatus(`Revoked device ${response.revoked_device_id} for ${response.user_id}`);
+}
+
+async function actionResetLocalState(): Promise<void> {
+  const userId = requireNonEmpty(setup.userId, "user id is empty");
+  const accepted = window.confirm(
+    `Retire the current device on the server when possible, then delete local keys, pins, cursors, and conversation metadata for ${userId} in this browser?`
+  );
+  if (!accepted) {
+    setStatus("Local reset cancelled");
+    return;
+  }
+
+  let retiredDeviceId: string | null = null;
+  if (hasLocalKeys(userId)) {
+    const api = new PqmsgApi(setup.serverUrl);
+    await ensureServerCompatibleForWeb(api);
+    const keys = await readKeys();
+    if (keys.userId !== userId) {
+      throw new Error(`user mismatch: current input '${userId}' vs stored keys '${keys.userId}'`);
+    }
+    const response = await api.retireCurrentDevice(userId, buildRetireDeviceAuthHeaders(keys));
+    if (response.user_id !== userId) {
+      throw new Error(`retire response user mismatch: expected '${userId}' got '${response.user_id}'`);
+    }
+    if (response.retired_device_id !== keys.deviceId) {
+      throw new Error(
+        `retire response device mismatch: expected '${keys.deviceId}' got '${response.retired_device_id}'`
+      );
+    }
+    retiredDeviceId = response.retired_device_id;
+  }
+
+  wipeLocalState(userId);
+  setup = {
+    ...DEFAULT_SETUP,
+    serverUrl: setup.serverUrl,
+    suiteLabel: setup.suiteLabel
+  };
+  saveSetup(setup);
+  elements.serverUrl.value = setup.serverUrl;
+  elements.userId.value = setup.userId;
+  elements.deviceId.value = setup.deviceId;
+  elements.suiteLabel.value = setup.suiteLabel;
+  elements.peerUserId.value = setup.peerUserId;
+  elements.passphrase.value = "";
+  elements.messageInput.value = "";
+  lastFetchedBundle = null;
+  lastCapabilities = null;
+  lastDeviceList = null;
+  elements.chatLog.textContent = "No messages yet";
+  renderAll();
+  if (retiredDeviceId) {
+    setStatus(`Retired ${retiredDeviceId} and cleared local state for ${userId}`);
+  } else {
+    setStatus(`Cleared local state for ${userId}`);
+  }
+}
+
 function applyPreset(userId: string, peerUserId: string): void {
   setup.userId = userId;
   setup.peerUserId = peerUserId;
   setup.deviceId = `${userId}-web-1`;
+  elements.managedDeviceId.value = `${userId}-web-2`;
   elements.userId.value = setup.userId;
   elements.peerUserId.value = setup.peerUserId;
   elements.deviceId.value = setup.deviceId;
@@ -387,12 +532,31 @@ function renderSecuritySnapshot(): void {
     transport: "http/local-dev or https",
     key_storage: "sealed localStorage via WebCrypto AES-256-GCM",
     suite_label: setup.suiteLabel,
-    interoperability: "web fallback mode is intended for web-to-web demo flows"
+    interoperability: "web fallback mode is intended for web-to-web demo flows",
+    server_capabilities: lastCapabilities
+      ? {
+          profile: lastCapabilities.security_profile,
+          deployment_mode: lastCapabilities.deployment_mode,
+          suite_id: lastCapabilities.runtime_crypto_profile.suite_id,
+          web_client_policy: lastCapabilities.web_client_policy,
+          production_baseline_met: lastCapabilities.production_baseline_met
+        }
+      : "not checked"
   };
+  const deviceRows = lastDeviceList
+    ? lastDeviceList.devices
+        .map((item) => {
+          const status = item.active ? "active" : `revoked at ${item.revoked_at ?? "unknown"}`;
+          return `<li><code>${escapeHtml(item.device_id)}</code> ${escapeHtml(status)} (linked ${escapeHtml(item.linked_at)})</li>`;
+        })
+        .join("")
+    : "<li>not checked</li>";
   elements.securitySnapshot.innerHTML = `
 <pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre>
 <h4>Pinned identities</h4>
-<ul>${pinRows}</ul>`;
+<ul>${pinRows}</ul>
+<h4>Linked devices</h4>
+<ul>${deviceRows}</ul>`;
 }
 
 function appendLog(line: string): void {
@@ -426,6 +590,39 @@ function requirePassphrase(): string {
 
 function normalizeSuite(value: string): "ml-kem-768" | "kyber768" {
   return value === "kyber768" ? "kyber768" : "ml-kem-768";
+}
+
+function suiteIdForSetup(): number {
+  return setup.suiteLabel === "kyber768" ? 2 : 1;
+}
+
+async function ensureServerCompatibleForWeb(
+  api: PqmsgApi
+): Promise<ServerCapabilitiesResponse> {
+  const capabilities = await api.getCapabilities();
+  lastCapabilities = capabilities;
+  if (capabilities.capability_schema_version !== 1) {
+    throw new Error(`Unsupported server capability schema ${capabilities.capability_schema_version}`);
+  }
+  if (!capabilities.supported_suite_ids.includes(suiteIdForSetup())) {
+    throw new Error(`Server does not support suite '${setup.suiteLabel}'`);
+  }
+  if (capabilities.security_profile !== "research" && !capabilities.runtime_crypto_profile.pq_oqs_enabled) {
+    throw new Error("Server is not running a PQ-enabled crypto backend");
+  }
+  if (capabilities.deployment_mode !== "development" && !capabilities.production_baseline_met) {
+    throw new Error(
+      `Server '${capabilities.deployment_mode}' deployment is missing its production baseline`
+    );
+  }
+  if (
+    capabilities.web_client_policy === "demo_only" &&
+    capabilities.deployment_mode !== "development"
+  ) {
+    throw new Error("Web demo client is blocked against pilot/production servers");
+  }
+  renderSecuritySnapshot();
+  return capabilities;
 }
 
 function byId<T extends HTMLElement>(id: string): T {

@@ -53,7 +53,11 @@ The Conversations screen now acts as the runtime hub after provisioning is compl
 - chat send/poll flows perform authenticated prekey-inventory checks and auto-replenish one-time prekeys when inventory is low,
 - optional push-token registration uses Ed25519-signed auth headers and binds token updates to the authenticated user/device pair,
 - local key/session files are persisted through Android keystore-backed encrypted file storage,
-- local conversation metadata tracks unread counters and transport-safe message previews,
+- local setup, progress, cursor, identity-pin, and conversation metadata are persisted through encrypted shared preferences with lazy migration from legacy plaintext preferences,
+- the Security Center can list linked devices, link a new device id, and revoke non-current linked devices with authenticated request headers,
+- the Security Center can prepare a secondary-device onboarding package by linking a target device id, rebasing device-local prekeys while preserving the account identity keys, encrypting the package with a user-supplied passphrase, and copying it to the clipboard for transfer,
+- the Setup screen can paste and import a secondary-device onboarding package, decrypt it locally, publish fresh prekeys for the linked device automatically, and mark the adopted device as provisioned without re-registering the user,
+- the Security Center exposes a destructive reset action that first retires the authenticated current device on the server when keys are still present, then purges per-user keys, sessions, pins, cursors, and conversation metadata after confirmation,
 - optional media attachments are encapsulated in the encrypted payload path and remain opaque to the server.
 
 ## 4. Prerequisites

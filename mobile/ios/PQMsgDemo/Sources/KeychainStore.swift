@@ -71,6 +71,31 @@ final class KeychainStore {
         }
         throw KeychainStoreError.osStatus(status)
     }
+
+    func listAccounts() throws -> [String] {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound {
+            return []
+        }
+        guard status == errSecSuccess else {
+            throw KeychainStoreError.osStatus(status)
+        }
+        if let items = result as? [[String: Any]] {
+            return items.compactMap { $0[kSecAttrAccount as String] as? String }
+        }
+        if let item = result as? [String: Any],
+           let account = item[kSecAttrAccount as String] as? String {
+            return [account]
+        }
+        return []
+    }
 }
 
 enum KeychainStoreError: Error {

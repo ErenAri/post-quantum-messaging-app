@@ -17,6 +17,9 @@ use pqmsg_core::handshake::{
 use pqmsg_core::kem::MlKem768;
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
 use pqmsg_core::session::{SessionRole, SessionSnapshot, SessionState};
+use pqmsg_core::storage::{
+    unwrap_bytes as unwrap_wrapped_bytes, wrap_bytes as wrap_wrapped_bytes, WrappedSecret,
+};
 use pqmsg_core::tlv::{critical_type, encode, TlvRecord};
 use pqmsg_core::CoreError;
 use rand::rngs::OsRng;
@@ -38,6 +41,8 @@ const AUTH_TAG_PREKEY_SPK_HASH: u16 = critical_type(0x3209);
 const AUTH_TAG_PREKEY_PQSPK_HASH: u16 = critical_type(0x320A);
 const AUTH_TAG_PUSH_DEVICE_ID: u16 = critical_type(0x3210);
 const AUTH_TAG_PUSH_TOKEN_HASH: u16 = critical_type(0x3211);
+const AUTH_TAG_LINK_DEVICE_ID: u16 = critical_type(0x3212);
+const AUTH_TAG_REVOKE_DEVICE_ID: u16 = critical_type(0x3213);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, uniffi::Enum)]
 pub enum Suite {
@@ -45,7 +50,7 @@ pub enum Suite {
     Kyber768,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct OneTimeKeyRecord {
     key_id: String,
     public_b64: String,
@@ -152,6 +157,22 @@ pub struct DecryptResult {
     pub plaintext_base64: String,
     pub session_json: String,
     pub used_handshake: bool,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PreparedOnboardingPackage {
+    pub user_id: String,
+    pub device_id: String,
+    pub suite: Suite,
+    pub package_json: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct OpenedOnboardingPackage {
+    pub user_id: String,
+    pub device_id: String,
+    pub suite: Suite,
+    pub keys_json: String,
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -286,6 +307,65 @@ fn refresh_one_time_prekeys(
     keys.one_time_prekeys_x25519 = one_time_x25519;
     keys.one_time_prekeys_mlkem768 = one_time_mlkem;
     Ok(())
+}
+
+fn refresh_signed_prekeys(keys: &mut UserKeysFile) -> Result<(), PqmsgIosError> {
+    let mut rng = OsRng;
+    let timestamp = auth_timestamp()?;
+    let signed_prekey =
+        OneTimePreKey::generate(format!("{}-spk-{timestamp}", keys.user_id), &mut rng);
+    let kem = build_kem_for_suite(keys.suite)?;
+    let pq_signed_prekey = kem_keypair(&kem)?;
+
+    keys.signed_prekey_x25519_pub_b64 = B64.encode(signed_prekey.public_key.0);
+    keys.signed_prekey_x25519_secret_b64 = B64.encode(signed_prekey.secret_key.as_slice());
+    keys.pq_signed_prekey_pub_b64 = B64.encode(pq_signed_prekey.public_key);
+    keys.pq_signed_prekey_secret_b64 = B64.encode(pq_signed_prekey.secret_key);
+    Ok(())
+}
+
+fn prepare_linked_device_keys(
+    source_keys: &UserKeysFile,
+    new_device_id: &str,
+    one_time_count: u32,
+) -> Result<UserKeysFile, PqmsgIosError> {
+    let target_device_id = new_device_id.trim();
+    if target_device_id.is_empty() {
+        return Err(invalid_input("new_device_id must not be empty"));
+    }
+    if source_keys.device_id == target_device_id {
+        return Err(invalid_input(
+            "new_device_id must differ from the authenticated device_id",
+        ));
+    }
+
+    let mut prepared = source_keys.clone();
+    prepared.device_id = target_device_id.to_string();
+    refresh_signed_prekeys(&mut prepared)?;
+    refresh_one_time_prekeys(&mut prepared, one_time_count)?;
+    Ok(prepared)
+}
+
+fn require_storage_passphrase(passphrase: &str) -> Result<(), PqmsgIosError> {
+    if passphrase.trim().is_empty() {
+        return Err(invalid_input("passphrase must not be empty"));
+    }
+    Ok(())
+}
+
+fn wrap_onboarding_package(passphrase: &str, plaintext: &[u8]) -> Result<String, PqmsgIosError> {
+    require_storage_passphrase(passphrase)?;
+    let wrapped = wrap_wrapped_bytes(&passphrase.into(), plaintext)?;
+    serde_json::to_string_pretty(&wrapped).map_err(Into::into)
+}
+
+fn unwrap_onboarding_package(
+    package_json: &str,
+    passphrase: &str,
+) -> Result<Vec<u8>, PqmsgIosError> {
+    require_storage_passphrase(passphrase)?;
+    let wrapped: WrappedSecret = serde_json::from_str(package_json)?;
+    unwrap_wrapped_bytes(&passphrase.into(), &wrapped).map_err(Into::into)
 }
 
 fn auth_timestamp() -> Result<i64, PqmsgIosError> {
@@ -506,6 +586,52 @@ pub fn replenish_one_time_prekeys(
 }
 
 #[uniffi::export]
+pub fn prepare_secondary_device_onboarding_package(
+    keys_json: String,
+    new_device_id: String,
+    passphrase: String,
+    one_time_count: u32,
+) -> Result<PreparedOnboardingPackage, PqmsgIosError> {
+    let source_keys = read_keys_file(&keys_json)?;
+    let prepared_keys = prepare_linked_device_keys(&source_keys, &new_device_id, one_time_count)?;
+    let plaintext = serde_json::to_vec_pretty(&prepared_keys)
+        .map_err(|_| operation_failed("failed to encode onboarding package"))?;
+    let package_json = wrap_onboarding_package(&passphrase, &plaintext)?;
+
+    Ok(PreparedOnboardingPackage {
+        user_id: prepared_keys.user_id,
+        device_id: prepared_keys.device_id,
+        suite: prepared_keys.suite,
+        package_json,
+    })
+}
+
+#[uniffi::export]
+pub fn open_secondary_device_onboarding_package(
+    package_json: String,
+    passphrase: String,
+) -> Result<OpenedOnboardingPackage, PqmsgIosError> {
+    let plaintext = unwrap_onboarding_package(&package_json, &passphrase)?;
+    let plaintext_json = String::from_utf8(plaintext)
+        .map_err(|_| invalid_input("onboarding package did not contain UTF-8 JSON"))?;
+    let keys = read_keys_file(&plaintext_json)?;
+    let signing_key =
+        decode_signing_key_b64("identity_sig_secret_b64", &keys.identity_sig_secret_b64)?;
+    if B64.encode(signing_key.verifying_key().to_bytes()) != keys.identity_sig_pub_b64 {
+        return Err(invalid_input(
+            "identity_sig_pub_b64 does not match identity_sig_secret_b64",
+        ));
+    }
+
+    Ok(OpenedOnboardingPackage {
+        user_id: keys.user_id.clone(),
+        device_id: keys.device_id.clone(),
+        suite: keys.suite,
+        keys_json: serde_json::to_string_pretty(&keys)?,
+    })
+}
+
+#[uniffi::export]
 pub fn parse_bundle_json(bundle_json: String) -> Result<ServerBundle, PqmsgIosError> {
     let bundle: BundleResponse = serde_json::from_str(&bundle_json)?;
     Ok(ServerBundle {
@@ -588,6 +714,136 @@ pub fn build_inbox_auth_headers(
     });
     let transcript =
         encode(&records).map_err(|_| operation_failed("failed to encode inbox auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_list_devices_auth_headers(
+    keys_json: String,
+    user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgIosError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("devices-list", &user_id, &keys.device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode devices-list auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_link_device_auth_headers(
+    keys_json: String,
+    user_id: String,
+    new_device_id: String,
+) -> Result<RequestAuthHeaders, PqmsgIosError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    if new_device_id.trim().is_empty() {
+        return Err(invalid_input("new_device_id must not be empty"));
+    }
+    if keys.device_id == new_device_id {
+        return Err(invalid_input(
+            "new_device_id must differ from the authenticated device_id",
+        ));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("devices-link", &user_id, &keys.device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_LINK_DEVICE_ID,
+        value: new_device_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode devices-link auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_revoke_device_auth_headers(
+    keys_json: String,
+    user_id: String,
+    target_device_id: String,
+) -> Result<RequestAuthHeaders, PqmsgIosError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    if target_device_id.trim().is_empty() {
+        return Err(invalid_input("target_device_id must not be empty"));
+    }
+    if keys.device_id == target_device_id {
+        return Err(invalid_input(
+            "target_device_id must differ from the authenticated device_id",
+        ));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "devices-revoke",
+        &user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_REVOKE_DEVICE_ID,
+        value: target_device_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode devices-revoke auth transcript"))?;
     let signature = signing_key.sign(&transcript).to_bytes();
     Ok(RequestAuthHeaders {
         auth_user: user_id,
@@ -712,6 +968,48 @@ pub fn build_push_token_auth_headers(
     });
     let transcript = encode(&records)
         .map_err(|_| operation_failed("failed to encode push-token auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_retire_device_auth_headers(
+    keys_json: String,
+    user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgIosError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "devices-retire",
+        &user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_REVOKE_DEVICE_ID,
+        value: keys.device_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode devices-retire auth transcript"))?;
     let signature = signing_key.sign(&transcript).to_bytes();
     Ok(RequestAuthHeaders {
         auth_user: user_id,
@@ -1068,6 +1366,99 @@ impl From<serde_json::Error> for PqmsgIosError {
 impl From<base64::DecodeError> for PqmsgIosError {
     fn from(value: base64::DecodeError) -> Self {
         invalid_input(value.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secondary_onboarding_roundtrip_preserves_identity_and_rotates_prekeys() {
+        let profile = runtime_crypto_profile().expect("runtime crypto profile");
+        if !profile.pq_oqs_enabled {
+            return;
+        }
+
+        let source_json = generate_identity_keys(
+            "alice".to_string(),
+            "alice-ios-1".to_string(),
+            Suite::MlKem768,
+            8,
+        )
+        .expect("generate source keys");
+        let source = read_keys_file(&source_json).expect("parse source keys");
+
+        let prepared = prepare_secondary_device_onboarding_package(
+            source_json,
+            "alice-ios-2".to_string(),
+            "passphrase".to_string(),
+            8,
+        )
+        .expect("prepare onboarding package");
+        let opened = open_secondary_device_onboarding_package(
+            prepared.package_json,
+            "passphrase".to_string(),
+        )
+        .expect("open onboarding package");
+        let adopted = read_keys_file(&opened.keys_json).expect("parse adopted keys");
+
+        assert_eq!(prepared.user_id, source.user_id);
+        assert_eq!(prepared.device_id, "alice-ios-2");
+        assert_eq!(prepared.suite, source.suite);
+        assert_eq!(opened.user_id, source.user_id);
+        assert_eq!(opened.device_id, "alice-ios-2");
+        assert_eq!(opened.suite, source.suite);
+
+        assert_eq!(adopted.user_id, source.user_id);
+        assert_eq!(adopted.device_id, "alice-ios-2");
+        assert_eq!(adopted.suite, source.suite);
+        assert_eq!(
+            adopted.identity_x25519_pub_b64,
+            source.identity_x25519_pub_b64
+        );
+        assert_eq!(
+            adopted.identity_x25519_secret_b64,
+            source.identity_x25519_secret_b64
+        );
+        assert_eq!(adopted.identity_sig_pub_b64, source.identity_sig_pub_b64);
+        assert_eq!(
+            adopted.identity_sig_secret_b64,
+            source.identity_sig_secret_b64
+        );
+
+        assert_ne!(
+            adopted.signed_prekey_x25519_pub_b64,
+            source.signed_prekey_x25519_pub_b64
+        );
+        assert_ne!(
+            adopted.signed_prekey_x25519_secret_b64,
+            source.signed_prekey_x25519_secret_b64
+        );
+        assert_ne!(
+            adopted.pq_signed_prekey_pub_b64,
+            source.pq_signed_prekey_pub_b64
+        );
+        assert_ne!(
+            adopted.pq_signed_prekey_secret_b64,
+            source.pq_signed_prekey_secret_b64
+        );
+        assert_eq!(adopted.one_time_prekeys_x25519.len(), 8);
+        assert_eq!(adopted.one_time_prekeys_mlkem768.len(), 8);
+        assert_ne!(
+            adopted.one_time_prekeys_x25519,
+            source.one_time_prekeys_x25519
+        );
+        assert_ne!(
+            adopted.one_time_prekeys_mlkem768,
+            source.one_time_prekeys_mlkem768
+        );
+        assert!(verify_identity_sig_keypair(opened.keys_json.clone())
+            .expect("verify identity signature keypair"));
+
+        let publish = build_publish_prekeys_payload(opened.keys_json).expect("build prekeys");
+        assert_eq!(publish.one_time_prekeys_x25519.len(), 8);
+        assert_eq!(publish.one_time_prekeys_mlkem768.len(), 8);
     }
 }
 

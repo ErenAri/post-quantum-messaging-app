@@ -84,8 +84,9 @@ flowchart TD
 - Clients pin peer identity fingerprints and require explicit trust on key changes.
 - Clients track seen ciphertext blobs and reject replayed transport message IDs per peer.
 - CLI and Android clients auto-replenish one-time prekeys when server low-inventory signals are observed.
-- CLI and Android persist key/session files encrypted at rest (CLI uses Argon2id + AES-256-GCM wrapping; Android uses keystore-backed encrypted files).
+- CLI persists keys, sessions, and message archives encrypted at rest; Android persists keys/sessions in keystore-backed encrypted files and metadata in encrypted preferences; iOS persists keys/sessions in Keychain and metadata in file-protected application support storage.
 - CLI maintains an encrypted local message archive with retention TTL enforcement and supports authenticated remote inbox deletion requests.
+- CLI and client security surfaces expose a deterministic local reset path to purge per-user keys, sessions, pins, cursors, and conversation metadata from the device/browser.
 
 ## Repository Layout
 
@@ -166,6 +167,22 @@ cargo run -p pqmsg-cli -- delete-messages --user alice --keys ./devkeys/alice.js
 cargo run -p pqmsg-cli -- delete-messages --user alice --keys ./devkeys/alice.json --before-message-id 250 --remote
 ```
 
+CLI local-state reset (optionally delete the local identity key file too):
+
+```powershell
+cargo run -p pqmsg-cli -- reset-local-state --user alice
+cargo run -p pqmsg-cli -- reset-local-state --user alice --keys ./devkeys/alice.json --wipe-keys
+cargo run -p pqmsg-cli -- reset-local-state --user alice --keys ./devkeys/alice.json --remote-retire --wipe-keys
+```
+
+CLI linked-device management:
+
+```powershell
+cargo run -p pqmsg-cli -- devices-list --user alice --keys ./devkeys/alice.json
+cargo run -p pqmsg-cli -- devices-link --user alice --keys ./devkeys/alice.json --new-device-id alice-device-2
+cargo run -p pqmsg-cli -- devices-revoke --user alice --keys ./devkeys/alice.json --target-device-id alice-device-2
+```
+
 CLI discovery, contacts, and group fan-out relay:
 
 ```powershell
@@ -188,7 +205,7 @@ cargo run -p pqmsg-cli --features pqmsg-core/pq-oqs -- --help
 
 The CLI performs an active runtime profile check and aborts when the PQ backend is not enabled.
 `pqmsg-android` now fails closed if `pq-oqs` is not available.
-`pqmsg-cli register` automatically solves registration PoW when the server advertises `registration_pow_bits > 0`.
+`pqmsg-cli register` automatically solves registration PoW when the server advertises `registration_pow_bits > 0` via `/v1/capabilities`.
 
 ## 15-Minute Quickstart (Windows + Android Emulator)
 
@@ -222,6 +239,7 @@ For PostgreSQL-backed server startup:
 $env:PQMSG_DATABASE_URL='postgres://pqmsg:pqmsg@localhost:5432/pqmsg'
 $env:PQMSG_BIND='127.0.0.1:3000'
 $env:PQMSG_SECURITY_PROFILE='high_assurance'
+$env:PQMSG_DEPLOYMENT_MODE='pilot'
 $env:PQMSG_DB_MAX_CONNECTIONS='30'
 $env:PQMSG_DB_MIN_CONNECTIONS='5'
 $env:PQMSG_DB_ACQUIRE_TIMEOUT_SECS='5'
@@ -302,7 +320,7 @@ The server sends wake-only FCM/APNs payloads and never includes plaintext messag
 
 The Android emulator endpoint pattern (`http://10.0.2.2:...`) is demonstration-only.  
 Operational deployment requires TLS and should include certificate pinning.  
-Set `PQMSG_SECURITY_PROFILE=high_assurance` (or `nss_aligned`) with `PQMSG_TLS_CERT_PATH` and `PQMSG_TLS_KEY_PATH` on the server.
+Set `PQMSG_SECURITY_PROFILE=high_assurance` (or `nss_aligned`) with `PQMSG_TLS_CERT_PATH` and `PQMSG_TLS_KEY_PATH` on the server. For pilot/production deployments, also set `PQMSG_DEPLOYMENT_MODE=pilot` (or `production`) so the server refuses SQLite, local-only rate limiting, missing audit logs, and non-PQ runtimes.
 
 ## Containerization and Kubernetes
 

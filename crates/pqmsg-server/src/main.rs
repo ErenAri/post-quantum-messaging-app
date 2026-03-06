@@ -2,10 +2,10 @@ use anyhow::Context;
 use axum_server::tls_rustls::RustlsConfig;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
-use pqmsg_core::alg::SecurityProfile;
+use pqmsg_core::alg::{enforce_runtime_security_profile, RuntimeCryptoProfile, SecurityProfile};
 use pqmsg_server::{
-    build_router, init_db, parse_db_backend, AppState, AuditLogger, AuthReplayCache,
-    DosHardeningPolicy, PushNotifier, RateLimiter, RealtimeHub,
+    build_router, init_db, parse_db_backend, AppState, AuditLogger, AuthReplayCache, DbBackend,
+    DeploymentMode, DosHardeningPolicy, PushNotifier, RateLimiter, RealtimeHub,
 };
 use sentry::ClientOptions;
 use sqlx::any::AnyPoolOptions;
@@ -66,6 +66,64 @@ fn parse_env_optional_f64(name: &str) -> anyhow::Result<Option<f64>> {
     }
 }
 
+fn enforce_deployment_contract(
+    deployment_mode: DeploymentMode,
+    security_profile: SecurityProfile,
+    runtime_crypto_profile: RuntimeCryptoProfile,
+    db_backend: DbBackend,
+    tls_enabled: bool,
+    audit_enabled: bool,
+    redis_enabled: bool,
+    structured_logging: bool,
+) -> anyhow::Result<()> {
+    if !deployment_mode.requires_production_baseline() {
+        return Ok(());
+    }
+    if matches!(security_profile, SecurityProfile::Research) {
+        anyhow::bail!(
+            "PQMSG_DEPLOYMENT_MODE='{}' requires PQMSG_SECURITY_PROFILE to be 'high_assurance' or 'nss_aligned'",
+            deployment_mode.as_str()
+        );
+    }
+    if db_backend != DbBackend::Postgres {
+        anyhow::bail!(
+            "PQMSG_DEPLOYMENT_MODE='{}' requires PostgreSQL (set PQMSG_DATABASE_URL=postgres://...)",
+            deployment_mode.as_str()
+        );
+    }
+    if !tls_enabled {
+        anyhow::bail!(
+            "PQMSG_DEPLOYMENT_MODE='{}' requires TLS (set PQMSG_TLS_CERT_PATH and PQMSG_TLS_KEY_PATH)",
+            deployment_mode.as_str()
+        );
+    }
+    if !audit_enabled {
+        anyhow::bail!(
+            "PQMSG_DEPLOYMENT_MODE='{}' requires audit logging (set PQMSG_AUDIT_LOG_PATH)",
+            deployment_mode.as_str()
+        );
+    }
+    if !redis_enabled {
+        anyhow::bail!(
+            "PQMSG_DEPLOYMENT_MODE='{}' requires Redis-backed distributed rate limiting, replay protection, and realtime fanout (set PQMSG_RATE_LIMIT_REDIS_URL)",
+            deployment_mode.as_str()
+        );
+    }
+    if !structured_logging {
+        anyhow::bail!(
+            "PQMSG_DEPLOYMENT_MODE='{}' requires structured JSON logs (set PQMSG_LOG_FORMAT=json)",
+            deployment_mode.as_str()
+        );
+    }
+    if !runtime_crypto_profile.pq_oqs_enabled {
+        anyhow::bail!(
+            "PQMSG_DEPLOYMENT_MODE='{}' requires a PQ-enabled runtime (build with pqmsg-core/pq-oqs support)",
+            deployment_mode.as_str()
+        );
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     sqlx::any::install_default_drivers();
@@ -73,6 +131,17 @@ async fn main() -> anyhow::Result<()> {
         env::var("PQMSG_SECURITY_PROFILE").unwrap_or_else(|_| "high_assurance".to_string());
     let security_profile = SecurityProfile::parse(&profile_raw)
         .with_context(|| format!("invalid PQMSG_SECURITY_PROFILE '{profile_raw}'"))?;
+    let deployment_mode_raw =
+        env::var("PQMSG_DEPLOYMENT_MODE").unwrap_or_else(|_| "development".to_string());
+    let deployment_mode = DeploymentMode::parse(&deployment_mode_raw)
+        .map_err(|_| anyhow::anyhow!("invalid PQMSG_DEPLOYMENT_MODE '{deployment_mode_raw}'"))?;
+    let runtime_crypto_profile = enforce_runtime_security_profile(security_profile, None)
+        .with_context(|| {
+            format!(
+                "compiled runtime crypto backend is incompatible with security profile '{}'",
+                security_profile.as_str()
+            )
+        })?;
     let sentry_dsn = env::var("PQMSG_SENTRY_DSN").ok().and_then(|value| {
         let trimmed = value.trim().to_string();
         if trimmed.is_empty() {
@@ -129,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let pretty = log_format.trim().eq_ignore_ascii_case("pretty");
+    let structured_logging = !pretty;
 
     if pretty {
         let reg = tracing_subscriber::registry()
@@ -239,6 +309,7 @@ async fn main() -> anyhow::Result<()> {
     });
     let tls_cert_path = env::var("PQMSG_TLS_CERT_PATH").ok();
     let tls_key_path = env::var("PQMSG_TLS_KEY_PATH").ok();
+    let tls_enabled = tls_cert_path.is_some() && tls_key_path.is_some();
 
     let pool = AnyPoolOptions::new()
         .max_connections(db_max_connections)
@@ -344,6 +415,16 @@ async fn main() -> anyhow::Result<()> {
                 }
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
+    enforce_deployment_contract(
+        deployment_mode,
+        security_profile,
+        runtime_crypto_profile,
+        db_backend,
+        tls_enabled,
+        audit_enabled,
+        rate_limit_redis_url.is_some(),
+        structured_logging,
+    )?;
     let realtime_hub = if let Some(redis_url) = &rate_limit_redis_url {
         let client = redis::Client::open(redis_url.as_str()).with_context(|| {
             format!("failed to create redis client for realtime hub: '{redis_url}'")
@@ -356,6 +437,10 @@ async fn main() -> anyhow::Result<()> {
     };
     let state =
         AppState::with_security_profile(pool, db_backend, rate_limiter.clone(), security_profile)
+            .with_deployment_mode(deployment_mode)
+            .with_runtime_crypto_profile(runtime_crypto_profile)
+            .with_transport_security(tls_enabled)
+            .with_structured_logging(structured_logging)
             .with_dos_policy(dos_policy)
             .with_audit_logger(audit_logger)
             .with_push_notifier(push_notifier)
@@ -387,9 +472,12 @@ async fn main() -> anyhow::Result<()> {
                     )
                 })?;
             info!(
-                "pqmsg-server listening with TLS on {bind_addr} profile={} db_backend={} max_conn={} min_conn={} push_enabled={} audit_enabled={} limiter_mode={} registration_pow_bits={} prekey_publish_min_interval_seconds={} prekey_bundle_reserve_count={} pq_ratchet_interval={} sentry_enabled={}",
+                "pqmsg-server listening with TLS on {bind_addr} deployment_mode={} profile={} db_backend={} runtime_suite_id={} pq_enabled={} max_conn={} min_conn={} push_enabled={} audit_enabled={} limiter_mode={} registration_pow_bits={} prekey_publish_min_interval_seconds={} prekey_bundle_reserve_count={} pq_ratchet_interval={} sentry_enabled={}",
+                deployment_mode.as_str(),
                 security_profile.as_str(),
                 db_backend.as_str(),
+                runtime_crypto_profile.suite_id,
+                runtime_crypto_profile.pq_oqs_enabled,
                 db_max_connections,
                 db_min_connections,
                 push_enabled,
@@ -423,9 +511,12 @@ async fn main() -> anyhow::Result<()> {
             }
             let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
             info!(
-                "pqmsg-server listening without TLS on {bind_addr} profile={} db_backend={} max_conn={} min_conn={} push_enabled={} audit_enabled={} limiter_mode={} registration_pow_bits={} prekey_publish_min_interval_seconds={} prekey_bundle_reserve_count={} pq_ratchet_interval={} sentry_enabled={}",
+                "pqmsg-server listening without TLS on {bind_addr} deployment_mode={} profile={} db_backend={} runtime_suite_id={} pq_enabled={} max_conn={} min_conn={} push_enabled={} audit_enabled={} limiter_mode={} registration_pow_bits={} prekey_publish_min_interval_seconds={} prekey_bundle_reserve_count={} pq_ratchet_interval={} sentry_enabled={}",
+                deployment_mode.as_str(),
                 security_profile.as_str(),
                 db_backend.as_str(),
+                runtime_crypto_profile.suite_id,
+                runtime_crypto_profile.pq_oqs_enabled,
                 db_max_connections,
                 db_min_connections,
                 push_enabled,
@@ -476,4 +567,101 @@ async fn shutdown_signal() {
     }
 
     info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::enforce_deployment_contract;
+    use pqmsg_core::alg::runtime_crypto_profile;
+    use pqmsg_core::alg::SecurityProfile;
+    use pqmsg_server::{DbBackend, DeploymentMode};
+
+    #[test]
+    fn development_mode_allows_local_defaults() {
+        let runtime = runtime_crypto_profile().expect("runtime profile");
+        enforce_deployment_contract(
+            DeploymentMode::Development,
+            SecurityProfile::Research,
+            runtime,
+            DbBackend::Sqlite,
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("development should remain permissive");
+    }
+
+    #[test]
+    fn pilot_requires_hardened_profile() {
+        let runtime = runtime_crypto_profile().expect("runtime profile");
+        let error = enforce_deployment_contract(
+            DeploymentMode::Pilot,
+            SecurityProfile::Research,
+            runtime,
+            DbBackend::Postgres,
+            true,
+            true,
+            true,
+            true,
+        )
+        .expect_err("pilot should reject research profile");
+        assert!(error
+            .to_string()
+            .contains("requires PQMSG_SECURITY_PROFILE to be 'high_assurance' or 'nss_aligned'"));
+    }
+
+    #[test]
+    fn pilot_requires_postgres() {
+        let runtime = runtime_crypto_profile().expect("runtime profile");
+        let error = enforce_deployment_contract(
+            DeploymentMode::Pilot,
+            SecurityProfile::HighAssurance,
+            runtime,
+            DbBackend::Sqlite,
+            true,
+            true,
+            true,
+            true,
+        )
+        .expect_err("pilot should reject sqlite");
+        assert!(error.to_string().contains("requires PostgreSQL"));
+    }
+
+    #[test]
+    fn production_requires_redis() {
+        let runtime = runtime_crypto_profile().expect("runtime profile");
+        let error = enforce_deployment_contract(
+            DeploymentMode::Production,
+            SecurityProfile::HighAssurance,
+            runtime,
+            DbBackend::Postgres,
+            true,
+            true,
+            false,
+            true,
+        )
+        .expect_err("production should reject local redis-free mode");
+        assert!(error
+            .to_string()
+            .contains("requires Redis-backed distributed"));
+    }
+
+    #[test]
+    fn production_accepts_hardened_stack() {
+        let runtime = runtime_crypto_profile().expect("runtime profile");
+        if runtime.pq_oqs_enabled {
+            enforce_deployment_contract(
+                DeploymentMode::Production,
+                SecurityProfile::HighAssurance,
+                runtime,
+                DbBackend::Postgres,
+                true,
+                true,
+                true,
+                true,
+            )
+            .expect("production baseline should accept hardened stack");
+        }
+    }
 }

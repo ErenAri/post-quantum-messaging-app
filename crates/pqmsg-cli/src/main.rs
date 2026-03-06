@@ -8,8 +8,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use pqmsg_core::ad::conversation_associated_data;
 use pqmsg_core::alg::{
-    enforce_runtime_security_profile, AlgorithmSuite, KemAlgorithm, SecurityProfile,
-    SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+    enforce_runtime_security_profile, runtime_crypto_profile, AlgorithmSuite, KemAlgorithm,
+    RuntimeCryptoProfile, SecurityProfile, SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
     SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305,
 };
 use pqmsg_core::dh::{DhKeyPair, DhPublicKey};
@@ -72,6 +72,8 @@ const AUTH_TAG_ROTATE_CHALLENGE_ID: u16 = critical_type(0x320D);
 const AUTH_TAG_ROTATE_SIG_CURRENT_HASH: u16 = critical_type(0x320E);
 #[allow(dead_code)]
 const AUTH_TAG_ROTATE_SIG_NEW_HASH: u16 = critical_type(0x320F);
+const AUTH_TAG_LINK_DEVICE_ID: u16 = critical_type(0x3212);
+const AUTH_TAG_REVOKE_DEVICE_ID: u16 = critical_type(0x3213);
 const AUTH_TAG_DELETE_IDS_HASH: u16 = critical_type(0x3214);
 const AUTH_TAG_DELETE_BEFORE_ID: u16 = critical_type(0x3215);
 const AUTH_TAG_DISCOVERY_PHONE_HASHES_HASH: u16 = critical_type(0x3216);
@@ -179,6 +181,28 @@ enum Commands {
         keys: PathBuf,
         #[arg(long, value_enum)]
         suite: Option<SuiteFlag>,
+    },
+    DevicesList {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+    },
+    DevicesLink {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long)]
+        new_device_id: String,
+    },
+    DevicesRevoke {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long)]
+        target_device_id: String,
     },
     DiscoveryUpload {
         #[arg(long)]
@@ -351,6 +375,16 @@ enum Commands {
         before_message_id: Option<i64>,
         #[arg(long, default_value_t = false)]
         remote: bool,
+    },
+    ResetLocalState {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        wipe_keys: bool,
+        #[arg(long, default_value_t = false)]
+        remote_retire: bool,
     },
 }
 
@@ -607,9 +641,21 @@ struct RegisterRequest {
     pow_nonce: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
-struct HealthResponse {
-    registration_pow_bits: Option<u8>,
+struct ServerCapabilitiesResponse {
+    capability_schema_version: u16,
+    security_profile: String,
+    deployment_mode: String,
+    tls_required: bool,
+    tls_enabled: bool,
+    supported_suite_ids: Vec<u16>,
+    runtime_crypto_profile: RuntimeCryptoProfile,
+    production_baseline_met: bool,
+    registration_pow_bits: u8,
+    prekey_bundle_reserve_count: i64,
+    pq_ratchet_interval: u32,
+    web_client_policy: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -687,6 +733,47 @@ struct DeleteInboxResponse {
     deleted_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct RetireCurrentDeviceResponse {
+    user_id: String,
+    retired_device_id: String,
+    retired_at: String,
+    remaining_active_devices: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct LinkDeviceRequest {
+    new_device_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LinkDeviceResponse {
+    user_id: String,
+    linked_device_id: String,
+    linked_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RevokeDeviceResponse {
+    user_id: String,
+    revoked_device_id: String,
+    revoked_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DeviceRecord {
+    device_id: String,
+    active: bool,
+    linked_at: String,
+    revoked_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DeviceListResponse {
+    user_id: String,
+    devices: Vec<DeviceRecord>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct QrIdentityPayload {
     version: u16,
@@ -747,6 +834,11 @@ struct DeleteMessagesOptions<'a> {
     before_message_id: Option<i64>,
     remote: bool,
     message_retention_seconds: i64,
+}
+
+struct LocalStateWipeSummary {
+    state_removed: bool,
+    keys_removed: bool,
 }
 
 struct Ed25519SignatureVerifier;
@@ -868,6 +960,105 @@ fn validate_server_url_for_profile(security_profile: SecurityProfile, server: &s
     Ok(())
 }
 
+fn server_profile_satisfies_client(
+    client_profile: SecurityProfile,
+    server_profile: SecurityProfile,
+) -> bool {
+    match client_profile {
+        SecurityProfile::Research => true,
+        SecurityProfile::HighAssurance => matches!(
+            server_profile,
+            SecurityProfile::HighAssurance | SecurityProfile::NssAligned
+        ),
+        SecurityProfile::NssAligned => matches!(server_profile, SecurityProfile::NssAligned),
+    }
+}
+
+fn validate_server_capabilities_for_cli(
+    security_profile: SecurityProfile,
+    suite_id: Option<u16>,
+    capabilities: &ServerCapabilitiesResponse,
+    server: &str,
+) -> Result<()> {
+    if capabilities.capability_schema_version != 1 {
+        return Err(anyhow!(
+            "server capability schema version {} is unsupported by this cli",
+            capabilities.capability_schema_version
+        ));
+    }
+    let server_profile = SecurityProfile::parse(&capabilities.security_profile).map_err(|_| {
+        anyhow!(
+            "server reported unknown security profile '{}'",
+            capabilities.security_profile
+        )
+    })?;
+    if !server_profile_satisfies_client(security_profile, server_profile) {
+        return Err(anyhow!(
+            "server profile '{}' is weaker than requested cli security profile '{}'",
+            capabilities.security_profile,
+            security_profile.as_str()
+        ));
+    }
+    if security_profile.requires_tls() && (!capabilities.tls_required || !capabilities.tls_enabled)
+    {
+        return Err(anyhow!(
+            "server capabilities for '{}' do not satisfy required TLS transport for profile '{}'",
+            server,
+            security_profile.as_str()
+        ));
+    }
+    if security_profile.requires_pq_backend() && !capabilities.runtime_crypto_profile.pq_oqs_enabled
+    {
+        return Err(anyhow!(
+            "server '{}' is not running a PQ-enabled crypto backend required by profile '{}'",
+            server,
+            security_profile.as_str()
+        ));
+    }
+    if capabilities.deployment_mode != "development" && !capabilities.production_baseline_met {
+        return Err(anyhow!(
+            "server '{}' advertises deployment_mode='{}' but production_baseline_met=false",
+            server,
+            capabilities.deployment_mode
+        ));
+    }
+    if let Some(suite_id) = suite_id {
+        if !capabilities.supported_suite_ids.contains(&suite_id) {
+            return Err(anyhow!(
+                "server '{}' does not support requested suite_id={} for profile '{}'",
+                server,
+                suite_id,
+                security_profile.as_str()
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn fetch_server_capabilities(
+    client: &Client,
+    server: &str,
+) -> Result<ServerCapabilitiesResponse> {
+    let response = client
+        .get(format!("{server}/v1/capabilities"))
+        .send()
+        .await
+        .context("capabilities request failed")?;
+    handle_json_response(response).await
+}
+
+async fn preflight_server_command(
+    client: &Client,
+    server: &str,
+    security_profile: SecurityProfile,
+    suite_id: Option<u16>,
+) -> Result<ServerCapabilitiesResponse> {
+    validate_server_url_for_profile(security_profile, server)?;
+    let capabilities = fetch_server_capabilities(client, server).await?;
+    validate_server_capabilities_for_cli(security_profile, suite_id, &capabilities, server)?;
+    Ok(capabilities)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -914,9 +1105,18 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
-            security_profile.enforce_suite_id(suite_to_suite_id(keys_file.suite))?;
-            validate_server_url_for_profile(security_profile, &cli.server)?;
-            register_user(&client, &cli.server, &keys_file).await?;
+            let suite_id = suite_to_suite_id(keys_file.suite);
+            security_profile.enforce_suite_id(suite_id)?;
+            let capabilities =
+                preflight_server_command(&client, &cli.server, security_profile, Some(suite_id))
+                    .await?;
+            register_user(
+                &client,
+                &cli.server,
+                &keys_file,
+                capabilities.registration_pow_bits,
+            )
+            .await?;
         }
         Commands::PublishPrekeys { user, keys, suite } => {
             let mut keys_file = read_keys_file(&keys)?;
@@ -930,9 +1130,99 @@ async fn main() -> Result<()> {
             if let Some(override_suite) = suite {
                 keys_file.suite = override_suite;
             }
-            security_profile.enforce_suite_id(suite_to_suite_id(keys_file.suite))?;
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            let suite_id = suite_to_suite_id(keys_file.suite);
+            security_profile.enforce_suite_id(suite_id)?;
+            preflight_server_command(&client, &cli.server, security_profile, Some(suite_id))
+                .await?;
             publish_prekeys(&client, &cli.server, &keys_file).await?;
+        }
+        Commands::DevicesList { user, keys } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            preflight_server_command(&client, &cli.server, security_profile, None).await?;
+            let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+            let response = list_devices_remote(
+                &client,
+                &cli.server,
+                &keys_file.user_id,
+                &keys_file.device_id,
+                &auth_signing_key,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::DevicesLink {
+            user,
+            keys,
+            new_device_id,
+        } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            validate_id("new_device_id", &new_device_id)?;
+            if new_device_id == keys_file.device_id {
+                return Err(anyhow!(
+                    "new_device_id must differ from the authenticated device_id '{}'",
+                    keys_file.device_id
+                ));
+            }
+            preflight_server_command(&client, &cli.server, security_profile, None).await?;
+            let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+            let response = link_device_remote(
+                &client,
+                &cli.server,
+                &keys_file.user_id,
+                &keys_file.device_id,
+                &new_device_id,
+                &auth_signing_key,
+            )
+            .await?;
+            validate_link_device_response(&response, &keys_file.user_id, &new_device_id)?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::DevicesRevoke {
+            user,
+            keys,
+            target_device_id,
+        } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            validate_id("target_device_id", &target_device_id)?;
+            if target_device_id == keys_file.device_id {
+                return Err(anyhow!(
+                    "target_device_id matches the authenticated device; use reset-local-state --remote-retire for self-retirement"
+                ));
+            }
+            preflight_server_command(&client, &cli.server, security_profile, None).await?;
+            let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+            let response = revoke_device_remote(
+                &client,
+                &cli.server,
+                &keys_file.user_id,
+                &keys_file.device_id,
+                &target_device_id,
+                &auth_signing_key,
+            )
+            .await?;
+            validate_revoke_device_response(&response, &keys_file.user_id, &target_device_id)?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Commands::DiscoveryUpload {
             user,
@@ -948,7 +1238,7 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            preflight_server_command(&client, &cli.server, security_profile, None).await?;
             let phone_hashes =
                 normalize_sha256_hashes("phone_hashes_sha256", &phone_hashes_sha256)?;
             let email_hashes =
@@ -979,7 +1269,7 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            preflight_server_command(&client, &cli.server, security_profile, None).await?;
             let hashes = normalize_sha256_hashes("hashes_sha256", &hashes_sha256)?;
             let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
             let response = discovery_match_remote(
@@ -1008,7 +1298,7 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            preflight_server_command(&client, &cli.server, security_profile, None).await?;
             validate_id("peer", &peer)?;
             let alias = validate_optional_alias(alias.as_deref())?;
             let qr_verified = if let Some(payload) = qr_payload {
@@ -1045,7 +1335,7 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            preflight_server_command(&client, &cli.server, security_profile, None).await?;
             let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
             let response = list_contacts_remote(
                 &client,
@@ -1066,7 +1356,7 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            preflight_server_command(&client, &cli.server, security_profile, None).await?;
             validate_id("peer", &peer)?;
             let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
             let response = remove_contact_remote(
@@ -1094,7 +1384,7 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            preflight_server_command(&client, &cli.server, security_profile, None).await?;
             validate_id("group", &group)?;
             let members = normalize_group_member_ids(&members)?;
             let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
@@ -1119,7 +1409,7 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            preflight_server_command(&client, &cli.server, security_profile, None).await?;
             validate_id("group", &group)?;
             let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
             let response = list_group_members_remote(
@@ -1147,7 +1437,7 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            preflight_server_command(&client, &cli.server, security_profile, None).await?;
             validate_id("group", &group)?;
             validate_id("member", &member)?;
             let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
@@ -1177,7 +1467,7 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            preflight_server_command(&client, &cli.server, security_profile, None).await?;
             validate_id("group", &group)?;
             validate_id("member", &member)?;
             let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
@@ -1208,7 +1498,7 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            preflight_server_command(&client, &cli.server, security_profile, None).await?;
             validate_id("group", &group)?;
             let message_blob = match (text, payload_b64) {
                 (Some(value), None) => value.into_bytes(),
@@ -1294,8 +1584,10 @@ async fn main() -> Result<()> {
             if let Some(override_suite) = suite {
                 keys_file.suite = override_suite;
             }
-            security_profile.enforce_suite_id(suite_to_suite_id(keys_file.suite))?;
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            let suite_id = suite_to_suite_id(keys_file.suite);
+            security_profile.enforce_suite_id(suite_id)?;
+            preflight_server_command(&client, &cli.server, security_profile, Some(suite_id))
+                .await?;
             ensure_prekeys_replenished(&client, &cli.server, &keys_path, &mut keys_file).await?;
             send_message_flow(
                 &client,
@@ -1332,8 +1624,10 @@ async fn main() -> Result<()> {
             if let Some(override_suite) = suite {
                 keys_file.suite = override_suite;
             }
-            security_profile.enforce_suite_id(suite_to_suite_id(keys_file.suite))?;
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            let suite_id = suite_to_suite_id(keys_file.suite);
+            security_profile.enforce_suite_id(suite_id)?;
+            preflight_server_command(&client, &cli.server, security_profile, Some(suite_id))
+                .await?;
             ensure_prekeys_replenished(&client, &cli.server, &keys_path, &mut keys_file).await?;
             send_sealed_message_flow(
                 &client,
@@ -1359,8 +1653,10 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
-            security_profile.enforce_suite_id(suite_to_suite_id(keys_file.suite))?;
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            let suite_id = suite_to_suite_id(keys_file.suite);
+            security_profile.enforce_suite_id(suite_id)?;
+            preflight_server_command(&client, &cli.server, security_profile, Some(suite_id))
+                .await?;
             ensure_prekeys_replenished(&client, &cli.server, &keys, &mut keys_file).await?;
             poll_inbox_flow(
                 &client,
@@ -1381,8 +1677,10 @@ async fn main() -> Result<()> {
                     keys_file.user_id
                 ));
             }
-            security_profile.enforce_suite_id(suite_to_suite_id(keys_file.suite))?;
-            validate_server_url_for_profile(security_profile, &cli.server)?;
+            let suite_id = suite_to_suite_id(keys_file.suite);
+            security_profile.enforce_suite_id(suite_id)?;
+            preflight_server_command(&client, &cli.server, security_profile, Some(suite_id))
+                .await?;
             poll_sealed_inbox_flow(
                 &client,
                 &cli.server,
@@ -1409,7 +1707,7 @@ async fn main() -> Result<()> {
                 ));
             }
             if remote {
-                validate_server_url_for_profile(security_profile, &cli.server)?;
+                preflight_server_command(&client, &cli.server, security_profile, None).await?;
             }
             delete_messages_flow(
                 &client,
@@ -1424,6 +1722,49 @@ async fn main() -> Result<()> {
                 },
             )
             .await?;
+        }
+        Commands::ResetLocalState {
+            user,
+            keys,
+            wipe_keys,
+            remote_retire,
+        } => {
+            validate_id("user", &user)?;
+            let mut remote_retire_remaining = None;
+            if remote_retire {
+                let keys_path = keys.clone().unwrap_or_else(|| default_keys_path(&user));
+                let keys_file = read_keys_file(&keys_path)?;
+                if keys_file.user_id != user {
+                    return Err(anyhow!(
+                        "user mismatch: command user '{}' vs keys file user '{}'",
+                        user,
+                        keys_file.user_id
+                    ));
+                }
+                preflight_server_command(&client, &cli.server, security_profile, None).await?;
+                let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+                let response = retire_current_device_remote(
+                    &client,
+                    &cli.server,
+                    &keys_file.user_id,
+                    &keys_file.device_id,
+                    &auth_signing_key,
+                )
+                .await?;
+                validate_retire_current_device_response(&response, &keys_file)?;
+                remote_retire_remaining = Some(response.remaining_active_devices);
+            }
+            let summary = wipe_local_state(&cli.state_dir, &user, keys.as_deref(), wipe_keys)?;
+            if let Some(remaining_active_devices) = remote_retire_remaining {
+                println!(
+                    "retired current device for '{}' on server (remaining_active_devices={})",
+                    user, remaining_active_devices
+                );
+            }
+            println!(
+                "cleared local state for '{}' (state_removed={}, keys_removed={})",
+                user, summary.state_removed, summary.keys_removed
+            );
         }
     }
 
@@ -1516,7 +1857,12 @@ fn refresh_one_time_prekeys(keys: &mut UserKeysFile, one_time_count: usize) -> R
     Ok(())
 }
 
-async fn register_user(client: &Client, server: &str, keys: &UserKeysFile) -> Result<()> {
+async fn register_user(
+    client: &Client,
+    server: &str,
+    keys: &UserKeysFile,
+    registration_pow_bits: u8,
+) -> Result<()> {
     let mut req = RegisterRequest {
         user_id: keys.user_id.clone(),
         identity_x25519_pub: keys.identity_x25519_pub_b64.clone(),
@@ -1524,11 +1870,8 @@ async fn register_user(client: &Client, server: &str, keys: &UserKeysFile) -> Re
         device_id: keys.device_id.clone(),
         pow_nonce: None,
     };
-    let pow_bits = fetch_registration_pow_bits(client, server)
-        .await
-        .unwrap_or(0);
-    if pow_bits > 0 {
-        req.pow_nonce = Some(solve_registration_pow(&req, pow_bits)?);
+    if registration_pow_bits > 0 {
+        req.pow_nonce = Some(solve_registration_pow(&req, registration_pow_bits)?);
     }
     let value = post_json(client, format!("{server}/v1/users/register"), &req).await?;
     println!("{}", serde_json::to_string_pretty(&value)?);
@@ -1586,6 +1929,70 @@ async fn publish_prekeys(client: &Client, server: &str, keys: &UserKeysFile) -> 
     let value: Value = handle_json_response(response).await?;
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
+}
+
+async fn list_devices_remote(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    auth_signing_key: &SigningKey,
+) -> Result<DeviceListResponse> {
+    let auth_headers = devices_list_auth_headers(auth_signing_key, user, device_id)?;
+    let mut request = client.get(format!("{server}/v1/users/{user}/devices"));
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("list devices request failed")?;
+    handle_json_response(response).await
+}
+
+async fn link_device_remote(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    new_device_id: &str,
+    auth_signing_key: &SigningKey,
+) -> Result<LinkDeviceResponse> {
+    let req = LinkDeviceRequest {
+        new_device_id: new_device_id.to_string(),
+    };
+    let auth_headers = devices_link_auth_headers(auth_signing_key, user, device_id, new_device_id)?;
+    let mut request = client
+        .post(format!("{server}/v1/users/{user}/devices/link"))
+        .json(&req);
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request.send().await.context("link device request failed")?;
+    handle_json_response(response).await
+}
+
+async fn revoke_device_remote(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    target_device_id: &str,
+    auth_signing_key: &SigningKey,
+) -> Result<RevokeDeviceResponse> {
+    let auth_headers =
+        devices_revoke_auth_headers(auth_signing_key, user, device_id, target_device_id)?;
+    let mut request = client.post(format!(
+        "{server}/v1/users/{user}/devices/{target_device_id}/revoke"
+    ));
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("revoke device request failed")?;
+    handle_json_response(response).await
 }
 
 async fn fetch_prekeys_status(
@@ -2690,14 +3097,25 @@ async fn post_json<T: Serialize>(client: &Client, url: String, body: &T) -> Resu
     handle_json_response(response).await
 }
 
-async fn fetch_registration_pow_bits(client: &Client, server: &str) -> Result<u8> {
-    let response = client
-        .get(format!("{server}/health"))
+async fn retire_current_device_remote(
+    client: &Client,
+    server: &str,
+    user_id: &str,
+    device_id: &str,
+    signing_key: &SigningKey,
+) -> Result<RetireCurrentDeviceResponse> {
+    let auth_headers = retire_current_device_auth_headers(signing_key, user_id, device_id)?;
+    let mut request = client.post(format!(
+        "{server}/v1/users/{user_id}/devices/current/retire"
+    ));
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
         .send()
         .await
-        .context("health request failed")?;
-    let health: HealthResponse = handle_json_response(response).await?;
-    Ok(health.registration_pow_bits.unwrap_or(0))
+        .context("retire current device request failed")?;
+    handle_json_response(response).await
 }
 
 async fn handle_json_response<T: for<'de> Deserialize<'de>>(
@@ -2834,6 +3252,42 @@ fn sealed_inbox_cursor_path(state_dir: &Path, user: &str) -> PathBuf {
 
 fn message_store_file_path(state_dir: &Path, user: &str) -> PathBuf {
     state_dir.join(user).join("_messages.json")
+}
+
+fn wipe_local_state(
+    state_dir: &Path,
+    user: &str,
+    keys_path: Option<&Path>,
+    wipe_keys: bool,
+) -> Result<LocalStateWipeSummary> {
+    let state_removed = remove_path_if_exists(&state_dir.join(user))?;
+    let keys_removed = if wipe_keys {
+        let path = keys_path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| default_keys_path(user));
+        remove_path_if_exists(&path)?
+    } else {
+        false
+    };
+    Ok(LocalStateWipeSummary {
+        state_removed,
+        keys_removed,
+    })
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let metadata =
+        fs::metadata(path).with_context(|| format!("failed to inspect {}", path.display()))?;
+    if metadata.is_dir() {
+        fs::remove_dir_all(path)
+            .with_context(|| format!("failed to remove directory {}", path.display()))?;
+    } else {
+        fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+    Ok(true)
 }
 
 fn message_hash_hex(bytes: &[u8]) -> String {
@@ -3199,6 +3653,177 @@ fn inbox_delete_auth_headers(
         (AUTH_HEADER_NONCE, nonce),
         (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
     ])
+}
+
+fn devices_list_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("devices-list", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let transcript =
+        encode(&records).map_err(|_| anyhow!("failed to encode devices-list auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn devices_link_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    auth_device_id: &str,
+    new_device_id: &str,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("devices-link", user_id, auth_device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_LINK_DEVICE_ID,
+        value: new_device_id.as_bytes().to_vec(),
+    });
+    let transcript =
+        encode(&records).map_err(|_| anyhow!("failed to encode devices-link auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, auth_device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn devices_revoke_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    auth_device_id: &str,
+    target_device_id: &str,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("devices-revoke", user_id, auth_device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_REVOKE_DEVICE_ID,
+        value: target_device_id.as_bytes().to_vec(),
+    });
+    let transcript =
+        encode(&records).map_err(|_| anyhow!("failed to encode devices-revoke auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, auth_device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn retire_current_device_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+) -> Result<Vec<(&'static str, String)>> {
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("devices-retire", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_REVOKE_DEVICE_ID,
+        value: device_id.as_bytes().to_vec(),
+    });
+    let transcript =
+        encode(&records).map_err(|_| anyhow!("failed to encode devices-retire auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ])
+}
+
+fn validate_link_device_response(
+    response: &LinkDeviceResponse,
+    user_id: &str,
+    new_device_id: &str,
+) -> Result<()> {
+    if response.user_id != user_id || response.linked_device_id != new_device_id {
+        return Err(anyhow!(
+            "link device response identity mismatch: expected {}/{} got {}/{}",
+            user_id,
+            new_device_id,
+            response.user_id,
+            response.linked_device_id
+        ));
+    }
+    if response.linked_at.trim().is_empty() {
+        return Err(anyhow!("link device response missing linked_at"));
+    }
+    Ok(())
+}
+
+fn validate_revoke_device_response(
+    response: &RevokeDeviceResponse,
+    user_id: &str,
+    target_device_id: &str,
+) -> Result<()> {
+    if response.user_id != user_id || response.revoked_device_id != target_device_id {
+        return Err(anyhow!(
+            "revoke device response identity mismatch: expected {}/{} got {}/{}",
+            user_id,
+            target_device_id,
+            response.user_id,
+            response.revoked_device_id
+        ));
+    }
+    if response.revoked_at.trim().is_empty() {
+        return Err(anyhow!("revoke device response missing revoked_at"));
+    }
+    Ok(())
+}
+
+fn validate_retire_current_device_response(
+    response: &RetireCurrentDeviceResponse,
+    keys: &UserKeysFile,
+) -> Result<()> {
+    if response.user_id != keys.user_id || response.retired_device_id != keys.device_id {
+        return Err(anyhow!(
+            "retire device response identity mismatch: expected {}/{} got {}/{}",
+            keys.user_id,
+            keys.device_id,
+            response.user_id,
+            response.retired_device_id
+        ));
+    }
+    if response.retired_at.trim().is_empty() {
+        return Err(anyhow!("retire device response missing retired_at"));
+    }
+    Ok(())
 }
 
 fn discovery_handles_auth_headers(
@@ -4138,6 +4763,106 @@ mod tests {
     }
 
     #[test]
+    fn parse_reset_local_state_args() {
+        let cli = Cli::try_parse_from([
+            "pqmsg-cli",
+            "reset-local-state",
+            "--user",
+            "alice",
+            "--wipe-keys",
+        ])
+        .expect("parse");
+        match cli.command {
+            Commands::ResetLocalState {
+                user,
+                keys,
+                wipe_keys,
+                remote_retire,
+            } => {
+                assert_eq!(user, "alice");
+                assert!(keys.is_none());
+                assert!(wipe_keys);
+                assert!(!remote_retire);
+            }
+            _ => panic!("expected reset-local-state command"),
+        }
+    }
+
+    #[test]
+    fn parse_devices_list_args() {
+        let cli = Cli::try_parse_from([
+            "pqmsg-cli",
+            "devices-list",
+            "--user",
+            "alice",
+            "--keys",
+            "./devkeys/alice.json",
+        ])
+        .expect("parse");
+        match cli.command {
+            Commands::DevicesList { user, keys } => {
+                assert_eq!(user, "alice");
+                assert_eq!(keys, PathBuf::from("./devkeys/alice.json"));
+            }
+            _ => panic!("expected devices-list command"),
+        }
+    }
+
+    #[test]
+    fn parse_devices_link_args() {
+        let cli = Cli::try_parse_from([
+            "pqmsg-cli",
+            "devices-link",
+            "--user",
+            "alice",
+            "--keys",
+            "./devkeys/alice.json",
+            "--new-device-id",
+            "alice-device-2",
+        ])
+        .expect("parse");
+        match cli.command {
+            Commands::DevicesLink {
+                user,
+                keys,
+                new_device_id,
+            } => {
+                assert_eq!(user, "alice");
+                assert_eq!(keys, PathBuf::from("./devkeys/alice.json"));
+                assert_eq!(new_device_id, "alice-device-2");
+            }
+            _ => panic!("expected devices-link command"),
+        }
+    }
+
+    #[test]
+    fn parse_devices_revoke_args() {
+        let cli = Cli::try_parse_from([
+            "pqmsg-cli",
+            "devices-revoke",
+            "--user",
+            "alice",
+            "--keys",
+            "./devkeys/alice.json",
+            "--target-device-id",
+            "alice-device-2",
+        ])
+        .expect("parse");
+        match cli.command {
+            Commands::DevicesRevoke {
+                user,
+                keys,
+                target_device_id,
+            } => {
+                assert_eq!(user, "alice");
+                assert_eq!(keys, PathBuf::from("./devkeys/alice.json"));
+                assert_eq!(target_device_id, "alice-device-2");
+            }
+            _ => panic!("expected devices-revoke command"),
+        }
+    }
+
+    #[test]
     fn parse_groups_create_args() {
         let cli = Cli::try_parse_from([
             "pqmsg-cli",
@@ -4202,6 +4927,67 @@ mod tests {
         assert!(result.is_err());
         validate_server_url_for_profile(SecurityProfile::HighAssurance, "https://example.test")
             .expect("https allowed");
+    }
+
+    fn sample_capabilities() -> ServerCapabilitiesResponse {
+        ServerCapabilitiesResponse {
+            capability_schema_version: 1,
+            security_profile: "high_assurance".to_string(),
+            deployment_mode: "development".to_string(),
+            tls_required: true,
+            tls_enabled: true,
+            supported_suite_ids: vec![
+                SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+                SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+            ],
+            runtime_crypto_profile: runtime_crypto_profile().expect("runtime profile"),
+            production_baseline_met: false,
+            registration_pow_bits: 0,
+            prekey_bundle_reserve_count: 2,
+            pq_ratchet_interval: 4,
+            web_client_policy: "demo_only".to_string(),
+        }
+    }
+
+    #[test]
+    fn nss_client_rejects_weaker_server_profile() {
+        let mut capabilities = sample_capabilities();
+        capabilities.security_profile = "high_assurance".to_string();
+        let result = validate_server_capabilities_for_cli(
+            SecurityProfile::NssAligned,
+            Some(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305),
+            &capabilities,
+            "https://example.test",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn production_mode_requires_server_baseline() {
+        let mut capabilities = sample_capabilities();
+        capabilities.deployment_mode = "production".to_string();
+        capabilities.production_baseline_met = false;
+        let result = validate_server_capabilities_for_cli(
+            SecurityProfile::HighAssurance,
+            Some(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305),
+            &capabilities,
+            "https://example.test",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cli_rejects_unsupported_suite_from_server_capabilities() {
+        let mut capabilities = sample_capabilities();
+        capabilities.supported_suite_ids =
+            vec![SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305];
+        let result = validate_server_capabilities_for_cli(
+            SecurityProfile::HighAssurance,
+            Some(SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305),
+            &capabilities,
+            "https://example.test",
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -4518,6 +5304,36 @@ mod tests {
             loaded.peers.get("bob").expect("bob entry").last_message_id,
             12
         );
+    }
+
+    #[test]
+    fn wipe_local_state_removes_only_requested_user() {
+        let dir = tempdir().expect("tempdir");
+        let alice_state = dir.path().join("state").join("alice");
+        let bob_state = dir.path().join("state").join("bob");
+        fs::create_dir_all(&alice_state).expect("alice state dir");
+        fs::create_dir_all(&bob_state).expect("bob state dir");
+        fs::write(alice_state.join("_messages.json"), b"{}").expect("alice messages");
+        fs::write(bob_state.join("_messages.json"), b"{}").expect("bob messages");
+
+        let alice_keys = dir.path().join("alice.json");
+        let bob_keys = dir.path().join("bob.json");
+        fs::write(&alice_keys, b"{}").expect("alice keys");
+        fs::write(&bob_keys, b"{}").expect("bob keys");
+
+        let summary = wipe_local_state(
+            dir.path().join("state").as_path(),
+            "alice",
+            Some(&alice_keys),
+            true,
+        )
+        .expect("wipe");
+        assert!(summary.state_removed);
+        assert!(summary.keys_removed);
+        assert!(!alice_state.exists());
+        assert!(!alice_keys.exists());
+        assert!(bob_state.exists());
+        assert!(bob_keys.exists());
     }
 
     #[test]

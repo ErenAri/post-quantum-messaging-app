@@ -347,6 +347,23 @@ pub(crate) fn revoke_device_auth_message(
         .map_err(|_| AppError::internal("failed to encode devices-revoke auth transcript"))
 }
 
+pub(crate) fn retire_current_device_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+) -> Result<Vec<u8>, AppError> {
+    let mut records = auth_common_records(auth, "devices-retire");
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_REVOKE_DEVICE_ID,
+        value: auth.device_id.as_bytes().to_vec(),
+    });
+    encode(&records)
+        .map_err(|_| AppError::internal("failed to encode devices-retire auth transcript"))
+}
+
 pub(crate) fn discovery_handles_auth_message(
     auth: &RequestAuth,
     user_id: &str,

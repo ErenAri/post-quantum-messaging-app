@@ -1,3 +1,4 @@
+use pqmsg_core::alg::RuntimeCryptoProfile;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +35,14 @@ pub(crate) struct RevokeDeviceResponse {
     pub(crate) user_id: String,
     pub(crate) revoked_device_id: String,
     pub(crate) revoked_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RetireCurrentDeviceResponse {
+    pub(crate) user_id: String,
+    pub(crate) retired_device_id: String,
+    pub(crate) retired_at: String,
+    pub(crate) remaining_active_devices: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -492,6 +501,7 @@ pub(crate) struct WsInboxEnvelope {
 pub(crate) struct StatusResponse {
     pub(crate) status: &'static str,
     pub(crate) security_profile: String,
+    pub(crate) deployment_mode: String,
     pub(crate) db_backend: String,
     pub(crate) db_ready: bool,
     pub(crate) db_pool_size: u32,
@@ -499,12 +509,33 @@ pub(crate) struct StatusResponse {
     pub(crate) push_enabled: bool,
     pub(crate) push_providers: Vec<&'static str>,
     pub(crate) audit_logger_enabled: bool,
+    pub(crate) tls_enabled: bool,
     pub(crate) rate_limiter_mode: &'static str,
     pub(crate) replay_cache_mode: &'static str,
+    pub(crate) realtime_mode: &'static str,
+    pub(crate) supported_suite_ids: Vec<u16>,
+    pub(crate) runtime_crypto_profile: RuntimeCryptoProfile,
+    pub(crate) production_baseline_met: bool,
     pub(crate) registration_pow_bits: u8,
     pub(crate) prekey_publish_min_interval_seconds: i64,
     pub(crate) prekey_bundle_reserve_count: i64,
     pub(crate) pq_ratchet_interval: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ServerCapabilitiesResponse {
+    pub(crate) capability_schema_version: u16,
+    pub(crate) security_profile: String,
+    pub(crate) deployment_mode: String,
+    pub(crate) tls_required: bool,
+    pub(crate) tls_enabled: bool,
+    pub(crate) supported_suite_ids: Vec<u16>,
+    pub(crate) runtime_crypto_profile: RuntimeCryptoProfile,
+    pub(crate) production_baseline_met: bool,
+    pub(crate) registration_pow_bits: u8,
+    pub(crate) prekey_bundle_reserve_count: i64,
+    pub(crate) pq_ratchet_interval: u32,
+    pub(crate) web_client_policy: &'static str,
 }
 
 // ── Delivery receipts ──

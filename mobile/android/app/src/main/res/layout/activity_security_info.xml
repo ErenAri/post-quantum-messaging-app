@@ -31,12 +31,82 @@
             android:hint="@string/hint_user"
             android:inputType="text" />
 
+        <EditText
+            android:id="@+id/editSecurityManagedDevice"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:hint="@string/hint_managed_device"
+            android:inputType="text" />
+
+        <EditText
+            android:id="@+id/editSecurityOnboardingPassphrase"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:hint="@string/hint_onboarding_passphrase"
+            android:inputType="textPassword" />
+
         <Button
             android:id="@+id/buttonRefreshSecurityInfo"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:text="@string/button_refresh_security" />
+
+        <Button
+            android:id="@+id/buttonListDevices"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/button_list_devices" />
+
+        <Button
+            android:id="@+id/buttonLinkDevice"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/button_link_device" />
+
+        <Button
+            android:id="@+id/buttonRevokeDevice"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/button_revoke_device" />
+
+        <Button
+            android:id="@+id/buttonPrepareSecondaryDevicePackage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/button_prepare_secondary_device" />
+
+        <Button
+            android:id="@+id/buttonCopyOnboardingPackage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/button_copy_onboarding_package" />
+
+        <EditText
+            android:id="@+id/editSecurityOnboardingPackage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="top|start"
+            android:hint="@string/hint_onboarding_package"
+            android:inputType="textMultiLine"
+            android:minLines="6"
+            android:scrollbars="vertical"
+            android:textIsSelectable="true" />
+
+        <Button
+            android:id="@+id/buttonResetLocalState"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/button_reset_local_state" />
 
         <TextView
             android:id="@+id/textSecurityProfile"
@@ -58,6 +128,13 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="10dp"
             android:text="@string/security_pins_default" />
+
+        <TextView
+            android:id="@+id/textSecurityDevices"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/security_devices_default" />
 
         <TextView
             android:id="@+id/textSecurityLocalState"

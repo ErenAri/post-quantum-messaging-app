@@ -2,14 +2,14 @@
 
 ## 1. Objective
 
-This document specifies the reproducible path for running the iOS demo client with UniFFI Swift bindings, Keychain-backed local secret storage, and APNs token capture.
+This document specifies the reproducible path for running the iOS demo client with UniFFI Swift bindings, Keychain-backed secret storage, file-protected local metadata, guided secondary-device onboarding, and APNs token capture.
 
 ## 2. Architecture
 
 ```mermaid
 flowchart LR
     UI[SwiftUI Setup and Chat UI] --> NET[URLSession JSON transport]
-    UI --> STORE[Keychain and UserDefaults state]
+    UI --> STORE[Keychain and file-protected app state]
     UI --> SWIFT[UniFFI Swift bindings]
     SWIFT --> XC[pqmsg_iosFFI.xcframework]
     XC --> RUST[pqmsg-ios crate]
@@ -20,11 +20,16 @@ flowchart LR
 
 ## 3. Client Security Baseline
 
-- private keys and session snapshots are persisted in iOS Keychain,
+- private keys, session snapshots, and APNs token are persisted in iOS Keychain,
+- setup, progress, cursor, bundle, identity-pin, and conversation metadata are persisted under Application Support with `completeUntilFirstUserAuthentication` file protection,
 - protocol operations are executed in Rust (`pqmsg-ios` -> `pqmsg-core`),
 - first-seen identity keys are pinned and key changes are blocked by default,
 - relay and inbox requests use Ed25519 request-auth headers from Rust,
+- the Security tab can list linked devices, link a new device id, and revoke non-current linked devices through authenticated server requests,
+- the Security tab can prepare a portable linked-device onboarding package by first linking the target device id on the server and then sealing regenerated device prekeys with the existing identity keys using the `WrappedSecret` Argon2id + AES-256-GCM storage format,
+- the Setup tab can import that sealed onboarding package on the secondary device, persist the adopted keys, publish fresh prekeys automatically, and leave the final local step as `Verify server`,
 - APNs token registration is integrated and exposed through setup/security screens,
+- the Security tab exposes a destructive reset action that first retires the authenticated current device on the server when keys are still present, then removes per-user keys, sessions, pins, cursors, conversation metadata, and the stored APNs token,
 - HTTP transport is accepted only for local debug hosts; production builds require HTTPS.
 
 ## 4. Prerequisites
@@ -75,12 +80,16 @@ cargo run -p pqmsg-server
 - Setup tab:
   - set server URL to `http://127.0.0.1:3000` for simulator-local demo,
   - generate keys, register user, publish prekeys, verify server,
+  - for a secondary device, paste the sealed package from the primary device into `Import Linked Device`, provide the passphrase, then run `Verify Server`,
   - request APNs token if push entitlements are configured.
 - Chats tab:
   - open peer conversation,
   - fetch bundle, send encrypted message, poll inbox.
 - Security tab:
   - inspect active crypto profile, transport validity, pinned identities, and local state counts.
+  - use `Secondary Device Onboarding` to enter a target device id, seal a passphrase-protected onboarding package, and copy the resulting package text to the secondary device.
+  - use the Devices section to list linked devices, manually link a new device id, or revoke a non-current device.
+  - use `Reset Local State` to retire the current device on the server when possible and then purge the current user's local device material when rotating or revoking the account.
 
 ## 8. APNs Integration Notes
 

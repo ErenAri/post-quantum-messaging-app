@@ -30,6 +30,15 @@ data class SetupProgress(
         )
     }
 
+    fun adoptLinkedDevice(): SetupProgress {
+        return SetupProgress(
+            keysGenerated = true,
+            userRegistered = true,
+            prekeysPublished = true,
+            serverVerified = false,
+        )
+    }
+
     fun afterServerVerified(): SetupProgress {
         return copy(serverVerified = true)
     }

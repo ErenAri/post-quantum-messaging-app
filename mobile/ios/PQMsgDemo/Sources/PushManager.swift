@@ -5,9 +5,10 @@ import UserNotifications
 final class PushManager: NSObject, UIApplicationDelegate, ObservableObject, UNUserNotificationCenterDelegate {
     @Published var apnsTokenHex: String
     @Published var lastError: String
+    private let keychain = KeychainStore(service: "com.pqmsg.demo.ios")
 
     override init() {
-        self.apnsTokenHex = UserDefaults.standard.string(forKey: "apns_token_hex") ?? ""
+        self.apnsTokenHex = (try? keychain.getString(account: "push.apns_token_hex")) ?? ""
         self.lastError = ""
         super.init()
     }
@@ -39,10 +40,17 @@ final class PushManager: NSObject, UIApplicationDelegate, ObservableObject, UNUs
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         let token = deviceToken.map { String(format: "%02x", $0) }.joined()
         apnsTokenHex = token
-        UserDefaults.standard.set(token, forKey: "apns_token_hex")
+        try? keychain.setString(token, account: "push.apns_token_hex")
+        UserDefaults.standard.removeObject(forKey: "apns_token_hex")
     }
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
         lastError = error.localizedDescription
+    }
+
+    func clearStoredToken() {
+        apnsTokenHex = ""
+        try? keychain.delete(account: "push.apns_token_hex")
+        UserDefaults.standard.removeObject(forKey: "apns_token_hex")
     }
 }

@@ -19,6 +19,10 @@ final class ApiClient {
         _ = try await requestData(path: "", method: "GET", headers: [:], body: Optional<String>.none)
     }
 
+    func getCapabilities() async throws -> ServerCapabilitiesResponse {
+        try await request(path: "v1/capabilities", method: "GET", headers: [:], body: Optional<String>.none)
+    }
+
     func registerUser(_ requestBody: RegisterUserRequest) async throws -> RegisterUserResponse {
         try await request(path: "v1/users/register", method: "POST", headers: [:], body: requestBody)
     }
@@ -46,6 +50,42 @@ final class ApiClient {
 
     func registerPushToken(userId: String, headers: [String: String], requestBody: RegisterPushTokenRequest) async throws -> RegisterPushTokenResponse {
         try await request(path: "v1/users/\(userId)/push-token", method: "POST", headers: headers, body: requestBody)
+    }
+
+    func listDevices(userId: String, headers: [String: String]) async throws -> DeviceListResponse {
+        try await request(
+            path: "v1/users/\(userId)/devices",
+            method: "GET",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
+    func linkDevice(userId: String, newDeviceId: String, headers: [String: String]) async throws -> LinkDeviceResponse {
+        try await request(
+            path: "v1/users/\(userId)/devices/link",
+            method: "POST",
+            headers: headers,
+            body: ["new_device_id": newDeviceId]
+        )
+    }
+
+    func revokeDevice(userId: String, targetDeviceId: String, headers: [String: String]) async throws -> RevokeDeviceResponse {
+        try await request(
+            path: "v1/users/\(userId)/devices/\(targetDeviceId)/revoke",
+            method: "POST",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
+    func retireCurrentDevice(userId: String, headers: [String: String]) async throws -> RetireCurrentDeviceResponse {
+        try await request(
+            path: "v1/users/\(userId)/devices/current/retire",
+            method: "POST",
+            headers: headers,
+            body: Optional<String>.none
+        )
     }
 
     private func request<T: Decodable, U: Encodable>(

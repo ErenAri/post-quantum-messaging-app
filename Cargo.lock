@@ -2696,6 +2696,7 @@ dependencies = [
  "ed25519-dalek",
  "pqmsg-core",
  "rand 0.8.5",
+ "secrecy 0.10.3",
  "serde",
  "serde_json",
  "sha2",

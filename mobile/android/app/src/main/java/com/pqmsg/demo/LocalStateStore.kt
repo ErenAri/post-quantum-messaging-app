@@ -1,7 +1,9 @@
 package com.pqmsg.demo
 
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedFile
+import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import java.io.File
 import java.nio.charset.StandardCharsets
@@ -35,20 +37,27 @@ data class IdentityPinRecord(
 )
 
 class LocalStateStore(context: Context) {
-    private val prefs = context.getSharedPreferences("pqmsg_android_setup", Context.MODE_PRIVATE)
+    private val legacyPrefs = context.getSharedPreferences("pqmsg_android_setup", Context.MODE_PRIVATE)
     private val rootDir = File(context.filesDir, "pqmsg")
     private val appContext = context.applicationContext
     private val masterKey = MasterKey.Builder(appContext)
         .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
         .build()
+    private val prefs: SharedPreferences = EncryptedSharedPreferences.create(
+        appContext,
+        "pqmsg_android_secure",
+        masterKey,
+        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+    )
 
     fun loadSetup(): SetupConfig {
         return SetupConfig(
-            serverUrl = prefs.getString("server_url", "http://10.0.2.2:3000") ?: "http://10.0.2.2:3000",
-            userId = prefs.getString("user_id", "") ?: "",
-            deviceId = prefs.getString("device_id", "") ?: "",
-            suiteLabel = prefs.getString("suite_label", "ml-kem-768") ?: "ml-kem-768",
-            peerUserId = prefs.getString("peer_user_id", "bob") ?: "bob",
+            serverUrl = getString("server_url", "http://10.0.2.2:3000"),
+            userId = getString("user_id", ""),
+            deviceId = getString("device_id", ""),
+            suiteLabel = getString("suite_label", "ml-kem-768"),
+            peerUserId = getString("peer_user_id", "bob"),
         )
     }
 
@@ -60,15 +69,16 @@ class LocalStateStore(context: Context) {
             .putString("suite_label", config.suiteLabel)
             .putString("peer_user_id", config.peerUserId)
             .apply()
+        removeLegacyKeys("server_url", "user_id", "device_id", "suite_label", "peer_user_id")
     }
 
     fun loadProgress(userId: String): SetupProgress {
         val sanitized = userId.ifBlank { "_" }
         return SetupProgress(
-            keysGenerated = prefs.getBoolean("progress_${sanitized}_keys", false),
-            userRegistered = prefs.getBoolean("progress_${sanitized}_registered", false),
-            prekeysPublished = prefs.getBoolean("progress_${sanitized}_prekeys", false),
-            serverVerified = prefs.getBoolean("progress_${sanitized}_verified", false),
+            keysGenerated = getBoolean("progress_${sanitized}_keys", false),
+            userRegistered = getBoolean("progress_${sanitized}_registered", false),
+            prekeysPublished = getBoolean("progress_${sanitized}_prekeys", false),
+            serverVerified = getBoolean("progress_${sanitized}_verified", false),
         )
     }
 
@@ -80,6 +90,12 @@ class LocalStateStore(context: Context) {
             .putBoolean("progress_${sanitized}_prekeys", progress.prekeysPublished)
             .putBoolean("progress_${sanitized}_verified", progress.serverVerified)
             .apply()
+        removeLegacyKeys(
+            "progress_${sanitized}_keys",
+            "progress_${sanitized}_registered",
+            "progress_${sanitized}_prekeys",
+            "progress_${sanitized}_verified",
+        )
     }
 
     fun clearProgress(userId: String) {
@@ -140,25 +156,27 @@ class LocalStateStore(context: Context) {
     }
 
     fun readCursor(userId: String): Long {
-        return prefs.getLong("cursor_$userId", 0L)
+        return getLong("cursor_$userId", 0L)
     }
 
     fun writeCursor(userId: String, cursor: Long) {
         prefs.edit().putLong("cursor_$userId", cursor).apply()
+        removeLegacyKeys("cursor_$userId")
     }
 
     fun readPeerLastMessageId(userId: String, peerUserId: String): Long {
-        return prefs.getLong("peer_last_${userId}_$peerUserId", 0L)
+        return getLong("peer_last_${userId}_$peerUserId", 0L)
     }
 
     fun writePeerLastMessageId(userId: String, peerUserId: String, messageId: Long) {
         prefs.edit()
             .putLong("peer_last_${userId}_$peerUserId", messageId)
             .apply()
+        removeLegacyKeys("peer_last_${userId}_$peerUserId")
     }
 
     fun readPeerSeenCipherHashes(userId: String, peerUserId: String): LinkedHashSet<String> {
-        val stored = prefs.getStringSet("peer_seen_${userId}_$peerUserId", emptySet()) ?: emptySet()
+        val stored = getStringSet("peer_seen_${userId}_$peerUserId")
         return LinkedHashSet(stored)
     }
 
@@ -166,26 +184,28 @@ class LocalStateStore(context: Context) {
         prefs.edit()
             .putStringSet("peer_seen_${userId}_$peerUserId", LinkedHashSet(hashes))
             .apply()
+        removeLegacyKeys("peer_seen_${userId}_$peerUserId")
     }
 
     fun writeBundleFetchedAt(userId: String, peerUserId: String, timestamp: String) {
         prefs.edit()
             .putString("bundle_${userId}_$peerUserId", timestamp)
             .apply()
+        removeLegacyKeys("bundle_${userId}_$peerUserId")
     }
 
     fun readBundleFetchedAt(userId: String, peerUserId: String): String? {
-        return prefs.getString("bundle_${userId}_$peerUserId", null)
+        return getNullableString("bundle_${userId}_$peerUserId")
     }
 
     fun readIdentityPin(userId: String, peerUserId: String): IdentityPin? {
         val keyBase = "pin_${userId}_$peerUserId"
-        val fingerprint = prefs.getString("${keyBase}_fp", null) ?: return null
+        val fingerprint = getNullableString("${keyBase}_fp") ?: return null
         return IdentityPin(
             fingerprintSha256 = fingerprint,
-            identityKeyVersion = prefs.getInt("${keyBase}_ver", 1),
-            identitySigPub = prefs.getString("${keyBase}_sig", "") ?: "",
-            observedAt = prefs.getString("${keyBase}_at", "") ?: "",
+            identityKeyVersion = getInt("${keyBase}_ver", 1),
+            identitySigPub = getString("${keyBase}_sig", ""),
+            observedAt = getString("${keyBase}_at", ""),
         )
     }
 
@@ -197,6 +217,12 @@ class LocalStateStore(context: Context) {
             .putString("${keyBase}_sig", pin.identitySigPub)
             .putString("${keyBase}_at", pin.observedAt)
             .apply()
+        removeLegacyKeys(
+            "${keyBase}_fp",
+            "${keyBase}_ver",
+            "${keyBase}_sig",
+            "${keyBase}_at",
+        )
     }
 
     fun upsertConversation(
@@ -218,9 +244,9 @@ class LocalStateStore(context: Context) {
             cleanPreview
         }
         val nextUnread = if (incrementUnread) {
-            prefs.getInt("${keyBase}_unread", 0) + 1
+            getInt("${keyBase}_unread", 0) + 1
         } else {
-            prefs.getInt("${keyBase}_unread", 0)
+            getInt("${keyBase}_unread", 0)
         }
         prefs.edit()
             .putStringSet(conversationPeersKey(userId), LinkedHashSet(peers))
@@ -228,6 +254,12 @@ class LocalStateStore(context: Context) {
             .putLong("${keyBase}_updated_ms", System.currentTimeMillis())
             .putInt("${keyBase}_unread", nextUnread)
             .apply()
+        removeLegacyKeys(
+            conversationPeersKey(userId),
+            "${keyBase}_preview",
+            "${keyBase}_updated_ms",
+            "${keyBase}_unread",
+        )
     }
 
     fun markConversationRead(userId: String, peerUserId: String) {
@@ -238,6 +270,7 @@ class LocalStateStore(context: Context) {
         prefs.edit()
             .putInt("${keyBase}_unread", 0)
             .apply()
+        removeLegacyKeys("${keyBase}_unread")
     }
 
     fun listConversations(userId: String): List<ConversationSummary> {
@@ -249,9 +282,9 @@ class LocalStateStore(context: Context) {
                 val keyBase = "conv_${userId}_$peer"
                 ConversationSummary(
                     peerUserId = peer,
-                    lastPreview = prefs.getString("${keyBase}_preview", "No messages yet") ?: "No messages yet",
-                    updatedAtMillis = prefs.getLong("${keyBase}_updated_ms", 0L),
-                    unreadCount = prefs.getInt("${keyBase}_unread", 0),
+                    lastPreview = getString("${keyBase}_preview", "No messages yet"),
+                    updatedAtMillis = getLong("${keyBase}_updated_ms", 0L),
+                    unreadCount = getInt("${keyBase}_unread", 0),
                 )
             }
             .sortedByDescending { it.updatedAtMillis }
@@ -263,9 +296,10 @@ class LocalStateStore(context: Context) {
         }
         val prefix = "pin_${userId}_"
         val suffix = "_fp"
-        return prefs.all.keys
+        return (prefs.all.keys + legacyPrefs.all.keys)
             .asSequence()
             .filter { it.startsWith(prefix) && it.endsWith(suffix) }
+            .distinct()
             .map { key ->
                 key.removePrefix(prefix).removeSuffix(suffix)
             }
@@ -291,12 +325,176 @@ class LocalStateStore(context: Context) {
             ?: 0
     }
 
+    fun wipeUserState(userId: String) {
+        if (userId.isBlank()) {
+            return
+        }
+        deletePath(File(rootDir, "keys/$userId.json"))
+        deletePath(File(rootDir, "sessions/$userId"))
+        removePrefsForUser(userId)
+
+        val currentSetup = loadSetup()
+        if (currentSetup.userId == userId) {
+            saveSetup(
+                currentSetup.copy(
+                    userId = "",
+                    deviceId = "",
+                    peerUserId = "bob",
+                ),
+            )
+        }
+    }
+
     private fun readConversationPeers(userId: String): LinkedHashSet<String> {
-        val stored = prefs.getStringSet(conversationPeersKey(userId), emptySet()) ?: emptySet()
-        return LinkedHashSet(stored)
+        return LinkedHashSet(getStringSet(conversationPeersKey(userId)))
     }
 
     private fun conversationPeersKey(userId: String): String {
         return "conv_peers_$userId"
+    }
+
+    private fun removePrefsForUser(userId: String) {
+        val sanitized = userId.ifBlank { "_" }
+        removeKeysMatching(
+            prefs,
+            exactKeys = setOf(
+                "cursor_$userId",
+                conversationPeersKey(userId),
+            ),
+            prefixes = listOf(
+                "progress_${sanitized}_",
+                "peer_last_${userId}_",
+                "peer_seen_${userId}_",
+                "bundle_${userId}_",
+                "pin_${userId}_",
+                "conv_${userId}_",
+            ),
+        )
+        removeKeysMatching(
+            legacyPrefs,
+            exactKeys = setOf(
+                "cursor_$userId",
+                conversationPeersKey(userId),
+            ),
+            prefixes = listOf(
+                "progress_${sanitized}_",
+                "peer_last_${userId}_",
+                "peer_seen_${userId}_",
+                "bundle_${userId}_",
+                "pin_${userId}_",
+                "conv_${userId}_",
+            ),
+        )
+    }
+
+    private fun getNullableString(key: String): String? {
+        if (prefs.contains(key)) {
+            return prefs.getString(key, null)
+        }
+        if (!legacyPrefs.contains(key)) {
+            return null
+        }
+        val legacy = legacyPrefs.getString(key, null)
+        prefs.edit().putString(key, legacy).apply()
+        removeLegacyKeys(key)
+        return legacy
+    }
+
+    private fun getString(key: String, default: String): String {
+        return getNullableString(key) ?: default
+    }
+
+    private fun getBoolean(key: String, default: Boolean): Boolean {
+        if (prefs.contains(key)) {
+            return prefs.getBoolean(key, default)
+        }
+        if (!legacyPrefs.contains(key)) {
+            return default
+        }
+        val legacy = legacyPrefs.getBoolean(key, default)
+        prefs.edit().putBoolean(key, legacy).apply()
+        removeLegacyKeys(key)
+        return legacy
+    }
+
+    private fun getInt(key: String, default: Int): Int {
+        if (prefs.contains(key)) {
+            return prefs.getInt(key, default)
+        }
+        if (!legacyPrefs.contains(key)) {
+            return default
+        }
+        val legacy = legacyPrefs.getInt(key, default)
+        prefs.edit().putInt(key, legacy).apply()
+        removeLegacyKeys(key)
+        return legacy
+    }
+
+    private fun getLong(key: String, default: Long): Long {
+        if (prefs.contains(key)) {
+            return prefs.getLong(key, default)
+        }
+        if (!legacyPrefs.contains(key)) {
+            return default
+        }
+        val legacy = legacyPrefs.getLong(key, default)
+        prefs.edit().putLong(key, legacy).apply()
+        removeLegacyKeys(key)
+        return legacy
+    }
+
+    private fun getStringSet(key: String): Set<String> {
+        if (prefs.contains(key)) {
+            return prefs.getStringSet(key, emptySet()) ?: emptySet()
+        }
+        if (!legacyPrefs.contains(key)) {
+            return emptySet()
+        }
+        val legacy = LinkedHashSet(legacyPrefs.getStringSet(key, emptySet()) ?: emptySet())
+        prefs.edit().putStringSet(key, legacy).apply()
+        removeLegacyKeys(key)
+        return legacy
+    }
+
+    private fun removeLegacyKeys(vararg keys: String) {
+        val editor = legacyPrefs.edit()
+        var changed = false
+        for (key in keys) {
+            if (legacyPrefs.contains(key)) {
+                editor.remove(key)
+                changed = true
+            }
+        }
+        if (changed) {
+            editor.apply()
+        }
+    }
+
+    private fun removeKeysMatching(
+        preferences: SharedPreferences,
+        exactKeys: Set<String>,
+        prefixes: List<String>,
+    ) {
+        val editor = preferences.edit()
+        var changed = false
+        for (key in preferences.all.keys) {
+            if (key in exactKeys || prefixes.any(key::startsWith)) {
+                editor.remove(key)
+                changed = true
+            }
+        }
+        if (changed) {
+            editor.apply()
+        }
+    }
+
+    private fun deletePath(path: File) {
+        if (!path.exists()) {
+            return
+        }
+        if (path.isDirectory) {
+            path.listFiles()?.forEach(::deletePath)
+        }
+        path.delete()
     }
 }

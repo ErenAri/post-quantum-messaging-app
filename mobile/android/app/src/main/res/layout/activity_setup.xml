@@ -92,6 +92,40 @@
             android:hint="@string/hint_push_token"
             android:inputType="text" />
 
+        <EditText
+            android:id="@+id/editOnboardingPassphrase"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:hint="@string/hint_onboarding_passphrase"
+            android:inputType="textPassword" />
+
+        <Button
+            android:id="@+id/buttonPasteOnboardingPackage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/button_paste_onboarding_package" />
+
+        <Button
+            android:id="@+id/buttonImportOnboardingPackage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/button_import_onboarding_package" />
+
+        <EditText
+            android:id="@+id/editOnboardingPackage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="top|start"
+            android:hint="@string/hint_onboarding_package"
+            android:inputType="textMultiLine"
+            android:minLines="6"
+            android:scrollbars="vertical"
+            android:textIsSelectable="true" />
+
         <TextView
             android:id="@+id/textStepKeys"
             android:layout_width="match_parent"

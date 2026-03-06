@@ -21,6 +21,8 @@ const AUTH_TAG_SINCE = criticalType(0x3207);
 const AUTH_TAG_MESSAGE_BLOB = criticalType(0x3208);
 const AUTH_TAG_PREKEY_SPK_HASH = criticalType(0x3209);
 const AUTH_TAG_PREKEY_PQSPK_HASH = criticalType(0x320a);
+const AUTH_TAG_LINK_DEVICE_ID = criticalType(0x3212);
+const AUTH_TAG_REVOKE_DEVICE_ID = criticalType(0x3213);
 
 const SIG_TAG_PROTOCOL_VERSION = criticalType(0x0201);
 const SIG_TAG_LABEL = criticalType(0x0202);
@@ -198,6 +200,68 @@ export function buildInboxAuthHeaders(keys: GeneratedKeys, since: number): Reque
   records.push({
     ty: AUTH_TAG_SINCE,
     value: i64ToBeBytes(since)
+  });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildListDevicesAuthHeaders(keys: GeneratedKeys): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("devices-list", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({
+    ty: AUTH_TAG_RECIPIENT_ID,
+    value: utf8ToBytes(keys.userId)
+  });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildLinkDeviceAuthHeaders(
+  keys: GeneratedKeys,
+  newDeviceId: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("devices-link", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({
+    ty: AUTH_TAG_RECIPIENT_ID,
+    value: utf8ToBytes(keys.userId)
+  });
+  records.push({
+    ty: AUTH_TAG_LINK_DEVICE_ID,
+    value: utf8ToBytes(newDeviceId)
+  });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildRevokeDeviceAuthHeaders(
+  keys: GeneratedKeys,
+  targetDeviceId: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("devices-revoke", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({
+    ty: AUTH_TAG_RECIPIENT_ID,
+    value: utf8ToBytes(keys.userId)
+  });
+  records.push({
+    ty: AUTH_TAG_REVOKE_DEVICE_ID,
+    value: utf8ToBytes(targetDeviceId)
+  });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildRetireDeviceAuthHeaders(keys: GeneratedKeys): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("devices-retire", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({
+    ty: AUTH_TAG_RECIPIENT_ID,
+    value: utf8ToBytes(keys.userId)
+  });
+  records.push({
+    ty: AUTH_TAG_REVOKE_DEVICE_ID,
+    value: utf8ToBytes(keys.deviceId)
   });
   return signAuthHeaders(keys, timestamp, nonce, records);
 }

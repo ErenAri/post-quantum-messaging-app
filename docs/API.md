@@ -62,6 +62,7 @@ sequenceDiagram
 Server startup is controlled by environment variables:
 
 - `PQMSG_SECURITY_PROFILE`: `research` | `high_assurance` | `nss_aligned` (default: `high_assurance`)
+- `PQMSG_DEPLOYMENT_MODE`: `development` (default) | `pilot` | `production`
 - `PQMSG_DATABASE_URL`: `sqlite://...` or `postgres://...`
 - `PQMSG_TLS_CERT_PATH`: PEM certificate path
 - `PQMSG_TLS_KEY_PATH`: PEM private key path
@@ -88,7 +89,7 @@ Server startup is controlled by environment variables:
 - `PQMSG_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS`: optional minimum interval between prekey publishes per user/device
 - `PQMSG_PREKEY_BUNDLE_RESERVE_COUNT`: optional one-time prekey reserve floor per device before returning last-resort bundle mode
 
-In `high_assurance` and `nss_aligned`, server startup fails unless both TLS paths are provided.
+In `high_assurance` and `nss_aligned`, server startup fails unless both TLS paths are provided. In `pilot` and `production` deployment modes, startup also fails unless PostgreSQL, Redis-backed rate limiting, JSON logs, audit logging, and a PQ-enabled runtime are all active.
 
 ## 3. Identity and Prekey Security Semantics
 
@@ -172,7 +173,7 @@ Request:
 }
 ```
 
-When `registration_pow_bits > 0` (reported by `GET /health`), `pow_nonce` is mandatory and MUST satisfy the server proof-of-work predicate over the registration transcript.
+When `registration_pow_bits > 0` (reported by `GET /v1/capabilities`), `pow_nonce` is mandatory and MUST satisfy the server proof-of-work predicate over the registration transcript.
 
 Success response:
 
@@ -261,6 +262,21 @@ Response:
 }
 ```
 
+`POST /v1/users/{user_id}/devices/current/retire`
+
+Retires the authenticated current device, clears device-scoped relay, prekey, cursor, push-token, and presence state, and returns the remaining active device count.
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "retired_device_id": "alice-device-1",
+  "retired_at": "2026-03-04T12:15:00Z",
+  "remaining_active_devices": 1
+}
+```
+
 `POST /v1/users/{user_id}/devices/{target_device_id}/revoke`
 
 Response:
@@ -292,6 +308,16 @@ Device-revoke auth signature transcript fields:
 5. auth nonce,
 6. target user id,
 7. revoked device id.
+
+Current-device retire auth signature transcript fields:
+
+1. endpoint label (`devices-retire`),
+2. auth user id,
+3. auth device id,
+4. auth timestamp,
+5. auth nonce,
+6. target user id,
+7. revoked device id (the authenticated current device id).
 
 ### 4.3 Prekey Inventory Status
 
@@ -1060,6 +1086,7 @@ Response:
 {
   "status": "ok",
   "security_profile": "research",
+  "deployment_mode": "development",
   "db_backend": "sqlite",
   "db_ready": true,
   "db_pool_size": 1,
@@ -1067,14 +1094,64 @@ Response:
   "push_enabled": false,
   "push_providers": [],
   "audit_logger_enabled": false,
+  "tls_enabled": false,
   "rate_limiter_mode": "in_memory",
+  "replay_cache_mode": "in_memory",
+  "realtime_mode": "in_memory",
+  "supported_suite_ids": [1, 2],
+  "runtime_crypto_profile": {
+    "protocol_version": 1,
+    "suite_id": 1,
+    "kem": "MlKem768",
+    "dh": "X25519",
+    "kdf": "HkdfSha256",
+    "aead": "ChaCha20Poly1305",
+    "signature": "External",
+    "pq_oqs_enabled": true,
+    "fips_mode": false
+  },
+  "production_baseline_met": false,
   "registration_pow_bits": 0,
   "prekey_publish_min_interval_seconds": 0,
-  "prekey_bundle_reserve_count": 0
+  "prekey_bundle_reserve_count": 0,
+  "pq_ratchet_interval": 0
 }
 ```
 
-### 4.13 Prometheus Metrics
+### 4.13 Capabilities
+
+`GET /v1/capabilities`
+
+Response:
+
+```json
+{
+  "capability_schema_version": 1,
+  "security_profile": "high_assurance",
+  "deployment_mode": "pilot",
+  "tls_required": true,
+  "tls_enabled": true,
+  "supported_suite_ids": [1, 2],
+  "runtime_crypto_profile": {
+    "protocol_version": 1,
+    "suite_id": 1,
+    "kem": "MlKem768",
+    "dh": "X25519",
+    "kdf": "HkdfSha256",
+    "aead": "ChaCha20Poly1305",
+    "signature": "External",
+    "pq_oqs_enabled": true,
+    "fips_mode": false
+  },
+  "production_baseline_met": true,
+  "registration_pow_bits": 18,
+  "prekey_bundle_reserve_count": 2,
+  "pq_ratchet_interval": 4,
+  "web_client_policy": "demo_only"
+}
+```
+
+### 4.14 Prometheus Metrics
 
 `GET /metrics`
 
@@ -1086,7 +1163,7 @@ Returns Prometheus text exposition with:
 - `pqmsg_http_request_duration_seconds_count{method,path,status}`
 - `pqmsg_security_events_total{event}`
 
-### 4.14 Delivery/Read Receipts
+### 4.15 Delivery/Read Receipts
 
 #### `POST /v1/users/{user_id}/receipts`
 

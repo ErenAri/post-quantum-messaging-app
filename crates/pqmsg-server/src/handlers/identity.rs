@@ -286,57 +286,14 @@ pub(crate) async fn revoke_device(
 
     let revoked_at = Utc::now().to_rfc3339();
     let mut tx = state.pool.begin().await?;
-    let updated = sqlx::query(
-        "UPDATE user_devices
-         SET active = 0, revoked_at = $3
-         WHERE user_id = $1 AND device_id = $2 AND active = 1",
-    )
-    .bind(&user_id)
-    .bind(&target_device_id)
-    .bind(&revoked_at)
-    .execute(&mut *tx)
-    .await?;
+    let updated = retire_device_row(&mut tx, &user_id, &target_device_id, &revoked_at).await?;
     if updated.rows_affected() != 1 {
         return Err(AppError::conflict("target device is already revoked"));
     }
 
-    sqlx::query(
-        "UPDATE users
-         SET device_id = $1, updated_at = $2
-         WHERE user_id = $3 AND device_id = $4",
-    )
-    .bind(&auth.device_id)
-    .bind(&revoked_at)
-    .bind(&user_id)
-    .bind(&target_device_id)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query("DELETE FROM prekeys WHERE user_id = $1 AND device_id = $2")
-        .bind(&user_id)
-        .bind(&target_device_id)
-        .execute(&mut *tx)
+    update_user_primary_device_after_retire(&mut tx, &user_id, &target_device_id, &revoked_at)
         .await?;
-    sqlx::query("DELETE FROM one_time_prekeys_x25519 WHERE user_id = $1 AND device_id = $2")
-        .bind(&user_id)
-        .bind(&target_device_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("DELETE FROM one_time_prekeys_mlkem768 WHERE user_id = $1 AND device_id = $2")
-        .bind(&user_id)
-        .bind(&target_device_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("DELETE FROM push_tokens WHERE user_id = $1 AND device_id = $2")
-        .bind(&user_id)
-        .bind(&target_device_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("DELETE FROM inbox_cursors WHERE user_id = $1 AND device_id = $2")
-        .bind(&user_id)
-        .bind(&target_device_id)
-        .execute(&mut *tx)
-        .await?;
+    cleanup_retired_device_state(&mut tx, &user_id, &target_device_id).await?;
 
     tx.commit().await?;
 
@@ -354,4 +311,150 @@ pub(crate) async fn revoke_device(
         revoked_device_id: target_device_id,
         revoked_at,
     }))
+}
+
+pub(crate) async fn retire_current_device(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<RetireCurrentDeviceResponse>, AppError> {
+    check_rate_limit(&state, &format!("devices-retire:{user_id}"))?;
+    validate_id("user_id", &user_id)?;
+
+    let auth = parse_request_auth(&headers)?;
+    if auth.user_id != user_id {
+        return Err(AppError::bad_request("auth user_id mismatch"));
+    }
+    let auth_message = retire_current_device_auth_message(&auth, &user_id)?;
+    verify_request_auth(&state, &auth, &auth_message).await?;
+    ensure_user_exists(state.pool(), &user_id).await?;
+
+    let retired_at = Utc::now().to_rfc3339();
+    let mut tx = state.pool.begin().await?;
+    let updated = retire_device_row(&mut tx, &user_id, &auth.device_id, &retired_at).await?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::conflict("current device is already revoked"));
+    }
+
+    let remaining_active_devices =
+        update_user_primary_device_after_retire(&mut tx, &user_id, &auth.device_id, &retired_at)
+            .await?;
+    cleanup_retired_device_state(&mut tx, &user_id, &auth.device_id).await?;
+    tx.commit().await?;
+
+    record_security_event(
+        &state,
+        "device_self_retired",
+        "success",
+        None,
+        Some(&user_id),
+        Some(&auth.device_id),
+        None,
+    );
+    Ok(Json(RetireCurrentDeviceResponse {
+        user_id,
+        retired_device_id: auth.device_id,
+        retired_at,
+        remaining_active_devices,
+    }))
+}
+
+async fn retire_device_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    user_id: &str,
+    device_id: &str,
+    retired_at: &str,
+) -> Result<sqlx::any::AnyQueryResult, AppError> {
+    sqlx::query(
+        "UPDATE user_devices
+         SET active = 0, revoked_at = $3
+         WHERE user_id = $1 AND device_id = $2 AND active = 1",
+    )
+    .bind(user_id)
+    .bind(device_id)
+    .bind(retired_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+async fn update_user_primary_device_after_retire(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    user_id: &str,
+    retired_device_id: &str,
+    retired_at: &str,
+) -> Result<usize, AppError> {
+    let remaining_device_rows = sqlx::query(
+        "SELECT device_id
+         FROM user_devices
+         WHERE user_id = $1 AND active = 1
+         ORDER BY linked_at ASC, device_id ASC",
+    )
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let remaining_active_devices = remaining_device_rows.len();
+
+    sqlx::query(
+        "UPDATE users
+         SET updated_at = $1
+         WHERE user_id = $2",
+    )
+    .bind(retired_at)
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+
+    if let Some(primary_row) = remaining_device_rows.first() {
+        let replacement_device_id: String = primary_row.try_get("device_id")?;
+        sqlx::query(
+            "UPDATE users
+             SET device_id = $1
+             WHERE user_id = $2 AND device_id = $3",
+        )
+        .bind(&replacement_device_id)
+        .bind(user_id)
+        .bind(retired_device_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    Ok(remaining_active_devices)
+}
+
+async fn cleanup_retired_device_state(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    user_id: &str,
+    device_id: &str,
+) -> Result<(), AppError> {
+    for statement in [
+        "DELETE FROM prekeys WHERE user_id = $1 AND device_id = $2",
+        "DELETE FROM one_time_prekeys_x25519 WHERE user_id = $1 AND device_id = $2",
+        "DELETE FROM one_time_prekeys_mlkem768 WHERE user_id = $1 AND device_id = $2",
+        "DELETE FROM message_expiry_meta WHERE message_id IN (
+            SELECT message_id
+            FROM relay_messages
+            WHERE recipient_user_id = $1 AND recipient_device_id = $2
+         )",
+        "DELETE FROM message_expiry_meta WHERE message_id IN (
+            SELECT message_id
+            FROM sealed_relay_messages
+            WHERE recipient_user_id = $1 AND recipient_device_id = $2
+         )",
+        "DELETE FROM relay_messages WHERE recipient_user_id = $1 AND recipient_device_id = $2",
+        "DELETE FROM sealed_relay_messages WHERE recipient_user_id = $1 AND recipient_device_id = $2",
+        "DELETE FROM push_tokens WHERE user_id = $1 AND device_id = $2",
+        "DELETE FROM inbox_cursors WHERE user_id = $1 AND device_id = $2",
+        "DELETE FROM sealed_inbox_cursors WHERE user_id = $1 AND device_id = $2",
+        "DELETE FROM message_receipts WHERE recipient_user_id = $1 AND recipient_device_id = $2",
+        "DELETE FROM presence_state WHERE user_id = $1 AND device_id = $2",
+        "DELETE FROM typing_state WHERE sender_user_id = $1 AND sender_device_id = $2",
+    ] {
+        sqlx::query(statement)
+            .bind(user_id)
+            .bind(device_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
 }

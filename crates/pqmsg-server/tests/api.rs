@@ -734,6 +734,36 @@ fn revoke_device_auth_headers(
     ]
 }
 
+fn retire_device_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "devices-retire-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("devices-retire", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_REVOKE_DEVICE_ID,
+        value: device_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("devices-retire auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
 fn normalize_message_ids(message_ids: &[i64]) -> Vec<i64> {
     let mut ids = message_ids.to_vec();
     ids.sort_unstable();
@@ -1826,11 +1856,49 @@ async fn health_reports_security_profile() {
     assert!(request_id.is_some());
     assert_eq!(body["status"].as_str(), Some("ok"));
     assert_eq!(body["security_profile"].as_str(), Some("research"));
+    assert_eq!(body["deployment_mode"].as_str(), Some("development"));
     assert_eq!(body["db_backend"].as_str(), Some("sqlite"));
     assert_eq!(body["db_ready"].as_bool(), Some(true));
     assert_eq!(body["push_enabled"].as_bool(), Some(false));
     assert_eq!(body["audit_logger_enabled"].as_bool(), Some(false));
+    assert_eq!(body["tls_enabled"].as_bool(), Some(false));
     assert_eq!(body["rate_limiter_mode"].as_str(), Some("in_memory"));
+    assert_eq!(body["replay_cache_mode"].as_str(), Some("in_memory"));
+    assert_eq!(body["realtime_mode"].as_str(), Some("in_memory"));
+    assert_eq!(body["production_baseline_met"].as_bool(), Some(false));
+    assert_eq!(
+        body["runtime_crypto_profile"]["protocol_version"].as_u64(),
+        Some(PROTOCOL_VERSION_V1 as u64)
+    );
+    assert!(body["supported_suite_ids"]
+        .as_array()
+        .is_some_and(|suite_ids| !suite_ids.is_empty()));
+}
+
+#[tokio::test]
+async fn capabilities_reports_client_contract() {
+    let app = test_app_with_profile(SecurityProfile::HighAssurance).await;
+    let (status, headers, body) =
+        json_request_with_headers_raw(app, Method::GET, "/v1/capabilities", json!({}), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok());
+    assert!(request_id.is_some());
+    assert_eq!(body["capability_schema_version"].as_u64(), Some(1));
+    assert_eq!(body["security_profile"].as_str(), Some("high_assurance"));
+    assert_eq!(body["deployment_mode"].as_str(), Some("development"));
+    assert_eq!(body["tls_required"].as_bool(), Some(true));
+    assert_eq!(body["tls_enabled"].as_bool(), Some(false));
+    assert_eq!(body["production_baseline_met"].as_bool(), Some(false));
+    assert_eq!(body["web_client_policy"].as_str(), Some("demo_only"));
+    assert_eq!(
+        body["runtime_crypto_profile"]["protocol_version"].as_u64(),
+        Some(PROTOCOL_VERSION_V1 as u64)
+    );
+    assert!(body["supported_suite_ids"]
+        .as_array()
+        .is_some_and(|suite_ids| !suite_ids.is_empty()));
 }
 
 #[tokio::test]
@@ -2027,6 +2095,205 @@ async fn identity_rotation_happy_path_and_log() {
     assert_eq!(events[0]["event_type"].as_str(), Some("rotation"));
     assert_eq!(events[1]["version"].as_u64(), Some(1));
     assert_eq!(events[1]["event_type"].as_str(), Some("initial"));
+}
+
+#[tokio::test]
+async fn current_device_retire_clears_device_scoped_server_state() {
+    let app = test_app().await;
+    let alice_sig = signing_key(201);
+    let bob_sig = signing_key(202);
+
+    for (user_id, device_id, identity_bytes, signing_key) in [
+        ("alice", "alice-dev-1", [1u8; 32], &alice_sig),
+        ("bob", "bob-dev-1", [2u8; 32], &bob_sig),
+    ] {
+        let registration = register_payload(user_id, device_id, identity_bytes, signing_key);
+        let (status_register, _) = json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/users/register",
+            registration,
+        )
+        .await;
+        assert_eq!(status_register, StatusCode::OK);
+    }
+
+    let publish = publish_prekeys_payload(
+        &bob_sig,
+        [11u8; 32],
+        vec![12u8; 64],
+        vec![[13u8; 32]],
+        vec![vec![14u8; 64]],
+    );
+    let publish_auth = prekeys_auth_headers(&bob_sig, "bob", "bob-dev-1", &publish);
+    let (status_prekeys, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/prekeys",
+        publish,
+        &publish_auth,
+    )
+    .await;
+    assert_eq!(status_prekeys, StatusCode::OK);
+
+    let push_auth = push_token_auth_headers(&bob_sig, "bob", "bob-dev-1", "push-token-bob");
+    let (status_push, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/push-token",
+        json!({
+            "device_id": "bob-dev-1",
+            "provider": "fcm",
+            "token": "push-token-bob",
+            "fcm_token": null
+        }),
+        &push_auth,
+    )
+    .await;
+    assert_eq!(status_push, StatusCode::OK);
+
+    let relay_blob = b"retire-test-relay".to_vec();
+    let relay_auth = relay_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob", &relay_blob);
+    let (status_relay, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob",
+        json!({
+            "sender_user_id": "alice",
+            "device_id": "alice-dev-1",
+            "message_bytes_base64": B64.encode(&relay_blob)
+        }),
+        &relay_auth,
+    )
+    .await;
+    assert_eq!(status_relay, StatusCode::OK);
+
+    let sealed_blob = b"retire-test-sealed".to_vec();
+    let (status_sealed_relay, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/sealed-relay/bob",
+        json!({
+            "message_bytes_base64": B64.encode(&sealed_blob)
+        }),
+    )
+    .await;
+    assert_eq!(status_sealed_relay, StatusCode::OK);
+
+    let inbox_headers = inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0);
+    let (status_inbox, inbox_body) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/inbox/bob?since=0",
+        json!({}),
+        &inbox_headers,
+    )
+    .await;
+    assert_eq!(status_inbox, StatusCode::OK);
+    assert_eq!(
+        inbox_body["messages"].as_array().map(|items| items.len()),
+        Some(1)
+    );
+
+    let sealed_inbox_headers = sealed_inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0);
+    let (status_sealed_inbox, sealed_inbox_body) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/sealed-inbox/bob?since=0",
+        json!({}),
+        &sealed_inbox_headers,
+    )
+    .await;
+    assert_eq!(status_sealed_inbox, StatusCode::OK);
+    assert_eq!(
+        sealed_inbox_body["messages"]
+            .as_array()
+            .map(|items| items.len()),
+        Some(1)
+    );
+
+    let retire_headers = retire_device_auth_headers(&bob_sig, "bob", "bob-dev-1");
+    let (status_retire, retire_body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/devices/current/retire",
+        json!({}),
+        &retire_headers,
+    )
+    .await;
+    assert_eq!(status_retire, StatusCode::OK);
+    assert_eq!(retire_body["retired_device_id"].as_str(), Some("bob-dev-1"));
+    assert_eq!(retire_body["remaining_active_devices"].as_u64(), Some(0));
+
+    let (status_bundle_after_retire, _) =
+        json_request(app.clone(), Method::GET, "/v1/users/bob/bundle", json!({})).await;
+    assert_eq!(status_bundle_after_retire, StatusCode::NOT_FOUND);
+
+    let (status_inbox_after_retire, _) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/inbox/bob?since=0",
+        json!({}),
+        &inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0),
+    )
+    .await;
+    assert_eq!(status_inbox_after_retire, StatusCode::BAD_REQUEST);
+
+    let re_register = register_payload("bob", "bob-dev-1", [2u8; 32], &bob_sig);
+    let (status_re_register, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", re_register).await;
+    assert_eq!(status_re_register, StatusCode::OK);
+
+    let publish_after_retire = publish_prekeys_payload(
+        &bob_sig,
+        [21u8; 32],
+        vec![22u8; 64],
+        vec![[23u8; 32]],
+        vec![vec![24u8; 64]],
+    );
+    let publish_after_retire_auth =
+        prekeys_auth_headers(&bob_sig, "bob", "bob-dev-1", &publish_after_retire);
+    let (status_publish_after_retire, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/prekeys",
+        publish_after_retire,
+        &publish_after_retire_auth,
+    )
+    .await;
+    assert_eq!(status_publish_after_retire, StatusCode::OK);
+
+    let (status_inbox_after_reactivate, inbox_after_reactivate_body) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/inbox/bob?since=0",
+        json!({}),
+        &inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0),
+    )
+    .await;
+    assert_eq!(status_inbox_after_reactivate, StatusCode::OK);
+    assert_eq!(
+        inbox_after_reactivate_body["messages"]
+            .as_array()
+            .map(|items| items.len()),
+        Some(0)
+    );
+
+    let (status_sealed_after_reactivate, sealed_after_reactivate_body) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/sealed-inbox/bob?since=0",
+        json!({}),
+        &sealed_inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0),
+    )
+    .await;
+    assert_eq!(status_sealed_after_reactivate, StatusCode::OK);
+    assert_eq!(
+        sealed_after_reactivate_body["messages"]
+            .as_array()
+            .map(|items| items.len()),
+        Some(0)
+    );
 }
 
 #[tokio::test]

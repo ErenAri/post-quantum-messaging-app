@@ -1,8 +1,11 @@
 import SwiftUI
+import UIKit
 
 struct SecurityView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var pushManager: PushManager
+    @State private var confirmingReset = false
+    @State private var onboardingPassphrase = ""
 
     var body: some View {
         NavigationStack {
@@ -18,6 +21,8 @@ struct SecurityView: View {
 
                 Section("Transport") {
                     Text(transportLine())
+                        .font(.caption)
+                    Text("Server capabilities: \(appState.serverCapabilitiesSummary)")
                         .font(.caption)
                 }
 
@@ -54,12 +59,110 @@ struct SecurityView: View {
                     }
                 }
 
+                Section("Secondary Device Onboarding") {
+                    TextField("Managed Device ID", text: $appState.managedDeviceId)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Package Passphrase", text: $onboardingPassphrase)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button("Prepare Package") {
+                        Task {
+                            await appState.prepareSecondaryDeviceOnboarding(passphrase: onboardingPassphrase)
+                            if appState.errorLine.isEmpty {
+                                onboardingPassphrase = ""
+                            }
+                        }
+                    }
+                    .disabled(
+                        appState.managedDeviceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                        onboardingPassphrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
+                    if let prepared = appState.preparedOnboardingPackage {
+                        HStack {
+                            Button("Copy Package") {
+                                UIPasteboard.general.string = prepared.packageText
+                                appState.statusLine = "Copied onboarding package for \(prepared.deviceId)"
+                            }
+                            Spacer()
+                            Text(prepared.deviceId)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text("Prepared for \(prepared.userId) at \(prepared.linkedAt)")
+                            .font(.caption)
+                        TextEditor(text: .constant(prepared.packageText))
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .frame(minHeight: 200)
+                    } else {
+                        Text("Link a target device id and seal a portable onboarding package for the secondary device.")
+                            .font(.caption)
+                    }
+                }
+
+                Section("Devices") {
+                    Text(appState.managedDeviceId.isEmpty ? "Set a managed device id above." : "Managed device target: \(appState.managedDeviceId)")
+                        .font(.caption)
+                    HStack {
+                        Button("List Devices") {
+                            Task { await appState.listDevices() }
+                        }
+                        Button("Link Device") {
+                            Task { await appState.linkManagedDevice() }
+                        }
+                    }
+                    Button("Revoke Device", role: .destructive) {
+                        Task { await appState.revokeManagedDevice() }
+                    }
+                    if appState.linkedDevices.isEmpty {
+                        Text("No linked-device snapshot loaded.")
+                            .font(.caption)
+                    } else {
+                        ForEach(appState.linkedDevices) { device in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(device.device_id)
+                                    .font(.headline)
+                                Text(device.active ? "active" : "revoked at \(device.revoked_at ?? "unknown")")
+                                    .font(.caption2)
+                                Text("linked \(device.linked_at)")
+                                    .font(.caption2)
+                            }
+                        }
+                    }
+                }
+
                 Section("Local Security State") {
                     Text("Conversations: \(appState.conversations.count)")
                     Text("Sessions: \(LocalStateStore.shared.countSessions(userId: appState.setup.userId, peers: appState.conversations))")
                 }
+
+                Section("Reset") {
+                    Button("Reset Local State", role: .destructive) {
+                        confirmingReset = true
+                    }
+                    .disabled(appState.setup.userId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Text("Retires the current device on the server when keys are still present, then deletes local keys, sessions, pins, cursors, and conversation metadata.")
+                        .font(.caption)
+                }
             }
             .navigationTitle("Security")
+            .confirmationDialog(
+                "Reset local state?",
+                isPresented: $confirmingReset,
+                titleVisibility: .visible
+            ) {
+                Button("Reset Local State", role: .destructive) {
+                    Task {
+                        if await appState.resetLocalState() {
+                            pushManager.clearStoredToken()
+                        }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This retires the current device on the server when possible, then removes local identity material and metadata for \(appState.setup.userId).")
+            }
         }
     }
 

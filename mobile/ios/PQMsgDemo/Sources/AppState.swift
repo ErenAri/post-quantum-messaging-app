@@ -11,7 +11,11 @@ final class AppState: ObservableObject {
     @Published var chatLog: [String]
     @Published var draftMessage: String
     @Published var cryptoProfile: String
+    @Published var serverCapabilitiesSummary: String
     @Published var pinnedIdentities: [IdentityPinRecord]
+    @Published var managedDeviceId: String
+    @Published var linkedDevices: [DeviceRecord]
+    @Published var preparedOnboardingPackage: OnboardingPackageRecord?
 
     private let store: LocalStateStore
     private var latestBundleByPeer: [String: BundleResponse]
@@ -28,7 +32,11 @@ final class AppState: ObservableObject {
         self.chatLog = []
         self.draftMessage = ""
         self.cryptoProfile = ""
+        self.serverCapabilitiesSummary = "Not checked"
         self.pinnedIdentities = store.listIdentityPins(userId: loadedSetup.userId)
+        self.managedDeviceId = AppState.defaultManagedDeviceId(for: loadedSetup.userId)
+        self.linkedDevices = []
+        self.preparedOnboardingPackage = nil
         self.latestBundleByPeer = [:]
         refreshSecuritySnapshot()
     }
@@ -40,6 +48,9 @@ final class AppState: ObservableObject {
             setup.deviceId = "\(userId)-ios-1"
         }
         progress = store.loadProgress(userId: setup.userId)
+        managedDeviceId = Self.defaultManagedDeviceId(for: setup.userId)
+        linkedDevices = []
+        preparedOnboardingPackage = nil
         persistSetup()
         refreshConversations()
         clearError()
@@ -47,12 +58,18 @@ final class AppState: ObservableObject {
 
     func setServerURL(_ value: String) {
         setup.serverURL = value
+        serverCapabilitiesSummary = "Not checked"
+        linkedDevices = []
+        preparedOnboardingPackage = nil
         persistSetup()
     }
 
     func setUserId(_ value: String) {
         setup.userId = value
         progress = store.loadProgress(userId: value)
+        managedDeviceId = Self.defaultManagedDeviceId(for: value)
+        linkedDevices = []
+        preparedOnboardingPackage = nil
         refreshConversations()
         persistSetup()
     }
@@ -103,6 +120,8 @@ final class AppState: ObservableObject {
             let keys = try requireKeys(user)
             let payload = try buildRegisterPayload(keysJson: keys)
             let api = try ApiClient(serverURL: setup.serverURL)
+            let capabilities = try await api.getCapabilities()
+            try validateServerCapabilities(capabilities)
             _ = try await api.registerUser(
                 RegisterUserRequest(
                     user_id: payload.userId,
@@ -125,6 +144,8 @@ final class AppState: ObservableObject {
             let payload = try buildPublishPrekeysPayload(keysJson: keys)
             let authHeaders = try buildPrekeysAuthHeaders(keysJson: keys, userId: user).toHeaderMap()
             let api = try ApiClient(serverURL: setup.serverURL)
+            let capabilities = try await api.getCapabilities()
+            try validateServerCapabilities(capabilities)
             _ = try await api.publishPrekeys(
                 userId: user,
                 requestBody: PublishPrekeysRequest(
@@ -150,7 +171,8 @@ final class AppState: ObservableObject {
             let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
             let keys = try requireKeys(user)
             let api = try ApiClient(serverURL: setup.serverURL)
-            try await api.pingRoot()
+            let capabilities = try await api.getCapabilities()
+            try validateServerCapabilities(capabilities)
             let since = store.readCursor(userId: user)
             let inboxHeaders = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: since).toHeaderMap()
             _ = try await api.inbox(userId: user, since: since, headers: inboxHeaders)
@@ -170,6 +192,7 @@ final class AppState: ObservableObject {
             }
             progress = progress.afterServerVerified()
             store.saveProgress(userId: user, progress: progress)
+            serverCapabilitiesSummary = capabilitySummary(capabilities)
             statusLine = "Server verification completed for \(user)"
             clearError()
         }
@@ -329,6 +352,275 @@ final class AppState: ObservableObject {
         conversations = store.listConversations(userId: setup.userId)
     }
 
+    func listDevices() async {
+        await runSecurityAction("List devices") {
+            let context = try await deviceManagementContext()
+            let response = try await fetchDeviceSnapshot(context: context)
+            statusLine = "Loaded \(response.devices.count) device record(s) for \(response.user_id)"
+            clearError()
+        }
+    }
+
+    func linkManagedDevice() async {
+        await runSecurityAction("Link device") {
+            let target = managedDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !target.isEmpty else {
+                throw RustBridgeError.missingKeys("managed device id is empty")
+            }
+            let context = try await deviceManagementContext()
+            guard target != context.profile.deviceId else {
+                throw ApiClientError.transportPolicy("managed device id must differ from the authenticated device id")
+            }
+            let headers = try buildLinkDeviceAuthHeaders(
+                keysJson: context.keysJson,
+                userId: context.userId,
+                newDeviceId: target
+            ).toHeaderMap()
+            let response = try await context.api.linkDevice(
+                userId: context.userId,
+                newDeviceId: target,
+                headers: headers
+            )
+            guard response.user_id == context.userId else {
+                throw ApiClientError.requestFailed(-1, "link response user mismatch")
+            }
+            guard response.linked_device_id == target else {
+                throw ApiClientError.requestFailed(-1, "link response device mismatch")
+            }
+            _ = try await fetchDeviceSnapshot(context: context)
+            statusLine = "Linked device \(response.linked_device_id) for \(response.user_id)"
+            clearError()
+        }
+    }
+
+    func prepareSecondaryDeviceOnboarding(passphrase: String) async {
+        preparedOnboardingPackage = nil
+        await runSecurityAction("Prepare secondary onboarding") {
+            let target = managedDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !target.isEmpty else {
+                throw RustBridgeError.missingKeys("managed device id is empty")
+            }
+            guard !passphrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw RustBridgeError.missingKeys("onboarding passphrase is empty")
+            }
+
+            let context = try await deviceManagementContext()
+            guard target != context.profile.deviceId else {
+                throw ApiClientError.transportPolicy("managed device id must differ from the authenticated device id")
+            }
+
+            let headers = try buildLinkDeviceAuthHeaders(
+                keysJson: context.keysJson,
+                userId: context.userId,
+                newDeviceId: target
+            ).toHeaderMap()
+            let response = try await context.api.linkDevice(
+                userId: context.userId,
+                newDeviceId: target,
+                headers: headers
+            )
+            guard response.user_id == context.userId else {
+                throw ApiClientError.requestFailed(-1, "link response user mismatch")
+            }
+            guard response.linked_device_id == target else {
+                throw ApiClientError.requestFailed(-1, "link response device mismatch")
+            }
+
+            let prepared = try prepareSecondaryDeviceOnboardingPackage(
+                keysJson: context.keysJson,
+                newDeviceId: target,
+                passphrase: passphrase,
+                oneTimeCount: 16
+            )
+            guard prepared.userId == context.userId else {
+                throw ApiClientError.requestFailed(-1, "prepared onboarding package user mismatch")
+            }
+            guard prepared.deviceId == target else {
+                throw ApiClientError.requestFailed(-1, "prepared onboarding package device mismatch")
+            }
+            _ = try await fetchDeviceSnapshot(context: context)
+            preparedOnboardingPackage = OnboardingPackageRecord(
+                userId: prepared.userId,
+                deviceId: prepared.deviceId,
+                linkedAt: response.linked_at,
+                packageText: prepared.packageJson
+            )
+            statusLine = "Prepared onboarding package for \(prepared.deviceId)"
+            clearError()
+        }
+    }
+
+    func revokeManagedDevice() async {
+        await runSecurityAction("Revoke device") {
+            let target = managedDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !target.isEmpty else {
+                throw RustBridgeError.missingKeys("managed device id is empty")
+            }
+            let context = try await deviceManagementContext()
+            guard target != context.profile.deviceId else {
+                throw ApiClientError.transportPolicy("managed device id matches the current device; use Reset Local State for self-retirement")
+            }
+            let headers = try buildRevokeDeviceAuthHeaders(
+                keysJson: context.keysJson,
+                userId: context.userId,
+                targetDeviceId: target
+            ).toHeaderMap()
+            let response = try await context.api.revokeDevice(
+                userId: context.userId,
+                targetDeviceId: target,
+                headers: headers
+            )
+            guard response.user_id == context.userId else {
+                throw ApiClientError.requestFailed(-1, "revoke response user mismatch")
+            }
+            guard response.revoked_device_id == target else {
+                throw ApiClientError.requestFailed(-1, "revoke response device mismatch")
+            }
+            _ = try await fetchDeviceSnapshot(context: context)
+            statusLine = "Revoked device \(response.revoked_device_id) for \(response.user_id)"
+            clearError()
+        }
+    }
+
+    func importLinkedDeviceOnboarding(packageText: String, passphrase: String) async {
+        await runSetupAction("Import linked device package") {
+            let normalizedPackage = packageText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedPackage.isEmpty else {
+                throw RustBridgeError.missingKeys("onboarding package is empty")
+            }
+            guard !passphrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw RustBridgeError.missingKeys("onboarding passphrase is empty")
+            }
+
+            let opened = try openSecondaryDeviceOnboardingPackage(
+                packageJson: normalizedPackage,
+                passphrase: passphrase
+            )
+            let user = opened.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let device = opened.deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !user.isEmpty else {
+                throw RustBridgeError.missingKeys("onboarding package user id is empty")
+            }
+            guard !device.isEmpty else {
+                throw RustBridgeError.missingKeys("onboarding package device id is empty")
+            }
+
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let capabilities = try await api.getCapabilities()
+            try validateServerCapabilities(capabilities)
+
+            try store.writeKeys(userId: user, keysJson: opened.keysJson)
+            setup.userId = user
+            setup.deviceId = device
+            setup.suiteLabel = suiteLabel(for: opened.suite)
+            if setup.peerUserId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                setup.peerUserId = SetupConfig.default.peerUserId
+            }
+
+            let importedProgress = SetupProgress.default.afterKeysGenerated().afterUserRegistered()
+            progress = importedProgress
+            store.saveProgress(userId: user, progress: importedProgress)
+            persistSetup()
+
+            let payload = try buildPublishPrekeysPayload(keysJson: opened.keysJson)
+            let headers = try buildPrekeysAuthHeaders(keysJson: opened.keysJson, userId: user).toHeaderMap()
+            let publishResponse = try await api.publishPrekeys(
+                userId: user,
+                requestBody: PublishPrekeysRequest(
+                    signed_prekey_x25519_pub: payload.signedPrekeyX25519Pub,
+                    sig_over_spk: payload.sigOverSpk,
+                    pq_signed_prekey_pub_mlkem768: payload.pqSignedPrekeyPubMlkem768,
+                    sig_over_pqspk: payload.sigOverPqspk,
+                    one_time_prekeys_x25519: payload.oneTimePrekeysX25519,
+                    one_time_prekeys_mlkem768: payload.oneTimePrekeysMlkem768
+                ),
+                headers: headers
+            )
+            guard publishResponse.user_id == user else {
+                throw ApiClientError.requestFailed(-1, "publish response user mismatch")
+            }
+            guard publishResponse.device_id == device else {
+                throw ApiClientError.requestFailed(-1, "publish response device mismatch")
+            }
+
+            let deviceHeaders = try buildListDevicesAuthHeaders(keysJson: opened.keysJson, userId: user).toHeaderMap()
+            let snapshot = try await api.listDevices(userId: user, headers: deviceHeaders)
+            guard snapshot.user_id == user else {
+                throw ApiClientError.requestFailed(-1, "device list response user mismatch")
+            }
+
+            progress = importedProgress.adoptLinkedDevice()
+            store.saveProgress(userId: user, progress: progress)
+            serverCapabilitiesSummary = capabilitySummary(capabilities)
+            linkedDevices = snapshot.devices
+            managedDeviceId = Self.defaultManagedDeviceId(for: user)
+            preparedOnboardingPackage = nil
+            latestBundleByPeer = [:]
+            conversations = store.listConversations(userId: user)
+            pinnedIdentities = store.listIdentityPins(userId: user)
+            selectedPeer = setup.peerUserId
+            refreshSecuritySnapshot()
+            statusLine = "Imported linked device \(device) for \(user)"
+            clearError()
+        }
+    }
+
+    func resetLocalState() async -> Bool {
+        let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !user.isEmpty else {
+            errorLine = "user id is empty"
+            return false
+        }
+        do {
+            var retiredRemotely = false
+            if let keys = store.readKeys(userId: user),
+               !keys.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let profile = try loadUserProfile(keysJson: keys)
+                guard profile.userId == user else {
+                    throw RustBridgeError.missingKeys(
+                        "user mismatch: current input '\(user)' vs stored keys '\(profile.userId)'"
+                    )
+                }
+                let api = try ApiClient(serverURL: setup.serverURL)
+                let capabilities = try await api.getCapabilities()
+                try validateServerCapabilities(capabilities)
+                let headers = try buildRetireDeviceAuthHeaders(keysJson: keys, userId: user).toHeaderMap()
+                let response = try await api.retireCurrentDevice(userId: user, headers: headers)
+                guard response.user_id == user else {
+                    throw ApiClientError.requestFailed(-1, "retire response user mismatch")
+                }
+                guard response.retired_device_id == profile.deviceId else {
+                    throw ApiClientError.requestFailed(-1, "retire response device mismatch")
+                }
+                serverCapabilitiesSummary = capabilitySummary(capabilities)
+                retiredRemotely = true
+            }
+            store.wipeUserState(userId: user)
+            setup = store.loadSetup()
+            progress = store.loadProgress(userId: setup.userId)
+            conversations = store.listConversations(userId: setup.userId)
+            pinnedIdentities = store.listIdentityPins(userId: setup.userId)
+            selectedPeer = setup.peerUserId
+            chatLog = []
+            draftMessage = ""
+            latestBundleByPeer = [:]
+            serverCapabilitiesSummary = "Not checked"
+            linkedDevices = []
+            preparedOnboardingPackage = nil
+            managedDeviceId = Self.defaultManagedDeviceId(for: setup.userId)
+            statusLine = retiredRemotely
+                ? "Retired current device and cleared local state for \(user)"
+                : "Cleared local state for \(user)"
+            clearError()
+            refreshSecuritySnapshot()
+            return true
+        } catch {
+            errorLine = "Reset local state failed: \(error.localizedDescription)"
+            statusLine = "Reset local state failed"
+            return false
+        }
+    }
+
     private func persistSetup() {
         store.saveSetup(setup)
     }
@@ -346,6 +638,51 @@ final class AppState: ObservableObject {
             return .kyber768
         }
         return .mlKem768
+    }
+
+    private func suiteLabel(for suite: Suite) -> String {
+        switch suite {
+        case .kyber768:
+            return "kyber768"
+        case .mlKem768:
+            return "ml-kem-768"
+        }
+    }
+
+    private func suiteIdForSetup() -> Int {
+        setup.suiteLabel.lowercased() == "kyber768" ? 2 : 1
+    }
+
+    private func validateServerCapabilities(_ capabilities: ServerCapabilitiesResponse) throws {
+        guard capabilities.capability_schema_version == 1 else {
+            throw ApiClientError.transportPolicy(
+                "Unsupported server capability schema \(capabilities.capability_schema_version)"
+            )
+        }
+        guard capabilities.supported_suite_ids.contains(suiteIdForSetup()) else {
+            throw ApiClientError.transportPolicy(
+                "Server does not support suite '\(setup.suiteLabel)'"
+            )
+        }
+        guard !capabilities.tls_required || capabilities.tls_enabled else {
+            throw ApiClientError.transportPolicy(
+                "Server requires TLS but is not advertising an active TLS transport"
+            )
+        }
+        guard capabilities.security_profile == "research" || capabilities.runtime_crypto_profile.pq_oqs_enabled else {
+            throw ApiClientError.transportPolicy(
+                "Server is not running a PQ-enabled crypto backend"
+            )
+        }
+        guard capabilities.deployment_mode == "development" || capabilities.production_baseline_met else {
+            throw ApiClientError.transportPolicy(
+                "Server '\(capabilities.deployment_mode)' deployment is missing its production baseline"
+            )
+        }
+    }
+
+    private func capabilitySummary(_ capabilities: ServerCapabilitiesResponse) -> String {
+        "\(capabilities.security_profile) / \(capabilities.deployment_mode) / suite \(capabilities.runtime_crypto_profile.suite_id)"
     }
 
     private func requireKeys(_ userId: String) throws -> String {
@@ -386,6 +723,52 @@ final class AppState: ObservableObject {
         chatLog.append(line)
     }
 
+    private func deviceManagementContext() async throws -> (
+        userId: String,
+        keysJson: String,
+        profile: UserProfile,
+        api: ApiClient,
+        capabilities: ServerCapabilitiesResponse
+    ) {
+        let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !user.isEmpty else {
+            throw RustBridgeError.missingKeys("user id is empty")
+        }
+        let keys = try requireKeys(user)
+        let profile = try loadUserProfile(keysJson: keys)
+        guard profile.userId == user else {
+            throw RustBridgeError.missingKeys(
+                "user mismatch: current input '\(user)' vs stored keys '\(profile.userId)'"
+            )
+        }
+        let api = try ApiClient(serverURL: setup.serverURL)
+        let capabilities = try await api.getCapabilities()
+        try validateServerCapabilities(capabilities)
+        return (user, keys, profile, api, capabilities)
+    }
+
+    private func fetchDeviceSnapshot(
+        context: (
+            userId: String,
+            keysJson: String,
+            profile: UserProfile,
+            api: ApiClient,
+            capabilities: ServerCapabilitiesResponse
+        )
+    ) async throws -> DeviceListResponse {
+        let headers = try buildListDevicesAuthHeaders(
+            keysJson: context.keysJson,
+            userId: context.userId
+        ).toHeaderMap()
+        let response = try await context.api.listDevices(userId: context.userId, headers: headers)
+        guard response.user_id == context.userId else {
+            throw ApiClientError.requestFailed(-1, "device list response user mismatch")
+        }
+        linkedDevices = response.devices
+        serverCapabilitiesSummary = capabilitySummary(context.capabilities)
+        return response
+    }
+
     private func runSetupAction(_ label: String, action: @escaping () async throws -> Void) async {
         do {
             try await action()
@@ -404,7 +787,24 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func runSecurityAction(_ label: String, action: @escaping () async throws -> Void) async {
+        do {
+            try await action()
+        } catch {
+            errorLine = "\(label) failed: \(error.localizedDescription)"
+            statusLine = "\(label) failed"
+        }
+    }
+
     private func clearError() {
         errorLine = ""
+    }
+
+    private static func defaultManagedDeviceId(for userId: String) -> String {
+        let trimmed = userId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return ""
+        }
+        return "\(trimmed)-device-2"
     }
 }

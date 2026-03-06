@@ -79,6 +79,14 @@ export async function loadKeys(
   return openJsonWithPassphrase<GeneratedKeys>(sealed, passphrase);
 }
 
+export function hasLocalKeys(userId: string): boolean {
+  const normalized = userId.trim();
+  if (!normalized) {
+    return false;
+  }
+  return localStorage.getItem(`${KEYS_PREFIX}${normalized}`) !== null;
+}
+
 type ConversationRow = ConversationSummary & { userId: string };
 
 export function loadConversations(userId: string): ConversationSummary[] {
@@ -187,6 +195,29 @@ export function listIdentityPins(userId: string): Array<{ peerUserId: string; pi
     .sort((lhs, rhs) => lhs.peerUserId.localeCompare(rhs.peerUserId));
 }
 
+export function wipeLocalState(userId: string): void {
+  const normalizedUser = userId.trim();
+  if (!normalizedUser) {
+    return;
+  }
+
+  localStorage.removeItem(`${KEYS_PREFIX}${normalizedUser}`);
+
+  const conversations = parseRecord<ConversationRow[]>(CONVERSATIONS_KEY, []).filter(
+    (item) => item.userId !== normalizedUser
+  );
+  writeRecord(CONVERSATIONS_KEY, conversations);
+
+  const pins = parseRecord<PinRow[]>(PINS_KEY, []).filter((item) => item.userId !== normalizedUser);
+  writeRecord(PINS_KEY, pins);
+
+  const cursors = parseRecord<Record<string, number>>(CURSORS_KEY, {});
+  if (normalizedUser in cursors) {
+    delete cursors[normalizedUser];
+    writeRecord(CURSORS_KEY, cursors);
+  }
+}
+
 function parseRecord<T>(key: string, fallback: T): T {
   const raw = localStorage.getItem(key);
   if (!raw) {
@@ -197,4 +228,16 @@ function parseRecord<T>(key: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function writeRecord<T>(key: string, value: T): void {
+  if (Array.isArray(value) && value.length === 0) {
+    localStorage.removeItem(key);
+    return;
+  }
+  if (typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length === 0) {
+    localStorage.removeItem(key);
+    return;
+  }
+  localStorage.setItem(key, JSON.stringify(value));
 }

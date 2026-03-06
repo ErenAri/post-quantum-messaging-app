@@ -131,12 +131,13 @@ Requirements:
 1. Use TLS certificates and set `PQMSG_TLS_CERT_PATH` and `PQMSG_TLS_KEY_PATH`.
 2. Use PostgreSQL for production (`PQMSG_DATABASE_URL=postgres://...`).
 3. Configure distributed rate limiting (`PQMSG_RATE_LIMIT_REDIS_URL=redis://...`).
-4. Set `PQMSG_LOG_FORMAT=json` and `PQMSG_AUDIT_LOG_PATH` for audit retention.
-5. Keep `PQMSG_SECURITY_PROFILE=high_assurance` or `nss_aligned`.
-6. Configure push provider credentials:
+4. Set `PQMSG_DEPLOYMENT_MODE=pilot` (or `production`) to enable fail-closed production baseline checks.
+5. Set `PQMSG_LOG_FORMAT=json` and `PQMSG_AUDIT_LOG_PATH` for audit retention.
+6. Keep `PQMSG_SECURITY_PROFILE=high_assurance` or `nss_aligned`.
+7. Configure push provider credentials:
    - FCM: `PQMSG_FCM_SERVER_KEY` (and optional `PQMSG_FCM_ENDPOINT`),
    - APNs: `PQMSG_APNS_BEARER_TOKEN`, `PQMSG_APNS_TOPIC` (and optional `PQMSG_APNS_ENDPOINT`).
-7. Configure Sentry (`PQMSG_SENTRY_DSN`, `PQMSG_SENTRY_TRACES_SAMPLE_RATE`) for production error telemetry.
+8. Configure Sentry (`PQMSG_SENTRY_DSN`, `PQMSG_SENTRY_TRACES_SAMPLE_RATE`) for production error telemetry.
 
 ## 7. Observability Stack
 
