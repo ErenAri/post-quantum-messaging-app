@@ -170,7 +170,7 @@ async fn main() -> anyhow::Result<()> {
     let database_url =
         env::var("PQMSG_DATABASE_URL").unwrap_or_else(|_| "sqlite://pqmsg-server.db".to_string());
     let db_backend = parse_db_backend(&database_url)
-        .map_err(|message| anyhow::anyhow!("{message} (got '{database_url}')"))?;
+        .map_err(|message| anyhow::anyhow!("{message} (check PQMSG_DATABASE_URL)"))?;
     let db_max_connections = parse_env_u32("PQMSG_DB_MAX_CONNECTIONS", 20)?;
     let db_min_connections = parse_env_u32("PQMSG_DB_MIN_CONNECTIONS", 1)?;
     if db_min_connections > db_max_connections {
@@ -235,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
         .idle_timeout(Some(StdDuration::from_secs(db_idle_timeout_secs)))
         .connect(&database_url)
         .await
-        .with_context(|| format!("failed to connect to {database_url}"))?;
+        .with_context(|| "failed to connect to database (check PQMSG_DATABASE_URL)")?;
     let skip_auto_migrate = env::var("PQMSG_SKIP_AUTO_MIGRATE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);

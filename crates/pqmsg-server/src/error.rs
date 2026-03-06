@@ -2,6 +2,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
+use tracing;
 
 #[derive(Debug)]
 pub struct AppError {
@@ -54,7 +55,8 @@ impl AppError {
 
 impl From<sqlx::Error> for AppError {
     fn from(value: sqlx::Error) -> Self {
-        Self::internal(value.to_string())
+        tracing::error!(error = %value, "database error");
+        Self::internal("internal database error")
     }
 }
 

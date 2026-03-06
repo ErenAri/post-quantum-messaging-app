@@ -56,7 +56,10 @@ impl ChainState {
         next_chain_key.copy_from_slice(&okm[32..]);
 
         let msg_num = self.next_msg_num;
-        self.next_msg_num = self.next_msg_num.saturating_add(1);
+        if msg_num == u32::MAX {
+            return Err(CoreError::PolicyViolation("chain exhausted: message counter overflow"));
+        }
+        self.next_msg_num = msg_num + 1;
         self.chain_key = next_chain_key;
         Ok((msg_num, message_key))
     }

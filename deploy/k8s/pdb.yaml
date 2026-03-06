@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pqmsg-server
+  namespace: pqmsg
+  labels:
+    app: pqmsg-server
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: pqmsg-server

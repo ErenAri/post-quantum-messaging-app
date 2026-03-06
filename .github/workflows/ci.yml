@@ -37,6 +37,56 @@ jobs:
       - name: cargo test (FIPS)
         run: cargo test -p pqmsg-core --features fips
 
+  classical-only-build-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy (classical-only)
+        run: cargo clippy -p pqmsg-core --features classical-only-INSECURE --no-default-features -- -D warnings
+      - name: cargo test (classical-only)
+        run: cargo test -p pqmsg-core --features classical-only-INSECURE --no-default-features
+
+  hsm-pkcs11-build-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install SoftHSM2
+        run: sudo apt-get update && sudo apt-get install -y softhsm2
+      - name: cargo clippy (hsm-pkcs11)
+        run: cargo clippy -p pqmsg-core --features hsm-pkcs11 -- -D warnings
+      - name: cargo test (hsm-pkcs11)
+        run: cargo test -p pqmsg-core --features hsm-pkcs11
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pqmsg
+          POSTGRES_PASSWORD: pqmsg_ci
+          POSTGRES_DB: pqmsg_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: run server tests against PostgreSQL
+        env:
+          PQMSG_DATABASE_URL: "postgres://pqmsg:pqmsg_ci@localhost:5432/pqmsg_test"
+          PQMSG_SECURITY_PROFILE: research
+        run: cargo test -p pqmsg-server --all-targets
+
   benchmarks:
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest

@@ -138,7 +138,7 @@ pub(crate) async fn relay_ephemeral_message(
     }))
 }
 
-/// Background task to delete expired ephemeral messages.
+/// Background task to delete expired ephemeral messages and stale data.
 /// Should be spawned once at startup.
 pub async fn run_message_expiry_reaper(state: AppState) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -146,6 +146,9 @@ pub async fn run_message_expiry_reaper(state: AppState) {
         interval.tick().await;
         if let Err(e) = reap_expired_messages(&state).await {
             tracing::warn!("message expiry reaper error: {e:?}");
+        }
+        if let Err(e) = reap_stale_data(&state).await {
+            tracing::warn!("stale data reaper error: {e:?}");
         }
     }
 }
@@ -170,6 +173,56 @@ async fn reap_expired_messages(state: &AppState) -> Result<(), crate::error::App
             .execute(state.pool())
             .await?;
         tracing::info!("message expiry reaper deleted {deleted} expired messages");
+    }
+    Ok(())
+}
+
+/// Clean up stale data: expired dedup entries, consumed one-time prekeys,
+/// expired identity rotation challenges, and old delivered relay messages.
+async fn reap_stale_data(state: &AppState) -> Result<(), crate::error::AppError> {
+    let now_unix = Utc::now().timestamp();
+
+    // 1. Expired relay_dedup entries
+    let dedup_deleted = sqlx::query("DELETE FROM relay_dedup WHERE expires_at_unix <= $1")
+        .bind(now_unix)
+        .execute(state.pool())
+        .await?
+        .rows_affected();
+
+    // 2. Consumed one-time prekeys (v2 tables; consumed = 1 means already used)
+    let otk_x_deleted = sqlx::query(
+        "DELETE FROM one_time_prekeys_x25519_v2 WHERE consumed = 1",
+    )
+    .execute(state.pool())
+    .await?
+    .rows_affected();
+
+    let otk_pq_deleted = sqlx::query(
+        "DELETE FROM one_time_prekeys_mlkem768_v2 WHERE consumed = 1",
+    )
+    .execute(state.pool())
+    .await?
+    .rows_affected();
+
+    // 3. Expired identity rotation challenges (older than 10 minutes)
+    let challenge_cutoff = (Utc::now() - Duration::seconds(600)).to_rfc3339();
+    let challenge_deleted = sqlx::query(
+        "DELETE FROM identity_rotation_challenges WHERE created_at < $1",
+    )
+    .bind(&challenge_cutoff)
+    .execute(state.pool())
+    .await?
+    .rows_affected();
+
+    let total = dedup_deleted + otk_x_deleted + otk_pq_deleted + challenge_deleted;
+    if total > 0 {
+        tracing::info!(
+            dedup = dedup_deleted,
+            consumed_otk_x25519 = otk_x_deleted,
+            consumed_otk_mlkem = otk_pq_deleted,
+            expired_challenges = challenge_deleted,
+            "stale data reaper cleanup"
+        );
     }
     Ok(())
 }
