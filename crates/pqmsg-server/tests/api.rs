@@ -3830,3 +3830,586 @@ async fn rich_media_profile_presence_typing_reject_invalid_inputs() {
     .await;
     assert_eq!(status_typing_self, StatusCode::BAD_REQUEST);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2 — Test Coverage Expansion
+// ---------------------------------------------------------------------------
+
+/// Build a test app with a custom rate-limiter (low capacity for saturation tests).
+async fn test_app_with_rate_limiter(rate_limiter: Arc<RateLimiter>) -> axum::Router {
+    sqlx::any::install_default_drivers();
+    let database_url = "sqlite::memory:";
+    let db_backend = parse_db_backend(database_url).expect("sqlite backend");
+    let pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .expect("connect sqlite memory");
+    init_db(&pool, db_backend).await.expect("migrate");
+    let state = AppState::new(pool, db_backend, rate_limiter);
+    build_router(state)
+}
+
+/// Helper: build relay auth headers with a *custom* timestamp (for clock-skew tests).
+fn relay_auth_headers_with_timestamp(
+    signing_key: &SigningKey,
+    sender_user_id: &str,
+    sender_device_id: &str,
+    recipient_user_id: &str,
+    message_blob: &[u8],
+    timestamp: i64,
+) -> Vec<(&'static str, String)> {
+    let nonce = format!(
+        "relay-skew-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records(
+        "relay",
+        sender_user_id,
+        sender_device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: recipient_user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_MESSAGE_BLOB,
+        value: message_blob.to_vec(),
+    });
+    let message = encode(&records).expect("relay auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, sender_user_id.to_string()),
+        (AUTH_HEADER_DEVICE, sender_device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+// ---- 1. Auth timestamp / clock-skew rejection ----------------------------
+
+#[tokio::test]
+async fn auth_rejects_stale_and_future_timestamps() {
+    let app = test_app().await;
+    let alice_sig = signing_key(200);
+    let bob_sig = signing_key(201);
+
+    // Register both users
+    let reg_alice = register_payload("alice", "alice-dev-1", [41u8; 32], &alice_sig);
+    let (s, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(s, StatusCode::OK);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [42u8; 32], &bob_sig);
+    let (s, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(s, StatusCode::OK);
+
+    let relay = json!({
+        "sender_user_id": "alice",
+        "device_id": "alice-dev-1",
+        "message_bytes_base64": B64.encode("clock-test")
+    });
+
+    // Stale timestamp: 10 minutes in the past (skew limit is 300 s)
+    let stale_ts = Utc::now().timestamp() - 600;
+    let stale_headers = relay_auth_headers_with_timestamp(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "bob",
+        b"clock-test",
+        stale_ts,
+    );
+    let (status_stale, body_stale) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob",
+        relay.clone(),
+        &stale_headers,
+    )
+    .await;
+    assert_eq!(status_stale, StatusCode::BAD_REQUEST);
+    assert!(
+        body_stale["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("timestamp"),
+        "stale body should mention timestamp: {body_stale}"
+    );
+
+    // Future timestamp: 10 minutes ahead
+    let future_ts = Utc::now().timestamp() + 600;
+    let future_headers = relay_auth_headers_with_timestamp(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "bob",
+        b"clock-test",
+        future_ts,
+    );
+    let (status_future, body_future) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob",
+        relay.clone(),
+        &future_headers,
+    )
+    .await;
+    assert_eq!(status_future, StatusCode::BAD_REQUEST);
+    assert!(
+        body_future["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("timestamp"),
+        "future body should mention timestamp: {body_future}"
+    );
+
+    // Just inside the window (4 minutes ago, limit is 5 min) → should succeed
+    let ok_ts = Utc::now().timestamp() - 240;
+    let ok_headers = relay_auth_headers_with_timestamp(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "bob",
+        b"clock-test",
+        ok_ts,
+    );
+    let (status_ok, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob",
+        relay,
+        &ok_headers,
+    )
+    .await;
+    assert_eq!(status_ok, StatusCode::OK);
+}
+
+// ---- 2. Group owner-only enforcement -------------------------------------
+
+#[tokio::test]
+async fn group_non_owner_cannot_add_or_remove_members() {
+    let app = test_app().await;
+    let alice_sig = signing_key(210);
+    let bob_sig = signing_key(211);
+    let carol_sig = signing_key(212);
+
+    // Register alice, bob, carol
+    for (name, dev, seed, sig) in [
+        ("alice", "alice-dev-1", [51u8; 32], &alice_sig),
+        ("bob", "bob-dev-1", [52u8; 32], &bob_sig),
+        ("carol", "carol-dev-1", [53u8; 32], &carol_sig),
+    ] {
+        let reg = register_payload(name, dev, seed, sig);
+        let (s, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg).await;
+        assert_eq!(s, StatusCode::OK);
+    }
+
+    // Alice creates group "beta" with bob
+    let members = vec!["bob".to_string()];
+    let headers = groups_create_auth_headers(&alice_sig, "alice", "alice-dev-1", "beta", &members);
+    let (s, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/groups",
+        json!({"group_id": "beta", "member_user_ids": members}),
+        &headers,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Bob (non-owner) tries to add carol → should fail
+    let add_headers =
+        groups_members_add_auth_headers(&bob_sig, "bob", "bob-dev-1", "beta", "carol");
+    let (status_add, body_add) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/groups/beta/members/add",
+        json!({"member_user_id": "carol"}),
+        &add_headers,
+    )
+    .await;
+    assert_eq!(status_add, StatusCode::BAD_REQUEST);
+    assert!(
+        body_add["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("owner"),
+        "non-owner add should mention owner: {body_add}"
+    );
+
+    // Bob (non-owner) tries to remove alice → should fail
+    let remove_headers =
+        groups_members_remove_auth_headers(&bob_sig, "bob", "bob-dev-1", "beta", "alice");
+    let (status_remove, body_remove) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/groups/beta/members/remove",
+        json!({"member_user_id": "alice"}),
+        &remove_headers,
+    )
+    .await;
+    assert_eq!(status_remove, StatusCode::BAD_REQUEST);
+    assert!(
+        body_remove["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("owner"),
+        "non-owner remove should mention owner: {body_remove}"
+    );
+
+    // Owner cannot remove themselves
+    let self_remove_headers =
+        groups_members_remove_auth_headers(&alice_sig, "alice", "alice-dev-1", "beta", "alice");
+    let (status_self, body_self) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/groups/beta/members/remove",
+        json!({"member_user_id": "alice"}),
+        &self_remove_headers,
+    )
+    .await;
+    assert_eq!(status_self, StatusCode::BAD_REQUEST);
+    assert!(
+        body_self["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("owner"),
+        "owner self-remove should mention owner: {body_self}"
+    );
+
+    // Owner (alice) CAN add carol — sanity check
+    let owner_add_headers =
+        groups_members_add_auth_headers(&alice_sig, "alice", "alice-dev-1", "beta", "carol");
+    let (status_owner_add, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/groups/beta/members/add",
+        json!({"member_user_id": "carol"}),
+        &owner_add_headers,
+    )
+    .await;
+    assert_eq!(status_owner_add, StatusCode::OK);
+}
+
+// ---- 3. Rate-limiter saturation ------------------------------------------
+
+#[tokio::test]
+async fn rate_limiter_rejects_after_bucket_exhaustion() {
+    // Capacity = 2, refill = 0/s → third request should be rejected
+    let rate_limiter = Arc::new(RateLimiter::new(
+        2.0,
+        0.0,
+        100,
+        StdDuration::from_secs(600),
+    ));
+    let app = test_app_with_rate_limiter(rate_limiter).await;
+    let sig = signing_key(220);
+    let reg = register_payload("rate-user", "dev-1", [61u8; 32], &sig);
+    let (s, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // The registration itself consumed one token from "register:rate-user".
+    // Now hammer a *different* keyed endpoint (health is unauthenticated and has no
+    // rate-limit call, so use prekeys-status which calls check_rate_limit).
+    let h1 = prekeys_status_auth_headers(&sig, "rate-user", "dev-1");
+    let (s1, _) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/rate-user/prekeys/status",
+        json!({}),
+        &h1,
+    )
+    .await;
+    assert_eq!(s1, StatusCode::OK);
+
+    let h2 = prekeys_status_auth_headers(&sig, "rate-user", "dev-1");
+    let (s2, _) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/rate-user/prekeys/status",
+        json!({}),
+        &h2,
+    )
+    .await;
+    assert_eq!(s2, StatusCode::OK);
+
+    // Third call — bucket is exhausted (capacity=2, 0 refill)
+    let h3 = prekeys_status_auth_headers(&sig, "rate-user", "dev-1");
+    let (s3, body3) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/rate-user/prekeys/status",
+        json!({}),
+        &h3,
+    )
+    .await;
+    assert_eq!(s3, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body3["status"].as_u64(), Some(429));
+}
+
+// ---- 4. Max prekey count boundary ----------------------------------------
+
+#[tokio::test]
+async fn publish_prekeys_rejects_exceeding_max_one_time_keys() {
+    let app = test_app().await;
+    let sig = signing_key(230);
+    let reg = register_payload("prekey-max-user", "dev-1", [71u8; 32], &sig);
+    let (s, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // 257 one-time keys (limit is 256)
+    let too_many_x = vec![[99u8; 32]; 257];
+    let too_many_pq = vec![vec![99u8; 64]; 257];
+    let publish = publish_prekeys_payload(&sig, [5u8; 32], vec![7u8; 64], too_many_x, too_many_pq);
+    let auth = prekeys_auth_headers(&sig, "prekey-max-user", "dev-1", &publish);
+    let (status, body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/prekey-max-user/prekeys",
+        publish,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("256"),
+        "should mention the 256 limit: {body}"
+    );
+
+    // Exactly 256 → should succeed
+    let ok_x = vec![[88u8; 32]; 256];
+    let ok_pq = vec![vec![88u8; 64]; 256];
+    let publish_ok = publish_prekeys_payload(&sig, [5u8; 32], vec![7u8; 64], ok_x, ok_pq);
+    let auth_ok = prekeys_auth_headers(&sig, "prekey-max-user", "dev-1", &publish_ok);
+    let (status_ok, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/prekey-max-user/prekeys",
+        publish_ok,
+        &auth_ok,
+    )
+    .await;
+    assert_eq!(status_ok, StatusCode::OK);
+}
+
+// ---- 5. Max group members boundary ---------------------------------------
+
+#[tokio::test]
+async fn group_rejects_exceeding_max_member_count() {
+    let app = test_app().await;
+    let owner_sig = signing_key(240);
+    let reg_owner = register_payload("group-owner", "dev-1", [81u8; 32], &owner_sig);
+    let (s, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg_owner).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Try creating a group with 513 members (limit is 512 including owner)
+    let member_ids: Vec<String> = (0..513).map(|i| format!("member-{i}")).collect();
+    let headers = groups_create_auth_headers(
+        &owner_sig,
+        "group-owner",
+        "dev-1",
+        "huge-group",
+        &member_ids,
+    );
+    let (status, body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/groups",
+        json!({"group_id": "huge-group", "member_user_ids": member_ids}),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("512"),
+        "should mention the 512 limit: {body}"
+    );
+}
+
+// ---- 6. WebSocket disconnect and reconnect --------------------------------
+
+#[tokio::test]
+async fn websocket_inbox_disconnect_and_reconnect_delivers_messages() {
+    let app = test_app().await;
+    let bob_sig = signing_key(250);
+    let alice_sig = signing_key(251);
+
+    let reg_bob = register_payload("bob-ws2", "bob-ws2-dev", [91u8; 32], &bob_sig);
+    let (s, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(s, StatusCode::OK);
+
+    let reg_alice = register_payload("alice-ws2", "alice-ws2-dev", [92u8; 32], &alice_sig);
+    let (s, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(s, StatusCode::OK);
+
+    let (ws_base, _handle) = spawn_http_server(app.clone()).await;
+
+    // --- First WS connection ---
+    let ws_headers_1 = ws_inbox_auth_headers(&bob_sig, "bob-ws2", "bob-ws2-dev", 0);
+    let mut ws_url_1 = format!("{ws_base}/v1/ws/inbox/bob-ws2?since=0");
+    let mut request_1 = ws_url_1.into_client_request().expect("ws request");
+    for (name, value) in &ws_headers_1 {
+        request_1
+            .headers_mut()
+            .insert(HeaderName::from_static(name), value.parse().unwrap());
+    }
+    let (mut ws_1, _) = connect_async(request_1).await.expect("ws connect 1");
+
+    // Send a message while connected
+    let relay_1 = json!({
+        "sender_user_id": "alice-ws2",
+        "device_id": "alice-ws2-dev",
+        "message_bytes_base64": B64.encode("ws-msg-1")
+    });
+    let relay_headers_1 = relay_auth_headers(
+        &alice_sig,
+        "alice-ws2",
+        "alice-ws2-dev",
+        "bob-ws2",
+        b"ws-msg-1",
+    );
+    let (s, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob-ws2",
+        relay_1,
+        &relay_headers_1,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Receive on WS 1
+    let msg_1 = timeout(Duration::from_secs(5), ws_1.next())
+        .await
+        .expect("ws timeout")
+        .expect("ws closed")
+        .expect("ws error");
+    assert!(msg_1.is_text(), "expected text message");
+    let parsed_1: Value = serde_json::from_str(msg_1.to_text().unwrap()).expect("json");
+    assert_eq!(parsed_1["event"].as_str(), Some("relay"));
+    let msgs_1 = parsed_1["messages"].as_array().expect("messages");
+    assert_eq!(msgs_1.len(), 1);
+    assert_eq!(
+        msgs_1[0]["message_bytes_base64"].as_str(),
+        Some(B64.encode("ws-msg-1").as_str())
+    );
+    let msg_1_id = msgs_1[0]["message_id"].as_i64().expect("message_id");
+
+    // Drop (disconnect) ws 1
+    drop(ws_1);
+
+    // Send another message while bob is disconnected
+    let relay_2 = json!({
+        "sender_user_id": "alice-ws2",
+        "device_id": "alice-ws2-dev",
+        "message_bytes_base64": B64.encode("ws-msg-2")
+    });
+    let relay_headers_2 = relay_auth_headers(
+        &alice_sig,
+        "alice-ws2",
+        "alice-ws2-dev",
+        "bob-ws2",
+        b"ws-msg-2",
+    );
+    let (s, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob-ws2",
+        relay_2,
+        &relay_headers_2,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Reconnect WS with since = msg_1_id to get only the missed message
+    let ws_headers_2 = ws_inbox_auth_headers(&bob_sig, "bob-ws2", "bob-ws2-dev", msg_1_id);
+    ws_url_1 = format!("{ws_base}/v1/ws/inbox/bob-ws2?since={msg_1_id}");
+    let mut request_2 = ws_url_1.into_client_request().expect("ws request");
+    for (name, value) in &ws_headers_2 {
+        request_2
+            .headers_mut()
+            .insert(HeaderName::from_static(name), value.parse().unwrap());
+    }
+    let (mut ws_2, _) = connect_async(request_2).await.expect("ws connect 2");
+
+    // Should receive the missed message on backfill
+    let msg_2 = timeout(Duration::from_secs(5), ws_2.next())
+        .await
+        .expect("ws timeout 2")
+        .expect("ws closed 2")
+        .expect("ws error 2");
+    assert!(msg_2.is_text(), "expected text message");
+    let parsed_2: Value = serde_json::from_str(msg_2.to_text().unwrap()).expect("json 2");
+    let msgs_2 = parsed_2["messages"].as_array().expect("messages 2");
+    assert!(
+        msgs_2.iter().any(|m| m["message_bytes_base64"].as_str()
+            == Some(B64.encode("ws-msg-2").as_str())),
+        "reconnect should deliver missed message: {parsed_2}"
+    );
+}
+
+// ---- 7. Negative identity-log queries ------------------------------------
+
+#[tokio::test]
+async fn identity_log_rejects_wrong_user_and_nonexistent() {
+    let app = test_app().await;
+    let alice_sig = signing_key(195);
+    let bob_sig = signing_key(196);
+
+    let reg_alice = register_payload("alice-log", "alice-log-dev", [101u8; 32], &alice_sig);
+    let (s, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(s, StatusCode::OK);
+
+    let reg_bob = register_payload("bob-log", "bob-log-dev", [102u8; 32], &bob_sig);
+    let (s, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Bob tries to query alice's identity-log with bob's credentials
+    // The auth system binds endpoint+user_id into the TLV, so bob's signature
+    // won't verify for alice's user_id path — should fail with 400.
+    let bob_headers = identity_log_auth_headers(&bob_sig, "bob-log", "bob-log-dev");
+    let (status_wrong, _) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/alice-log/identity-log",
+        json!({}),
+        &bob_headers,
+    )
+    .await;
+    assert_eq!(status_wrong, StatusCode::BAD_REQUEST);
+
+    // Query identity-log for a user that exists but has no rotation events
+    // (only the initial registration event should be returned)
+    let alice_headers = identity_log_auth_headers(&alice_sig, "alice-log", "alice-log-dev");
+    let (status_ok, body) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/alice-log/identity-log",
+        json!({}),
+        &alice_headers,
+    )
+    .await;
+    assert_eq!(status_ok, StatusCode::OK);
+    let events = body["events"].as_array().expect("events array");
+    assert_eq!(events.len(), 1, "fresh user has only initial event");
+    assert_eq!(events[0]["event_type"].as_str(), Some("initial"));
+
+    // Query without any auth headers → should fail
+    let (status_no_auth, _) = json_request(
+        app.clone(),
+        Method::GET,
+        "/v1/users/alice-log/identity-log",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_no_auth, StatusCode::BAD_REQUEST);
+}

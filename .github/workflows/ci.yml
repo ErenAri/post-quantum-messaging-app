@@ -18,6 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - name: cargo fmt
         run: cargo fmt --all --check
       - name: cargo clippy
@@ -25,12 +26,29 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-targets
 
-  dependency-policy:
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+  benchmarks:
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: run criterion benchmarks (no regression gate)
+        run: cargo bench -p pqmsg-core --bench crypto_benchmarks -- --output-format bencher 2>/dev/null | tee bench-output.txt
+      - name: upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-benchmarks
+          path: |
+            bench-output.txt
+            target/criterion/
+
+  dependency-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: install cargo-audit
         run: cargo install cargo-audit --locked
       - name: cargo audit
@@ -46,9 +64,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: cargo llvm-cov
-        run: cargo llvm-cov --workspace --exclude pqmsg-android --exclude pqmsg-ios --lcov --output-path lcov.info --fail-under-lines 20
+        run: cargo llvm-cov --workspace --exclude pqmsg-android --exclude pqmsg-ios --lcov --output-path lcov.info --fail-under-lines 50
       - name: upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
@@ -60,6 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -111,6 +131,15 @@ jobs:
       - name: fuzz wire smoke
         working-directory: crates/pqmsg-core
         run: cargo fuzz run fuzz_wire_decode -- -max_total_time=20
+      - name: fuzz handshake decode smoke
+        working-directory: crates/pqmsg-core
+        run: cargo fuzz run fuzz_handshake_decode -- -max_total_time=20
+      - name: fuzz sealed decode smoke
+        working-directory: crates/pqmsg-core
+        run: cargo fuzz run fuzz_sealed_decode -- -max_total_time=20
+      - name: fuzz algorithm dispatch smoke
+        working-directory: crates/pqmsg-core
+        run: cargo fuzz run fuzz_algorithm_dispatch -- -max_total_time=20
 
   formal-verification-smoke:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -146,6 +175,23 @@ jobs:
           trap 'kill $SERVER_PID' EXIT
           sleep 5
           ./scripts/security/pentest_smoke.sh http://127.0.0.1:3000
+
+  sbom:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+      - name: generate SBOM
+        run: cargo cyclonedx --manifest-path Cargo.toml --format json --all
+      - name: upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: "**/bom.json"
 
   alertmanager-config-smoke:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}

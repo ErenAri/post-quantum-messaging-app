@@ -25,5 +25,26 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_handshake_decode"
+path = "fuzz_targets/fuzz_handshake_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sealed_decode"
+path = "fuzz_targets/fuzz_sealed_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_algorithm_dispatch"
+path = "fuzz_targets/fuzz_algorithm_dispatch.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

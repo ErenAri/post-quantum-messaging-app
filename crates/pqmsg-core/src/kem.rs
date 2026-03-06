@@ -1,3 +1,10 @@
+#[cfg(not(any(feature = "pq-oqs", feature = "classical-only-INSECURE")))]
+compile_error!(
+    "pqmsg-core requires either the `pq-oqs` feature (default, recommended) \
+     or the explicit `classical-only-INSECURE` opt-in. \
+     Do not build without post-quantum support unless you know what you are doing."
+);
+
 use crate::alg::KemAlgorithm;
 use crate::keys::SecretBytes;
 use crate::CoreError;

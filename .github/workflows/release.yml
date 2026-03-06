@@ -15,6 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: build release binary
         run: cargo build --release -p pqmsg-server
       - name: package artifacts
@@ -23,6 +24,15 @@ jobs:
           cp target/release/pqmsg-server dist/pqmsg-server-linux-x86_64
           chmod +x dist/pqmsg-server-linux-x86_64
           sha256sum dist/pqmsg-server-linux-x86_64 > dist/checksums.txt
+      - name: install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+      - name: generate SBOM
+        run: cargo cyclonedx --manifest-path Cargo.toml --format json --all
+      - name: collect SBOM
+        run: |
+          mkdir -p dist/sbom
+          find . -name 'bom.json' -exec cp --parents {} dist/sbom/ \;
+          tar -czf dist/sbom.tar.gz -C dist/sbom .
       - name: install cosign
         uses: sigstore/cosign-installer@v3
       - name: sign checksums
@@ -46,4 +56,5 @@ jobs:
             dist/checksums.txt
             dist/checksums.txt.sig
             dist/checksums.txt.pem
+            dist/sbom.tar.gz
           generate_release_notes: true

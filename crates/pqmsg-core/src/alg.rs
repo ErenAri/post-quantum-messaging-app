@@ -38,7 +38,7 @@ impl SecurityProfile {
     }
 
     pub const fn requires_pq_backend(self) -> bool {
-        if cfg!(feature = "insecure-no-pq") {
+        if cfg!(feature = "classical-only-INSECURE") {
             false
         } else {
             !matches!(self, Self::Research)

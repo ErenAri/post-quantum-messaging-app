@@ -88,7 +88,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-CI/CD quality gates additionally enforce dependency policy checks (`cargo-audit`, `cargo-deny`), workspace coverage thresholds, Android debug build assembly, and tag-triggered signed release artifacts.
+CI/CD quality gates additionally enforce:
+
+- **SAST**: `cargo-audit` and `cargo-deny` on every push/PR (advisories, licenses, bans, sources),
+- **Coverage**: `cargo-llvm-cov` with a minimum 50% line-coverage threshold,
+- **SBOM**: CycloneDX JSON bill-of-materials generated and uploaded as artifact,
+- **Benchmarks**: Criterion performance benchmarks for all crypto primitives (results as CI artifact),
+- **Android build**: full APK assembly,
+- **Fuzz smoke** (nightly): 5 libFuzzer targets covering TLV, wire, handshake, sealed-sender, and algorithm dispatch,
+- **Signed releases**: cosign-signed checksums with SBOM attached.
 
 ### Security Profile Runtime Controls
 
@@ -303,19 +311,23 @@ cargo run -p pqmsg-server --bin migrate_sqlite_to_postgres -- --sqlite-url "sqli
 
 ## Documentation Index
 
-- [SPEC](docs/SPEC.md)
-- [THREAT_MODEL](docs/THREAT_MODEL.md)
-- [WIRE_FORMAT](docs/WIRE_FORMAT.md)
-- [CRYPTO_AGILITY](docs/CRYPTO_AGILITY.md)
-- [API](docs/API.md)
-- [SECURITY_GATES](docs/SECURITY_GATES.md)
-- [DEPLOYMENT](docs/DEPLOYMENT.md)
-- [OBSERVABILITY](docs/OBSERVABILITY.md)
-- [OPERATIONS](docs/OPERATIONS.md)
-- [RELEASE_GOVERNANCE](docs/RELEASE_GOVERNANCE.md)
-- [FORMAL_AUDIT](docs/FORMAL_AUDIT.md)
-- [PENETRATION_TESTING](docs/PENETRATION_TESTING.md)
-- [ANDROID](docs/ANDROID.md)
-- [IOS](docs/IOS.md)
-- [WEB](docs/WEB.md)
-- [TLS_ROTATION](docs/TLS_ROTATION.md)
+| Document | Description |
+|---|---|
+| [SPEC](docs/SPEC.md) | Protocol specification |
+| [THREAT_MODEL](docs/THREAT_MODEL.md) | Threat model and mitigations |
+| [WIRE_FORMAT](docs/WIRE_FORMAT.md) | Binary wire encoding reference |
+| [CRYPTO_AGILITY](docs/CRYPTO_AGILITY.md) | Algorithm suite agility design |
+| [API](docs/API.md) | Server REST/WebSocket API reference |
+| [SECURITY_GATES](docs/SECURITY_GATES.md) | Security quality gates policy |
+| [DEPLOYMENT](docs/DEPLOYMENT.md) | Container and Kubernetes deployment |
+| [OBSERVABILITY](docs/OBSERVABILITY.md) | Prometheus, Grafana, Loki stack |
+| [OPERATIONS](docs/OPERATIONS.md) | Operational runbooks |
+| [RELEASE_GOVERNANCE](docs/RELEASE_GOVERNANCE.md) | Release gate pipeline |
+| [FORMAL_AUDIT](docs/FORMAL_AUDIT.md) | Formal verification status |
+| [PENETRATION_TESTING](docs/PENETRATION_TESTING.md) | Penetration test methodology |
+| [ANDROID](docs/ANDROID.md) | Android build and integration guide |
+| [IOS](docs/IOS.md) | iOS build and integration guide |
+| [WEB](docs/WEB.md) | Web client fallback mode |
+| [TLS_ROTATION](docs/TLS_ROTATION.md) | TLS certificate rotation procedures |
+| [SECURITY](SECURITY.md) | Vulnerability disclosure policy |
+| [CONTRIBUTING](CONTRIBUTING.md) | Contributor guide and code conventions |

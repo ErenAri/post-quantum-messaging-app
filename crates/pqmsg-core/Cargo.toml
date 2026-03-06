@@ -21,10 +21,15 @@ zeroize.workspace = true
 oqs = { version = "0.11", default-features = false, features = ["vendored", "ml_kem", "kyber"], optional = true }
 
 [features]
-default = []
+default = ["pq-oqs"]
 pq-oqs = ["dep:oqs"]
-insecure-no-pq = []
+classical-only-INSECURE = []
 
 [dev-dependencies]
 rand.workspace = true
 rand_chacha = "0.3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "crypto_benchmarks"
+harness = false
