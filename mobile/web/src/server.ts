@@ -46,6 +46,7 @@ export type BundleResponse = {
   one_time_prekey_x25519: string | null;
   one_time_prekey_mlkem768: string | null;
   identity_fingerprint_sha256: string | null;
+  identity_key_version: number;
   bundle_generated_at: string;
 };
 

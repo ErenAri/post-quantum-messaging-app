@@ -7,16 +7,16 @@ use chrono::{Duration, Utc};
 use sqlx::Row;
 use uuid::Uuid;
 
+use super::util::*;
 use crate::auth::*;
 use crate::db::*;
 use crate::error::AppError;
 use crate::types::*;
 use crate::validation::*;
 use crate::{
-    AppState, MAX_AVATAR_BLOB_BYTES, MAX_FILE_BLOB_BYTES, MAX_TYPING_EVENTS,
-    PRESENCE_TTL_SECONDS, TYPING_TTL_SECONDS,
+    AppState, MAX_AVATAR_BLOB_BYTES, MAX_FILE_BLOB_BYTES, MAX_TYPING_EVENTS, PRESENCE_TTL_SECONDS,
+    TYPING_TTL_SECONDS,
 };
-use super::util::*;
 
 pub(crate) async fn register_push_token(
     State(state): State<AppState>,

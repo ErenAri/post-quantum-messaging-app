@@ -4,13 +4,13 @@ use axum::Json;
 use chrono::Utc;
 use sqlx::Row;
 
+use super::util::*;
 use crate::auth::*;
 use crate::db::*;
 use crate::error::AppError;
 use crate::types::*;
 use crate::validation::*;
 use crate::AppState;
-use super::util::*;
 
 pub(crate) async fn upload_discovery_handles(
     State(state): State<AppState>,

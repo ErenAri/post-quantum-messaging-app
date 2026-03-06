@@ -15,6 +15,8 @@ const AD_TAG_PROTOCOL_VERSION: u16 = critical_type(0x0001);
 const AD_TAG_SUITE_ID: u16 = critical_type(0x0002);
 const AD_TAG_INITIATOR_IDENTITY_KEY: u16 = critical_type(0x0003);
 const AD_TAG_RESPONDER_IDENTITY_KEY: u16 = critical_type(0x0004);
+const AD_TAG_INITIATOR_ID: u16 = critical_type(0x0005);
+const AD_TAG_RESPONDER_ID: u16 = critical_type(0x0006);
 
 const MSG_TAG_PROTOCOL_VERSION: u16 = critical_type(0x0101);
 const MSG_TAG_SUITE_ID: u16 = critical_type(0x0109);
@@ -209,6 +211,8 @@ pub fn associated_data(
     suite_id: u16,
     initiator_identity_key: &DhPublicKey,
     responder_identity_key: &DhPublicKey,
+    initiator_id: &str,
+    responder_id: &str,
 ) -> Result<Vec<u8>, CoreError> {
     encode(&[
         TlvRecord {
@@ -226,6 +230,14 @@ pub fn associated_data(
         TlvRecord {
             ty: AD_TAG_RESPONDER_IDENTITY_KEY,
             value: responder_identity_key.0.to_vec(),
+        },
+        TlvRecord {
+            ty: AD_TAG_INITIATOR_ID,
+            value: initiator_id.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: AD_TAG_RESPONDER_ID,
+            value: responder_id.as_bytes().to_vec(),
         },
     ])
 }
@@ -273,6 +285,8 @@ pub fn alice_initiate<R: RngCore + CryptoRng, V: SignatureVerifier, K: KemProvid
         suite_id,
         &alice_identity.public_key,
         &bob_bundle.identity_key,
+        alice_id,
+        bob_id,
     )?;
     let envelope = encrypt_with_rng(session_key.as_bytes(), payload, &ad, rng)?;
 
@@ -335,6 +349,8 @@ pub fn bob_receive<K: KemProvider>(
         initial_message.suite_id,
         &initial_message.ik_a_pub,
         &bob_identity.public_key,
+        &initial_message.sender_id,
+        &initial_message.recipient_id,
     )?;
     let envelope = CiphertextEnvelope {
         nonce: initial_message.nonce,
@@ -691,7 +707,7 @@ mod tests {
         assert_eq!(responder.plaintext, b"kat-payload");
         assert_eq!(initiator.session_key, responder.session_key);
 
-        let expected_transcript_hex = "81010002000181090002000181020005616c69636581030003626f628104002018b7279e7599928f72e167111e89af25fbdff045bd6faa83425ab2d1468c8b6781050020e0ce49028ee32078ac70bf8910b2ebbab37d6e1baf5afc0b393be2ff634b78298106002074e6fa5c389000b2bf9774c6625d6368d03aa43fb398eb1736b8ae93ac5769768107000cc82fb56107fe74a0d3679f848108001b2f1799c2714d83a71a98cc1a34d299696579b15278aca29e7e981e";
+        let expected_transcript_hex = "81010002000181090002000181020005616c69636581030003626f628104002018b7279e7599928f72e167111e89af25fbdff045bd6faa83425ab2d1468c8b6781050020e0ce49028ee32078ac70bf8910b2ebbab37d6e1baf5afc0b393be2ff634b78298106002074e6fa5c389000b2bf9774c6625d6368d03aa43fb398eb1736b8ae93ac5769768107000cc82fb56107fe74a0d3679f848108001b2f1799c2714d83a71a98cc9f859c815480962b56b80e6d516aceb6";
         let expected_session_key_hex =
             "7d40f0a2f7cbb531ffeb2d944bf7b57dfeb5a98e8090965ff1f9576f64793270";
         assert_eq!(hex_encode(&encoded), expected_transcript_hex);
@@ -720,8 +736,7 @@ mod tests {
 
         let signature_public_key = b"deterministic-signature-key".to_vec();
         let spk_msg = signed_prekey_signature_message(1, &bob_spk.public_key).expect("spk msg");
-        let pq_msg =
-            pq_signed_prekey_signature_message(1, &bob_pq_spk.public_key).expect("pq msg");
+        let pq_msg = pq_signed_prekey_signature_message(1, &bob_pq_spk.public_key).expect("pq msg");
         let bundle = PreKeyBundle::new(
             "bob",
             bob_identity.public_key,
@@ -767,7 +782,7 @@ mod tests {
         );
         assert_eq!(
             transcript_hex,
-            "81010002000181090002000181020005616c69636581030003626f62810400207638d04176f97ced442a413e0d61ba20c71e5d3ecf5bf7e822f562db9c7e9e5181050020fdbbeb429f42522da9c1563623ccc647c4d1ed594648891b4e7508717d67140081060020b159c62fbbaa1c0bd278a7a97f426c0102ab5290805e884fa4bfbdb00f0051d48107000c15734c6700fe3cae0d92b72f8108001c38e86c127ab840ee286d7bd7ea862b09e9924430241cbd14b694f4d3"
+            "81010002000181090002000181020005616c69636581030003626f62810400207638d04176f97ced442a413e0d61ba20c71e5d3ecf5bf7e822f562db9c7e9e5181050020fdbbeb429f42522da9c1563623ccc647c4d1ed594648891b4e7508717d67140081060020b159c62fbbaa1c0bd278a7a97f426c0102ab5290805e884fa4bfbdb00f0051d48107000c15734c6700fe3cae0d92b72f8108001c38e86c127ab840ee286d7bd7d42c7b2358d9a9728de96088a83a5d91"
         );
     }
 
@@ -793,7 +808,10 @@ mod tests {
 
         let encoded = initiator.initial_message.encode().expect("encode");
         let decoded = InitialMessage::decode(&encoded).expect("decode");
-        assert_eq!(decoded.protocol_version, initiator.initial_message.protocol_version);
+        assert_eq!(
+            decoded.protocol_version,
+            initiator.initial_message.protocol_version
+        );
         assert_eq!(decoded.suite_id, initiator.initial_message.suite_id);
         assert_eq!(decoded.sender_id, "alice");
         assert_eq!(decoded.recipient_id, "bob");

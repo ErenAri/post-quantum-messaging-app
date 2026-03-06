@@ -107,6 +107,29 @@ async fn test_app() -> axum::Router {
     build_router(state)
 }
 
+async fn test_app_with_rate_limit_settings(capacity: f64, refill_per_second: f64) -> axum::Router {
+    sqlx::any::install_default_drivers();
+    let database_url = "sqlite::memory:";
+    let db_backend = parse_db_backend(database_url).expect("sqlite backend");
+    let pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .expect("connect sqlite memory");
+    init_db(&pool, db_backend).await.expect("migrate");
+    let state = AppState::new(
+        pool,
+        db_backend,
+        Arc::new(RateLimiter::new(
+            capacity,
+            refill_per_second,
+            100_000,
+            StdDuration::from_secs(600),
+        )),
+    );
+    build_router(state)
+}
+
 async fn test_app_with_profile(profile: SecurityProfile) -> axum::Router {
     sqlx::any::install_default_drivers();
     let database_url = "sqlite::memory:";
@@ -187,7 +210,12 @@ async fn spawn_http_server(app: axum::Router) -> (String, tokio::task::JoinHandl
         .expect("bind ephemeral");
     let addr = listener.local_addr().expect("local addr");
     let handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve app");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve app");
     });
     (format!("ws://{}", addr), handle)
 }
@@ -3415,6 +3443,88 @@ async fn sealed_sender_relay_and_inbox_flow() {
 }
 
 #[tokio::test]
+async fn sealed_sender_uses_peer_ip_when_proxy_headers_are_untrusted() {
+    let app = test_app_with_rate_limit_settings(1.0, 0.0).await;
+    let bob_sig = signing_key(161);
+    let carol_sig = signing_key(162);
+
+    for (user_id, device_id, identity_bytes, signing_key, spk_seed, pq_seed) in [
+        (
+            "bob",
+            "bob-dev-1",
+            [41u8; 32],
+            &bob_sig,
+            [11u8; 32],
+            vec![12u8; 32],
+        ),
+        (
+            "carol",
+            "carol-dev-1",
+            [42u8; 32],
+            &carol_sig,
+            [13u8; 32],
+            vec![14u8; 32],
+        ),
+    ] {
+        let registration = register_payload(user_id, device_id, identity_bytes, signing_key);
+        let (status_register, _) = json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/users/register",
+            registration,
+        )
+        .await;
+        assert_eq!(status_register, StatusCode::OK);
+
+        let publish = publish_prekeys_payload(
+            signing_key,
+            spk_seed,
+            pq_seed.clone(),
+            vec![[15u8; 32]],
+            vec![vec![16u8; 32]],
+        );
+        let publish_auth = prekeys_auth_headers(signing_key, user_id, device_id, &publish);
+        let (status_prekeys, _) = json_request_with_headers(
+            app.clone(),
+            Method::POST,
+            &format!("/v1/users/{user_id}/prekeys"),
+            publish,
+            &publish_auth,
+        )
+        .await;
+        assert_eq!(status_prekeys, StatusCode::OK);
+    }
+
+    let (base_ws_url, server_handle) = spawn_http_server(app).await;
+    let base_http_url = base_ws_url.replacen("ws://", "http://", 1);
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{base_http_url}/v1/sealed-relay/bob"))
+        .header("x-forwarded-for", "203.0.113.10")
+        .json(&json!({
+            "message_bytes_base64": B64.encode("sealed-one")
+        }))
+        .send()
+        .await
+        .expect("first sealed relay");
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = client
+        .post(format!("{base_http_url}/v1/sealed-relay/carol"))
+        .header("x-forwarded-for", "198.51.100.20")
+        .json(&json!({
+            "message_bytes_base64": B64.encode("sealed-two")
+        }))
+        .send()
+        .await
+        .expect("second sealed relay");
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    server_handle.abort();
+}
+
+#[tokio::test]
 async fn registration_requires_pow_when_enabled() {
     let app = test_app_with_dos_policy(
         DosHardeningPolicy::for_security_profile(SecurityProfile::Research)
@@ -3863,13 +3973,8 @@ fn relay_auth_headers_with_timestamp(
         "relay-skew-{}",
         NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
-    let mut records = auth_common_records(
-        "relay",
-        sender_user_id,
-        sender_device_id,
-        timestamp,
-        &nonce,
-    );
+    let mut records =
+        auth_common_records("relay", sender_user_id, sender_device_id, timestamp, &nonce);
     records.push(TlvRecord {
         ty: AUTH_TAG_RECIPIENT_ID,
         value: recipient_user_id.as_bytes().to_vec(),
@@ -4033,10 +4138,7 @@ async fn group_non_owner_cannot_add_or_remove_members() {
     .await;
     assert_eq!(status_add, StatusCode::BAD_REQUEST);
     assert!(
-        body_add["detail"]
-            .as_str()
-            .unwrap_or("")
-            .contains("owner"),
+        body_add["detail"].as_str().unwrap_or("").contains("owner"),
         "non-owner add should mention owner: {body_add}"
     );
 
@@ -4073,10 +4175,7 @@ async fn group_non_owner_cannot_add_or_remove_members() {
     .await;
     assert_eq!(status_self, StatusCode::BAD_REQUEST);
     assert!(
-        body_self["detail"]
-            .as_str()
-            .unwrap_or("")
-            .contains("owner"),
+        body_self["detail"].as_str().unwrap_or("").contains("owner"),
         "owner self-remove should mention owner: {body_self}"
     );
 
@@ -4099,12 +4198,7 @@ async fn group_non_owner_cannot_add_or_remove_members() {
 #[tokio::test]
 async fn rate_limiter_rejects_after_bucket_exhaustion() {
     // Capacity = 2, refill = 0/s → third request should be rejected
-    let rate_limiter = Arc::new(RateLimiter::new(
-        2.0,
-        0.0,
-        100,
-        StdDuration::from_secs(600),
-    ));
+    let rate_limiter = Arc::new(RateLimiter::new(2.0, 0.0, 100, StdDuration::from_secs(600)));
     let app = test_app_with_rate_limiter(rate_limiter).await;
     let sig = signing_key(220);
     let reg = register_payload("rate-user", "dev-1", [61u8; 32], &sig);
@@ -4175,10 +4269,7 @@ async fn publish_prekeys_rejects_exceeding_max_one_time_keys() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or("")
-            .contains("256"),
+        body["detail"].as_str().unwrap_or("").contains("256"),
         "should mention the 256 limit: {body}"
     );
 
@@ -4227,10 +4318,7 @@ async fn group_rejects_exceeding_max_member_count() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or("")
-            .contains("512"),
+        body["detail"].as_str().unwrap_or("").contains("512"),
         "should mention the 512 limit: {body}"
     );
 }
@@ -4351,8 +4439,9 @@ async fn websocket_inbox_disconnect_and_reconnect_delivers_messages() {
     let parsed_2: Value = serde_json::from_str(msg_2.to_text().unwrap()).expect("json 2");
     let msgs_2 = parsed_2["messages"].as_array().expect("messages 2");
     assert!(
-        msgs_2.iter().any(|m| m["message_bytes_base64"].as_str()
-            == Some(B64.encode("ws-msg-2").as_str())),
+        msgs_2
+            .iter()
+            .any(|m| m["message_bytes_base64"].as_str() == Some(B64.encode("ws-msg-2").as_str())),
         "reconnect should deliver missed message: {parsed_2}"
     );
 }

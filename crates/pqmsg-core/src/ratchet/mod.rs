@@ -57,7 +57,9 @@ impl ChainState {
 
         let msg_num = self.next_msg_num;
         if msg_num == u32::MAX {
-            return Err(CoreError::PolicyViolation("chain exhausted: message counter overflow"));
+            return Err(CoreError::PolicyViolation(
+                "chain exhausted: message counter overflow",
+            ));
         }
         self.next_msg_num = msg_num + 1;
         self.chain_key = next_chain_key;
@@ -193,9 +195,18 @@ mod tests {
     #[test]
     fn skipped_keys_evicts_oldest_first() {
         let mut cache = SkippedMessageKeys::new(2);
-        let k1 = SkippedKeyId { dh_pub: [1u8; 32], msg_num: 0 };
-        let k2 = SkippedKeyId { dh_pub: [1u8; 32], msg_num: 1 };
-        let k3 = SkippedKeyId { dh_pub: [1u8; 32], msg_num: 2 };
+        let k1 = SkippedKeyId {
+            dh_pub: [1u8; 32],
+            msg_num: 0,
+        };
+        let k2 = SkippedKeyId {
+            dh_pub: [1u8; 32],
+            msg_num: 1,
+        };
+        let k3 = SkippedKeyId {
+            dh_pub: [1u8; 32],
+            msg_num: 2,
+        };
 
         cache.insert(k1, [0xAA; 32]);
         cache.insert(k2, [0xBB; 32]);
@@ -210,7 +221,10 @@ mod tests {
     #[test]
     fn skipped_keys_zero_max_entries_drops_all() {
         let mut cache = SkippedMessageKeys::new(0);
-        let key_id = SkippedKeyId { dh_pub: [1u8; 32], msg_num: 0 };
+        let key_id = SkippedKeyId {
+            dh_pub: [1u8; 32],
+            msg_num: 0,
+        };
         cache.insert(key_id, [0xAA; 32]);
         assert!(cache.take(key_id).is_none());
     }

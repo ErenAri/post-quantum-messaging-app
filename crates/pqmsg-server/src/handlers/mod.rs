@@ -1,23 +1,23 @@
-mod util;
-mod identity;
 mod discovery;
-mod groups;
-mod profile;
-mod prekeys;
-mod messaging;
-mod receipts;
 mod ephemeral;
+mod groups;
+mod identity;
+mod messaging;
+mod prekeys;
+mod profile;
+mod receipts;
+mod util;
 
-pub(crate) use util::*;
-pub(crate) use identity::*;
 pub(crate) use discovery::*;
-pub(crate) use groups::*;
-pub(crate) use profile::*;
-pub(crate) use prekeys::*;
-pub(crate) use messaging::*;
-pub(crate) use receipts::*;
-pub(crate) use ephemeral::*;
 pub use ephemeral::run_message_expiry_reaper;
+pub(crate) use ephemeral::*;
+pub(crate) use groups::*;
+pub(crate) use identity::*;
+pub(crate) use messaging::*;
+pub(crate) use prekeys::*;
+pub(crate) use profile::*;
+pub(crate) use receipts::*;
+pub(crate) use util::*;
 
 use axum::extract::State;
 use axum::http::{header, StatusCode};

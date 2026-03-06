@@ -215,9 +215,9 @@ async function actionFetchBundle(): Promise<void> {
     identitySigPub: bundle.identity_sig_pub,
     fingerprint,
     observedAt: bundle.bundle_generated_at,
-    identityVersion: 1
+    identityVersion: bundle.identity_key_version
   };
-  enforceIdentityPin(bundle.user_id, bundle.identity_sig_pub, fingerprint, 1, bundle.bundle_generated_at);
+  enforceIdentityPin(bundle.user_id, bundle.identity_sig_pub, fingerprint, bundle.identity_key_version, bundle.bundle_generated_at);
   upsertConversation(setup.userId, setup.peerUserId, `Bundle fetched for ${setup.peerUserId}`, false);
   renderConversations();
   setStatus(`Fetched bundle for ${setup.peerUserId}`);

@@ -181,8 +181,7 @@ fn snapshot_roundtrip_preserves_session() {
     // Snapshot and restore Alice
     let snap = alice.snapshot();
     let snap_json = serde_json::to_string(&snap).expect("serialize");
-    let restored_snap: SessionSnapshot =
-        serde_json::from_str(&snap_json).expect("deserialize");
+    let restored_snap: SessionSnapshot = serde_json::from_str(&snap_json).expect("deserialize");
     let mut alice2 = SessionState::from_snapshot(restored_snap);
 
     // Continue conversation with restored session

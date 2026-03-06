@@ -9,6 +9,7 @@ use rand::RngCore;
 use sqlx::Row;
 use uuid::Uuid;
 
+use super::util::*;
 use crate::auth::*;
 use crate::db::*;
 use crate::error::AppError;
@@ -19,7 +20,6 @@ use crate::{
     ROTATION_CHALLENGE_BYTES, ROTATION_CHALLENGE_TTL_MINUTES, SIG_LEN, SIG_PUB_KEY_LEN,
     X25519_KEY_LEN,
 };
-use super::util::*;
 
 pub(crate) async fn publish_prekeys(
     State(state): State<AppState>,
@@ -47,8 +47,7 @@ pub(crate) async fn publish_prekeys(
     )?;
 
     // Enforce PQ prekey presence when PQ ratchet interval is active
-    if state.dos_policy().pq_ratchet_interval() > 0
-        && request.one_time_prekeys_mlkem768.is_empty()
+    if state.dos_policy().pq_ratchet_interval() > 0 && request.one_time_prekeys_mlkem768.is_empty()
     {
         return Err(AppError::bad_request(
             "PQ one-time prekeys required when pq_ratchet_interval > 0",
@@ -302,9 +301,7 @@ pub(crate) async fn get_bundle(
     if state.security_profile().requires_tls() {
         if let Ok(updated_str) = row.try_get::<String, _>("updated_at") {
             if let Ok(updated_at) = chrono::DateTime::parse_from_rfc3339(&updated_str) {
-                let age = Utc::now()
-                    .signed_duration_since(updated_at)
-                    .num_seconds();
+                let age = Utc::now().signed_duration_since(updated_at).num_seconds();
                 if age > crate::SIGNED_PREKEY_MAX_AGE_SECONDS {
                     record_security_event(
                         &state,

@@ -3682,7 +3682,11 @@ fn enforce_identity_pin(
 
 fn load_session(path: &Path) -> Result<SessionState> {
     let file: SessionFile = read_json_file(path)?;
-    Ok(SessionState::from_snapshot(file.snapshot))
+    let kem = build_kem_for_suite(file.suite)?;
+    Ok(SessionState::from_snapshot_with_kem(
+        file.snapshot,
+        Some(Box::new(kem)),
+    ))
 }
 
 fn save_session(path: &Path, file: SessionFile) -> Result<()> {

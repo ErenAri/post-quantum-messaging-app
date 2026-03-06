@@ -21,6 +21,20 @@ const AD_TAG_MSG_NUM: u16 = critical_type(0x1105);
 const AD_TAG_PREV_CHAIN_LEN: u16 = critical_type(0x1106);
 const AD_TAG_PQ_STEP_CT: u16 = critical_type(0x1107);
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PqRatchetSnapshot {
+    pub interval: u32,
+    pub local_public_key: Vec<u8>,
+    pub local_secret_key: Vec<u8>,
+    pub remote_public_key: Vec<u8>,
+}
+
+impl Drop for PqRatchetSnapshot {
+    fn drop(&mut self) {
+        self.local_secret_key.zeroize();
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionRole {
     Initiator,
@@ -55,6 +69,8 @@ pub struct SessionSnapshot {
     pub prev_chain_len: u32,
     pub max_skipped: usize,
     pub skipped: Vec<SkippedMessageKeySnapshot>,
+    #[serde(default)]
+    pub pq_ratchet: Option<PqRatchetSnapshot>,
 }
 
 impl Drop for SessionSnapshot {
@@ -163,6 +179,13 @@ impl SessionState {
             })
             .collect();
 
+        let pq_ratchet = self.pq_state.as_ref().map(|s| PqRatchetSnapshot {
+            interval: s.interval,
+            local_public_key: s.local_public_key.clone(),
+            local_secret_key: s.local_secret_key.as_slice().to_vec(),
+            remote_public_key: s.remote_public_key.clone(),
+        });
+
         SessionSnapshot {
             version: self.version,
             suite_id: self.suite_id,
@@ -177,10 +200,18 @@ impl SessionState {
             prev_chain_len: self.prev_chain_len,
             max_skipped: self.skipped.max_entries(),
             skipped,
+            pq_ratchet,
         }
     }
 
-    pub fn from_snapshot(mut snapshot: SessionSnapshot) -> Self {
+    pub fn from_snapshot(snapshot: SessionSnapshot) -> Self {
+        Self::from_snapshot_with_kem(snapshot, None)
+    }
+
+    pub fn from_snapshot_with_kem(
+        mut snapshot: SessionSnapshot,
+        kem: Option<Box<dyn KemProvider>>,
+    ) -> Self {
         let skipped_items = std::mem::take(&mut snapshot.skipped);
         let skipped = skipped_items
             .into_iter()
@@ -200,14 +231,21 @@ impl SessionState {
         let receiving_chain_key = std::mem::take(&mut snapshot.receiving_chain_key);
         let local_dh_secret = std::mem::take(&mut snapshot.local_dh_secret);
 
+        let pq_state = snapshot.pq_ratchet.take().map(|mut s| {
+            let secret = std::mem::take(&mut s.local_secret_key);
+            PqRatchetState {
+                interval: s.interval,
+                local_public_key: s.local_public_key.clone(),
+                local_secret_key: crate::keys::SecretBytes::from(secret),
+                remote_public_key: s.remote_public_key.clone(),
+            }
+        });
+
         Self {
             version: snapshot.version,
             suite_id: snapshot.suite_id,
             root_key,
-            sending_chain: ChainState::from_parts(
-                sending_chain_key,
-                snapshot.sending_next_msg_num,
-            ),
+            sending_chain: ChainState::from_parts(sending_chain_key, snapshot.sending_next_msg_num),
             receiving_chain: ChainState::from_parts(
                 receiving_chain_key,
                 snapshot.receiving_next_msg_num,
@@ -219,8 +257,8 @@ impl SessionState {
             remote_dh_pub: DhPublicKey(snapshot.remote_dh_pub),
             prev_chain_len: snapshot.prev_chain_len,
             skipped: SkippedMessageKeys::from_entries(snapshot.max_skipped, skipped),
-            pq_state: None,
-            pq_kem: None,
+            pq_state,
+            pq_kem: kem,
         }
     }
 
@@ -327,9 +365,11 @@ impl SessionState {
     }
 
     fn apply_dh_ratchet(&mut self, new_remote_dh_pub: DhPublicKey) -> Result<(), CoreError> {
-        let mut recv_step = dh_root_step(&self.root_key, &self.local_dh.secret, &new_remote_dh_pub)?;
+        let mut recv_step =
+            dh_root_step(&self.root_key, &self.local_dh.secret, &new_remote_dh_pub)?;
         self.root_key = std::mem::take(&mut recv_step.root_key);
-        self.receiving_chain.reset(std::mem::take(&mut recv_step.chain_key));
+        self.receiving_chain
+            .reset(std::mem::take(&mut recv_step.chain_key));
 
         self.prev_chain_len = self.sending_chain.next_msg_num();
         self.remote_dh_pub = new_remote_dh_pub;
@@ -337,9 +377,11 @@ impl SessionState {
         let mut rng = OsRng;
         self.local_dh = generate_keypair(&mut rng);
 
-        let mut send_step = dh_root_step(&self.root_key, &self.local_dh.secret, &self.remote_dh_pub)?;
+        let mut send_step =
+            dh_root_step(&self.root_key, &self.local_dh.secret, &self.remote_dh_pub)?;
         self.root_key = std::mem::take(&mut send_step.root_key);
-        self.sending_chain.reset(std::mem::take(&mut send_step.chain_key));
+        self.sending_chain
+            .reset(std::mem::take(&mut send_step.chain_key));
         Ok(())
     }
 }
@@ -719,5 +761,50 @@ mod tests {
 
         let result = bob.decrypt(&tampered, ad);
         assert!(matches!(result, Err(CoreError::AeadOperation)));
+    }
+
+    #[test]
+    fn pq_snapshot_restore_with_kem_preserves_future_steps() {
+        let (mut alice, mut bob) = setup_sessions(32);
+        let ad = b"session-ad";
+        let mut rng = OsRng;
+        let mut alice_pq = [0u8; 32];
+        let mut bob_pq = [0u8; 32];
+        rng.fill_bytes(&mut alice_pq);
+        rng.fill_bytes(&mut bob_pq);
+
+        alice.enable_pq_ratchet(
+            PqRatchetState {
+                interval: 1,
+                local_public_key: alice_pq.to_vec(),
+                local_secret_key: SecretBytes::from(alice_pq.to_vec()),
+                remote_public_key: bob_pq.to_vec(),
+            },
+            Box::new(MockKem),
+        );
+        bob.enable_pq_ratchet(
+            PqRatchetState {
+                interval: 1,
+                local_public_key: bob_pq.to_vec(),
+                local_secret_key: SecretBytes::from(bob_pq.to_vec()),
+                remote_public_key: alice_pq.to_vec(),
+            },
+            Box::new(MockKem),
+        );
+
+        let alice_snapshot = alice.snapshot();
+        let bob_snapshot = bob.snapshot();
+
+        let mut alice =
+            SessionState::from_snapshot_with_kem(alice_snapshot, Some(Box::new(MockKem)));
+        let mut bob = SessionState::from_snapshot_with_kem(bob_snapshot, Some(Box::new(MockKem)));
+
+        let wire = alice
+            .encrypt(b"restored", ad)
+            .expect("encrypt after restore");
+        let parsed = WireMessage::decode(&wire).expect("decode restored wire");
+        assert!(parsed.pq_step_ct.is_some());
+        let plain = bob.decrypt(&wire, ad).expect("decrypt after restore");
+        assert_eq!(plain, b"restored");
     }
 }

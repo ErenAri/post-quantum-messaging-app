@@ -371,17 +371,11 @@ mod tests {
     #[test]
     fn mlkem_suite_always_allowed() {
         // ML-KEM-768 suite is approved in all profiles and FIPS mode.
-        assert!(
-            SecurityProfile::Research
-                .allows_suite_id(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305)
-        );
-        assert!(
-            SecurityProfile::HighAssurance
-                .allows_suite_id(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305)
-        );
-        assert!(
-            SecurityProfile::NssAligned
-                .allows_suite_id(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305)
-        );
+        assert!(SecurityProfile::Research
+            .allows_suite_id(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305));
+        assert!(SecurityProfile::HighAssurance
+            .allows_suite_id(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305));
+        assert!(SecurityProfile::NssAligned
+            .allows_suite_id(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305));
     }
 }

@@ -1,13 +1,14 @@
-﻿use axum::extract::{MatchedPath, State};
+use axum::extract::{MatchedPath, State};
 use axum::http::{header, HeaderValue, Method};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
-use tower_http::cors::CorsLayer;
 use chrono::Utc;
+use tower_http::cors::CorsLayer;
 
 use pqmsg_core::alg::SecurityProfile;
 use pqmsg_core::tlv::critical_type;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use sqlx::AnyPool;
@@ -22,21 +23,21 @@ use tracing::Instrument;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+mod auth;
 mod db;
 mod error;
 mod types;
-mod auth;
 mod validation;
 
-pub use db::{DbBackend, init_db, parse_db_backend};
+pub use db::{init_db, parse_db_backend, DbBackend};
 pub use error::AppError;
 
-use types::*;
 use auth::*;
+use types::*;
 use validation::*;
 mod handlers;
-use handlers::*;
 pub use handlers::run_message_expiry_reaper;
+use handlers::*;
 
 pub(crate) const MAX_BODY_BYTES: usize = 1_048_576;
 pub(crate) const MAX_USER_ID_LEN: usize = 128;
@@ -251,6 +252,7 @@ pub struct AppState {
     metrics: Arc<MetricsRegistry>,
     audit_logger: Arc<AuditLogger>,
     cors_allowed_origins: Vec<String>,
+    trusted_proxies: Arc<Vec<std::net::IpAddr>>,
 }
 
 impl AppState {
@@ -271,6 +273,7 @@ impl AppState {
             metrics: Arc::new(MetricsRegistry::new()),
             audit_logger: Arc::new(AuditLogger::disabled()),
             cors_allowed_origins: Vec::new(),
+            trusted_proxies: Arc::new(Vec::new()),
         }
     }
 
@@ -295,6 +298,7 @@ impl AppState {
             metrics: Arc::new(MetricsRegistry::new()),
             audit_logger: Arc::new(AuditLogger::disabled()),
             cors_allowed_origins: Vec::new(),
+            trusted_proxies: Arc::new(Vec::new()),
         }
     }
 
@@ -358,18 +362,40 @@ impl AppState {
         self.cors_allowed_origins = origins;
         self
     }
+
+    pub fn with_trusted_proxies(mut self, proxies: Vec<std::net::IpAddr>) -> Self {
+        self.trusted_proxies = Arc::new(proxies);
+        self
+    }
+
+    pub fn trusted_proxies(&self) -> &[std::net::IpAddr] {
+        &self.trusted_proxies
+    }
+
+    pub fn with_realtime_hub(mut self, hub: RealtimeHub) -> Self {
+        self.realtime_hub = hub;
+        self
+    }
 }
 
 #[derive(Clone)]
 pub struct RealtimeHub {
     inner: Arc<Mutex<HashMap<String, Vec<RealtimeSubscriber>>>>,
     next_id: Arc<AtomicU64>,
+    redis_client: Option<redis::Client>,
+    instance_id: Arc<String>,
 }
 
 #[derive(Clone)]
 struct RealtimeSubscriber {
     id: u64,
     sender: mpsc::UnboundedSender<InboxItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RealtimePubSubEnvelope {
+    origin_instance_id: Option<String>,
+    message: InboxItem,
 }
 
 #[derive(Clone)]
@@ -559,8 +585,7 @@ impl MetricsRegistry {
     }
 
     pub fn record_pq_ratchet_step(&self) {
-        self.pq_ratchet_steps_total
-            .fetch_add(1, Ordering::Relaxed);
+        self.pq_ratchet_steps_total.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn render_prometheus(&self) -> String {
@@ -1008,10 +1033,21 @@ impl AuthReplayCache {
 }
 
 impl RealtimeHub {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(AtomicU64::new(1)),
+            redis_client: None,
+            instance_id: Arc::new(Uuid::new_v4().to_string()),
+        }
+    }
+
+    pub fn with_redis(redis_client: redis::Client) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Arc::new(AtomicU64::new(1)),
+            redis_client: Some(redis_client),
+            instance_id: Arc::new(Uuid::new_v4().to_string()),
         }
     }
 
@@ -1047,6 +1083,27 @@ impl RealtimeHub {
     }
 
     fn publish(&self, user_id: &str, device_id: &str, message: InboxItem) {
+        // Publish to Redis channel when available so other server instances
+        // can forward to their local subscribers.
+        if let Some(ref client) = self.redis_client {
+            let channel = format!("pqmsg:inbox:{}", inbox_stream_key(user_id, device_id));
+            if let Ok(payload) = serde_json::to_string(&RealtimePubSubEnvelope {
+                origin_instance_id: Some(self.instance_id.as_ref().clone()),
+                message: message.clone(),
+            }) {
+                if let Ok(mut conn) = client.get_connection() {
+                    let _: redis::RedisResult<i64> = redis::cmd("PUBLISH")
+                        .arg(&channel)
+                        .arg(&payload)
+                        .query(&mut conn);
+                }
+            }
+        }
+
+        self.dispatch_local(user_id, device_id, message);
+    }
+
+    fn dispatch_local(&self, user_id: &str, device_id: &str, message: InboxItem) {
         let Ok(mut map) = self.inner.lock() else {
             return;
         };
@@ -1059,6 +1116,82 @@ impl RealtimeHub {
             map.remove(&key);
         }
     }
+
+    /// Spawn a background task that subscribes to Redis pub/sub channels and
+    /// dispatches incoming messages to local WebSocket subscribers.
+    pub fn spawn_redis_subscriber(&self) {
+        let Some(ref client) = self.redis_client else {
+            return;
+        };
+        let client = client.clone();
+        let inner = self.inner.clone();
+        let instance_id = self.instance_id.as_ref().clone();
+        std::thread::spawn(move || {
+            loop {
+                let mut conn = match client.get_connection() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("realtime redis subscriber connection failed: {e}");
+                        std::thread::sleep(StdDuration::from_secs(2));
+                        continue;
+                    }
+                };
+                let mut pubsub = conn.as_pubsub();
+                if let Err(e) = pubsub.psubscribe("pqmsg:inbox:*") {
+                    tracing::warn!("realtime redis psubscribe failed: {e}");
+                    std::thread::sleep(StdDuration::from_secs(2));
+                    continue;
+                }
+                loop {
+                    let msg: redis::Msg = match pubsub.get_message() {
+                        Ok(m) => m,
+                        Err(e) => {
+                            tracing::warn!("realtime redis get_message error: {e}");
+                            break; // reconnect
+                        }
+                    };
+                    let channel: String = match msg.get_channel() {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                    let payload: String = match msg.get_payload() {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    // channel format: pqmsg:inbox:{user_id}:{device_id}
+                    let key = channel.strip_prefix("pqmsg:inbox:").unwrap_or(&channel);
+                    let Some(envelope) = decode_realtime_pubsub_envelope(&payload) else {
+                        continue;
+                    };
+                    if envelope.origin_instance_id.as_deref() == Some(instance_id.as_str()) {
+                        continue;
+                    }
+                    let item = envelope.message;
+                    if let Ok(mut map) = inner.lock() {
+                        if let Some(subscribers) = map.get_mut(key) {
+                            subscribers.retain(|sub| sub.sender.send(item.clone()).is_ok());
+                            if subscribers.is_empty() {
+                                map.remove(key);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+fn decode_realtime_pubsub_envelope(payload: &str) -> Option<RealtimePubSubEnvelope> {
+    serde_json::from_str::<RealtimePubSubEnvelope>(payload)
+        .ok()
+        .or_else(|| {
+            serde_json::from_str::<InboxItem>(payload)
+                .ok()
+                .map(|message| RealtimePubSubEnvelope {
+                    origin_instance_id: None,
+                    message,
+                })
+        })
 }
 
 fn inbox_stream_key(user_id: &str, device_id: &str) -> String {
@@ -1324,10 +1457,8 @@ pub fn build_router(state: AppState) -> Router {
     let cors_layer = if cors_origins.is_empty() {
         CorsLayer::new()
     } else {
-        let origins: Vec<HeaderValue> = cors_origins
-            .iter()
-            .filter_map(|o| o.parse().ok())
-            .collect();
+        let origins: Vec<HeaderValue> =
+            cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
         CorsLayer::new()
             .allow_origin(origins)
             .allow_methods([
@@ -1341,6 +1472,11 @@ pub fn build_router(state: AppState) -> Router {
                 header::CONTENT_TYPE,
                 header::AUTHORIZATION,
                 "x-request-id".parse().expect("valid header name"),
+                AUTH_HEADER_USER.parse().expect("valid header name"),
+                AUTH_HEADER_DEVICE.parse().expect("valid header name"),
+                AUTH_HEADER_TIMESTAMP.parse().expect("valid header name"),
+                AUTH_HEADER_NONCE.parse().expect("valid header name"),
+                AUTH_HEADER_SIGNATURE.parse().expect("valid header name"),
             ])
             .max_age(StdDuration::from_secs(3600))
     };
@@ -1472,3 +1608,42 @@ async fn security_headers_middleware(
     response
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{decode_realtime_pubsub_envelope, InboxItem, RealtimeHub, RealtimePubSubEnvelope};
+
+    fn sample_inbox_item() -> InboxItem {
+        InboxItem {
+            message_id: 7,
+            sender_user_id: "alice".to_string(),
+            message_bytes_base64: "Y2lwaGVydGV4dA==".to_string(),
+            received_at: "2026-03-07T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn realtime_pubsub_ignores_same_instance_echo() {
+        let hub = RealtimeHub::new();
+        let payload = serde_json::to_string(&RealtimePubSubEnvelope {
+            origin_instance_id: Some(hub.instance_id.as_ref().clone()),
+            message: sample_inbox_item(),
+        })
+        .expect("serialize envelope");
+
+        let envelope = decode_realtime_pubsub_envelope(&payload).expect("decode envelope");
+        assert_eq!(
+            envelope.origin_instance_id.as_deref(),
+            Some(hub.instance_id.as_str())
+        );
+    }
+
+    #[test]
+    fn realtime_pubsub_decodes_legacy_payloads() {
+        let payload =
+            serde_json::to_string(&sample_inbox_item()).expect("serialize legacy payload");
+
+        let envelope = decode_realtime_pubsub_envelope(&payload).expect("decode payload");
+        assert_eq!(envelope.origin_instance_id, None);
+        assert_eq!(envelope.message.message_id, 7);
+    }
+}

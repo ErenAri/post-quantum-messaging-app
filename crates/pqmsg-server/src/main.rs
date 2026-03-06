@@ -5,11 +5,12 @@ use opentelemetry_otlp::WithExportConfig;
 use pqmsg_core::alg::SecurityProfile;
 use pqmsg_server::{
     build_router, init_db, parse_db_backend, AppState, AuditLogger, AuthReplayCache,
-    DosHardeningPolicy, PushNotifier, RateLimiter,
+    DosHardeningPolicy, PushNotifier, RateLimiter, RealtimeHub,
 };
 use sentry::ClientOptions;
 use sqlx::any::AnyPoolOptions;
 use std::env;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use tower_http::timeout::TimeoutLayer;
@@ -102,7 +103,11 @@ async fn main() -> anyhow::Result<()> {
     // Optional OpenTelemetry OTLP exporter
     let otlp_endpoint = env::var("PQMSG_OTLP_ENDPOINT").ok().and_then(|v| {
         let trimmed = v.trim().to_string();
-        if trimmed.is_empty() { None } else { Some(trimmed) }
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
     });
     let otel_provider = if let Some(endpoint) = &otlp_endpoint {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
@@ -112,9 +117,11 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("failed to create OTLP exporter for '{endpoint}'"))?;
         let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
             .with_batch_exporter(exporter)
-            .with_resource(opentelemetry_sdk::Resource::builder()
-                .with_service_name("pqmsg-server")
-                .build())
+            .with_resource(
+                opentelemetry_sdk::Resource::builder()
+                    .with_service_name("pqmsg-server")
+                    .build(),
+            )
             .build();
         Some(provider)
     } else {
@@ -130,7 +137,9 @@ async fn main() -> anyhow::Result<()> {
         if sentry_enabled {
             if let Some(ref provider) = otel_provider {
                 reg.with(sentry_tracing::layer())
-                    .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("pqmsg-server")))
+                    .with(
+                        tracing_opentelemetry::layer().with_tracer(provider.tracer("pqmsg-server")),
+                    )
                     .init();
             } else {
                 reg.with(sentry_tracing::layer()).init();
@@ -153,7 +162,9 @@ async fn main() -> anyhow::Result<()> {
         if sentry_enabled {
             if let Some(ref provider) = otel_provider {
                 reg.with(sentry_tracing::layer())
-                    .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("pqmsg-server")))
+                    .with(
+                        tracing_opentelemetry::layer().with_tracer(provider.tracer("pqmsg-server")),
+                    )
                     .init();
             } else {
                 reg.with(sentry_tracing::layer()).init();
@@ -206,8 +217,9 @@ async fn main() -> anyhow::Result<()> {
         dos_policy = dos_policy.with_prekey_bundle_reserve_count(reserve);
     }
     if let Some(interval) = parse_env_optional_i64("PQMSG_PQ_RATCHET_INTERVAL")? {
-        let interval = u32::try_from(interval)
-            .with_context(|| format!("invalid PQMSG_PQ_RATCHET_INTERVAL '{interval}': must be 0..4294967295"))?;
+        let interval = u32::try_from(interval).with_context(|| {
+            format!("invalid PQMSG_PQ_RATCHET_INTERVAL '{interval}': must be 0..4294967295")
+        })?;
         dos_policy = dos_policy.with_pq_ratchet_interval(interval);
     }
     let fcm_server_key = env::var("PQMSG_FCM_SERVER_KEY").ok();
@@ -317,19 +329,48 @@ async fn main() -> anyhow::Result<()> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+    let trusted_proxies: Vec<std::net::IpAddr> =
+        env::var("PQMSG_TRUSTED_PROXIES")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|s| {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.parse::<std::net::IpAddr>().with_context(|| {
+                        format!("invalid IP in PQMSG_TRUSTED_PROXIES: '{trimmed}'")
+                    }))
+                }
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+    let realtime_hub = if let Some(redis_url) = &rate_limit_redis_url {
+        let client = redis::Client::open(redis_url.as_str()).with_context(|| {
+            format!("failed to create redis client for realtime hub: '{redis_url}'")
+        })?;
+        let hub = RealtimeHub::with_redis(client);
+        hub.spawn_redis_subscriber();
+        hub
+    } else {
+        RealtimeHub::new()
+    };
     let state =
         AppState::with_security_profile(pool, db_backend, rate_limiter.clone(), security_profile)
             .with_dos_policy(dos_policy)
             .with_audit_logger(audit_logger)
             .with_push_notifier(push_notifier)
             .with_auth_replay(auth_replay)
-            .with_cors_allowed_origins(cors_allowed_origins);
+            .with_cors_allowed_origins(cors_allowed_origins)
+            .with_trusted_proxies(trusted_proxies)
+            .with_realtime_hub(realtime_hub);
 
     // Spawn the ephemeral message expiry reaper
     tokio::spawn(pqmsg_server::run_message_expiry_reaper(state.clone()));
 
-    let app = build_router(state)
-        .layer(TimeoutLayer::with_status_code(axum::http::StatusCode::REQUEST_TIMEOUT, StdDuration::from_secs(30)));
+    let app = build_router(state).layer(TimeoutLayer::with_status_code(
+        axum::http::StatusCode::REQUEST_TIMEOUT,
+        StdDuration::from_secs(30),
+    ));
     let rate_limiter_mode = if rate_limiter.is_distributed() {
         "redis"
     } else {
@@ -370,7 +411,7 @@ async fn main() -> anyhow::Result<()> {
             });
             axum_server::bind_rustls(bind_addr.parse()?, tls_config)
                 .handle(handle)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                 .await?;
         }
         (None, None) => {
@@ -397,9 +438,12 @@ async fn main() -> anyhow::Result<()> {
                 sentry_enabled
             );
             info!("enabled_push_providers={}", push_providers.join(","));
-            axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown_signal())
-                .await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
         }
         _ => {
             anyhow::bail!("set both PQMSG_TLS_CERT_PATH and PQMSG_TLS_KEY_PATH, or neither");

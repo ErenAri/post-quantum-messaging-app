@@ -1,17 +1,17 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use pqmsg_core::aead;
 use pqmsg_core::dh;
 use pqmsg_core::handshake::{
-    alice_initiate, bob_receive, signed_prekey_signature_message,
-    pq_signed_prekey_signature_message, InitialMessage, SignatureVerifier,
+    alice_initiate, bob_receive, pq_signed_prekey_signature_message,
+    signed_prekey_signature_message, InitialMessage, SignatureVerifier,
 };
 use pqmsg_core::kdf;
 use pqmsg_core::kem::{KemEncapsulation, KemProvider, MlKem768};
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
 use pqmsg_core::ratchet::{dh_root_step, kdf_root_step, ChainState};
-use pqmsg_core::sealed::{seal_message, open_message, derive_pairwise_sealed_sender_key};
+use pqmsg_core::sealed::{derive_pairwise_sealed_sender_key, open_message, seal_message};
 use pqmsg_core::session::{SessionRole, SessionState};
-use pqmsg_core::storage::{wrap_bytes_with_params, unwrap_bytes, Argon2idParams};
+use pqmsg_core::storage::{unwrap_bytes, wrap_bytes_with_params, Argon2idParams};
 use pqmsg_core::tlv::{self, critical_type, TlvRecord};
 use pqmsg_core::wire::WireMessage;
 use pqmsg_core::CoreError;
@@ -88,7 +88,9 @@ fn digest3(a: &[u8], b: &[u8], c: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-fn setup_bundle(rng: &mut ChaCha20Rng) -> (IdentityKeyPair, OneTimePreKey, KEMPreKey, PreKeyBundle) {
+fn setup_bundle(
+    rng: &mut ChaCha20Rng,
+) -> (IdentityKeyPair, OneTimePreKey, KEMPreKey, PreKeyBundle) {
     use rand::RngCore;
     let bob_identity = IdentityKeyPair::generate("bob-ik", rng);
     let bob_spk = OneTimePreKey::generate("bob-spk", rng);
@@ -182,21 +184,26 @@ fn bench_kdf(c: &mut Criterion) {
 
     c.bench_function("kdf/hkdf_sha256_32", |b| {
         b.iter(|| {
-            kdf::hkdf_sha256_32(
-                black_box(&ikm),
-                Some(black_box(&salt)),
-                black_box(b"info"),
-            )
-            .unwrap()
+            kdf::hkdf_sha256_32(black_box(&ikm), Some(black_box(&salt)), black_box(b"info"))
+                .unwrap()
         })
     });
 }
 
 fn bench_tlv(c: &mut Criterion) {
     let records = vec![
-        TlvRecord { ty: critical_type(0x0001), value: vec![0u8; 32] },
-        TlvRecord { ty: critical_type(0x0002), value: vec![0u8; 64] },
-        TlvRecord { ty: 0x0004, value: vec![0u8; 128] },
+        TlvRecord {
+            ty: critical_type(0x0001),
+            value: vec![0u8; 32],
+        },
+        TlvRecord {
+            ty: critical_type(0x0002),
+            value: vec![0u8; 64],
+        },
+        TlvRecord {
+            ty: 0x0004,
+            value: vec![0u8; 128],
+        },
     ];
     let encoded = tlv::encode(&records).unwrap();
     let known = [critical_type(0x0001), critical_type(0x0002), 0x0004];
@@ -244,7 +251,14 @@ fn bench_ratchet(c: &mut Criterion) {
     });
 
     c.bench_function("ratchet/dh_root_step", |b| {
-        b.iter(|| dh_root_step(black_box(&root_key), black_box(&kp.secret), black_box(&remote.public)).unwrap())
+        b.iter(|| {
+            dh_root_step(
+                black_box(&root_key),
+                black_box(&kp.secret),
+                black_box(&remote.public),
+            )
+            .unwrap()
+        })
     });
 
     c.bench_function("ratchet/chain_next_message_key", |b| {
@@ -270,9 +284,16 @@ fn bench_handshake(c: &mut Criterion) {
             },
             |(mut rng, alice, bundle)| {
                 alice_initiate(
-                    &mut rng, &verifier, &kem,
-                    "alice", "bob", &alice, &bundle, b"bench-payload",
-                ).unwrap()
+                    &mut rng,
+                    &verifier,
+                    &kem,
+                    "alice",
+                    "bob",
+                    &alice,
+                    &bundle,
+                    b"bench-payload",
+                )
+                .unwrap()
             },
             criterion::BatchSize::SmallInput,
         )
@@ -285,9 +306,16 @@ fn bench_handshake(c: &mut Criterion) {
                 let alice = IdentityKeyPair::generate("alice-ik", &mut rng);
                 let (bob_id, bob_spk, bob_pq_spk, bundle) = setup_bundle(&mut rng);
                 let out = alice_initiate(
-                    &mut rng, &verifier, &kem,
-                    "alice", "bob", &alice, &bundle, b"bench-payload",
-                ).unwrap();
+                    &mut rng,
+                    &verifier,
+                    &kem,
+                    "alice",
+                    "bob",
+                    &alice,
+                    &bundle,
+                    b"bench-payload",
+                )
+                .unwrap();
                 let encoded = out.initial_message.encode().unwrap();
                 let decoded = InitialMessage::decode(&encoded).unwrap();
                 (bob_id, bob_spk, bob_pq_spk, decoded)
@@ -309,16 +337,19 @@ fn bench_sealed_sender(c: &mut Criterion) {
     c.bench_function("sealed/seal_message_256b", |b| {
         b.iter(|| {
             seal_message(
-                black_box(&key), 0x0001, "bob", "alice", "dev1",
+                black_box(&key),
+                0x0001,
+                "bob",
+                "alice",
+                "dev1",
                 black_box(&payload),
-            ).unwrap()
+            )
+            .unwrap()
         })
     });
 
     c.bench_function("sealed/open_message_256b", |b| {
-        b.iter(|| {
-            open_message(black_box(&key), black_box(&sealed), 0x0001, "bob").unwrap()
-        })
+        b.iter(|| open_message(black_box(&key), black_box(&sealed), 0x0001, "bob").unwrap())
     });
 
     let mut rng = ChaCha20Rng::seed_from_u64(3);
@@ -331,7 +362,8 @@ fn bench_sealed_sender(c: &mut Criterion) {
                 black_box(&local_kp.secret),
                 black_box(&remote_kp.public),
                 0x0001,
-            ).unwrap()
+            )
+            .unwrap()
         })
     });
 }
@@ -345,16 +377,17 @@ fn bench_session(c: &mut Criterion) {
     let bob_pub = bob_dh.public;
 
     // Both sides share the same handshake root key. Alice sees Bob's pub, Bob sees Alice's pub.
-    let mut alice = SessionState::from_handshake(
-        SessionRole::Initiator, root_key, alice_dh, bob_pub, 2000,
-    ).unwrap();
-    let mut bob = SessionState::from_handshake(
-        SessionRole::Responder, root_key, bob_dh, alice_pub, 2000,
-    ).unwrap();
+    let mut alice =
+        SessionState::from_handshake(SessionRole::Initiator, root_key, alice_dh, bob_pub, 2000)
+            .unwrap();
+    let mut bob =
+        SessionState::from_handshake(SessionRole::Responder, root_key, bob_dh, alice_pub, 2000)
+            .unwrap();
 
     // Alice sends, Bob receives — this validates the session pair is valid.
     let ct0 = alice.encrypt(b"warmup", b"ad").unwrap();
-    bob.decrypt(&ct0, b"ad").expect("session warmup decrypt must succeed");
+    bob.decrypt(&ct0, b"ad")
+        .expect("session warmup decrypt must succeed");
 
     c.bench_function("session/encrypt_256b", |b| {
         let msg = vec![0xABu8; 256];
@@ -388,11 +421,8 @@ fn bench_argon2id(c: &mut Criterion) {
 
     c.bench_function("storage/argon2id_wrap_fast", |b| {
         b.iter(|| {
-            wrap_bytes_with_params(
-                black_box(&passphrase),
-                black_box(plaintext),
-                fast_params,
-            ).unwrap()
+            wrap_bytes_with_params(black_box(&passphrase), black_box(plaintext), fast_params)
+                .unwrap()
         })
     });
 

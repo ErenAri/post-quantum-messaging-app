@@ -453,7 +453,7 @@ pub(crate) struct BundleQuery {
     pub(crate) device_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct InboxItem {
     pub(crate) message_id: i64,
     pub(crate) sender_user_id: String,
@@ -512,7 +512,7 @@ pub(crate) struct StatusResponse {
 #[derive(Debug, Deserialize)]
 pub(crate) struct SendReceiptRequest {
     pub(crate) message_id: i64,
-    pub(crate) receipt_type: String,  // "delivered" or "read"
+    pub(crate) receipt_type: String, // "delivered" or "read"
 }
 
 #[derive(Debug, Serialize)]

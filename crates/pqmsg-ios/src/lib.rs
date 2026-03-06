@@ -812,7 +812,7 @@ pub fn encrypt_with_session(
         )));
     }
 
-    let mut session = SessionState::from_snapshot(session_file.snapshot.clone());
+    let mut session = restore_session(&session_file)?;
     let ad = make_ad(&sender_user_id, &peer_user_id)?;
     let wire = session.encrypt(plaintext_utf8.as_bytes(), &ad)?;
     session_file.snapshot = session.snapshot();
@@ -910,7 +910,7 @@ pub fn decrypt_message(
         )));
     }
 
-    let mut session = SessionState::from_snapshot(session_file.snapshot.clone());
+    let mut session = restore_session(&session_file)?;
     let ad = make_ad(&sender_user_id, &recipient_user_id)?;
     let plaintext = session.decrypt(&message_bytes, &ad)?;
     session_file.snapshot = session.snapshot();
@@ -931,6 +931,14 @@ fn read_keys_file(keys_json: &str) -> Result<UserKeysFile, PqmsgIosError> {
 
 fn read_session_file(session_json: &str) -> Result<SessionFile, PqmsgIosError> {
     serde_json::from_str(session_json).map_err(Into::into)
+}
+
+fn restore_session(session_file: &SessionFile) -> Result<SessionState, PqmsgIosError> {
+    let kem = build_kem_for_suite(session_file.suite)?;
+    Ok(SessionState::from_snapshot_with_kem(
+        session_file.snapshot.clone(),
+        Some(Box::new(kem)),
+    ))
 }
 
 fn to_identity_keypair(keys: &UserKeysFile) -> Result<IdentityKeyPair, PqmsgIosError> {

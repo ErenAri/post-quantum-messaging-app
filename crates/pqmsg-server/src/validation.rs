@@ -1,4 +1,4 @@
-﻿use base64::engine::general_purpose::STANDARD as B64;
+use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use pqmsg_core::alg::PROTOCOL_VERSION_V1;
@@ -10,17 +10,12 @@ use sha2::{Digest, Sha256};
 use crate::error::AppError;
 use crate::types::RegisterPushTokenRequest;
 use crate::{
-    PushProvider,
-    MAX_USER_ID_LEN, MAX_DEVICE_ID_LEN, MAX_ONE_TIME_KEYS,
-    MAX_PUSH_TOKEN_LEN, MAX_CONTACT_ALIAS_LEN, MAX_PROFILE_DISPLAY_NAME_LEN,
-    MAX_MIME_TYPE_LEN, MAX_FILE_ID_LEN, SHA256_HEX_LEN,
-    MAX_DISCOVERY_HASHES, MAX_GROUP_MEMBERS,
-    MAX_ROTATION_CHALLENGE_ID_LEN,
-    PREKEY_LOW_WATERMARK,
-    X25519_KEY_LEN, SIG_PUB_KEY_LEN, SIG_LEN,
-    ROTATE_SIG_TAG_USER_ID, ROTATE_SIG_TAG_CHALLENGE_ID,
-    ROTATE_SIG_TAG_CHALLENGE_NONCE, ROTATE_SIG_TAG_NEW_IDENTITY_X25519,
-    ROTATE_SIG_TAG_NEW_IDENTITY_SIG, ROTATE_SIG_TAG_NEW_DEVICE_ID,
+    PushProvider, MAX_CONTACT_ALIAS_LEN, MAX_DEVICE_ID_LEN, MAX_DISCOVERY_HASHES, MAX_FILE_ID_LEN,
+    MAX_GROUP_MEMBERS, MAX_MIME_TYPE_LEN, MAX_ONE_TIME_KEYS, MAX_PROFILE_DISPLAY_NAME_LEN,
+    MAX_PUSH_TOKEN_LEN, MAX_ROTATION_CHALLENGE_ID_LEN, MAX_USER_ID_LEN, PREKEY_LOW_WATERMARK,
+    ROTATE_SIG_TAG_CHALLENGE_ID, ROTATE_SIG_TAG_CHALLENGE_NONCE, ROTATE_SIG_TAG_NEW_DEVICE_ID,
+    ROTATE_SIG_TAG_NEW_IDENTITY_SIG, ROTATE_SIG_TAG_NEW_IDENTITY_X25519, ROTATE_SIG_TAG_USER_ID,
+    SHA256_HEX_LEN, SIG_LEN, SIG_PUB_KEY_LEN, X25519_KEY_LEN,
 };
 
 pub(crate) fn is_prekey_inventory_low(remaining_x: i64, remaining_pq: i64) -> bool {
@@ -183,7 +178,9 @@ pub(crate) fn validate_optional_mime_type(
     Ok(Some(validate_mime_type(field, trimmed)?))
 }
 
-pub(crate) fn validate_optional_profile_display_name(value: Option<&str>) -> Result<Option<String>, AppError> {
+pub(crate) fn validate_optional_profile_display_name(
+    value: Option<&str>,
+) -> Result<Option<String>, AppError> {
     let Some(raw) = value else {
         return Ok(None);
     };
@@ -210,7 +207,9 @@ pub(crate) fn validate_presence_status(value: &str) -> Result<String, AppError> 
     Ok(normalized)
 }
 
-pub(crate) fn validate_optional_contact_alias(value: Option<&str>) -> Result<Option<String>, AppError> {
+pub(crate) fn validate_optional_contact_alias(
+    value: Option<&str>,
+) -> Result<Option<String>, AppError> {
     let Some(alias) = value else {
         return Ok(None);
     };
@@ -259,7 +258,9 @@ pub(crate) fn validate_sha256_hex(field: &'static str, value: &str) -> Result<St
     Ok(normalized)
 }
 
-pub(crate) fn validate_optional_fingerprint_sha256(value: Option<&str>) -> Result<Option<String>, AppError> {
+pub(crate) fn validate_optional_fingerprint_sha256(
+    value: Option<&str>,
+) -> Result<Option<String>, AppError> {
     let Some(raw) = value else {
         return Ok(None);
     };

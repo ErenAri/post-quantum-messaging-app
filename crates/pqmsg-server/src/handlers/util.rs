@@ -5,10 +5,7 @@ use tracing::warn;
 
 use crate::error::AppError;
 use crate::types::*;
-use crate::{
-    AppState, PushProvider, MAX_POW_NONCE_LEN,
-    RELAY_DEDUP_TTL_SECONDS,
-};
+use crate::{AppState, PushProvider, MAX_POW_NONCE_LEN, RELAY_DEDUP_TTL_SECONDS};
 
 pub(crate) fn record_security_event(
     state: &AppState,
@@ -30,28 +27,42 @@ pub(crate) fn record_security_event(
     );
 }
 
-/// Extract the originating client IP from reverse-proxy headers.
-/// Checks `X-Forwarded-For` (first entry) then `X-Real-IP`.
-pub(crate) fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
-    if let Some(val) = headers.get("x-forwarded-for") {
-        if let Ok(s) = val.to_str() {
-            if let Some(first) = s.split(',').next() {
-                let ip = first.trim();
+/// Extract the originating client IP.
+///
+/// Proxy headers (`X-Forwarded-For`, `X-Real-IP`) are only trusted when the
+/// request arrives from a known proxy address listed in `trusted_proxies`.
+/// Otherwise the peer (socket) address is returned directly.
+pub(crate) fn extract_client_ip(
+    headers: &axum::http::HeaderMap,
+    peer_addr: Option<std::net::IpAddr>,
+    trusted_proxies: &[std::net::IpAddr],
+) -> Option<String> {
+    let peer_is_trusted = peer_addr
+        .map(|addr| trusted_proxies.contains(&addr))
+        .unwrap_or(false);
+
+    if peer_is_trusted {
+        if let Some(val) = headers.get("x-forwarded-for") {
+            if let Ok(s) = val.to_str() {
+                if let Some(first) = s.split(',').next() {
+                    let ip = first.trim();
+                    if !ip.is_empty() {
+                        return Some(ip.to_owned());
+                    }
+                }
+            }
+        }
+        if let Some(val) = headers.get("x-real-ip") {
+            if let Ok(s) = val.to_str() {
+                let ip = s.trim();
                 if !ip.is_empty() {
                     return Some(ip.to_owned());
                 }
             }
         }
     }
-    if let Some(val) = headers.get("x-real-ip") {
-        if let Ok(s) = val.to_str() {
-            let ip = s.trim();
-            if !ip.is_empty() {
-                return Some(ip.to_owned());
-            }
-        }
-    }
-    None
+
+    peer_addr.map(|a| a.to_string())
 }
 
 pub(crate) fn check_rate_limit(state: &AppState, key: &str) -> Result<(), AppError> {
@@ -182,7 +193,10 @@ pub(crate) fn has_leading_zero_bits(bytes: &[u8], bits: u8) -> bool {
     bytes[full_bytes] & mask == 0
 }
 
-pub(crate) async fn observe_relay_dedup(state: &AppState, dedup_key: &str) -> Result<bool, AppError> {
+pub(crate) async fn observe_relay_dedup(
+    state: &AppState,
+    dedup_key: &str,
+) -> Result<bool, AppError> {
     let now = Utc::now();
     let now_unix = now.timestamp();
     let now_rfc3339 = now.to_rfc3339();

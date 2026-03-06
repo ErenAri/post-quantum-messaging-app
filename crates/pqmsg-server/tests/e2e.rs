@@ -190,7 +190,10 @@ fn relay_auth_headers(
     message_blob: &[u8],
 ) -> Vec<(&'static str, String)> {
     let timestamp = Utc::now().timestamp();
-    let nonce = format!("e2e-relay-{}", NONCE_COUNTER.fetch_add(1, Ordering::Relaxed));
+    let nonce = format!(
+        "e2e-relay-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
     let mut records =
         auth_common_records("relay", sender_user_id, sender_device_id, timestamp, &nonce);
     records.push(TlvRecord {
@@ -219,7 +222,10 @@ fn inbox_auth_headers(
     since: i64,
 ) -> Vec<(&'static str, String)> {
     let timestamp = Utc::now().timestamp();
-    let nonce = format!("e2e-inbox-{}", NONCE_COUNTER.fetch_add(1, Ordering::Relaxed));
+    let nonce = format!(
+        "e2e-inbox-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
     let mut records = auth_common_records("inbox", user_id, device_id, timestamp, &nonce);
     records.push(TlvRecord {
         ty: AUTH_TAG_RECIPIENT_ID,
@@ -294,7 +300,13 @@ fn receipt_auth_headers(
     receipt_type: &str,
 ) -> Vec<(&'static str, String)> {
     let auth_message = format!("receipt:{user_id}:{device_id}:{message_id}:{receipt_type}");
-    make_auth_headers(signing_key, user_id, device_id, auth_message.as_bytes(), "e2e-receipt")
+    make_auth_headers(
+        signing_key,
+        user_id,
+        device_id,
+        auth_message.as_bytes(),
+        "e2e-receipt",
+    )
 }
 
 /// Auth headers for receipt polling (simple string-based auth message).
@@ -305,7 +317,13 @@ fn get_receipts_auth_headers(
     since_id: i64,
 ) -> Vec<(&'static str, String)> {
     let auth_message = format!("get-receipts:{user_id}:{device_id}:{since_id}");
-    make_auth_headers(signing_key, user_id, device_id, auth_message.as_bytes(), "e2e-get-receipts")
+    make_auth_headers(
+        signing_key,
+        user_id,
+        device_id,
+        auth_message.as_bytes(),
+        "e2e-get-receipts",
+    )
 }
 
 /// Auth headers for ephemeral relay (simple string-based auth message).
@@ -335,10 +353,7 @@ fn link_device_auth_headers(
     new_device_id: &str,
 ) -> Vec<(&'static str, String)> {
     let timestamp = Utc::now().timestamp();
-    let nonce = format!(
-        "e2e-link-{}",
-        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
+    let nonce = format!("e2e-link-{}", NONCE_COUNTER.fetch_add(1, Ordering::Relaxed));
     let mut records =
         auth_common_records("devices-link", user_id, auth_device_id, timestamp, &nonce);
     records.push(TlvRecord {
@@ -436,13 +451,8 @@ impl Client {
             self.x25519_pub,
             &self.signing_key,
         );
-        let (status, _) = json_request(
-            app.clone(),
-            Method::POST,
-            "/v1/users/register",
-            payload,
-        )
-        .await;
+        let (status, _) =
+            json_request(app.clone(), Method::POST, "/v1/users/register", payload).await;
         assert_eq!(status, StatusCode::OK, "register {}", self.user_id);
     }
 
@@ -460,12 +470,7 @@ impl Client {
                 vec![self.x25519_pub[0].wrapping_add(41); 64],
             ],
         );
-        let auth = prekeys_auth_headers(
-            &self.signing_key,
-            self.user_id,
-            self.device_id,
-            &payload,
-        );
+        let auth = prekeys_auth_headers(&self.signing_key, self.user_id, self.device_id, &payload);
         let (status, _) = json_request_with_headers(
             app.clone(),
             Method::POST,
@@ -492,7 +497,13 @@ impl Client {
             &auth,
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "link_device {} → {}", self.user_id, new_device_id);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "link_device {} → {}",
+            self.user_id,
+            new_device_id
+        );
     }
 }
 
@@ -595,7 +606,7 @@ async fn e2e_full_message_and_receipt_flow() {
     assert_eq!(receipt_body["message_id"].as_i64(), Some(message_id));
     assert_eq!(receipt_body["receipt_type"].as_str(), Some("delivered"));
 
-    // Alice polls for receipts  
+    // Alice polls for receipts
     let poll_auth = get_receipts_auth_headers(&alice.signing_key, "e2e-alice", "alice-d1", 0);
     let (status, receipts) = json_request_with_headers(
         app.clone(),
@@ -613,19 +624,10 @@ async fn e2e_full_message_and_receipt_flow() {
         receipt_items[0]["recipient_user_id"].as_str(),
         Some("e2e-bob")
     );
-    assert_eq!(
-        receipt_items[0]["receipt_type"].as_str(),
-        Some("delivered")
-    );
+    assert_eq!(receipt_items[0]["receipt_type"].as_str(), Some("delivered"));
 
     // Bob upgrades to "read" receipt
-    let read_auth = receipt_auth_headers(
-        &bob.signing_key,
-        "e2e-bob",
-        "bob-d1",
-        message_id,
-        "read",
-    );
+    let read_auth = receipt_auth_headers(&bob.signing_key, "e2e-bob", "bob-d1", message_id, "read");
     let (status, _) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -668,13 +670,8 @@ async fn e2e_ephemeral_message_relay() {
     let ciphertext = b"self-destructing-message";
     let ttl = 3600u64; // 1 hour
 
-    let auth = ephemeral_relay_auth_headers(
-        &alice.signing_key,
-        "eph-alice",
-        "alice-d1",
-        "eph-bob",
-        ttl,
-    );
+    let auth =
+        ephemeral_relay_auth_headers(&alice.signing_key, "eph-alice", "alice-d1", "eph-bob", ttl);
     let (status, body) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -719,9 +716,8 @@ async fn e2e_ephemeral_rejects_invalid_ttl() {
     bob.register(&app).await;
 
     // TTL = 0 (too low)
-    let auth = ephemeral_relay_auth_headers(
-        &alice.signing_key, "ettl-alice", "alice-d1", "ettl-bob", 0,
-    );
+    let auth =
+        ephemeral_relay_auth_headers(&alice.signing_key, "ettl-alice", "alice-d1", "ettl-bob", 0);
     let (status, _) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -740,7 +736,11 @@ async fn e2e_ephemeral_rejects_invalid_ttl() {
     // TTL = 8 days (too high)
     let big_ttl = 8 * 24 * 3600u64;
     let auth2 = ephemeral_relay_auth_headers(
-        &alice.signing_key, "ettl-alice", "alice-d1", "ettl-bob", big_ttl,
+        &alice.signing_key,
+        "ettl-alice",
+        "alice-d1",
+        "ettl-bob",
+        big_ttl,
     );
     let (status, _) = json_request_with_headers(
         app.clone(),
@@ -851,13 +851,8 @@ async fn e2e_multi_device_message_and_receipts() {
     assert!(!msgs_d2.is_empty(), "device 2 inbox non-empty");
 
     // Device 1 sends "delivered" receipt
-    let d1_receipt_auth = receipt_auth_headers(
-        &bob.signing_key,
-        "md-bob",
-        "bob-d1",
-        msg_id,
-        "delivered",
-    );
+    let d1_receipt_auth =
+        receipt_auth_headers(&bob.signing_key, "md-bob", "bob-d1", msg_id, "delivered");
     let (status, _) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -869,13 +864,8 @@ async fn e2e_multi_device_message_and_receipts() {
     assert_eq!(status, StatusCode::OK);
 
     // Device 2 sends "delivered" receipt
-    let d2_receipt_auth = receipt_auth_headers(
-        &bob.signing_key,
-        "md-bob",
-        "bob-d2",
-        msg_id,
-        "delivered",
-    );
+    let d2_receipt_auth =
+        receipt_auth_headers(&bob.signing_key, "md-bob", "bob-d2", msg_id, "delivered");
     let (status, _) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -912,18 +902,14 @@ async fn e2e_multi_device_message_and_receipts() {
 async fn e2e_security_headers_present() {
     let app = test_app().await;
 
-    let (status, headers, _) = json_request_with_headers_raw(
-        app.clone(),
-        Method::GET,
-        "/health",
-        json!({}),
-        &[],
-    )
-    .await;
+    let (status, headers, _) =
+        json_request_with_headers_raw(app.clone(), Method::GET, "/health", json!({}), &[]).await;
     assert_eq!(status, StatusCode::OK);
 
     assert_eq!(
-        headers.get("x-content-type-options").map(|v| v.to_str().unwrap()),
+        headers
+            .get("x-content-type-options")
+            .map(|v| v.to_str().unwrap()),
         Some("nosniff"),
     );
     assert_eq!(
@@ -982,13 +968,8 @@ async fn e2e_bidirectional_messaging() {
 
     // Bob → Alice (reply)
     let ct2 = b"bob-reply-to-alice";
-    let relay_auth2 = relay_auth_headers(
-        &bob.signing_key,
-        "bidir-bob",
-        "bob-d1",
-        "bidir-alice",
-        ct2,
-    );
+    let relay_auth2 =
+        relay_auth_headers(&bob.signing_key, "bidir-bob", "bob-d1", "bidir-alice", ct2);
     let (status, _) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -1086,13 +1067,8 @@ async fn e2e_receipt_idempotent_upsert() {
 
     // Alice sends a message
     let ct = b"idem-test-msg";
-    let relay_auth = relay_auth_headers(
-        &alice.signing_key,
-        "idem-alice",
-        "alice-d1",
-        "idem-bob",
-        ct,
-    );
+    let relay_auth =
+        relay_auth_headers(&alice.signing_key, "idem-alice", "alice-d1", "idem-bob", ct);
     let (status, relay_body) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -1110,13 +1086,8 @@ async fn e2e_receipt_idempotent_upsert() {
 
     // Bob sends "delivered" receipt twice — second should succeed (upsert)
     for _ in 0..2 {
-        let auth = receipt_auth_headers(
-            &bob.signing_key,
-            "idem-bob",
-            "bob-d1",
-            msg_id,
-            "delivered",
-        );
+        let auth =
+            receipt_auth_headers(&bob.signing_key, "idem-bob", "bob-d1", msg_id, "delivered");
         let (status, _) = json_request_with_headers(
             app.clone(),
             Method::POST,

@@ -4,13 +4,13 @@ use axum::Json;
 use chrono::{Duration, Utc};
 use sha2::{Digest, Sha256};
 
+use super::util::*;
 use crate::auth::*;
 use crate::db::*;
 use crate::error::AppError;
 use crate::types::*;
 use crate::validation::*;
 use crate::{AppState, MAX_MESSAGE_BYTES};
-use super::util::*;
 
 const MAX_TTL_SECONDS: u64 = 7 * 24 * 3600; // 1 week
 
@@ -40,10 +40,14 @@ pub(crate) async fn relay_ephemeral_message(
 
     let auth = parse_request_auth(&headers)?;
     if auth.user_id != request.sender_user_id {
-        return Err(AppError::bad_request("auth user_id must match sender_user_id"));
+        return Err(AppError::bad_request(
+            "auth user_id must match sender_user_id",
+        ));
     }
     if auth.device_id != request.device_id {
-        return Err(AppError::bad_request("auth device_id must match request device_id"));
+        return Err(AppError::bad_request(
+            "auth device_id must match request device_id",
+        ));
     }
     let auth_message = format!(
         "ephemeral-relay:{}:{}:{}:{}",
@@ -68,7 +72,9 @@ pub(crate) async fn relay_ephemeral_message(
     ensure_user_exists(&state.pool, &request.sender_user_id).await?;
     let recipient_devices = load_active_device_ids(state.pool(), &recipient_user_id).await?;
     if recipient_devices.is_empty() {
-        return Err(AppError::not_found("recipient has no active linked devices"));
+        return Err(AppError::not_found(
+            "recipient has no active linked devices",
+        ));
     }
 
     let now = Utc::now();
@@ -126,7 +132,9 @@ pub(crate) async fn relay_ephemeral_message(
         String::new()
     };
     tokio::spawn(async move {
-        if let Err(e) = dispatch_push_wake_signals(&push_state, &push_recipient, &push_excluded).await {
+        if let Err(e) =
+            dispatch_push_wake_signals(&push_state, &push_recipient, &push_excluded).await
+        {
             tracing::warn!("ephemeral push wake dispatch failed reason={}", e);
         }
     });
@@ -190,29 +198,24 @@ async fn reap_stale_data(state: &AppState) -> Result<(), crate::error::AppError>
         .rows_affected();
 
     // 2. Consumed one-time prekeys (v2 tables; consumed = 1 means already used)
-    let otk_x_deleted = sqlx::query(
-        "DELETE FROM one_time_prekeys_x25519_v2 WHERE consumed = 1",
-    )
-    .execute(state.pool())
-    .await?
-    .rows_affected();
+    let otk_x_deleted = sqlx::query("DELETE FROM one_time_prekeys_x25519_v2 WHERE consumed = 1")
+        .execute(state.pool())
+        .await?
+        .rows_affected();
 
-    let otk_pq_deleted = sqlx::query(
-        "DELETE FROM one_time_prekeys_mlkem768_v2 WHERE consumed = 1",
-    )
-    .execute(state.pool())
-    .await?
-    .rows_affected();
+    let otk_pq_deleted = sqlx::query("DELETE FROM one_time_prekeys_mlkem768_v2 WHERE consumed = 1")
+        .execute(state.pool())
+        .await?
+        .rows_affected();
 
     // 3. Expired identity rotation challenges (older than 10 minutes)
     let challenge_cutoff = (Utc::now() - Duration::seconds(600)).to_rfc3339();
-    let challenge_deleted = sqlx::query(
-        "DELETE FROM identity_rotation_challenges WHERE created_at < $1",
-    )
-    .bind(&challenge_cutoff)
-    .execute(state.pool())
-    .await?
-    .rows_affected();
+    let challenge_deleted =
+        sqlx::query("DELETE FROM identity_rotation_challenges WHERE created_at < $1")
+            .bind(&challenge_cutoff)
+            .execute(state.pool())
+            .await?
+            .rows_affected();
 
     let total = dedup_deleted + otk_x_deleted + otk_pq_deleted + challenge_deleted;
     if total > 0 {

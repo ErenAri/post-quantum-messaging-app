@@ -4,13 +4,13 @@ use axum::Json;
 use chrono::Utc;
 use sqlx::Row;
 
+use super::util::*;
 use crate::auth::*;
 use crate::db::*;
 use crate::error::AppError;
 use crate::types::*;
 use crate::validation::*;
 use crate::{AppState, SIG_PUB_KEY_LEN, X25519_KEY_LEN};
-use super::util::*;
 
 pub(crate) async fn register_user(
     State(state): State<AppState>,

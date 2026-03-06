@@ -182,7 +182,9 @@ mod pkcs11_real {
         /// Open a PKCS#11 session on the given slot and log in.
         pub fn new(library_path: &str, slot_id: u64, pin: &str) -> Result<Self, CoreError> {
             let ctx = Pkcs11::new(library_path).map_err(|e| {
-                CoreError::HsmOperation(format!("failed to load PKCS#11 library '{library_path}': {e}"))
+                CoreError::HsmOperation(format!(
+                    "failed to load PKCS#11 library '{library_path}': {e}"
+                ))
             })?;
             ctx.initialize(CInitializeArgs::OsThreads).map_err(|e| {
                 CoreError::HsmOperation(format!("failed to initialize PKCS#11: {e}"))
@@ -193,11 +195,17 @@ mod pkcs11_real {
             })?;
 
             let session = ctx.open_rw_session(slot).map_err(|e| {
-                CoreError::HsmOperation(format!("failed to open PKCS#11 session on slot {slot_id}: {e}"))
+                CoreError::HsmOperation(format!(
+                    "failed to open PKCS#11 session on slot {slot_id}: {e}"
+                ))
             })?;
-            session.login(UserType::User, Some(&AuthPin::new(pin.to_string()))).map_err(|e| {
-                CoreError::HsmOperation(format!("failed to login to PKCS#11 slot {slot_id}: {e}"))
-            })?;
+            session
+                .login(UserType::User, Some(&AuthPin::new(pin.to_string())))
+                .map_err(|e| {
+                    CoreError::HsmOperation(format!(
+                        "failed to login to PKCS#11 slot {slot_id}: {e}"
+                    ))
+                })?;
 
             Ok(Self {
                 _ctx: ctx,
@@ -205,7 +213,11 @@ mod pkcs11_real {
             })
         }
 
-        fn find_private_key(&self, session: &Session, label: &str) -> Result<ObjectHandle, CoreError> {
+        fn find_private_key(
+            &self,
+            session: &Session,
+            label: &str,
+        ) -> Result<ObjectHandle, CoreError> {
             let template = vec![
                 Attribute::Class(ObjectClass::PRIVATE_KEY),
                 Attribute::Label(label.as_bytes().to_vec()),
@@ -218,7 +230,11 @@ mod pkcs11_real {
             })
         }
 
-        fn find_public_key(&self, session: &Session, label: &str) -> Result<ObjectHandle, CoreError> {
+        fn find_public_key(
+            &self,
+            session: &Session,
+            label: &str,
+        ) -> Result<ObjectHandle, CoreError> {
             let template = vec![
                 Attribute::Class(ObjectClass::PUBLIC_KEY),
                 Attribute::Label(label.as_bytes().to_vec()),
@@ -239,13 +255,14 @@ mod pkcs11_real {
                     "Pkcs11Signer requires an HSM key handle".into(),
                 ));
             };
-            let session = self.session.lock().map_err(|_| {
-                CoreError::HsmOperation("failed to lock PKCS#11 session".into())
-            })?;
+            let session = self
+                .session
+                .lock()
+                .map_err(|_| CoreError::HsmOperation("failed to lock PKCS#11 session".into()))?;
             let key = self.find_private_key(&session, label)?;
-            let signature = session.sign(&Mechanism::Eddsa, key, message).map_err(|e| {
-                CoreError::HsmOperation(format!("PKCS#11 sign failed: {e}"))
-            })?;
+            let signature = session
+                .sign(&Mechanism::Eddsa, key, message)
+                .map_err(|e| CoreError::HsmOperation(format!("PKCS#11 sign failed: {e}")))?;
             Ok(signature)
         }
 
@@ -255,9 +272,10 @@ mod pkcs11_real {
                     "Pkcs11Signer requires an HSM key handle".into(),
                 ));
             };
-            let session = self.session.lock().map_err(|_| {
-                CoreError::HsmOperation("failed to lock PKCS#11 session".into())
-            })?;
+            let session = self
+                .session
+                .lock()
+                .map_err(|_| CoreError::HsmOperation("failed to lock PKCS#11 session".into()))?;
             let key = self.find_public_key(&session, label)?;
             let attrs = session
                 .get_attributes(key, &[AttributeType::EcPoint])

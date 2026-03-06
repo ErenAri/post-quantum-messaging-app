@@ -5,13 +5,13 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 
+use super::util::*;
 use crate::auth::*;
 use crate::db::*;
 use crate::error::AppError;
 use crate::types::*;
 use crate::validation::*;
 use crate::{AppState, MAX_GROUP_MEMBERS, MAX_MESSAGE_BYTES};
-use super::util::*;
 
 pub(crate) async fn create_group(
     State(state): State<AppState>,

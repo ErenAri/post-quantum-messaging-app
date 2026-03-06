@@ -1,41 +1,32 @@
-﻿use axum::http::HeaderMap;
+use axum::http::HeaderMap;
 use chrono::Utc;
 use pqmsg_core::tlv::{encode, TlvRecord};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 
 use crate::error::AppError;
-use crate::types::{DeleteInboxRequest, PublishPrekeysRequest, RotateConfirmRequest, RotateInitRequest};
+use crate::types::{
+    DeleteInboxRequest, PublishPrekeysRequest, RotateConfirmRequest, RotateInitRequest,
+};
 use crate::{
-    AppState, record_security_event, validate_id, decode_base64_exact,
-    verify_ed25519_signature, hash_string_list_sha256, normalize_message_ids,
-    AUTH_HEADER_USER, AUTH_HEADER_DEVICE, AUTH_HEADER_TIMESTAMP,
-    AUTH_HEADER_NONCE, AUTH_HEADER_SIGNATURE, REQUEST_ID_HEADER,
-    AUTH_MAX_NONCE_LEN, MAX_REQUEST_ID_LEN, AUTH_MAX_CLOCK_SKEW_SECONDS,
-    MAX_USER_ID_LEN, MAX_DEVICE_ID_LEN, SIG_LEN,
-    AUTH_TAG_ENDPOINT, AUTH_TAG_USER_ID, AUTH_TAG_DEVICE_ID,
-    AUTH_TAG_TIMESTAMP, AUTH_TAG_NONCE, AUTH_TAG_RECIPIENT_ID,
-    AUTH_TAG_SINCE, AUTH_TAG_MESSAGE_BLOB,
-    AUTH_TAG_PREKEY_SPK_HASH, AUTH_TAG_PREKEY_PQSPK_HASH,
-    AUTH_TAG_ROTATE_NEW_X25519_HASH, AUTH_TAG_ROTATE_NEW_SIG_HASH,
-    AUTH_TAG_ROTATE_CHALLENGE_ID, AUTH_TAG_ROTATE_SIG_CURRENT_HASH,
-    AUTH_TAG_ROTATE_SIG_NEW_HASH,
-    AUTH_TAG_PUSH_DEVICE_ID, AUTH_TAG_PUSH_TOKEN_HASH,
-    AUTH_TAG_LINK_DEVICE_ID, AUTH_TAG_REVOKE_DEVICE_ID,
-    AUTH_TAG_DELETE_IDS_HASH, AUTH_TAG_DELETE_BEFORE_ID,
-    AUTH_TAG_DISCOVERY_PHONE_HASHES_HASH, AUTH_TAG_DISCOVERY_EMAIL_HASHES_HASH,
-    AUTH_TAG_DISCOVERY_QUERY_HASHES_HASH,
-    AUTH_TAG_CONTACT_USER_ID, AUTH_TAG_CONTACT_ALIAS_HASH,
-    AUTH_TAG_CONTACT_VERIFIED_FLAG, AUTH_TAG_CONTACT_FINGERPRINT,
-    AUTH_TAG_GROUP_ID, AUTH_TAG_GROUP_MEMBER_USER_ID,
-    AUTH_TAG_GROUP_MEMBERS_HASH, AUTH_TAG_GROUP_SENDER_USER_ID,
-    AUTH_TAG_GROUP_MESSAGE_BLOB_HASH,
-    AUTH_TAG_FILE_ID, AUTH_TAG_FILE_RECIPIENT_ID,
-    AUTH_TAG_FILE_BLOB_HASH, AUTH_TAG_FILE_MIME_HASH,
-    AUTH_TAG_PROFILE_DISPLAY_NAME_HASH, AUTH_TAG_PROFILE_AVATAR_HASH,
-    AUTH_TAG_PROFILE_AVATAR_MIME_HASH,
-    AUTH_TAG_PRESENCE_STATUS,
-    AUTH_TAG_TYPING_PEER_ID, AUTH_TAG_TYPING_STATE_FLAG,
+    decode_base64_exact, hash_string_list_sha256, normalize_message_ids, record_security_event,
+    validate_id, verify_ed25519_signature, AppState, AUTH_HEADER_DEVICE, AUTH_HEADER_NONCE,
+    AUTH_HEADER_SIGNATURE, AUTH_HEADER_TIMESTAMP, AUTH_HEADER_USER, AUTH_MAX_CLOCK_SKEW_SECONDS,
+    AUTH_MAX_NONCE_LEN, AUTH_TAG_CONTACT_ALIAS_HASH, AUTH_TAG_CONTACT_FINGERPRINT,
+    AUTH_TAG_CONTACT_USER_ID, AUTH_TAG_CONTACT_VERIFIED_FLAG, AUTH_TAG_DELETE_BEFORE_ID,
+    AUTH_TAG_DELETE_IDS_HASH, AUTH_TAG_DEVICE_ID, AUTH_TAG_DISCOVERY_EMAIL_HASHES_HASH,
+    AUTH_TAG_DISCOVERY_PHONE_HASHES_HASH, AUTH_TAG_DISCOVERY_QUERY_HASHES_HASH, AUTH_TAG_ENDPOINT,
+    AUTH_TAG_FILE_BLOB_HASH, AUTH_TAG_FILE_ID, AUTH_TAG_FILE_MIME_HASH, AUTH_TAG_FILE_RECIPIENT_ID,
+    AUTH_TAG_GROUP_ID, AUTH_TAG_GROUP_MEMBERS_HASH, AUTH_TAG_GROUP_MEMBER_USER_ID,
+    AUTH_TAG_GROUP_MESSAGE_BLOB_HASH, AUTH_TAG_GROUP_SENDER_USER_ID, AUTH_TAG_LINK_DEVICE_ID,
+    AUTH_TAG_MESSAGE_BLOB, AUTH_TAG_NONCE, AUTH_TAG_PREKEY_PQSPK_HASH, AUTH_TAG_PREKEY_SPK_HASH,
+    AUTH_TAG_PRESENCE_STATUS, AUTH_TAG_PROFILE_AVATAR_HASH, AUTH_TAG_PROFILE_AVATAR_MIME_HASH,
+    AUTH_TAG_PROFILE_DISPLAY_NAME_HASH, AUTH_TAG_PUSH_DEVICE_ID, AUTH_TAG_PUSH_TOKEN_HASH,
+    AUTH_TAG_RECIPIENT_ID, AUTH_TAG_REVOKE_DEVICE_ID, AUTH_TAG_ROTATE_CHALLENGE_ID,
+    AUTH_TAG_ROTATE_NEW_SIG_HASH, AUTH_TAG_ROTATE_NEW_X25519_HASH,
+    AUTH_TAG_ROTATE_SIG_CURRENT_HASH, AUTH_TAG_ROTATE_SIG_NEW_HASH, AUTH_TAG_SINCE,
+    AUTH_TAG_TIMESTAMP, AUTH_TAG_TYPING_PEER_ID, AUTH_TAG_TYPING_STATE_FLAG, AUTH_TAG_USER_ID,
+    MAX_DEVICE_ID_LEN, MAX_REQUEST_ID_LEN, MAX_USER_ID_LEN, REQUEST_ID_HEADER, SIG_LEN,
 };
 
 #[derive(Debug)]
@@ -226,7 +217,11 @@ pub(crate) fn relay_auth_message(
     encode(&records).map_err(|_| AppError::internal("failed to encode relay auth transcript"))
 }
 
-pub(crate) fn inbox_auth_message(auth: &RequestAuth, user_id: &str, since: i64) -> Result<Vec<u8>, AppError> {
+pub(crate) fn inbox_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+    since: i64,
+) -> Result<Vec<u8>, AppError> {
     let mut records = auth_common_records(auth, "inbox");
     records.push(TlvRecord {
         ty: AUTH_TAG_RECIPIENT_ID,
@@ -303,7 +298,10 @@ pub(crate) fn ws_inbox_auth_message(
     encode(&records).map_err(|_| AppError::internal("failed to encode ws-inbox auth transcript"))
 }
 
-pub(crate) fn list_devices_auth_message(auth: &RequestAuth, user_id: &str) -> Result<Vec<u8>, AppError> {
+pub(crate) fn list_devices_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+) -> Result<Vec<u8>, AppError> {
     let mut records = auth_common_records(auth, "devices-list");
     records.push(TlvRecord {
         ty: AUTH_TAG_RECIPIENT_ID,
@@ -390,7 +388,10 @@ pub(crate) fn discovery_match_auth_message(
         .map_err(|_| AppError::internal("failed to encode discovery-match auth transcript"))
 }
 
-pub(crate) fn contacts_list_auth_message(auth: &RequestAuth, user_id: &str) -> Result<Vec<u8>, AppError> {
+pub(crate) fn contacts_list_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+) -> Result<Vec<u8>, AppError> {
     let mut records = auth_common_records(auth, "contacts-list");
     records.push(TlvRecord {
         ty: AUTH_TAG_RECIPIENT_ID,
@@ -547,7 +548,10 @@ pub(crate) fn group_relay_auth_message(
         .map_err(|_| AppError::internal("failed to encode groups-relay auth transcript"))
 }
 
-pub(crate) fn identity_log_auth_message(auth: &RequestAuth, user_id: &str) -> Result<Vec<u8>, AppError> {
+pub(crate) fn identity_log_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+) -> Result<Vec<u8>, AppError> {
     let mut records = auth_common_records(auth, "identity-log");
     records.push(TlvRecord {
         ty: AUTH_TAG_RECIPIENT_ID,
@@ -557,7 +561,10 @@ pub(crate) fn identity_log_auth_message(auth: &RequestAuth, user_id: &str) -> Re
         .map_err(|_| AppError::internal("failed to encode identity-log auth transcript"))
 }
 
-pub(crate) fn prekeys_status_auth_message(auth: &RequestAuth, user_id: &str) -> Result<Vec<u8>, AppError> {
+pub(crate) fn prekeys_status_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+) -> Result<Vec<u8>, AppError> {
     let mut records = auth_common_records(auth, "prekeys-status");
     records.push(TlvRecord {
         ty: AUTH_TAG_RECIPIENT_ID,
@@ -635,7 +642,10 @@ pub(crate) fn file_upload_auth_message(
         .map_err(|_| AppError::internal("failed to encode files-upload auth transcript"))
 }
 
-pub(crate) fn file_download_auth_message(auth: &RequestAuth, file_id: &str) -> Result<Vec<u8>, AppError> {
+pub(crate) fn file_download_auth_message(
+    auth: &RequestAuth,
+    file_id: &str,
+) -> Result<Vec<u8>, AppError> {
     let mut records = auth_common_records(auth, "files-download");
     records.push(TlvRecord {
         ty: AUTH_TAG_FILE_ID,
@@ -677,7 +687,10 @@ pub(crate) fn profile_upsert_auth_message(
         .map_err(|_| AppError::internal("failed to encode profile-upsert auth transcript"))
 }
 
-pub(crate) fn profile_get_auth_message(auth: &RequestAuth, user_id: &str) -> Result<Vec<u8>, AppError> {
+pub(crate) fn profile_get_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+) -> Result<Vec<u8>, AppError> {
     let mut records = auth_common_records(auth, "profile-get");
     records.push(TlvRecord {
         ty: AUTH_TAG_RECIPIENT_ID,
@@ -704,7 +717,10 @@ pub(crate) fn presence_update_auth_message(
         .map_err(|_| AppError::internal("failed to encode presence-update auth transcript"))
 }
 
-pub(crate) fn presence_get_auth_message(auth: &RequestAuth, user_id: &str) -> Result<Vec<u8>, AppError> {
+pub(crate) fn presence_get_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+) -> Result<Vec<u8>, AppError> {
     let mut records = auth_common_records(auth, "presence-get");
     records.push(TlvRecord {
         ty: AUTH_TAG_RECIPIENT_ID,
@@ -732,7 +748,10 @@ pub(crate) fn typing_update_auth_message(
         .map_err(|_| AppError::internal("failed to encode typing-update auth transcript"))
 }
 
-pub(crate) fn typing_get_auth_message(auth: &RequestAuth, user_id: &str) -> Result<Vec<u8>, AppError> {
+pub(crate) fn typing_get_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+) -> Result<Vec<u8>, AppError> {
     let mut records = auth_common_records(auth, "typing-get");
     records.push(TlvRecord {
         ty: AUTH_TAG_RECIPIENT_ID,

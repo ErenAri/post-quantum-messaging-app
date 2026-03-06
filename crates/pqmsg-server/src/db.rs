@@ -54,7 +54,10 @@ pub(crate) async fn ensure_user_exists(pool: &AnyPool, user_id: &str) -> Result<
     Ok(())
 }
 
-pub(crate) async fn load_active_device_ids(pool: &AnyPool, user_id: &str) -> Result<Vec<String>, AppError> {
+pub(crate) async fn load_active_device_ids(
+    pool: &AnyPool,
+    user_id: &str,
+) -> Result<Vec<String>, AppError> {
     let rows = sqlx::query(
         "SELECT device_id
          FROM user_devices
@@ -71,7 +74,10 @@ pub(crate) async fn load_active_device_ids(pool: &AnyPool, user_id: &str) -> Res
     Ok(device_ids)
 }
 
-pub(crate) async fn load_group_owner_user_id(pool: &AnyPool, group_id: &str) -> Result<String, AppError> {
+pub(crate) async fn load_group_owner_user_id(
+    pool: &AnyPool,
+    group_id: &str,
+) -> Result<String, AppError> {
     let owner_user_id = sqlx::query_scalar::<_, String>(
         "SELECT owner_user_id
          FROM groups
@@ -100,7 +106,10 @@ pub(crate) async fn is_active_group_member(
     Ok(member.is_some())
 }
 
-pub(crate) async fn count_active_group_members(pool: &AnyPool, group_id: &str) -> Result<i64, AppError> {
+pub(crate) async fn count_active_group_members(
+    pool: &AnyPool,
+    group_id: &str,
+) -> Result<i64, AppError> {
     let count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) AS count
          FROM group_members
