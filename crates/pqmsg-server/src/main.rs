@@ -1,5 +1,7 @@
 use anyhow::Context;
 use axum_server::tls_rustls::RustlsConfig;
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_otlp::WithExportConfig;
 use pqmsg_core::alg::SecurityProfile;
 use pqmsg_server::{
     build_router, init_db, parse_db_backend, AppState, AuditLogger, AuthReplayCache,
@@ -96,40 +98,72 @@ async fn main() -> anyhow::Result<()> {
     let sentry_enabled = sentry_guard.is_some();
     let log_filter = env::var("RUST_LOG").unwrap_or_else(|_| "pqmsg_server=info".to_string());
     let log_format = env::var("PQMSG_LOG_FORMAT").unwrap_or_else(|_| "json".to_string());
-    if log_format.trim().eq_ignore_ascii_case("pretty") {
+
+    // Optional OpenTelemetry OTLP exporter
+    let otlp_endpoint = env::var("PQMSG_OTLP_ENDPOINT").ok().and_then(|v| {
+        let trimmed = v.trim().to_string();
+        if trimmed.is_empty() { None } else { Some(trimmed) }
+    });
+    let otel_provider = if let Some(endpoint) = &otlp_endpoint {
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()
+            .with_context(|| format!("failed to create OTLP exporter for '{endpoint}'"))?;
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(opentelemetry_sdk::Resource::builder()
+                .with_service_name("pqmsg-server")
+                .build())
+            .build();
+        Some(provider)
+    } else {
+        None
+    };
+
+    let pretty = log_format.trim().eq_ignore_ascii_case("pretty");
+
+    if pretty {
+        let reg = tracing_subscriber::registry()
+            .with(EnvFilter::new(log_filter))
+            .with(tracing_subscriber::fmt::layer().with_target(true));
         if sentry_enabled {
-            tracing_subscriber::registry()
-                .with(EnvFilter::new(log_filter))
-                .with(tracing_subscriber::fmt::layer().with_target(true))
-                .with(sentry_tracing::layer())
+            if let Some(ref provider) = otel_provider {
+                reg.with(sentry_tracing::layer())
+                    .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("pqmsg-server")))
+                    .init();
+            } else {
+                reg.with(sentry_tracing::layer()).init();
+            }
+        } else if let Some(ref provider) = otel_provider {
+            reg.with(tracing_opentelemetry::layer().with_tracer(provider.tracer("pqmsg-server")))
                 .init();
         } else {
-            tracing_subscriber::registry()
-                .with(EnvFilter::new(log_filter))
-                .with(tracing_subscriber::fmt::layer().with_target(true))
-                .init();
+            reg.init();
         }
-    } else if sentry_enabled {
-        tracing_subscriber::registry()
-            .with(EnvFilter::new(log_filter))
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .json()
-                    .with_current_span(false)
-                    .with_span_list(false),
-            )
-            .with(sentry_tracing::layer())
-            .init();
     } else {
-        tracing_subscriber::registry()
+        let reg = tracing_subscriber::registry()
             .with(EnvFilter::new(log_filter))
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
                     .with_current_span(false)
                     .with_span_list(false),
-            )
-            .init();
+            );
+        if sentry_enabled {
+            if let Some(ref provider) = otel_provider {
+                reg.with(sentry_tracing::layer())
+                    .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("pqmsg-server")))
+                    .init();
+            } else {
+                reg.with(sentry_tracing::layer()).init();
+            }
+        } else if let Some(ref provider) = otel_provider {
+            reg.with(tracing_opentelemetry::layer().with_tracer(provider.tracer("pqmsg-server")))
+                .init();
+        } else {
+            reg.init();
+        }
     }
 
     let bind_addr = env::var("PQMSG_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
@@ -245,8 +279,10 @@ async fn main() -> anyhow::Result<()> {
     let push_enabled = push_notifier.is_enabled();
     let push_providers = push_notifier.enabled_providers();
     let audit_logger = if let Some(path) = &audit_log_path {
+        let max_bytes = parse_env_u64("PQMSG_AUDIT_LOG_MAX_BYTES", 50 * 1024 * 1024)?;
+        let max_files = parse_env_u32("PQMSG_AUDIT_LOG_MAX_FILES", 5)?;
         Arc::new(
-            AuditLogger::with_path(path)
+            AuditLogger::with_path_and_rotation(path, max_bytes, max_files)
                 .with_context(|| format!("failed to initialize audit logger at '{path}'"))?,
         )
     } else {
@@ -275,12 +311,23 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Arc::new(AuthReplayCache::new(100_000, StdDuration::from_secs(600)))
     };
+    let cors_allowed_origins: Vec<String> = env::var("PQMSG_CORS_ALLOWED_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     let state =
         AppState::with_security_profile(pool, db_backend, rate_limiter.clone(), security_profile)
             .with_dos_policy(dos_policy)
             .with_audit_logger(audit_logger)
             .with_push_notifier(push_notifier)
-            .with_auth_replay(auth_replay);
+            .with_auth_replay(auth_replay)
+            .with_cors_allowed_origins(cors_allowed_origins);
+
+    // Spawn the ephemeral message expiry reaper
+    tokio::spawn(pqmsg_server::run_message_expiry_reaper(state.clone()));
+
     let app = build_router(state)
         .layer(TimeoutLayer::with_status_code(axum::http::StatusCode::REQUEST_TIMEOUT, StdDuration::from_secs(30)));
     let rate_limiter_mode = if rate_limiter.is_distributed() {

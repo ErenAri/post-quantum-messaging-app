@@ -1,8 +1,9 @@
 ﻿use axum::extract::{MatchedPath, State};
-use axum::http::HeaderValue;
+use axum::http::{header, HeaderValue, Method};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
+use tower_http::cors::CorsLayer;
 use chrono::Utc;
 
 use pqmsg_core::alg::SecurityProfile;
@@ -35,6 +36,7 @@ use auth::*;
 use validation::*;
 mod handlers;
 use handlers::*;
+pub use handlers::run_message_expiry_reaper;
 
 pub(crate) const MAX_BODY_BYTES: usize = 1_048_576;
 pub(crate) const MAX_USER_ID_LEN: usize = 128;
@@ -248,6 +250,7 @@ pub struct AppState {
     dos_policy: DosHardeningPolicy,
     metrics: Arc<MetricsRegistry>,
     audit_logger: Arc<AuditLogger>,
+    cors_allowed_origins: Vec<String>,
 }
 
 impl AppState {
@@ -267,6 +270,7 @@ impl AppState {
             dos_policy: DosHardeningPolicy::for_security_profile(security_profile),
             metrics: Arc::new(MetricsRegistry::new()),
             audit_logger: Arc::new(AuditLogger::disabled()),
+            cors_allowed_origins: Vec::new(),
         }
     }
 
@@ -290,6 +294,7 @@ impl AppState {
             dos_policy: DosHardeningPolicy::for_security_profile(security_profile),
             metrics: Arc::new(MetricsRegistry::new()),
             audit_logger: Arc::new(AuditLogger::disabled()),
+            cors_allowed_origins: Vec::new(),
         }
     }
 
@@ -346,6 +351,11 @@ impl AppState {
 
     pub fn with_auth_replay(mut self, auth_replay: Arc<AuthReplayCache>) -> Self {
         self.auth_replay = auth_replay;
+        self
+    }
+
+    pub fn with_cors_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.cors_allowed_origins = origins;
         self
     }
 }
@@ -453,7 +463,16 @@ pub struct MetricsRegistry {
 
 #[derive(Clone)]
 pub struct AuditLogger {
-    file: Option<Arc<Mutex<std::fs::File>>>,
+    inner: Option<Arc<AuditLoggerInner>>,
+}
+
+struct AuditLoggerInner {
+    file: Mutex<std::fs::File>,
+    path: String,
+    max_file_bytes: u64,
+    max_rotated_files: u32,
+    bytes_written: AtomicU64,
+    rotation_lock: Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -636,18 +655,34 @@ impl Default for MetricsRegistry {
 
 impl AuditLogger {
     pub fn disabled() -> Self {
-        Self { file: None }
+        Self { inner: None }
     }
 
     pub fn with_path(path: &str) -> std::io::Result<Self> {
+        Self::with_path_and_rotation(path, 50 * 1024 * 1024, 5)
+    }
+
+    pub fn with_path_and_rotation(
+        path: &str,
+        max_file_bytes: u64,
+        max_rotated_files: u32,
+    ) -> std::io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let current_len = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(Self {
-            file: Some(Arc::new(Mutex::new(file))),
+            inner: Some(Arc::new(AuditLoggerInner {
+                file: Mutex::new(file),
+                path: path.to_string(),
+                max_file_bytes,
+                max_rotated_files,
+                bytes_written: AtomicU64::new(current_len),
+                rotation_lock: Mutex::new(()),
+            })),
         })
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.file.is_some()
+        self.inner.is_some()
     }
 
     pub fn log_security_event(
@@ -678,7 +713,7 @@ impl AuditLogger {
             device_id = scrub_pii(device_id.unwrap_or_default()),
             detail = detail.unwrap_or_default()
         );
-        let Some(file) = &self.file else {
+        let Some(inner) = &self.inner else {
             return;
         };
         let serialized = match serde_json::to_string(&payload) {
@@ -688,13 +723,70 @@ impl AuditLogger {
                 return;
             }
         };
-        let Ok(mut guard) = file.lock() else {
+        let line = format!("{serialized}\n");
+        let line_len = line.len() as u64;
+
+        // Check if rotation is needed before writing
+        let current = inner.bytes_written.load(Ordering::Relaxed);
+        if current + line_len > inner.max_file_bytes {
+            self.rotate_log(inner);
+        }
+
+        let Ok(mut guard) = inner.file.lock() else {
             warn!("failed to lock audit log file");
             return;
         };
-        if let Err(error) = writeln!(guard, "{serialized}") {
+        if let Err(error) = guard.write_all(line.as_bytes()) {
             warn!("failed to append audit log event: {error}");
+            return;
         }
+        inner.bytes_written.fetch_add(line_len, Ordering::Relaxed);
+    }
+
+    fn rotate_log(&self, inner: &AuditLoggerInner) {
+        let Ok(_rotation_guard) = inner.rotation_lock.try_lock() else {
+            return; // another thread is already rotating
+        };
+        // Re-check size under lock
+        if inner.bytes_written.load(Ordering::Relaxed) < inner.max_file_bytes {
+            return;
+        }
+
+        // Shift existing rotated files: .4 -> .5, .3 -> .4, etc.
+        for i in (1..inner.max_rotated_files).rev() {
+            let from = format!("{}.{}", inner.path, i);
+            let to = format!("{}.{}", inner.path, i + 1);
+            let _ = std::fs::rename(&from, &to);
+        }
+        // Rename current -> .1
+        let rotated = format!("{}.1", inner.path);
+        let Ok(mut file_guard) = inner.file.lock() else {
+            return;
+        };
+        // Flush current file
+        let _ = file_guard.flush();
+        drop(file_guard);
+        let _ = std::fs::rename(&inner.path, &rotated);
+
+        // Open a new file
+        match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&inner.path)
+        {
+            Ok(new_file) => {
+                if let Ok(mut file_guard) = inner.file.lock() {
+                    *file_guard = new_file;
+                    inner.bytes_written.store(0, Ordering::Relaxed);
+                }
+            }
+            Err(error) => {
+                warn!("failed to create new audit log file after rotation: {error}");
+            }
+        }
+        // Delete the oldest rotated file if it exceeds max_rotated_files
+        let oldest = format!("{}.{}", inner.path, inner.max_rotated_files + 1);
+        let _ = std::fs::remove_file(oldest);
     }
 }
 
@@ -1154,6 +1246,7 @@ impl PushNotifier {
 
 pub fn build_router(state: AppState) -> Router {
     let hsts_enabled = state.security_profile().requires_tls();
+    let cors_origins = state.cors_allowed_origins.clone();
     let middleware_state = state.clone();
     let router = Router::new()
         .route("/health", get(health))
@@ -1214,12 +1307,45 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/sealed-inbox/:user_id", get(get_sealed_inbox))
         .route("/v1/inbox/:user_id/delete", post(delete_inbox_messages))
         .route("/v1/ws/inbox/:user_id", get(ws_inbox))
+        .route("/v1/users/:user_id/receipts", post(send_receipt))
+        .route("/v1/users/:user_id/receipts/poll", get(get_receipts))
+        .route(
+            "/v1/ephemeral-relay/:recipient_user_id",
+            post(relay_ephemeral_message),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
         .layer(axum::middleware::from_fn_with_state(
             middleware_state,
             observability_middleware,
-        ));
+        ))
+        .layer(axum::middleware::from_fn(security_headers_middleware));
+
+    let cors_layer = if cors_origins.is_empty() {
+        CorsLayer::new()
+    } else {
+        let origins: Vec<HeaderValue> = cors_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::OPTIONS,
+            ])
+            .allow_headers([
+                header::CONTENT_TYPE,
+                header::AUTHORIZATION,
+                "x-request-id".parse().expect("valid header name"),
+            ])
+            .max_age(StdDuration::from_secs(3600))
+    };
+    let router = router.layer(cors_layer);
+
     if hsts_enabled {
         router.layer(axum::middleware::from_fn(hsts_middleware))
     } else {
@@ -1311,6 +1437,37 @@ async fn hsts_middleware(
         "max-age=31536000; includeSubDomains"
             .parse()
             .expect("valid HSTS header"),
+    );
+    response
+}
+
+async fn security_headers_middleware(
+    request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert(
+        "referrer-policy",
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    headers.insert(
+        "content-security-policy",
+        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+    );
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_static("interest-cohort=(), camera=(), microphone=(), geolocation=()"),
+    );
+    headers.insert("cache-control", HeaderValue::from_static("no-store"));
+    headers.insert(
+        "x-permitted-cross-domain-policies",
+        HeaderValue::from_static("none"),
     );
     response
 }

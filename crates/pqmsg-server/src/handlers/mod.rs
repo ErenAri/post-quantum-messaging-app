@@ -5,6 +5,8 @@ mod groups;
 mod profile;
 mod prekeys;
 mod messaging;
+mod receipts;
+mod ephemeral;
 
 pub(crate) use util::*;
 pub(crate) use identity::*;
@@ -13,6 +15,9 @@ pub(crate) use groups::*;
 pub(crate) use profile::*;
 pub(crate) use prekeys::*;
 pub(crate) use messaging::*;
+pub(crate) use receipts::*;
+pub(crate) use ephemeral::*;
+pub use ephemeral::run_message_expiry_reaper;
 
 use axum::extract::State;
 use axum::http::{header, StatusCode};

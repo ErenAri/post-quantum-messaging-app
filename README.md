@@ -35,6 +35,7 @@ flowchart LR
     S --> DB[(PostgreSQL / SQLite)]
     S --> RD[(Redis rate limiter)]
     S --> OBS[Prometheus + Loki + Alertmanager]
+    S -.->|optional| OTLP[OpenTelemetry Collector]
     PV[ProVerif model] -.-> V{CI verification gate}
     TM[Tamarin model] -.-> V
 ```
@@ -58,13 +59,18 @@ flowchart TD
 ```
 
 - FIPS feature gate (`--features fips`) restricts algorithm suite to ML-KEM-768 only; compile-time conflict with `classical-only-INSECURE`.
-- PKCS#11 HSM signing abstraction in `pqmsg-core::hsm` supports software and hardware-backed key handles.
+- PKCS#11 HSM signing abstraction in `pqmsg-core::hsm` supports software and hardware-backed key handles; real PKCS#11 implementation via `cryptoki` crate gated behind `hsm-pkcs11` feature.
 - All secret key material is zeroized on drop via explicit `Drop` implementations (`DhKeyPair`, `SessionState`, `SessionSnapshot`, `RootStepOutput`, `PqStepOutput`, `SkippedMessageKeys`).
 - Sealed sender relay enforces IP-based rate limiting extracted from `X-Forwarded-For`/`X-Real-IP` headers alongside per-recipient rate limiting.
 - Push notification dispatch uses circuit-breaker pattern; circuit-open events emit security audit events.
 - Structured logs undergo PII scrubbing (user IDs and device IDs replaced with SHA-256 hash prefixes).
 - Server auto-migrates database schema on startup.
 - Server registration is identity-immutable after first successful bind.
+- Server enforces CORS (configurable via `PQMSG_CORS_ALLOWED_ORIGINS`) and security response headers (X-Content-Type-Options, X-Frame-Options, CSP, Referrer-Policy, Permissions-Policy, Cache-Control).
+- Server supports OpenTelemetry OTLP trace export (set `PQMSG_OTLP_ENDPOINT` for gRPC collector).
+- Server provides delivery/read receipt endpoints (`/v1/users/{user_id}/receipts`, `/v1/users/{user_id}/receipts/poll`).
+- Server supports ephemeral (disappearing) messages with TTL (`/v1/ephemeral-relay/{recipient_user_id}`) and automatic background reaper.
+- Server audit log supports size-based rotation (configurable `PQMSG_AUDIT_LOG_MAX_BYTES`, `PQMSG_AUDIT_LOG_MAX_FILES`).
 - Server prekey uploads require valid Ed25519 signatures under registered identity signature keys.
 - Server provides authenticated identity rotation challenge/confirm endpoints and a versioned identity event log.
 - Server relay/inbox/identity-log endpoints require signed request-auth headers bound to user/device identity keys.
@@ -233,6 +239,10 @@ $env:PQMSG_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS='30'
 $env:PQMSG_PREKEY_BUNDLE_RESERVE_COUNT='2'
 $env:PQMSG_LOG_FORMAT='json'
 $env:PQMSG_AUDIT_LOG_PATH='C:\logs\pqmsg-audit.jsonl'
+$env:PQMSG_AUDIT_LOG_MAX_BYTES='52428800'
+$env:PQMSG_AUDIT_LOG_MAX_FILES='5'
+$env:PQMSG_CORS_ALLOWED_ORIGINS='https://app.example.com'
+$env:PQMSG_OTLP_ENDPOINT='http://otel-collector:4317'
 cargo run -p pqmsg-server
 ```
 

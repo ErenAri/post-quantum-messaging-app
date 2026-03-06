@@ -506,3 +506,48 @@ pub(crate) struct StatusResponse {
     pub(crate) prekey_bundle_reserve_count: i64,
     pub(crate) pq_ratchet_interval: u32,
 }
+
+// ── Delivery receipts ──
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SendReceiptRequest {
+    pub(crate) message_id: i64,
+    pub(crate) receipt_type: String,  // "delivered" or "read"
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SendReceiptResponse {
+    pub(crate) message_id: i64,
+    pub(crate) receipt_type: String,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ReceiptItem {
+    pub(crate) message_id: i64,
+    pub(crate) recipient_user_id: String,
+    pub(crate) recipient_device_id: String,
+    pub(crate) receipt_type: String,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ReceiptsResponse {
+    pub(crate) sender_user_id: String,
+    pub(crate) receipts: Vec<ReceiptItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReceiptsQuery {
+    pub(crate) since_id: Option<i64>,
+}
+
+// ── Disappearing messages ──
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RelayEphemeralRequest {
+    pub(crate) sender_user_id: String,
+    pub(crate) device_id: String,
+    pub(crate) message_bytes_base64: String,
+    pub(crate) ttl_seconds: u64,
+}

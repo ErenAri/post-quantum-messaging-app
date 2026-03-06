@@ -103,7 +103,7 @@ The `pqmsg-core::hsm` module provides a PKCS#11 signing abstraction:
 - `Signer` trait with `sign()` and `public_key()` methods,
 - `KeyHandle` enum supporting `Software` (in-process) and `Hsm` (slot/label reference) variants,
 - `SoftwareSigner` implementation for Ed25519 software keys,
-- `Pkcs11Signer` placeholder for hardware security module integration.
+- `Pkcs11Signer`: real PKCS#11 implementation via `cryptoki` crate (feature `hsm-pkcs11`), supporting CKM_EDDSA signing and EC_POINT public key extraction; falls back to a feature-disabled stub when compiled without the feature.
 
 ## 7. Ratchet Metadata Authentication
 
@@ -153,4 +153,5 @@ Current verification set:
 - symbolic handshake model in `verification/proverif/pqxdh_hybrid_model.pv` (6 security queries including forward secrecy and identity misbinding),
 - Tamarin Prover model in `verification/tamarin/pqxdh_hybrid.spthy` (4 security lemmas with compromise rules),
 - cross-platform interoperability test suite in `crates/pqmsg-core/tests/interop.rs` (16 tests: wire format round-trip, snapshot persistence, bidirectional exchange, suite tampering, AD mismatch, large/empty messages),
+- end-to-end client-to-client test suite in `crates/pqmsg-server/tests/e2e.rs` (9 tests: full message+receipt flow, ephemeral messages, multi-device fan-out, bidirectional messaging, receipt idempotency, security headers),
 - penetration smoke runbooks and scripts under `docs/PENETRATION_TESTING.md` and `scripts/security/`.

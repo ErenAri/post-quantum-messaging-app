@@ -50,6 +50,9 @@ sequenceDiagram
     C->>S: GET /inbox/{id}?since=n
     C->>S: GET /sealed-inbox/{id}?since=n
     C->>S: POST /inbox/{id}/delete
+    C->>S: POST /users/{id}/receipts
+    C->>S: GET /users/{id}/receipts/poll?since_id=n
+    C->>S: POST /ephemeral-relay/{peer}
     C->>S: GET /ws/inbox/{id}?since=n (WebSocket)
     C->>S: GET /metrics
 ```
@@ -1082,6 +1085,93 @@ Returns Prometheus text exposition with:
 - `pqmsg_http_request_duration_seconds_sum{method,path,status}`
 - `pqmsg_http_request_duration_seconds_count{method,path,status}`
 - `pqmsg_security_events_total{event}`
+
+### 4.14 Delivery/Read Receipts
+
+#### `POST /v1/users/{user_id}/receipts`
+
+Send a delivery or read receipt for a message. Requires authenticated headers.
+
+**Request body:**
+
+```json
+{
+  "message_id": 42,
+  "receipt_type": "delivered"
+}
+```
+
+`receipt_type` must be `"delivered"` or `"read"`.
+
+**Auth message:** `receipt:{user_id}:{device_id}:{message_id}:{receipt_type}`
+
+**Response 200:**
+
+```json
+{
+  "message_id": 42,
+  "receipt_type": "delivered",
+  "created_at": "2025-01-15T12:00:00+00:00"
+}
+```
+
+Receipts are upserted: sending the same receipt type for the same message from the same device updates the timestamp.
+
+#### `GET /v1/users/{user_id}/receipts/poll?since_id=0`
+
+Poll receipts for messages that the authenticated user has sent. Returns receipts from all recipients' devices. Paginated by `since_id` (receipt row ID), max 200 per page.
+
+**Auth message:** `get-receipts:{user_id}:{device_id}:{since_id}`
+
+**Response 200:**
+
+```json
+{
+  "sender_user_id": "alice",
+  "receipts": [
+    {
+      "message_id": 42,
+      "recipient_user_id": "bob",
+      "recipient_device_id": "bob-dev-1",
+      "receipt_type": "delivered",
+      "created_at": "2025-01-15T12:00:00+00:00"
+    }
+  ]
+}
+```
+
+### 4.15 Ephemeral (Disappearing) Messages
+
+#### `POST /v1/ephemeral-relay/{recipient_user_id}`
+
+Relay a message with a server-enforced expiry TTL. The server inserts expiry metadata and a background reaper deletes expired messages every 60 seconds. Requires authenticated headers.
+
+**Request body:**
+
+```json
+{
+  "sender_user_id": "alice",
+  "device_id": "alice-dev-1",
+  "message_bytes_base64": "<base64-encoded ciphertext>",
+  "ttl_seconds": 3600
+}
+```
+
+`ttl_seconds` must be between 1 and 604800 (7 days).
+
+**Auth message:** `ephemeral-relay:{sender_user_id}:{device_id}:{recipient_user_id}:{ttl_seconds}`
+
+**Response 200:**
+
+```json
+{
+  "message_id": 99,
+  "delivered_device_count": 2,
+  "received_at": "2025-01-15T12:00:00+00:00"
+}
+```
+
+Messages are fanned out to all active recipient devices. Duplicate detection uses SHA-256 of sender + recipient + ciphertext.
 
 ## 5. Validation and Limits
 

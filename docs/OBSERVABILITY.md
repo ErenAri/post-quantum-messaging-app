@@ -7,6 +7,7 @@ This document defines the default observability stack for `pqmsg-server`:
 - metrics: Prometheus scraping `/metrics`,
 - dashboards: Grafana with provisioned PQMSG dashboard,
 - logs: Loki with Promtail ingestion,
+- traces: OpenTelemetry OTLP export (optional, via `PQMSG_OTLP_ENDPOINT`),
 - error tracking: Sentry via runtime DSN configuration,
 - alert evaluation: Prometheus rule groups for availability and security anomalies,
 - escalation routing: Alertmanager severity-based receiver fan-out.
@@ -23,7 +24,8 @@ This document defines the default observability stack for `pqmsg-server`:
 2. Security event counter:
    - `pqmsg_security_events_total{event=...}`
 3. Structured JSON logs with `request_id`.
-4. Optional audit JSONL stream when `PQMSG_AUDIT_LOG_PATH` is set.
+4. Optional audit JSONL stream when `PQMSG_AUDIT_LOG_PATH` is set (size-based rotation via `PQMSG_AUDIT_LOG_MAX_BYTES` / `PQMSG_AUDIT_LOG_MAX_FILES`).
+5. Optional OpenTelemetry OTLP trace export when `PQMSG_OTLP_ENDPOINT` is set (gRPC, batch span export).
 
 ## 3. Local Stack with Docker Compose
 

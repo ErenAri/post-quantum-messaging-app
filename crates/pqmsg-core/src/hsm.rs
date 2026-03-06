@@ -97,79 +97,192 @@ impl Signer for SoftwareSigner {
     }
 }
 
-// ── PKCS#11 HSM signer (stub) ────────────────────────────────────────
+// ── PKCS#11 HSM signer ────────────────────────────────────────
 
-/// Placeholder for PKCS#11-backed HSM signing.
-///
-/// When the `hsm-pkcs11` feature is enabled, this implementation will
-/// load a PKCS#11 shared library (`.so`/`.dylib`/`.dll`), open a session
-/// on the configured slot, and delegate `C_Sign` / `C_GetAttributeValue`
-/// calls to the HSM.
-///
-/// # Configuration
-///
-/// ```text
-/// PQMSG_HSM_PKCS11_LIB=/usr/lib/softhsm/libsofthsm2.so
-/// PQMSG_HSM_SLOT_ID=0
-/// PQMSG_HSM_PIN=***** (from secret store)
-/// ```
-///
-/// # Status
-///
-/// This is an architecture stub. The trait surface is stable; the PKCS#11
-/// plumbing requires the `cryptoki` crate and a configured HSM or SoftHSM
-/// environment for integration testing.
-pub struct Pkcs11Signer {
-    _library_path: String,
-    _slot_id: u64,
-}
+#[cfg(not(feature = "hsm-pkcs11"))]
+mod pkcs11_stub {
+    use super::*;
 
-impl Pkcs11Signer {
-    /// Create a new PKCS#11 signer (stub — always returns an error currently).
-    pub fn new(library_path: &str, slot_id: u64, _pin: &str) -> Result<Self, CoreError> {
-        // In a real implementation:
-        // 1. Load the PKCS#11 library via `cryptoki::context::Pkcs11::new(library_path)`
-        // 2. Initialize with `CKF_OS_LOCKING_OK`
-        // 3. Open a session on slot_id
-        // 4. Login with the PIN
-        Ok(Self {
-            _library_path: library_path.to_string(),
-            _slot_id: slot_id,
-        })
+    /// Placeholder for PKCS#11-backed HSM signing.
+    ///
+    /// Enable the `hsm-pkcs11` feature for the real implementation using
+    /// the `cryptoki` crate.
+    ///
+    /// # Configuration
+    ///
+    /// ```text
+    /// PQMSG_HSM_PKCS11_LIB=/usr/lib/softhsm/libsofthsm2.so
+    /// PQMSG_HSM_SLOT_ID=0
+    /// PQMSG_HSM_PIN=***** (from secret store)
+    /// ```
+    pub struct Pkcs11Signer {
+        _library_path: String,
+        _slot_id: u64,
+    }
+
+    impl Pkcs11Signer {
+        pub fn new(library_path: &str, slot_id: u64, _pin: &str) -> Result<Self, CoreError> {
+            Ok(Self {
+                _library_path: library_path.to_string(),
+                _slot_id: slot_id,
+            })
+        }
+    }
+
+    impl Signer for Pkcs11Signer {
+        fn sign(&self, handle: &KeyHandle, _message: &[u8]) -> Result<Vec<u8>, CoreError> {
+            let KeyHandle::Hsm { slot_id, label } = handle else {
+                return Err(CoreError::HsmOperation(
+                    "Pkcs11Signer requires an HSM key handle".into(),
+                ));
+            };
+            Err(CoreError::HsmOperation(format!(
+                "PKCS#11 signing not available: enable the hsm-pkcs11 feature (slot={slot_id}, label={label})"
+            )))
+        }
+
+        fn public_key(&self, handle: &KeyHandle) -> Result<Vec<u8>, CoreError> {
+            let KeyHandle::Hsm { slot_id, label } = handle else {
+                return Err(CoreError::HsmOperation(
+                    "Pkcs11Signer requires an HSM key handle".into(),
+                ));
+            };
+            Err(CoreError::HsmOperation(format!(
+                "PKCS#11 public key retrieval not available: enable the hsm-pkcs11 feature (slot={slot_id}, label={label})"
+            )))
+        }
     }
 }
 
-impl Signer for Pkcs11Signer {
-    fn sign(&self, handle: &KeyHandle, _message: &[u8]) -> Result<Vec<u8>, CoreError> {
-        let KeyHandle::Hsm { slot_id, label } = handle else {
-            return Err(CoreError::HsmOperation(
-                "Pkcs11Signer requires an HSM key handle".into(),
-            ));
-        };
-        // In a real implementation:
-        // 1. Find the private key object by label on the given slot
-        // 2. Call C_Sign with CKM_EDDSA mechanism
-        // 3. Return the 64-byte Ed25519 signature
-        Err(CoreError::HsmOperation(format!(
-            "PKCS#11 signing not yet implemented (slot={slot_id}, label={label})"
-        )))
+#[cfg(not(feature = "hsm-pkcs11"))]
+pub use pkcs11_stub::Pkcs11Signer;
+
+#[cfg(feature = "hsm-pkcs11")]
+mod pkcs11_real {
+    use super::*;
+    use cryptoki::context::{CInitializeArgs, Pkcs11};
+    use cryptoki::mechanism::Mechanism;
+    use cryptoki::object::{Attribute, AttributeType, ObjectClass, ObjectHandle};
+    use cryptoki::session::{Session, UserType};
+    use cryptoki::slot::Slot;
+    use cryptoki::types::AuthPin;
+    use std::convert::TryFrom;
+    use std::sync::Mutex;
+
+    /// Real PKCS#11-backed HSM signer using the `cryptoki` crate.
+    ///
+    /// Loads a PKCS#11 shared library, opens a session on the given slot,
+    /// authenticates with a PIN, and delegates signing to the HSM.
+    pub struct Pkcs11Signer {
+        _ctx: Pkcs11,
+        session: Mutex<Session>,
     }
 
-    fn public_key(&self, handle: &KeyHandle) -> Result<Vec<u8>, CoreError> {
-        let KeyHandle::Hsm { slot_id, label } = handle else {
-            return Err(CoreError::HsmOperation(
-                "Pkcs11Signer requires an HSM key handle".into(),
-            ));
-        };
-        // In a real implementation:
-        // 1. Find the public key object by label on the given slot
-        // 2. Call C_GetAttributeValue for CKA_EC_POINT / CKA_VALUE
-        // 3. Return the 32-byte Ed25519 public key
-        Err(CoreError::HsmOperation(format!(
-            "PKCS#11 public key retrieval not yet implemented (slot={slot_id}, label={label})"
-        )))
+    impl Pkcs11Signer {
+        /// Open a PKCS#11 session on the given slot and log in.
+        pub fn new(library_path: &str, slot_id: u64, pin: &str) -> Result<Self, CoreError> {
+            let ctx = Pkcs11::new(library_path).map_err(|e| {
+                CoreError::HsmOperation(format!("failed to load PKCS#11 library '{library_path}': {e}"))
+            })?;
+            ctx.initialize(CInitializeArgs::OsThreads).map_err(|e| {
+                CoreError::HsmOperation(format!("failed to initialize PKCS#11: {e}"))
+            })?;
+
+            let slot = Slot::try_from(slot_id).map_err(|e| {
+                CoreError::HsmOperation(format!("invalid PKCS#11 slot id {slot_id}: {e}"))
+            })?;
+
+            let session = ctx.open_rw_session(slot).map_err(|e| {
+                CoreError::HsmOperation(format!("failed to open PKCS#11 session on slot {slot_id}: {e}"))
+            })?;
+            session.login(UserType::User, Some(&AuthPin::new(pin.to_string()))).map_err(|e| {
+                CoreError::HsmOperation(format!("failed to login to PKCS#11 slot {slot_id}: {e}"))
+            })?;
+
+            Ok(Self {
+                _ctx: ctx,
+                session: Mutex::new(session),
+            })
+        }
+
+        fn find_private_key(&self, session: &Session, label: &str) -> Result<ObjectHandle, CoreError> {
+            let template = vec![
+                Attribute::Class(ObjectClass::PRIVATE_KEY),
+                Attribute::Label(label.as_bytes().to_vec()),
+            ];
+            let objects = session.find_objects(&template).map_err(|e| {
+                CoreError::HsmOperation(format!("failed to find private key '{label}': {e}"))
+            })?;
+            objects.into_iter().next().ok_or_else(|| {
+                CoreError::HsmOperation(format!("private key '{label}' not found on HSM"))
+            })
+        }
+
+        fn find_public_key(&self, session: &Session, label: &str) -> Result<ObjectHandle, CoreError> {
+            let template = vec![
+                Attribute::Class(ObjectClass::PUBLIC_KEY),
+                Attribute::Label(label.as_bytes().to_vec()),
+            ];
+            let objects = session.find_objects(&template).map_err(|e| {
+                CoreError::HsmOperation(format!("failed to find public key '{label}': {e}"))
+            })?;
+            objects.into_iter().next().ok_or_else(|| {
+                CoreError::HsmOperation(format!("public key '{label}' not found on HSM"))
+            })
+        }
+    }
+
+    impl Signer for Pkcs11Signer {
+        fn sign(&self, handle: &KeyHandle, message: &[u8]) -> Result<Vec<u8>, CoreError> {
+            let KeyHandle::Hsm { label, .. } = handle else {
+                return Err(CoreError::HsmOperation(
+                    "Pkcs11Signer requires an HSM key handle".into(),
+                ));
+            };
+            let session = self.session.lock().map_err(|_| {
+                CoreError::HsmOperation("failed to lock PKCS#11 session".into())
+            })?;
+            let key = self.find_private_key(&session, label)?;
+            let signature = session.sign(&Mechanism::Eddsa, key, message).map_err(|e| {
+                CoreError::HsmOperation(format!("PKCS#11 sign failed: {e}"))
+            })?;
+            Ok(signature)
+        }
+
+        fn public_key(&self, handle: &KeyHandle) -> Result<Vec<u8>, CoreError> {
+            let KeyHandle::Hsm { label, .. } = handle else {
+                return Err(CoreError::HsmOperation(
+                    "Pkcs11Signer requires an HSM key handle".into(),
+                ));
+            };
+            let session = self.session.lock().map_err(|_| {
+                CoreError::HsmOperation("failed to lock PKCS#11 session".into())
+            })?;
+            let key = self.find_public_key(&session, label)?;
+            let attrs = session
+                .get_attributes(key, &[AttributeType::EcPoint])
+                .map_err(|e| {
+                    CoreError::HsmOperation(format!("failed to get public key attributes: {e}"))
+                })?;
+            for attr in attrs {
+                if let Attribute::EcPoint(raw) = attr {
+                    // Ed25519 public keys are 32 bytes; PKCS#11 may wrap in
+                    // DER OCTET STRING (04 20 <32bytes>). Strip the prefix.
+                    if raw.len() == 34 && raw[0] == 0x04 && raw[1] == 0x20 {
+                        return Ok(raw[2..].to_vec());
+                    }
+                    return Ok(raw);
+                }
+            }
+            Err(CoreError::HsmOperation(
+                "no EC_POINT attribute found on public key object".into(),
+            ))
+        }
     }
 }
+
+#[cfg(feature = "hsm-pkcs11")]
+pub use pkcs11_real::Pkcs11Signer;
 
 #[cfg(test)]
 mod tests {
