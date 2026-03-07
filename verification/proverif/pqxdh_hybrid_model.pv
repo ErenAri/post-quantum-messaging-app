@@ -17,7 +17,7 @@ reduc forall sk:key, ss:bitstring; kem_ss(sk, kem_enc(pk(sk), ss)) = ss.
 
 fun hkdf(bitstring, bitstring): bitstring.
 fun tuple4(bitstring, bitstring, bitstring, bitstring): bitstring.
-fun tuple3(pkey, pkey, bitstring): bitstring.
+fun tuple5(pkey, pkey, bitstring, bitstring, bitstring): bitstring.
 fun aead_enc(bitstring, bitstring, bitstring): bitstring.
 
 free protocol_v1: bitstring.
@@ -67,7 +67,7 @@ let Alice =
         let t1 = shared_dh(ik_a, spk_b_pub) in
         let t2 = shared_dh(ek_a, ik_b_pub) in
         let t3 = shared_dh(ek_a, spk_b_pub) in
-        let ad = tuple3(pk(ik_a), ik_b_pub, protocol_v1) in
+        let ad = tuple5(pk(ik_a), ik_b_pub, protocol_v1, alice_id, bob_id) in
         let sk = hkdf(tuple4(t1, t2, t3, ss_pq), ad) in
         let ciphertext = aead_enc(plaintext0, sk, ad) in
         event AliceSessionBound(pk(ik_a), ik_b_pub, sk);
@@ -86,7 +86,7 @@ let AliceFS =
         let t1 = shared_dh(ik_a, spk_b_pub) in
         let t2 = shared_dh(ek_a, ik_b_pub) in
         let t3 = shared_dh(ek_a, spk_b_pub) in
-        let ad = tuple3(pk(ik_a), ik_b_pub, protocol_v1) in
+        let ad = tuple5(pk(ik_a), ik_b_pub, protocol_v1, alice_id, bob_id) in
         let sk = hkdf(tuple4(t1, t2, t3, ss_pq), ad) in
         let ciphertext = aead_enc(plaintext_fs, sk, ad) in
         out(net, (pk(ik_a), pk(ek_a), pq_ct, ad, ciphertext));

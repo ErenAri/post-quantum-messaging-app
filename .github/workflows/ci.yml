@@ -202,19 +202,6 @@ jobs:
         working-directory: crates/pqmsg-core
         run: cargo fuzz run fuzz_algorithm_dispatch -- -max_total_time=20
 
-  formal-verification-smoke:
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ocaml/setup-ocaml@v3
-        with:
-          ocaml-compiler: "4.14"
-      - name: install proverif
-        run: opam install -y proverif
-      - name: run proverif smoke
-        run: opam exec -- proverif verification/proverif/pqxdh_hybrid_model.pv
-
   proverif-gate:
     runs-on: ubuntu-22.04
     steps:
