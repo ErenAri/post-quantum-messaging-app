@@ -6,10 +6,20 @@ export type SetupConfig = {
   deviceId: string;
   suiteLabel: "ml-kem-768" | "kyber768";
   peerUserId: string;
+  displayName: string;
+  passphrase: string;
 };
 
 export type ConversationSummary = {
   peerUserId: string;
+  lastPreview: string;
+  unreadCount: number;
+  updatedAt: number;
+};
+
+export type GroupConversationSummary = {
+  groupId: string;
+  ownerUserId: string;
   lastPreview: string;
   unreadCount: number;
   updatedAt: number;
@@ -24,6 +34,7 @@ export type IdentityPin = {
 
 const SETUP_KEY = "pqmsg.web.setup.v1";
 const CONVERSATIONS_KEY = "pqmsg.web.conversations.v1";
+const GROUP_CONVOS_KEY = "pqmsg.web.groupconvos.v1";
 const PINS_KEY = "pqmsg.web.pins.v1";
 const CURSORS_KEY = "pqmsg.web.cursors.v1";
 const KEYS_PREFIX = "pqmsg.web.keys.v1.";
@@ -33,7 +44,9 @@ export const DEFAULT_SETUP: SetupConfig = {
   userId: "",
   deviceId: "",
   suiteLabel: "ml-kem-768",
-  peerUserId: "bob"
+  peerUserId: "bob",
+  displayName: "",
+  passphrase: ""
 };
 
 export function loadSetup(): SetupConfig {
@@ -48,7 +61,9 @@ export function loadSetup(): SetupConfig {
       userId: parsed.userId || DEFAULT_SETUP.userId,
       deviceId: parsed.deviceId || DEFAULT_SETUP.deviceId,
       suiteLabel: parsed.suiteLabel || DEFAULT_SETUP.suiteLabel,
-      peerUserId: parsed.peerUserId || DEFAULT_SETUP.peerUserId
+      peerUserId: parsed.peerUserId || DEFAULT_SETUP.peerUserId,
+      displayName: parsed.displayName || DEFAULT_SETUP.displayName,
+      passphrase: parsed.passphrase || DEFAULT_SETUP.passphrase
     };
   } catch {
     return DEFAULT_SETUP;
@@ -195,6 +210,54 @@ export function listIdentityPins(userId: string): Array<{ peerUserId: string; pi
     .sort((lhs, rhs) => lhs.peerUserId.localeCompare(rhs.peerUserId));
 }
 
+// --- Group conversations ---
+
+type GroupConvoRow = GroupConversationSummary & { userId: string };
+
+export function loadGroupConversations(userId: string): GroupConversationSummary[] {
+  const all = parseRecord<GroupConvoRow[]>(GROUP_CONVOS_KEY, []);
+  return all
+    .filter(item => item.userId === userId)
+    .map(item => ({
+      groupId: item.groupId,
+      ownerUserId: item.ownerUserId,
+      lastPreview: item.lastPreview,
+      unreadCount: item.unreadCount,
+      updatedAt: item.updatedAt,
+    }))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export function upsertGroupConversation(
+  userId: string,
+  groupId: string,
+  ownerUserId: string,
+  preview: string,
+  incrementUnread: boolean
+): void {
+  const all = parseRecord<GroupConvoRow[]>(GROUP_CONVOS_KEY, []);
+  const now = Date.now();
+  const normalizedPreview = preview.trim().slice(0, 160) || "No content";
+  const idx = all.findIndex(item => item.userId === userId && item.groupId === groupId);
+  if (idx >= 0) {
+    all[idx].lastPreview = normalizedPreview;
+    all[idx].updatedAt = now;
+    if (incrementUnread) all[idx].unreadCount += 1;
+  } else {
+    all.push({ userId, groupId, ownerUserId, lastPreview: normalizedPreview, unreadCount: incrementUnread ? 1 : 0, updatedAt: now });
+  }
+  localStorage.setItem(GROUP_CONVOS_KEY, JSON.stringify(all));
+}
+
+export function markGroupConversationRead(userId: string, groupId: string): void {
+  const all = parseRecord<GroupConvoRow[]>(GROUP_CONVOS_KEY, []);
+  const idx = all.findIndex(item => item.userId === userId && item.groupId === groupId);
+  if (idx >= 0) {
+    all[idx].unreadCount = 0;
+    localStorage.setItem(GROUP_CONVOS_KEY, JSON.stringify(all));
+  }
+}
+
 export function wipeLocalState(userId: string): void {
   const normalizedUser = userId.trim();
   if (!normalizedUser) {
@@ -207,6 +270,11 @@ export function wipeLocalState(userId: string): void {
     (item) => item.userId !== normalizedUser
   );
   writeRecord(CONVERSATIONS_KEY, conversations);
+
+  const groupConvos = parseRecord<GroupConvoRow[]>(GROUP_CONVOS_KEY, []).filter(
+    (item) => item.userId !== normalizedUser
+  );
+  writeRecord(GROUP_CONVOS_KEY, groupConvos);
 
   const pins = parseRecord<PinRow[]>(PINS_KEY, []).filter((item) => item.userId !== normalizedUser);
   writeRecord(PINS_KEY, pins);

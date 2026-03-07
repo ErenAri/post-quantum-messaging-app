@@ -104,6 +104,336 @@ export type RevokeDeviceResponse = {
   revoked_at: string;
 };
 
+// --- Phase 2 types ---
+
+export type ProfileResponse = {
+  user_id: string;
+  display_name: string | null;
+  avatar_mime: string | null;
+  avatar_bytes_base64: string | null;
+  updated_at: string | null;
+};
+
+export type UpsertProfileRequest = {
+  display_name?: string;
+  avatar_mime?: string;
+  avatar_bytes_base64?: string;
+};
+
+export type PresenceResponse = {
+  user_id: string;
+  status: "online" | "away" | "offline";
+  active: boolean;
+  updated_at: string | null;
+  expires_at: string | null;
+};
+
+export type UpdatePresenceRequest = {
+  status: "online" | "away" | "offline";
+};
+
+export type TypingEntry = {
+  user_id: string;
+  is_typing: boolean;
+  updated_at: string;
+};
+
+export type TypingResponse = {
+  typing: TypingEntry[];
+};
+
+export type UpdateTypingRequest = {
+  is_typing: boolean;
+};
+
+export type SendReceiptRequest = {
+  message_id: number;
+  receipt_type: "delivered" | "read";
+};
+
+export type ReceiptEntry = {
+  receipt_id: number;
+  message_id: number;
+  from_user_id: string;
+  receipt_type: string;
+  received_at: string;
+};
+
+export type ReceiptsResponse = {
+  receipts: ReceiptEntry[];
+};
+
+export type ContactEntry = {
+  contact_user_id: string;
+  alias: string | null;
+  verified_by_qr: boolean;
+  fingerprint: string | null;
+  added_at: string;
+};
+
+export type ContactsListResponse = {
+  contacts: ContactEntry[];
+};
+
+export type UpsertContactRequest = {
+  contact_user_id: string;
+  alias?: string;
+  verified_by_qr?: boolean;
+  fingerprint?: string;
+};
+
+export type RemoveContactRequest = {
+  contact_user_id: string;
+};
+
+// --- Phase 3 types ---
+
+export type CreateGroupRequest = {
+  group_id: string;
+  member_user_ids: string[];
+};
+
+export type CreateGroupResponse = {
+  group_id: string;
+  owner_user_id: string;
+  member_count: number;
+  created_at: string;
+};
+
+export type GroupMemberRecord = {
+  user_id: string;
+  joined_at: string;
+};
+
+export type GroupMembersResponse = {
+  group_id: string;
+  members: GroupMemberRecord[];
+};
+
+export type AddGroupMemberRequest = {
+  member_user_id: string;
+};
+
+export type RemoveGroupMemberRequest = {
+  member_user_id: string;
+};
+
+export type GroupMemberMutationResponse = {
+  group_id: string;
+  member_user_id: string;
+  owner_user_id: string;
+  changed: boolean;
+  updated_at: string;
+};
+
+export type GroupRelayRequest = {
+  sender_user_id: string;
+  device_id: string;
+  message_bytes_base64: string;
+};
+
+export type GroupRelayResponse = {
+  group_id: string;
+  delivered_message_count: number;
+  delivered_user_count: number;
+  first_message_id: number | null;
+  received_at: string;
+};
+
+export type FileUploadRequest = {
+  recipient_user_id: string;
+  device_id: string;
+  mime_type: string;
+  file_bytes_base64: string;
+};
+
+export type FileUploadResponse = {
+  file_id: string;
+  owner_user_id: string;
+  recipient_user_id: string;
+  mime_type: string;
+  byte_len: number;
+  uploaded_at: string;
+};
+
+export type FileDownloadResponse = {
+  file_id: string;
+  owner_user_id: string;
+  recipient_user_id: string;
+  mime_type: string;
+  file_bytes_base64: string;
+  uploaded_at: string;
+};
+
+export type DeleteInboxRequest = {
+  message_ids: number[];
+  delete_before_id?: number;
+};
+
+export type DeleteInboxResponse = {
+  user_id: string;
+  device_id: string;
+  deleted_count: number;
+  deleted_at: string;
+};
+
+export type PrekeysStatusResponse = {
+  user_id: string;
+  device_id: string;
+  remaining_one_time_prekeys_x25519: number;
+  remaining_one_time_prekeys_mlkem768: number;
+  low_one_time_prekeys: boolean;
+  minimum_recommended_one_time_prekeys: number;
+  checked_at: string;
+};
+
+// --- Phase 4 types ---
+
+export type RotateInitRequest = {
+  new_identity_x25519_pub: string;
+  new_identity_sig_pub: string;
+  new_device_id: string;
+};
+
+export type RotateInitResponse = {
+  user_id: string;
+  challenge_id: string;
+  challenge_nonce: string;
+  expires_at: string;
+};
+
+export type RotateConfirmRequest = {
+  challenge_id: string;
+  sig_by_current_identity: string;
+  sig_by_new_identity: string;
+};
+
+export type RotateConfirmResponse = {
+  user_id: string;
+  identity_key_version: number;
+  identity_fingerprint_sha256: string;
+  rotated_at: string;
+};
+
+export type IdentityLogItem = {
+  version: number;
+  identity_x25519_pub: string;
+  identity_sig_pub: string;
+  device_id: string;
+  event_type: string;
+  changed_at: string;
+  identity_fingerprint_sha256: string;
+};
+
+export type IdentityLogResponse = {
+  user_id: string;
+  events: IdentityLogItem[];
+};
+
+export type SealedRelayRequest = {
+  message_bytes_base64: string;
+};
+
+export type SealedRelayResponse = {
+  delivered_device_count: number;
+  first_message_id: number | null;
+  received_at: string;
+};
+
+export type SealedInboxItem = {
+  message_id: number;
+  message_bytes_base64: string;
+  received_at: string;
+};
+
+export type SealedInboxResponse = {
+  user_id: string;
+  messages: SealedInboxItem[];
+};
+
+export type RelayEphemeralRequest = {
+  sender_user_id: string;
+  device_id: string;
+  message_bytes_base64: string;
+  ttl_seconds: number;
+};
+
+export type RelayEphemeralResponse = {
+  message_id: number;
+  delivered_device_count: number;
+  received_at: string;
+};
+
+// Phase 5: Discovery
+export type DiscoveryHandlesUploadRequest = {
+  phone_hashes_sha256: string[];
+  email_hashes_sha256: string[];
+};
+
+export type DiscoveryHandlesUploadResponse = {
+  user_id: string;
+  device_id: string;
+  uploaded_phone_hashes: number;
+  uploaded_email_hashes: number;
+  updated_at: string;
+};
+
+export type DiscoveryMatchRequest = {
+  hashes_sha256: string[];
+};
+
+export type DiscoveryMatchItem = {
+  hash_sha256: string;
+  matched_user_id: string;
+  handle_kind: string;
+};
+
+export type DiscoveryMatchResponse = {
+  user_id: string;
+  matches: DiscoveryMatchItem[];
+  checked_at: string;
+};
+
+// Phase 5: Push Token
+export type RegisterPushTokenRequest = {
+  device_id: string;
+  provider?: string | null;
+  token?: string | null;
+  fcm_token?: string | null;
+};
+
+export type RegisterPushTokenResponse = {
+  user_id: string;
+  device_id: string;
+  provider: string;
+  registered_at: string;
+};
+
+// Phase 5: Health
+export type HealthStatusResponse = {
+  status: string;
+  security_profile: string;
+  deployment_mode: string;
+  db_backend: string;
+  db_ready: boolean;
+  db_pool_size: number;
+  db_pool_idle: number;
+  push_enabled: boolean;
+  push_providers: string[];
+  audit_logger_enabled: boolean;
+  tls_enabled: boolean;
+  rate_limiter_mode: string;
+  replay_cache_mode: string;
+  realtime_mode: string;
+  supported_suite_ids: number[];
+  runtime_crypto_profile: RuntimeCryptoProfileResponse;
+  production_baseline_met: boolean;
+  registration_pow_bits: number;
+  prekey_publish_min_interval_seconds: number;
+  prekey_bundle_reserve_count: number;
+  pq_ratchet_interval: number;
+};
+
 export type RuntimeCryptoProfileResponse = {
   protocol_version: number;
   suite_id: number;
@@ -250,6 +580,400 @@ export class PqmsgApi {
       undefined,
       headers
     );
+  }
+
+  // --- Phase 2 API methods ---
+
+  async getProfile(
+    userId: string,
+    headers: RequestAuthHeaders
+  ): Promise<ProfileResponse> {
+    return this.request<ProfileResponse>(
+      "GET",
+      `/v1/users/${encodeURIComponent(userId)}/profile`,
+      undefined,
+      headers
+    );
+  }
+
+  async upsertProfile(
+    userId: string,
+    payload: UpsertProfileRequest,
+    headers: RequestAuthHeaders
+  ): Promise<ProfileResponse> {
+    return this.request<ProfileResponse>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/profile`,
+      payload,
+      headers
+    );
+  }
+
+  async getPresence(
+    userId: string,
+    headers: RequestAuthHeaders
+  ): Promise<PresenceResponse> {
+    return this.request<PresenceResponse>(
+      "GET",
+      `/v1/users/${encodeURIComponent(userId)}/presence`,
+      undefined,
+      headers
+    );
+  }
+
+  async updatePresence(
+    userId: string,
+    payload: UpdatePresenceRequest,
+    headers: RequestAuthHeaders
+  ): Promise<PresenceResponse> {
+    return this.request<PresenceResponse>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/presence`,
+      payload,
+      headers
+    );
+  }
+
+  async getTyping(
+    userId: string,
+    headers: RequestAuthHeaders
+  ): Promise<TypingResponse> {
+    return this.request<TypingResponse>(
+      "GET",
+      `/v1/typing/${encodeURIComponent(userId)}`,
+      undefined,
+      headers
+    );
+  }
+
+  async updateTyping(
+    peerUserId: string,
+    payload: UpdateTypingRequest,
+    headers: RequestAuthHeaders
+  ): Promise<void> {
+    await this.request<void>(
+      "POST",
+      `/v1/typing/${encodeURIComponent(peerUserId)}`,
+      payload,
+      headers
+    );
+  }
+
+  async sendReceipt(
+    userId: string,
+    payload: SendReceiptRequest,
+    headers: RequestAuthHeaders
+  ): Promise<void> {
+    await this.request<void>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/receipts`,
+      payload,
+      headers
+    );
+  }
+
+  async getReceipts(
+    userId: string,
+    sinceId: number,
+    headers: RequestAuthHeaders
+  ): Promise<ReceiptsResponse> {
+    return this.request<ReceiptsResponse>(
+      "GET",
+      `/v1/users/${encodeURIComponent(userId)}/receipts/poll?since_id=${encodeURIComponent(String(sinceId))}`,
+      undefined,
+      headers
+    );
+  }
+
+  async listContacts(
+    userId: string,
+    headers: RequestAuthHeaders
+  ): Promise<ContactsListResponse> {
+    return this.request<ContactsListResponse>(
+      "GET",
+      `/v1/users/${encodeURIComponent(userId)}/contacts`,
+      undefined,
+      headers
+    );
+  }
+
+  async upsertContact(
+    userId: string,
+    payload: UpsertContactRequest,
+    headers: RequestAuthHeaders
+  ): Promise<void> {
+    await this.request<void>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/contacts`,
+      payload,
+      headers
+    );
+  }
+
+  async removeContact(
+    userId: string,
+    payload: RemoveContactRequest,
+    headers: RequestAuthHeaders
+  ): Promise<void> {
+    await this.request<void>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/contacts/remove`,
+      payload,
+      headers
+    );
+  }
+
+  // --- Phase 3 API methods ---
+
+  async createGroup(
+    payload: CreateGroupRequest,
+    headers: RequestAuthHeaders
+  ): Promise<CreateGroupResponse> {
+    return this.request<CreateGroupResponse>(
+      "POST",
+      "/v1/groups",
+      payload,
+      headers
+    );
+  }
+
+  async listGroupMembers(
+    groupId: string,
+    headers: RequestAuthHeaders
+  ): Promise<GroupMembersResponse> {
+    return this.request<GroupMembersResponse>(
+      "GET",
+      `/v1/groups/${encodeURIComponent(groupId)}/members`,
+      undefined,
+      headers
+    );
+  }
+
+  async addGroupMember(
+    groupId: string,
+    payload: AddGroupMemberRequest,
+    headers: RequestAuthHeaders
+  ): Promise<GroupMemberMutationResponse> {
+    return this.request<GroupMemberMutationResponse>(
+      "POST",
+      `/v1/groups/${encodeURIComponent(groupId)}/members/add`,
+      payload,
+      headers
+    );
+  }
+
+  async removeGroupMember(
+    groupId: string,
+    payload: RemoveGroupMemberRequest,
+    headers: RequestAuthHeaders
+  ): Promise<GroupMemberMutationResponse> {
+    return this.request<GroupMemberMutationResponse>(
+      "POST",
+      `/v1/groups/${encodeURIComponent(groupId)}/members/remove`,
+      payload,
+      headers
+    );
+  }
+
+  async relayGroupMessage(
+    groupId: string,
+    payload: GroupRelayRequest,
+    headers: RequestAuthHeaders
+  ): Promise<GroupRelayResponse> {
+    return this.request<GroupRelayResponse>(
+      "POST",
+      `/v1/groups/${encodeURIComponent(groupId)}/relay`,
+      payload,
+      headers
+    );
+  }
+
+  async uploadFile(
+    payload: FileUploadRequest,
+    headers: RequestAuthHeaders
+  ): Promise<FileUploadResponse> {
+    return this.request<FileUploadResponse>(
+      "POST",
+      "/v1/files/upload",
+      payload,
+      headers
+    );
+  }
+
+  async downloadFile(
+    fileId: string,
+    headers: RequestAuthHeaders
+  ): Promise<FileDownloadResponse> {
+    return this.request<FileDownloadResponse>(
+      "GET",
+      `/v1/files/${encodeURIComponent(fileId)}`,
+      undefined,
+      headers
+    );
+  }
+
+  async deleteInboxMessages(
+    userId: string,
+    payload: DeleteInboxRequest,
+    headers: RequestAuthHeaders
+  ): Promise<DeleteInboxResponse> {
+    return this.request<DeleteInboxResponse>(
+      "POST",
+      `/v1/inbox/${encodeURIComponent(userId)}/delete`,
+      payload,
+      headers
+    );
+  }
+
+  async getPrekeysStatus(
+    userId: string,
+    headers: RequestAuthHeaders
+  ): Promise<PrekeysStatusResponse> {
+    return this.request<PrekeysStatusResponse>(
+      "GET",
+      `/v1/users/${encodeURIComponent(userId)}/prekeys/status`,
+      undefined,
+      headers
+    );
+  }
+
+  // --- Phase 4 API methods ---
+
+  async rotateInit(
+    userId: string,
+    payload: RotateInitRequest,
+    headers: RequestAuthHeaders
+  ): Promise<RotateInitResponse> {
+    return this.request<RotateInitResponse>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/rotate/init`,
+      payload,
+      headers
+    );
+  }
+
+  async rotateConfirm(
+    userId: string,
+    payload: RotateConfirmRequest,
+    headers: RequestAuthHeaders
+  ): Promise<RotateConfirmResponse> {
+    return this.request<RotateConfirmResponse>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/rotate/confirm`,
+      payload,
+      headers
+    );
+  }
+
+  async getIdentityLog(
+    userId: string,
+    headers: RequestAuthHeaders
+  ): Promise<IdentityLogResponse> {
+    return this.request<IdentityLogResponse>(
+      "GET",
+      `/v1/users/${encodeURIComponent(userId)}/identity-log`,
+      undefined,
+      headers
+    );
+  }
+
+  async sealedRelay(
+    recipientUserId: string,
+    payload: SealedRelayRequest
+  ): Promise<SealedRelayResponse> {
+    return this.request<SealedRelayResponse>(
+      "POST",
+      `/v1/sealed-relay/${encodeURIComponent(recipientUserId)}`,
+      payload,
+      {}
+    );
+  }
+
+  async sealedInbox(
+    userId: string,
+    since: number,
+    headers: RequestAuthHeaders
+  ): Promise<SealedInboxResponse> {
+    return this.request<SealedInboxResponse>(
+      "GET",
+      `/v1/sealed-inbox/${encodeURIComponent(userId)}?since=${encodeURIComponent(String(since))}`,
+      undefined,
+      headers
+    );
+  }
+
+  async anonBundle(userId: string): Promise<BundleResponse> {
+    return this.request<BundleResponse>(
+      "GET",
+      `/v1/anon/users/${encodeURIComponent(userId)}/bundle`,
+      undefined,
+      {}
+    );
+  }
+
+  async relayEphemeral(
+    recipientUserId: string,
+    payload: RelayEphemeralRequest,
+    headers: RequestAuthHeaders
+  ): Promise<RelayEphemeralResponse> {
+    return this.request<RelayEphemeralResponse>(
+      "POST",
+      `/v1/ephemeral-relay/${encodeURIComponent(recipientUserId)}`,
+      payload,
+      headers
+    );
+  }
+
+  async uploadDiscoveryHandles(
+    userId: string,
+    payload: DiscoveryHandlesUploadRequest,
+    headers: RequestAuthHeaders
+  ): Promise<DiscoveryHandlesUploadResponse> {
+    return this.request<DiscoveryHandlesUploadResponse>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/discovery/handles`,
+      payload,
+      headers
+    );
+  }
+
+  async discoveryMatch(
+    userId: string,
+    payload: DiscoveryMatchRequest,
+    headers: RequestAuthHeaders
+  ): Promise<DiscoveryMatchResponse> {
+    return this.request<DiscoveryMatchResponse>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/discovery/match`,
+      payload,
+      headers
+    );
+  }
+
+  async registerPushToken(
+    userId: string,
+    payload: RegisterPushTokenRequest,
+    headers: RequestAuthHeaders
+  ): Promise<RegisterPushTokenResponse> {
+    return this.request<RegisterPushTokenResponse>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/push-token`,
+      payload,
+      headers
+    );
+  }
+
+  async getHealth(): Promise<HealthStatusResponse> {
+    return this.request<HealthStatusResponse>("GET", "/health", undefined, {});
+  }
+
+  async getMetrics(): Promise<string> {
+    const endpoint = `${this.baseUrl}/metrics`;
+    const response = await fetch(endpoint);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+    }
+    return response.text();
   }
 
   private async request<T>(

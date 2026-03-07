@@ -23,6 +23,37 @@ const AUTH_TAG_PREKEY_SPK_HASH = criticalType(0x3209);
 const AUTH_TAG_PREKEY_PQSPK_HASH = criticalType(0x320a);
 const AUTH_TAG_LINK_DEVICE_ID = criticalType(0x3212);
 const AUTH_TAG_REVOKE_DEVICE_ID = criticalType(0x3213);
+const AUTH_TAG_DISCOVERY_PHONE_HASHES_HASH = criticalType(0x3216);
+const AUTH_TAG_DISCOVERY_EMAIL_HASHES_HASH = criticalType(0x3217);
+const AUTH_TAG_DISCOVERY_QUERY_HASHES_HASH = criticalType(0x3218);
+const AUTH_TAG_CONTACT_USER_ID = criticalType(0x3219);
+const AUTH_TAG_CONTACT_ALIAS_HASH = criticalType(0x321a);
+const AUTH_TAG_CONTACT_VERIFIED_FLAG = criticalType(0x321b);
+const AUTH_TAG_CONTACT_FINGERPRINT = criticalType(0x321c);
+const AUTH_TAG_PROFILE_DISPLAY_NAME_HASH = criticalType(0x3226);
+const AUTH_TAG_PROFILE_AVATAR_HASH = criticalType(0x3227);
+const AUTH_TAG_PROFILE_AVATAR_MIME_HASH = criticalType(0x3228);
+const AUTH_TAG_PRESENCE_STATUS = criticalType(0x3229);
+const AUTH_TAG_TYPING_PEER_ID = criticalType(0x322a);
+const AUTH_TAG_TYPING_STATE_FLAG = criticalType(0x322b);
+const AUTH_TAG_DELETE_IDS_HASH = criticalType(0x3214);
+const AUTH_TAG_DELETE_BEFORE_ID = criticalType(0x3215);
+const AUTH_TAG_GROUP_ID = criticalType(0x321d);
+const AUTH_TAG_GROUP_MEMBER_USER_ID = criticalType(0x321e);
+const AUTH_TAG_GROUP_MEMBERS_HASH = criticalType(0x321f);
+const AUTH_TAG_GROUP_SENDER_USER_ID = criticalType(0x3220);
+const AUTH_TAG_GROUP_MESSAGE_BLOB_HASH = criticalType(0x3221);
+const AUTH_TAG_FILE_ID = criticalType(0x3222);
+const AUTH_TAG_FILE_RECIPIENT_ID = criticalType(0x3223);
+const AUTH_TAG_FILE_BLOB_HASH = criticalType(0x3224);
+const AUTH_TAG_FILE_MIME_HASH = criticalType(0x3225);
+const AUTH_TAG_PUSH_DEVICE_ID = criticalType(0x3210);
+const AUTH_TAG_PUSH_TOKEN_HASH = criticalType(0x3211);
+const AUTH_TAG_ROTATE_NEW_X25519_HASH = criticalType(0x320b);
+const AUTH_TAG_ROTATE_NEW_SIG_HASH = criticalType(0x320c);
+const AUTH_TAG_ROTATE_CHALLENGE_ID = criticalType(0x320d);
+const AUTH_TAG_ROTATE_SIG_CURRENT_HASH = criticalType(0x320e);
+const AUTH_TAG_ROTATE_SIG_NEW_HASH = criticalType(0x320f);
 
 const SIG_TAG_PROTOCOL_VERSION = criticalType(0x0201);
 const SIG_TAG_LABEL = criticalType(0x0202);
@@ -264,6 +295,391 @@ export function buildRetireDeviceAuthHeaders(keys: GeneratedKeys): RequestAuthHe
     value: utf8ToBytes(keys.deviceId)
   });
   return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+// --- Phase 2: Profile auth ---
+
+export function buildProfileGetAuthHeaders(keys: GeneratedKeys): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("profile-get", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildProfileUpsertAuthHeaders(
+  keys: GeneratedKeys,
+  displayName: string,
+  avatarMime: string,
+  avatarBlob: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("profile-upsert", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  records.push({ ty: AUTH_TAG_PROFILE_DISPLAY_NAME_HASH, value: sha256(utf8ToBytes(displayName)) });
+  records.push({ ty: AUTH_TAG_PROFILE_AVATAR_HASH, value: sha256(utf8ToBytes(avatarBlob)) });
+  records.push({ ty: AUTH_TAG_PROFILE_AVATAR_MIME_HASH, value: sha256(utf8ToBytes(avatarMime)) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+// --- Phase 2: Presence auth ---
+
+export function buildPresenceGetAuthHeaders(keys: GeneratedKeys): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("presence-get", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildPresenceUpdateAuthHeaders(keys: GeneratedKeys, status: string): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("presence-update", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  records.push({ ty: AUTH_TAG_PRESENCE_STATUS, value: utf8ToBytes(status) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+// --- Phase 2: Typing auth ---
+
+export function buildTypingGetAuthHeaders(keys: GeneratedKeys): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("typing-get", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildTypingUpdateAuthHeaders(
+  keys: GeneratedKeys,
+  peerUserId: string,
+  isTyping: boolean
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("typing-update", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_TYPING_PEER_ID, value: utf8ToBytes(peerUserId) });
+  records.push({ ty: AUTH_TAG_TYPING_STATE_FLAG, value: new Uint8Array([isTyping ? 1 : 0]) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+// --- Phase 2: Receipt auth (plain string format, not TLV) ---
+
+export function buildSendReceiptAuthHeaders(
+  keys: GeneratedKeys,
+  messageId: number,
+  receiptType: string
+): RequestAuthHeaders {
+  const authMsg = `receipt:${keys.userId}:${keys.deviceId}:${messageId}:${receiptType}`;
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const signingKey = base64ToBytes(keys.identitySigSecret);
+  const signature = ed25519.sign(utf8ToBytes(authMsg), signingKey);
+  return {
+    "x-pqmsg-auth-user": keys.userId,
+    "x-pqmsg-auth-device": keys.deviceId,
+    "x-pqmsg-auth-timestamp": String(timestamp),
+    "x-pqmsg-auth-nonce": nonce,
+    "x-pqmsg-auth-signature": bytesToBase64(signature),
+  };
+}
+
+export function buildGetReceiptsAuthHeaders(
+  keys: GeneratedKeys,
+  sinceId: number
+): RequestAuthHeaders {
+  const authMsg = `get-receipts:${keys.userId}:${keys.deviceId}:${sinceId}`;
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const signingKey = base64ToBytes(keys.identitySigSecret);
+  const signature = ed25519.sign(utf8ToBytes(authMsg), signingKey);
+  return {
+    "x-pqmsg-auth-user": keys.userId,
+    "x-pqmsg-auth-device": keys.deviceId,
+    "x-pqmsg-auth-timestamp": String(timestamp),
+    "x-pqmsg-auth-nonce": nonce,
+    "x-pqmsg-auth-signature": bytesToBase64(signature),
+  };
+}
+
+// --- Phase 2: Contacts auth ---
+
+export function buildContactsListAuthHeaders(keys: GeneratedKeys): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("contacts-list", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildContactsUpsertAuthHeaders(
+  keys: GeneratedKeys,
+  contactUserId: string,
+  alias: string,
+  verifiedByQr: boolean,
+  fingerprint: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("contacts-upsert", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  records.push({ ty: AUTH_TAG_CONTACT_USER_ID, value: utf8ToBytes(contactUserId) });
+  records.push({ ty: AUTH_TAG_CONTACT_ALIAS_HASH, value: sha256(utf8ToBytes(alias)) });
+  records.push({ ty: AUTH_TAG_CONTACT_VERIFIED_FLAG, value: new Uint8Array([verifiedByQr ? 1 : 0]) });
+  if (fingerprint) {
+    records.push({ ty: AUTH_TAG_CONTACT_FINGERPRINT, value: utf8ToBytes(fingerprint) });
+  }
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildContactsRemoveAuthHeaders(
+  keys: GeneratedKeys,
+  contactUserId: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("contacts-remove", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  records.push({ ty: AUTH_TAG_CONTACT_USER_ID, value: utf8ToBytes(contactUserId) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+// --- Phase 3: Group auth ---
+
+function hashStringListSha256(items: string[]): Uint8Array {
+  const sorted = [...new Set(items)].sort();
+  return sha256(utf8ToBytes(sorted.join(",")));
+}
+
+export function buildGroupCreateAuthHeaders(
+  keys: GeneratedKeys,
+  groupId: string,
+  memberUserIds: string[]
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("groups-create", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_GROUP_ID, value: utf8ToBytes(groupId) });
+  records.push({ ty: AUTH_TAG_GROUP_MEMBERS_HASH, value: hashStringListSha256(memberUserIds) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildGroupMembersListAuthHeaders(
+  keys: GeneratedKeys,
+  groupId: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("groups-members-list", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_GROUP_ID, value: utf8ToBytes(groupId) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildGroupMembersAddAuthHeaders(
+  keys: GeneratedKeys,
+  groupId: string,
+  memberUserId: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("groups-members-add", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_GROUP_ID, value: utf8ToBytes(groupId) });
+  records.push({ ty: AUTH_TAG_GROUP_MEMBER_USER_ID, value: utf8ToBytes(memberUserId) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildGroupMembersRemoveAuthHeaders(
+  keys: GeneratedKeys,
+  groupId: string,
+  memberUserId: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("groups-members-remove", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_GROUP_ID, value: utf8ToBytes(groupId) });
+  records.push({ ty: AUTH_TAG_GROUP_MEMBER_USER_ID, value: utf8ToBytes(memberUserId) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildGroupRelayAuthHeaders(
+  keys: GeneratedKeys,
+  groupId: string,
+  messageBytesBase64: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("groups-relay", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_GROUP_ID, value: utf8ToBytes(groupId) });
+  records.push({ ty: AUTH_TAG_GROUP_SENDER_USER_ID, value: utf8ToBytes(keys.userId) });
+  records.push({ ty: AUTH_TAG_GROUP_MESSAGE_BLOB_HASH, value: sha256(base64ToBytes(messageBytesBase64)) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+// --- Phase 3: File auth ---
+
+export function buildFileUploadAuthHeaders(
+  keys: GeneratedKeys,
+  recipientUserId: string,
+  mimeType: string,
+  fileBytesBase64: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("files-upload", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_FILE_RECIPIENT_ID, value: utf8ToBytes(recipientUserId) });
+  records.push({ ty: AUTH_TAG_FILE_BLOB_HASH, value: sha256(base64ToBytes(fileBytesBase64)) });
+  records.push({ ty: AUTH_TAG_FILE_MIME_HASH, value: sha256(utf8ToBytes(mimeType)) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildFileDownloadAuthHeaders(
+  keys: GeneratedKeys,
+  fileId: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("files-download", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_FILE_ID, value: utf8ToBytes(fileId) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+// --- Phase 3: Inbox delete auth ---
+
+export function buildInboxDeleteAuthHeaders(
+  keys: GeneratedKeys,
+  messageIds: number[],
+  deleteBeforeId?: number
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("inbox-delete", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  // Hash sorted deduplicated message IDs as concatenated big-endian i64
+  const sorted = [...new Set(messageIds)].sort((a, b) => a - b);
+  const idBytes = concatBytes(...sorted.map(id => i64ToBeBytes(id)));
+  records.push({ ty: AUTH_TAG_DELETE_IDS_HASH, value: sha256(idBytes) });
+  if (deleteBeforeId !== undefined) {
+    records.push({ ty: AUTH_TAG_DELETE_BEFORE_ID, value: i64ToBeBytes(deleteBeforeId) });
+  }
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+// --- Phase 3: Prekey status auth ---
+
+export function buildPrekeysStatusAuthHeaders(keys: GeneratedKeys): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("prekeys-status", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+// --- Phase 4: Identity key rotation auth ---
+
+export function buildRotateInitAuthHeaders(
+  keys: GeneratedKeys,
+  newIdentityX25519Pub: string,
+  newIdentitySigPub: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("rotate-init", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_ROTATE_NEW_X25519_HASH, value: sha256(utf8ToBytes(newIdentityX25519Pub)) });
+  records.push({ ty: AUTH_TAG_ROTATE_NEW_SIG_HASH, value: sha256(utf8ToBytes(newIdentitySigPub)) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildRotateConfirmAuthHeaders(
+  keys: GeneratedKeys,
+  challengeId: string,
+  sigByCurrentIdentity: string,
+  sigByNewIdentity: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("rotate-confirm", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_ROTATE_CHALLENGE_ID, value: utf8ToBytes(challengeId) });
+  records.push({ ty: AUTH_TAG_ROTATE_SIG_CURRENT_HASH, value: sha256(utf8ToBytes(sigByCurrentIdentity)) });
+  records.push({ ty: AUTH_TAG_ROTATE_SIG_NEW_HASH, value: sha256(utf8ToBytes(sigByNewIdentity)) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildIdentityLogAuthHeaders(keys: GeneratedKeys): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("identity-log", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+// --- Phase 4: Sealed sender auth ---
+
+export function buildSealedInboxAuthHeaders(keys: GeneratedKeys, since: number): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("sealed-inbox", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  records.push({ ty: AUTH_TAG_SINCE, value: i64ToBeBytes(since) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+// --- Phase 4: Ephemeral relay auth (format-string, not TLV) ---
+
+export function buildEphemeralRelayAuthHeaders(
+  keys: GeneratedKeys,
+  recipientUserId: string,
+  ttlSeconds: number
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const message = `ephemeral-relay:${keys.userId}:${keys.deviceId}:${recipientUserId}:${ttlSeconds}`;
+  const signingKey = base64ToBytes(keys.identitySigSecret);
+  const signature = ed25519.sign(utf8ToBytes(message), signingKey);
+  return {
+    "x-pqmsg-auth-user": keys.userId,
+    "x-pqmsg-auth-device": keys.deviceId,
+    "x-pqmsg-auth-timestamp": String(timestamp),
+    "x-pqmsg-auth-nonce": nonce,
+    "x-pqmsg-auth-signature": bytesToBase64(signature)
+  };
+}
+
+export function buildDiscoveryHandlesAuthHeaders(
+  keys: GeneratedKeys,
+  phoneHashes: string[],
+  emailHashes: string[]
+): RequestAuthHeaders {
+  const sortedPhones = [...phoneHashes].sort().join(",");
+  const sortedEmails = [...emailHashes].sort().join(",");
+  return signAuthHeaders(keys, "discovery-handles", [
+    { typeVal: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) },
+    { typeVal: AUTH_TAG_DISCOVERY_PHONE_HASHES_HASH, value: sha256(utf8ToBytes(sortedPhones)) },
+    { typeVal: AUTH_TAG_DISCOVERY_EMAIL_HASHES_HASH, value: sha256(utf8ToBytes(sortedEmails)) },
+  ]);
+}
+
+export function buildDiscoveryMatchAuthHeaders(
+  keys: GeneratedKeys,
+  queryHashes: string[]
+): RequestAuthHeaders {
+  const sorted = [...queryHashes].sort().join(",");
+  return signAuthHeaders(keys, "discovery-match", [
+    { typeVal: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) },
+    { typeVal: AUTH_TAG_DISCOVERY_QUERY_HASHES_HASH, value: sha256(utf8ToBytes(sorted)) },
+  ]);
+}
+
+export function buildPushTokenAuthHeaders(
+  keys: GeneratedKeys,
+  token: string
+): RequestAuthHeaders {
+  return signAuthHeaders(keys, "push-token", [
+    { typeVal: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) },
+    { typeVal: AUTH_TAG_PUSH_DEVICE_ID, value: utf8ToBytes(keys.deviceId) },
+    { typeVal: AUTH_TAG_PUSH_TOKEN_HASH, value: sha256(utf8ToBytes(token)) },
+  ]);
 }
 
 export async function sealJsonWithPassphrase<T>(value: T, passphrase: string): Promise<string> {
