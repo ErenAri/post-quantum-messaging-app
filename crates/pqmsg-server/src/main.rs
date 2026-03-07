@@ -66,7 +66,7 @@ fn parse_env_optional_f64(name: &str) -> anyhow::Result<Option<f64>> {
     }
 }
 
-fn enforce_deployment_contract(
+struct DeploymentContract {
     deployment_mode: DeploymentMode,
     security_profile: SecurityProfile,
     runtime_crypto_profile: RuntimeCryptoProfile,
@@ -75,50 +75,52 @@ fn enforce_deployment_contract(
     audit_enabled: bool,
     redis_enabled: bool,
     structured_logging: bool,
-) -> anyhow::Result<()> {
-    if !deployment_mode.requires_production_baseline() {
+}
+
+fn enforce_deployment_contract(contract: DeploymentContract) -> anyhow::Result<()> {
+    if !contract.deployment_mode.requires_production_baseline() {
         return Ok(());
     }
-    if matches!(security_profile, SecurityProfile::Research) {
+    if matches!(contract.security_profile, SecurityProfile::Research) {
         anyhow::bail!(
             "PQMSG_DEPLOYMENT_MODE='{}' requires PQMSG_SECURITY_PROFILE to be 'high_assurance' or 'nss_aligned'",
-            deployment_mode.as_str()
+            contract.deployment_mode.as_str()
         );
     }
-    if db_backend != DbBackend::Postgres {
+    if contract.db_backend != DbBackend::Postgres {
         anyhow::bail!(
             "PQMSG_DEPLOYMENT_MODE='{}' requires PostgreSQL (set PQMSG_DATABASE_URL=postgres://...)",
-            deployment_mode.as_str()
+            contract.deployment_mode.as_str()
         );
     }
-    if !tls_enabled {
+    if !contract.tls_enabled {
         anyhow::bail!(
             "PQMSG_DEPLOYMENT_MODE='{}' requires TLS (set PQMSG_TLS_CERT_PATH and PQMSG_TLS_KEY_PATH)",
-            deployment_mode.as_str()
+            contract.deployment_mode.as_str()
         );
     }
-    if !audit_enabled {
+    if !contract.audit_enabled {
         anyhow::bail!(
             "PQMSG_DEPLOYMENT_MODE='{}' requires audit logging (set PQMSG_AUDIT_LOG_PATH)",
-            deployment_mode.as_str()
+            contract.deployment_mode.as_str()
         );
     }
-    if !redis_enabled {
+    if !contract.redis_enabled {
         anyhow::bail!(
             "PQMSG_DEPLOYMENT_MODE='{}' requires Redis-backed distributed rate limiting, replay protection, and realtime fanout (set PQMSG_RATE_LIMIT_REDIS_URL)",
-            deployment_mode.as_str()
+            contract.deployment_mode.as_str()
         );
     }
-    if !structured_logging {
+    if !contract.structured_logging {
         anyhow::bail!(
             "PQMSG_DEPLOYMENT_MODE='{}' requires structured JSON logs (set PQMSG_LOG_FORMAT=json)",
-            deployment_mode.as_str()
+            contract.deployment_mode.as_str()
         );
     }
-    if !runtime_crypto_profile.pq_oqs_enabled {
+    if !contract.runtime_crypto_profile.pq_oqs_enabled {
         anyhow::bail!(
             "PQMSG_DEPLOYMENT_MODE='{}' requires a PQ-enabled runtime (build with pqmsg-core/pq-oqs support)",
-            deployment_mode.as_str()
+            contract.deployment_mode.as_str()
         );
     }
     Ok(())
@@ -415,16 +417,16 @@ async fn main() -> anyhow::Result<()> {
                 }
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
-    enforce_deployment_contract(
+    enforce_deployment_contract(DeploymentContract {
         deployment_mode,
         security_profile,
         runtime_crypto_profile,
         db_backend,
         tls_enabled,
         audit_enabled,
-        rate_limit_redis_url.is_some(),
+        redis_enabled: rate_limit_redis_url.is_some(),
         structured_logging,
-    )?;
+    })?;
     let realtime_hub = if let Some(redis_url) = &rate_limit_redis_url {
         let client = redis::Client::open(redis_url.as_str()).with_context(|| {
             format!("failed to create redis client for realtime hub: '{redis_url}'")
@@ -571,7 +573,7 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::enforce_deployment_contract;
+    use super::{enforce_deployment_contract, DeploymentContract};
     use pqmsg_core::alg::runtime_crypto_profile;
     use pqmsg_core::alg::SecurityProfile;
     use pqmsg_server::{DbBackend, DeploymentMode};
@@ -579,32 +581,32 @@ mod tests {
     #[test]
     fn development_mode_allows_local_defaults() {
         let runtime = runtime_crypto_profile().expect("runtime profile");
-        enforce_deployment_contract(
-            DeploymentMode::Development,
-            SecurityProfile::Research,
-            runtime,
-            DbBackend::Sqlite,
-            false,
-            false,
-            false,
-            false,
-        )
+        enforce_deployment_contract(DeploymentContract {
+            deployment_mode: DeploymentMode::Development,
+            security_profile: SecurityProfile::Research,
+            runtime_crypto_profile: runtime,
+            db_backend: DbBackend::Sqlite,
+            tls_enabled: false,
+            audit_enabled: false,
+            redis_enabled: false,
+            structured_logging: false,
+        })
         .expect("development should remain permissive");
     }
 
     #[test]
     fn pilot_requires_hardened_profile() {
         let runtime = runtime_crypto_profile().expect("runtime profile");
-        let error = enforce_deployment_contract(
-            DeploymentMode::Pilot,
-            SecurityProfile::Research,
-            runtime,
-            DbBackend::Postgres,
-            true,
-            true,
-            true,
-            true,
-        )
+        let error = enforce_deployment_contract(DeploymentContract {
+            deployment_mode: DeploymentMode::Pilot,
+            security_profile: SecurityProfile::Research,
+            runtime_crypto_profile: runtime,
+            db_backend: DbBackend::Postgres,
+            tls_enabled: true,
+            audit_enabled: true,
+            redis_enabled: true,
+            structured_logging: true,
+        })
         .expect_err("pilot should reject research profile");
         assert!(error
             .to_string()
@@ -614,16 +616,16 @@ mod tests {
     #[test]
     fn pilot_requires_postgres() {
         let runtime = runtime_crypto_profile().expect("runtime profile");
-        let error = enforce_deployment_contract(
-            DeploymentMode::Pilot,
-            SecurityProfile::HighAssurance,
-            runtime,
-            DbBackend::Sqlite,
-            true,
-            true,
-            true,
-            true,
-        )
+        let error = enforce_deployment_contract(DeploymentContract {
+            deployment_mode: DeploymentMode::Pilot,
+            security_profile: SecurityProfile::HighAssurance,
+            runtime_crypto_profile: runtime,
+            db_backend: DbBackend::Sqlite,
+            tls_enabled: true,
+            audit_enabled: true,
+            redis_enabled: true,
+            structured_logging: true,
+        })
         .expect_err("pilot should reject sqlite");
         assert!(error.to_string().contains("requires PostgreSQL"));
     }
@@ -631,16 +633,16 @@ mod tests {
     #[test]
     fn production_requires_redis() {
         let runtime = runtime_crypto_profile().expect("runtime profile");
-        let error = enforce_deployment_contract(
-            DeploymentMode::Production,
-            SecurityProfile::HighAssurance,
-            runtime,
-            DbBackend::Postgres,
-            true,
-            true,
-            false,
-            true,
-        )
+        let error = enforce_deployment_contract(DeploymentContract {
+            deployment_mode: DeploymentMode::Production,
+            security_profile: SecurityProfile::HighAssurance,
+            runtime_crypto_profile: runtime,
+            db_backend: DbBackend::Postgres,
+            tls_enabled: true,
+            audit_enabled: true,
+            redis_enabled: false,
+            structured_logging: true,
+        })
         .expect_err("production should reject local redis-free mode");
         assert!(error
             .to_string()
@@ -651,16 +653,16 @@ mod tests {
     fn production_accepts_hardened_stack() {
         let runtime = runtime_crypto_profile().expect("runtime profile");
         if runtime.pq_oqs_enabled {
-            enforce_deployment_contract(
-                DeploymentMode::Production,
-                SecurityProfile::HighAssurance,
-                runtime,
-                DbBackend::Postgres,
-                true,
-                true,
-                true,
-                true,
-            )
+            enforce_deployment_contract(DeploymentContract {
+                deployment_mode: DeploymentMode::Production,
+                security_profile: SecurityProfile::HighAssurance,
+                runtime_crypto_profile: runtime,
+                db_backend: DbBackend::Postgres,
+                tls_enabled: true,
+                audit_enabled: true,
+                redis_enabled: true,
+                structured_logging: true,
+            })
             .expect("production baseline should accept hardened stack");
         }
     }

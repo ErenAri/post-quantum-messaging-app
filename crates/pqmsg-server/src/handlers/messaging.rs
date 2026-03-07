@@ -538,7 +538,7 @@ pub(crate) async fn handle_ws_inbox_socket(
                         .unsubscribe(&user_id, &device_id, subscriber_id);
                     return;
                 }
-                if sender.send(WsMessage::Ping(vec![].into())).await.is_err() {
+                if sender.send(WsMessage::Ping(vec![])).await.is_err() {
                     state
                         .realtime_hub()
                         .unsubscribe(&user_id, &device_id, subscriber_id);

@@ -2,7 +2,6 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
-use tracing;
 
 #[derive(Debug)]
 pub struct AppError {

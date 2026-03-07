@@ -207,29 +207,26 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: install proverif if available
-        run: |
-          if ! command -v proverif >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y proverif || true
-          fi
-          if ! command -v proverif >/dev/null 2>&1; then
-            echo "proverif not available on runner; skipping formal smoke"
-            exit 0
-          fi
-          proverif verification/proverif/pqxdh_hybrid_model.pv
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "4.14"
+      - name: install proverif
+        run: opam install -y proverif
+      - name: run proverif smoke
+        run: opam exec -- proverif verification/proverif/pqxdh_hybrid_model.pv
 
   proverif-gate:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "4.14"
       - name: install proverif
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y proverif
+        run: opam install -y proverif
       - name: verify PQXDH hybrid model
         run: |
-          proverif verification/proverif/pqxdh_hybrid_model.pv 2>&1 | tee /tmp/proverif.log
+          opam exec -- proverif verification/proverif/pqxdh_hybrid_model.pv 2>&1 | tee /tmp/proverif.log
           if grep -q "RESULT.*is true" /tmp/proverif.log && ! grep -q "RESULT.*is false" /tmp/proverif.log; then
             echo "ProVerif: all queries verified"
           else

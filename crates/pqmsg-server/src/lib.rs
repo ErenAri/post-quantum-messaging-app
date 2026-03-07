@@ -1329,6 +1329,12 @@ impl RealtimeHub {
     }
 }
 
+impl Default for RealtimeHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn decode_realtime_pubsub_envelope(payload: &str) -> Option<RealtimePubSubEnvelope> {
     serde_json::from_str::<RealtimePubSubEnvelope>(payload)
         .ok()
