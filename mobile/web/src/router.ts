@@ -4,6 +4,8 @@
 
 export type AppView =
   | { screen: "onboarding" }
+  | { screen: "create-account" }
+  | { screen: "sign-in" }
   | { screen: "conversations" }
   | { screen: "chat"; peerId: string }
   | { screen: "settings" }

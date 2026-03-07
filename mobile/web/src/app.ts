@@ -118,6 +118,20 @@ let sealedSenderEnabled = false;
 let sealedInboxCursor = 0;
 let sealedInboxPollTimer: ReturnType<typeof setInterval> | null = null;
 
+const ONBOARDING_LOGO = `
+  <div class="onboarding-icon">
+    <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+      <rect width="64" height="64" rx="16" fill="#1a8cff"/>
+      <path d="M20 22h24v20H20z" fill="#fff" opacity="0.9"/>
+      <circle cx="28" cy="32" r="4" fill="#1a8cff"/>
+      <rect x="36" y="28" width="14" height="3" rx="1.5" fill="#1a8cff"/>
+      <rect x="36" y="34" width="10" height="3" rx="1.5" fill="#1a8cff" opacity="0.6"/>
+    </svg>
+  </div>
+  <h1>PQMsg</h1>
+  <p class="onboarding-sub">Post-quantum encrypted messaging</p>
+`;
+
 // Determine initial screen
 if (setup.userId && hasLocalKeys(setup.userId)) {
   const params = new URLSearchParams(location.search);
@@ -143,6 +157,12 @@ function render(view: AppView): void {
   switch (view.screen) {
     case "onboarding":
       renderOnboarding();
+      break;
+    case "create-account":
+      renderCreateAccount();
+      break;
+    case "sign-in":
+      renderSignIn();
       break;
     case "conversations":
       renderConversations();
@@ -180,40 +200,66 @@ function render(view: AppView): void {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Onboarding — silent keygen
+// 1. Onboarding — Welcome / Create / Sign-In
 // ---------------------------------------------------------------------------
 
 function renderOnboarding(): void {
   app.innerHTML = `
     <div class="onboarding">
       <div class="onboarding-card">
-        <div class="onboarding-icon">
-          <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
-            <rect width="64" height="64" rx="16" fill="#1a8cff"/>
-            <path d="M20 22h24v20H20z" fill="#fff" opacity="0.9"/>
-            <circle cx="28" cy="32" r="4" fill="#1a8cff"/>
-            <rect x="36" y="28" width="14" height="3" rx="1.5" fill="#1a8cff"/>
-            <rect x="36" y="34" width="10" height="3" rx="1.5" fill="#1a8cff" opacity="0.6"/>
-          </svg>
+        ${ONBOARDING_LOGO}
+        <div class="onboarding-actions">
+          <button id="onb-create" class="btn-primary">Create Account</button>
+          <button id="onb-signin" class="btn-secondary">I Have an Account</button>
         </div>
-        <h1>PQMsg</h1>
-        <p class="onboarding-sub">Post-quantum encrypted messaging</p>
+        <details class="onb-advanced">
+          <summary>Advanced</summary>
+          <label class="field">
+            <span>Server URL</span>
+            <input id="onb-server" type="text" value="${escHtml(setup.serverUrl)}" />
+          </label>
+          <button id="onb-save-server" class="btn-sm">Save</button>
+        </details>
+        <p class="onboarding-note">🔒 Your keys are generated locally and never leave this device.</p>
+      </div>
+    </div>
+  `;
+
+  q("#onb-create").addEventListener("click", () => navigateTo({ screen: "create-account" }));
+  q("#onb-signin").addEventListener("click", () => navigateTo({ screen: "sign-in" }));
+
+  q("#onb-save-server").addEventListener("click", () => {
+    const server = q<HTMLInputElement>("#onb-server").value.trim();
+    if (server) {
+      setup.serverUrl = server;
+      saveSetup(setup);
+      notify("Server URL saved", "success");
+    }
+  });
+}
+
+function renderCreateAccount(): void {
+  app.innerHTML = `
+    <div class="onboarding">
+      <div class="onboarding-card">
+        ${ONBOARDING_LOGO}
         <div class="onboarding-form">
           <label class="field">
             <span>Display Name</span>
             <input id="onb-name" type="text" placeholder="Your name" autocomplete="off" />
           </label>
           <label class="field">
-            <span>Server</span>
-            <input id="onb-server" type="text" value="${escHtml(setup.serverUrl)}" />
+            <span>Password</span>
+            <input id="onb-pass" type="password" placeholder="Protects your keys on this device" />
+            <div id="onb-strength" class="password-strength"></div>
           </label>
           <label class="field">
-            <span>Passphrase</span>
-            <input id="onb-pass" type="password" placeholder="Encryption passphrase" />
+            <span>Confirm Password</span>
+            <input id="onb-pass2" type="password" placeholder="Re-enter password" />
           </label>
-          <button id="onb-go" class="btn-primary">Create Profile</button>
+          <button id="onb-go" class="btn-primary">Create Account</button>
+          <button id="onb-back" class="btn-link">← Back</button>
         </div>
-        <p class="onboarding-note">Your keys are generated locally and never leave this device.</p>
         <div id="onb-progress" class="progress-bar hidden"><div class="progress-fill"></div></div>
         <p id="onb-status" class="onboarding-status"></p>
       </div>
@@ -221,24 +267,57 @@ function renderOnboarding(): void {
   `;
 
   const nameInput = q<HTMLInputElement>("#onb-name");
-  const serverInput = q<HTMLInputElement>("#onb-server");
   const passInput = q<HTMLInputElement>("#onb-pass");
+  const pass2Input = q<HTMLInputElement>("#onb-pass2");
   const goBtn = q<HTMLButtonElement>("#onb-go");
   const progress = q("#onb-progress");
   const status = q("#onb-status");
+  const strengthEl = q("#onb-strength");
+
+  // Password strength indicator
+  passInput.addEventListener("input", () => {
+    const val = passInput.value;
+    let score = 0;
+    if (val.length >= 8) score++;
+    if (val.length >= 12) score++;
+    if (/[A-Z]/.test(val) && /[a-z]/.test(val)) score++;
+    if (/\d/.test(val)) score++;
+    if (/[^A-Za-z0-9]/.test(val)) score++;
+    const labels = ["", "Weak", "Fair", "Good", "Strong", "Very strong"];
+    const colors = ["", "var(--danger)", "#f59e0b", "#eab308", "#4ade80", "#22c55e"];
+    if (val.length === 0) {
+      strengthEl.innerHTML = "";
+    } else {
+      strengthEl.innerHTML = `<div class="strength-bar"><div class="strength-fill" style="width:${score * 20}%;background:${colors[score]}"></div></div><span style="color:${colors[score]}">${labels[score]}</span>`;
+    }
+  });
+
+  q("#onb-back").addEventListener("click", () => navigateTo({ screen: "onboarding" }));
 
   goBtn.addEventListener("click", async () => {
     const name = nameInput.value.trim();
-    const server = serverInput.value.trim();
     const pass = passInput.value;
+    const pass2 = pass2Input.value;
     if (!name) { nameInput.focus(); return; }
     if (!pass) { passInput.focus(); return; }
+    if (pass !== pass2) {
+      status.textContent = "Passwords do not match";
+      status.classList.add("error-text");
+      pass2Input.focus();
+      return;
+    }
+    if (pass.length < 6) {
+      status.textContent = "Password must be at least 6 characters";
+      status.classList.add("error-text");
+      passInput.focus();
+      return;
+    }
 
     goBtn.disabled = true;
+    status.classList.remove("error-text");
     progress.classList.remove("hidden");
 
     try {
-      // Step 1: Generate keys
       status.textContent = "Generating keys…";
       setProgress(progress, 20);
       const userId = name.toLowerCase().replace(/[^a-z0-9_-]/g, "-").slice(0, 64) || `user-${Date.now()}`;
@@ -246,10 +325,9 @@ function renderOnboarding(): void {
       const genKeys = generateIdentityKeys(userId, deviceId, "ml-kem-768", 16);
       await saveKeys(userId, pass, genKeys);
 
-      // Step 2: Register
       status.textContent = "Registering…";
       setProgress(progress, 50);
-      const api = new PqmsgApi(server);
+      const api = new PqmsgApi(setup.serverUrl);
       await api.registerUser({
         user_id: genKeys.userId,
         identity_x25519_pub: genKeys.identityX25519Pub,
@@ -257,16 +335,14 @@ function renderOnboarding(): void {
         device_id: genKeys.deviceId,
       });
 
-      // Step 3: Publish prekeys
       status.textContent = "Publishing prekeys…";
       setProgress(progress, 80);
       const payload = buildPublishPrekeysPayload(genKeys);
       const headers = buildPrekeysAuthHeaders(genKeys, payload);
       await api.publishPrekeys(genKeys.userId, payload, headers);
 
-      // Save setup
       setup = {
-        serverUrl: server,
+        serverUrl: setup.serverUrl,
         userId: userId,
         deviceId: deviceId,
         suiteLabel: "ml-kem-768",
@@ -279,12 +355,81 @@ function renderOnboarding(): void {
 
       setProgress(progress, 100);
       status.textContent = "Ready!";
-      setTimeout(() => navigateTo({ screen: "conversations" }), 400);
+      notify(`Your User ID: ${userId} — share it with contacts`, "info");
+      setTimeout(() => navigateTo({ screen: "conversations" }), 600);
     } catch (e) {
       status.textContent = `Error: ${errorMsg(e)}`;
       status.classList.add("error-text");
       goBtn.disabled = false;
       progress.classList.add("hidden");
+    }
+  });
+}
+
+function renderSignIn(): void {
+  app.innerHTML = `
+    <div class="onboarding">
+      <div class="onboarding-card">
+        ${ONBOARDING_LOGO}
+        <div class="onboarding-form">
+          <label class="field">
+            <span>User ID</span>
+            <input id="onb-uid" type="text" placeholder="e.g. alice-smith" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="onb-pass" type="password" placeholder="Your device password" />
+          </label>
+          <button id="onb-go" class="btn-primary">Sign In</button>
+          <button id="onb-back" class="btn-link">← Back</button>
+        </div>
+        <p id="onb-status" class="onboarding-status"></p>
+      </div>
+    </div>
+  `;
+
+  const uidInput = q<HTMLInputElement>("#onb-uid");
+  const passInput = q<HTMLInputElement>("#onb-pass");
+  const goBtn = q<HTMLButtonElement>("#onb-go");
+  const status = q("#onb-status");
+
+  q("#onb-back").addEventListener("click", () => navigateTo({ screen: "onboarding" }));
+
+  goBtn.addEventListener("click", async () => {
+    const uid = uidInput.value.trim();
+    const pass = passInput.value;
+    if (!uid) { uidInput.focus(); return; }
+    if (!pass) { passInput.focus(); return; }
+
+    goBtn.disabled = true;
+    status.classList.remove("error-text");
+
+    try {
+      if (!hasLocalKeys(uid)) {
+        throw new Error("No keys found for this User ID on this device");
+      }
+
+      status.textContent = "Unlocking keys…";
+      const loadedKeys = await loadKeys(uid, pass);
+
+      setup = {
+        serverUrl: setup.serverUrl,
+        userId: uid,
+        deviceId: loadedKeys.deviceId,
+        suiteLabel: loadedKeys.suite,
+        peerUserId: "",
+        displayName: uid,
+        passphrase: "",
+      };
+      saveSetup(setup);
+      keys = loadedKeys;
+
+      status.textContent = "Signed in!";
+      setTimeout(() => navigateTo({ screen: "conversations" }), 400);
+    } catch (e) {
+      status.textContent = errorMsg(e);
+      status.classList.add("error-text");
+      goBtn.disabled = false;
     }
   });
 }

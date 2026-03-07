@@ -74,6 +74,82 @@ html, body {
 .onboarding-status { font-size: 13px; margin-top: 12px; min-height: 20px; color: var(--accent); }
 .error-text { color: var(--danger) !important; }
 
+/* Onboarding actions (welcome screen) */
+.onboarding-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.btn-secondary {
+  width: 100%;
+  padding: 12px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.btn-secondary:hover {
+  border-color: var(--accent);
+  background: rgba(26, 140, 255, 0.08);
+}
+.btn-link {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 14px;
+  cursor: pointer;
+  margin-top: 8px;
+  padding: 8px;
+  text-align: center;
+  transition: color .15s;
+}
+.btn-link:hover { color: var(--accent); }
+
+/* Advanced toggle */
+.onb-advanced {
+  margin-top: 16px;
+  text-align: left;
+}
+.onb-advanced summary {
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 0;
+}
+.onb-advanced summary:hover { color: var(--accent); }
+.onb-advanced .field { margin-top: 10px; }
+.onb-advanced .btn-sm { margin-top: 6px; }
+
+/* Password strength */
+.password-strength {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  min-height: 16px;
+}
+.strength-bar {
+  flex: 1;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.strength-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width .2s, background .2s;
+}
+
 /* Form fields */
 .field {
   display: block;
