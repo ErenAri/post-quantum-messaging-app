@@ -41,10 +41,21 @@ const AUTH_TAG_SINCE: u16 = critical_type(0x3207);
 const AUTH_TAG_MESSAGE_BLOB: u16 = critical_type(0x3208);
 const AUTH_TAG_PREKEY_SPK_HASH: u16 = critical_type(0x3209);
 const AUTH_TAG_PREKEY_PQSPK_HASH: u16 = critical_type(0x320A);
+const AUTH_TAG_ROTATE_NEW_X25519_HASH: u16 = critical_type(0x320B);
+const AUTH_TAG_ROTATE_NEW_SIG_HASH: u16 = critical_type(0x320C);
+const AUTH_TAG_ROTATE_CHALLENGE_ID: u16 = critical_type(0x320D);
+const AUTH_TAG_ROTATE_SIG_CURRENT_HASH: u16 = critical_type(0x320E);
+const AUTH_TAG_ROTATE_SIG_NEW_HASH: u16 = critical_type(0x320F);
 const AUTH_TAG_PUSH_DEVICE_ID: u16 = critical_type(0x3210);
 const AUTH_TAG_PUSH_TOKEN_HASH: u16 = critical_type(0x3211);
 const AUTH_TAG_LINK_DEVICE_ID: u16 = critical_type(0x3212);
 const AUTH_TAG_REVOKE_DEVICE_ID: u16 = critical_type(0x3213);
+const ROTATE_SIG_TAG_USER_ID: u16 = critical_type(0x3101);
+const ROTATE_SIG_TAG_CHALLENGE_ID: u16 = critical_type(0x3102);
+const ROTATE_SIG_TAG_CHALLENGE_NONCE: u16 = critical_type(0x3103);
+const ROTATE_SIG_TAG_NEW_IDENTITY_X25519: u16 = critical_type(0x3104);
+const ROTATE_SIG_TAG_NEW_IDENTITY_SIG: u16 = critical_type(0x3105);
+const ROTATE_SIG_TAG_NEW_DEVICE_ID: u16 = critical_type(0x3106);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, uniffi::Enum)]
 pub enum Suite {
@@ -148,6 +159,20 @@ pub struct SecondaryDeviceOnboardingPackage {
     pub device_id: String,
     pub suite: Suite,
     pub keys_json: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RotateInitPayload {
+    pub new_identity_x25519_pub: String,
+    pub new_identity_sig_pub: String,
+    pub new_device_id: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RotateConfirmPayload {
+    pub challenge_id: String,
+    pub sig_by_current_identity: String,
+    pub sig_by_new_identity: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
@@ -351,6 +376,43 @@ fn rebind_keys_to_new_device(
     rebound.pq_signed_prekey_secret_b64 = B64.encode(pq_signed_prekey.secret_key);
     refresh_one_time_prekeys(&mut rebound, one_time_count)?;
     Ok(rebound)
+}
+
+fn rotation_signature_message(
+    user_id: &str,
+    challenge_id: &str,
+    challenge_nonce: &[u8],
+    new_identity_x25519: &[u8],
+    new_identity_sig: &[u8],
+    new_device_id: &str,
+) -> Result<Vec<u8>, PqmsgAndroidError> {
+    encode(&[
+        TlvRecord {
+            ty: ROTATE_SIG_TAG_USER_ID,
+            value: user_id.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: ROTATE_SIG_TAG_CHALLENGE_ID,
+            value: challenge_id.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: ROTATE_SIG_TAG_CHALLENGE_NONCE,
+            value: challenge_nonce.to_vec(),
+        },
+        TlvRecord {
+            ty: ROTATE_SIG_TAG_NEW_IDENTITY_X25519,
+            value: new_identity_x25519.to_vec(),
+        },
+        TlvRecord {
+            ty: ROTATE_SIG_TAG_NEW_IDENTITY_SIG,
+            value: new_identity_sig.to_vec(),
+        },
+        TlvRecord {
+            ty: ROTATE_SIG_TAG_NEW_DEVICE_ID,
+            value: new_device_id.as_bytes().to_vec(),
+        },
+    ])
+    .map_err(|_| operation_failed("failed to encode rotation signature transcript"))
 }
 
 fn auth_timestamp() -> Result<i64, PqmsgAndroidError> {
@@ -633,6 +695,180 @@ pub fn open_secondary_device_package(
         device_id: keys.device_id,
         suite: keys.suite,
         keys_json: payload.keys_json,
+    })
+}
+
+#[uniffi::export]
+pub fn build_rotate_init_payload(keys_json: String) -> Result<RotateInitPayload, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    Ok(RotateInitPayload {
+        new_identity_x25519_pub: keys.identity_x25519_pub_b64,
+        new_identity_sig_pub: keys.identity_sig_pub_b64,
+        new_device_id: keys.device_id,
+    })
+}
+
+#[uniffi::export]
+pub fn build_rotate_init_auth_headers(
+    keys_json: String,
+    user_id: String,
+    new_identity_x25519_pub: String,
+    new_identity_sig_pub: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records("rotate-init", &user_id, &keys.device_id, timestamp, &nonce);
+    let mut hasher = Sha256::new();
+    hasher.update(new_identity_x25519_pub.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_ROTATE_NEW_X25519_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(new_identity_sig_pub.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_ROTATE_NEW_SIG_HASH,
+        value: hasher.finalize().to_vec(),
+    });
+    let transcript =
+        encode(&records).map_err(|_| operation_failed("failed to encode rotate-init auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_rotate_confirm_payload(
+    current_keys_json: String,
+    new_keys_json: String,
+    user_id: String,
+    challenge_id: String,
+    challenge_nonce_base64: String,
+) -> Result<RotateConfirmPayload, PqmsgAndroidError> {
+    let current_keys = read_keys_file(&current_keys_json)?;
+    if current_keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match current keys user '{}'",
+            user_id, current_keys.user_id
+        )));
+    }
+    let new_keys = read_keys_file(&new_keys_json)?;
+    if new_keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match new keys user '{}'",
+            user_id, new_keys.user_id
+        )));
+    }
+    let current_signing_key = auth_signing_key_for_user(&current_keys)?;
+    let new_signing_key = auth_signing_key_for_user(&new_keys)?;
+    let challenge_nonce = decode_b64("challenge_nonce_base64", &challenge_nonce_base64)?;
+    let new_identity_x25519 =
+        decode_b64("identity_x25519_pub_b64", &new_keys.identity_x25519_pub_b64)?;
+    let new_identity_sig = decode_b64("identity_sig_pub_b64", &new_keys.identity_sig_pub_b64)?;
+    let message = rotation_signature_message(
+        &user_id,
+        &challenge_id,
+        &challenge_nonce,
+        &new_identity_x25519,
+        &new_identity_sig,
+        &new_keys.device_id,
+    )?;
+    Ok(RotateConfirmPayload {
+        challenge_id,
+        sig_by_current_identity: B64.encode(current_signing_key.sign(&message).to_bytes()),
+        sig_by_new_identity: B64.encode(new_signing_key.sign(&message).to_bytes()),
+    })
+}
+
+#[uniffi::export]
+pub fn build_rotate_confirm_auth_headers(
+    keys_json: String,
+    user_id: String,
+    challenge_id: String,
+    sig_by_current_identity: String,
+    sig_by_new_identity: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("rotate-confirm", &user_id, &keys.device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_ROTATE_CHALLENGE_ID,
+        value: challenge_id.as_bytes().to_vec(),
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(sig_by_current_identity.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_ROTATE_SIG_CURRENT_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(sig_by_new_identity.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_ROTATE_SIG_NEW_HASH,
+        value: hasher.finalize().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode rotate-confirm auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_identity_log_auth_headers(
+    keys_json: String,
+    user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("identity-log", &user_id, &keys.device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let transcript =
+        encode(&records).map_err(|_| operation_failed("failed to encode identity-log auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
     })
 }
 
@@ -1433,6 +1669,47 @@ mod tests {
         );
         assert_eq!(imported_keys.one_time_prekeys_x25519.len(), 8);
         assert_eq!(imported_keys.one_time_prekeys_mlkem768.len(), 8);
+    }
+
+    #[test]
+    fn rotate_confirm_payload_and_identity_log_headers_use_expected_identities() {
+        let current_keys_json = generate_identity_keys(
+            "bob".to_string(),
+            "bob-android-1".to_string(),
+            Suite::MlKem768,
+            8,
+        )
+        .expect("generate current keys");
+        let new_keys_json = generate_identity_keys(
+            "bob".to_string(),
+            "bob-android-2".to_string(),
+            Suite::MlKem768,
+            8,
+        )
+        .expect("generate new keys");
+
+        let init_payload = build_rotate_init_payload(new_keys_json.clone()).expect("init payload");
+        assert_eq!(init_payload.new_device_id, "bob-android-2");
+
+        let confirm_payload = build_rotate_confirm_payload(
+            current_keys_json.clone(),
+            new_keys_json,
+            "bob".to_string(),
+            "challenge-123".to_string(),
+            B64.encode([7u8; 32]),
+        )
+        .expect("confirm payload");
+        assert_eq!(confirm_payload.challenge_id, "challenge-123");
+        assert_ne!(
+            confirm_payload.sig_by_current_identity,
+            confirm_payload.sig_by_new_identity
+        );
+
+        let headers = build_identity_log_auth_headers(current_keys_json, "bob".to_string())
+            .expect("identity log headers");
+        assert_eq!(headers.auth_user, "bob");
+        assert_eq!(headers.auth_device, "bob-android-1");
+        assert!(!headers.auth_signature.is_empty());
     }
 }
 

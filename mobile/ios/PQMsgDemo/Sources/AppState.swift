@@ -16,6 +16,7 @@ final class AppState: ObservableObject {
     @Published var managedDeviceId: String
     @Published var linkedDevices: [DeviceRecord]
     @Published var preparedOnboardingPackage: OnboardingPackageRecord?
+    @Published var identityLogEvents: [IdentityLogItem]
 
     private let store: LocalStateStore
     private var latestBundleByPeer: [String: BundleResponse]
@@ -37,6 +38,7 @@ final class AppState: ObservableObject {
         self.managedDeviceId = AppState.defaultManagedDeviceId(for: loadedSetup.userId)
         self.linkedDevices = []
         self.preparedOnboardingPackage = nil
+        self.identityLogEvents = []
         self.latestBundleByPeer = [:]
         refreshSecuritySnapshot()
     }
@@ -51,6 +53,7 @@ final class AppState: ObservableObject {
         managedDeviceId = Self.defaultManagedDeviceId(for: setup.userId)
         linkedDevices = []
         preparedOnboardingPackage = nil
+        identityLogEvents = []
         persistSetup()
         refreshConversations()
         clearError()
@@ -61,6 +64,7 @@ final class AppState: ObservableObject {
         serverCapabilitiesSummary = "Not checked"
         linkedDevices = []
         preparedOnboardingPackage = nil
+        identityLogEvents = []
         persistSetup()
     }
 
@@ -70,6 +74,7 @@ final class AppState: ObservableObject {
         managedDeviceId = Self.defaultManagedDeviceId(for: value)
         linkedDevices = []
         preparedOnboardingPackage = nil
+        identityLogEvents = []
         refreshConversations()
         persistSetup()
     }
@@ -482,6 +487,163 @@ final class AppState: ObservableObject {
         }
     }
 
+    func loadIdentityLog() async {
+        await runSecurityAction("Load identity log") {
+            let context = try await deviceManagementContext()
+            let headers = try IdentityRotationSupport.buildIdentityLogHeaders(
+                keysJson: context.keysJson,
+                userId: context.userId
+            )
+            let response = try await context.api.identityLog(
+                userId: context.userId,
+                headers: headers
+            )
+            guard response.user_id == context.userId else {
+                throw ApiClientError.requestFailed(-1, "identity log response user mismatch")
+            }
+            identityLogEvents = response.events
+            serverCapabilitiesSummary = capabilitySummary(context.capabilities)
+            statusLine = "Loaded \(response.events.count) identity event(s) for \(response.user_id)"
+            clearError()
+        }
+    }
+
+    func rotateIdentity() async {
+        await runSecurityAction("Rotate identity") {
+            let target = managedDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !target.isEmpty else {
+                throw RustBridgeError.missingKeys("managed device id is empty")
+            }
+            let context = try await deviceManagementContext()
+            guard target != context.profile.deviceId else {
+                throw ApiClientError.transportPolicy("managed device id must differ from the authenticated device id")
+            }
+
+            let nextKeysJson = try generateIdentityKeys(
+                userId: context.userId,
+                deviceId: target,
+                suite: context.profile.suite,
+                oneTimeCount: 16
+            )
+            let rotateInitRequest = try IdentityRotationSupport.buildRotateInitRequest(
+                newKeysJson: nextKeysJson
+            )
+            let rotateInitHeaders = try IdentityRotationSupport.buildRotateInitHeaders(
+                currentKeysJson: context.keysJson,
+                userId: context.userId,
+                request: rotateInitRequest
+            )
+            let rotateInitResponse = try await context.api.rotateInit(
+                userId: context.userId,
+                headers: rotateInitHeaders,
+                requestBody: rotateInitRequest
+            )
+            guard rotateInitResponse.user_id == context.userId else {
+                throw ApiClientError.requestFailed(-1, "rotate-init response user mismatch")
+            }
+
+            let rotateConfirmRequest = try IdentityRotationSupport.buildRotateConfirmRequest(
+                currentKeysJson: context.keysJson,
+                newKeysJson: nextKeysJson,
+                userId: context.userId,
+                challengeId: rotateInitResponse.challenge_id,
+                challengeNonceBase64: rotateInitResponse.challenge_nonce
+            )
+            let rotateConfirmHeaders = try IdentityRotationSupport.buildRotateConfirmHeaders(
+                currentKeysJson: context.keysJson,
+                userId: context.userId,
+                request: rotateConfirmRequest
+            )
+            let rotateConfirmResponse = try await context.api.rotateConfirm(
+                userId: context.userId,
+                headers: rotateConfirmHeaders,
+                requestBody: rotateConfirmRequest
+            )
+            guard rotateConfirmResponse.user_id == context.userId else {
+                throw ApiClientError.requestFailed(-1, "rotate-confirm response user mismatch")
+            }
+
+            let publishPayload = try buildPublishPrekeysPayload(keysJson: nextKeysJson)
+            let publishHeaders = try buildPrekeysAuthHeaders(
+                keysJson: nextKeysJson,
+                userId: context.userId
+            ).toHeaderMap()
+            let publishResponse = try await context.api.publishPrekeys(
+                userId: context.userId,
+                requestBody: PublishPrekeysRequest(
+                    signed_prekey_x25519_pub: publishPayload.signedPrekeyX25519Pub,
+                    sig_over_spk: publishPayload.sigOverSpk,
+                    pq_signed_prekey_pub_mlkem768: publishPayload.pqSignedPrekeyPubMlkem768,
+                    sig_over_pqspk: publishPayload.sigOverPqspk,
+                    one_time_prekeys_x25519: publishPayload.oneTimePrekeysX25519,
+                    one_time_prekeys_mlkem768: publishPayload.oneTimePrekeysMlkem768
+                ),
+                headers: publishHeaders
+            )
+            guard publishResponse.user_id == context.userId else {
+                throw ApiClientError.requestFailed(-1, "publish response user mismatch")
+            }
+            guard publishResponse.device_id == target else {
+                throw ApiClientError.requestFailed(-1, "publish response device mismatch")
+            }
+
+            let priorPeer = setup.peerUserId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? SetupConfig.default.peerUserId
+                : setup.peerUserId.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            store.wipeUserState(userId: context.userId)
+            try store.writeKeys(userId: context.userId, keysJson: nextKeysJson)
+            setup = SetupConfig(
+                serverURL: setup.serverURL,
+                userId: context.userId,
+                deviceId: target,
+                suiteLabel: suiteLabel(for: context.profile.suite),
+                peerUserId: priorPeer
+            )
+            progress = SetupProgress.default.adoptLinkedDevice()
+            persistSetup()
+            store.saveProgress(userId: context.userId, progress: progress)
+
+            let deviceHeaders = try buildListDevicesAuthHeaders(
+                keysJson: nextKeysJson,
+                userId: context.userId
+            ).toHeaderMap()
+            let deviceSnapshot = try await context.api.listDevices(
+                userId: context.userId,
+                headers: deviceHeaders
+            )
+            guard deviceSnapshot.user_id == context.userId else {
+                throw ApiClientError.requestFailed(-1, "device list response user mismatch")
+            }
+            let identityLogHeaders = try IdentityRotationSupport.buildIdentityLogHeaders(
+                keysJson: nextKeysJson,
+                userId: context.userId
+            )
+            let identityLogSnapshot = try await context.api.identityLog(
+                userId: context.userId,
+                headers: identityLogHeaders
+            )
+            guard identityLogSnapshot.user_id == context.userId else {
+                throw ApiClientError.requestFailed(-1, "identity log response user mismatch")
+            }
+
+            linkedDevices = deviceSnapshot.devices
+            identityLogEvents = identityLogSnapshot.events
+            preparedOnboardingPackage = nil
+            managedDeviceId = Self.defaultManagedDeviceId(for: context.userId)
+            latestBundleByPeer = [:]
+            conversations = store.listConversations(userId: context.userId)
+            pinnedIdentities = store.listIdentityPins(userId: context.userId)
+            selectedPeer = setup.peerUserId
+            chatLog = []
+            draftMessage = ""
+            serverCapabilitiesSummary = capabilitySummary(context.capabilities)
+            refreshSecuritySnapshot()
+            statusLine = "Rotated identity to \(target) (version \(rotateConfirmResponse.identity_key_version)) and published new prekeys"
+            clearError()
+        }
+    }
+
     func importLinkedDeviceOnboarding(packageText: String, passphrase: String) async {
         await runSetupAction("Import linked device package") {
             let normalizedPackage = packageText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -553,6 +715,7 @@ final class AppState: ObservableObject {
             store.saveProgress(userId: user, progress: progress)
             serverCapabilitiesSummary = capabilitySummary(capabilities)
             linkedDevices = snapshot.devices
+            identityLogEvents = []
             managedDeviceId = Self.defaultManagedDeviceId(for: user)
             preparedOnboardingPackage = nil
             latestBundleByPeer = [:]
@@ -606,6 +769,7 @@ final class AppState: ObservableObject {
             latestBundleByPeer = [:]
             serverCapabilitiesSummary = "Not checked"
             linkedDevices = []
+            identityLogEvents = []
             preparedOnboardingPackage = nil
             managedDeviceId = Self.defaultManagedDeviceId(for: setup.userId)
             statusLine = retiredRemotely

@@ -15,10 +15,18 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import uniffi.pqmsg_android.Suite
 import uniffi.pqmsg_android.activeCryptoProfile
+import uniffi.pqmsg_android.buildIdentityLogAuthHeaders
 import uniffi.pqmsg_android.buildLinkDeviceAuthHeaders
 import uniffi.pqmsg_android.buildListDevicesAuthHeaders
+import uniffi.pqmsg_android.buildPrekeysAuthHeaders
 import uniffi.pqmsg_android.buildRevokeDeviceAuthHeaders
 import uniffi.pqmsg_android.buildRetireDeviceAuthHeaders
+import uniffi.pqmsg_android.buildRotateConfirmAuthHeaders
+import uniffi.pqmsg_android.buildRotateConfirmPayload
+import uniffi.pqmsg_android.buildRotateInitAuthHeaders
+import uniffi.pqmsg_android.buildRotateInitPayload
+import uniffi.pqmsg_android.buildPublishPrekeysPayload
+import uniffi.pqmsg_android.generateIdentityKeys
 import uniffi.pqmsg_android.loadUserProfile
 import uniffi.pqmsg_android.prepareSecondaryDevicePackage
 
@@ -33,16 +41,21 @@ class SecurityInfoActivity : AppCompatActivity() {
     private lateinit var listDevicesButton: Button
     private lateinit var linkDeviceButton: Button
     private lateinit var revokeDeviceButton: Button
+    private lateinit var listIdentityLogButton: Button
+    private lateinit var rotateIdentityButton: Button
     private lateinit var prepareSecondaryDeviceButton: Button
     private lateinit var copyOnboardingPackageButton: Button
     private lateinit var resetButton: Button
     private lateinit var backButton: Button
+    private lateinit var statusText: TextView
     private lateinit var profileText: TextView
     private lateinit var transportText: TextView
     private lateinit var pinsText: TextView
     private lateinit var devicesText: TextView
+    private lateinit var identityLogText: TextView
     private lateinit var localStateText: TextView
     private var lastDeviceSnapshot: DeviceListResponse? = null
+    private var lastIdentityLogSnapshot: IdentityLogResponse? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,14 +71,18 @@ class SecurityInfoActivity : AppCompatActivity() {
         listDevicesButton = findViewById(R.id.buttonListDevices)
         linkDeviceButton = findViewById(R.id.buttonLinkDevice)
         revokeDeviceButton = findViewById(R.id.buttonRevokeDevice)
+        listIdentityLogButton = findViewById(R.id.buttonListIdentityLog)
+        rotateIdentityButton = findViewById(R.id.buttonRotateIdentity)
         prepareSecondaryDeviceButton = findViewById(R.id.buttonPrepareSecondaryDevicePackage)
         copyOnboardingPackageButton = findViewById(R.id.buttonCopyOnboardingPackage)
         resetButton = findViewById(R.id.buttonResetLocalState)
         backButton = findViewById(R.id.buttonBackConversationsFromSecurity)
+        statusText = findViewById(R.id.textSecurityStatus)
         profileText = findViewById(R.id.textSecurityProfile)
         transportText = findViewById(R.id.textSecurityTransport)
         pinsText = findViewById(R.id.textSecurityPins)
         devicesText = findViewById(R.id.textSecurityDevices)
+        identityLogText = findViewById(R.id.textSecurityIdentityLog)
         localStateText = findViewById(R.id.textSecurityLocalState)
 
         val setup = store.loadSetup()
@@ -75,11 +92,13 @@ class SecurityInfoActivity : AppCompatActivity() {
 
         serverInput.doAfterTextChanged {
             lastDeviceSnapshot = null
+            lastIdentityLogSnapshot = null
             renderSecurityInfo()
             syncActionAvailability()
         }
         userInput.doAfterTextChanged {
             lastDeviceSnapshot = null
+            lastIdentityLogSnapshot = null
             if (managedDeviceInput.text.toString().trim().isBlank()) {
                 managedDeviceInput.setText(defaultManagedDeviceId(it?.toString().orEmpty().trim()))
             }
@@ -96,6 +115,12 @@ class SecurityInfoActivity : AppCompatActivity() {
         listDevicesButton.setOnClickListener { runSecurityAction("List devices") { listLinkedDevices() } }
         linkDeviceButton.setOnClickListener { runSecurityAction("Link device") { linkManagedDevice() } }
         revokeDeviceButton.setOnClickListener { runSecurityAction("Revoke device") { revokeManagedDevice() } }
+        listIdentityLogButton.setOnClickListener {
+            runSecurityAction("Load identity log") { loadIdentityLog() }
+        }
+        rotateIdentityButton.setOnClickListener {
+            runSecurityAction("Rotate identity") { rotateIdentity() }
+        }
         prepareSecondaryDeviceButton.setOnClickListener {
             runSecurityAction("Prepare secondary device") { prepareSecondaryDeviceOnboardingPackage() }
         }
@@ -135,13 +160,14 @@ class SecurityInfoActivity : AppCompatActivity() {
         val pinLines = store.listIdentityPins(user)
             .map {
                 "${it.peerUserId}: ${it.pin.fingerprintSha256} (v${it.pin.identityKeyVersion})"
-            }
+        }
         pinsText.text = if (pinLines.isEmpty()) {
             "Pinned Identities\nNo pins recorded for user '$user'"
         } else {
             "Pinned Identities\n${pinLines.joinToString("\n")}"
         }
         devicesText.text = buildDeviceSnapshotText(user)
+        identityLogText.text = buildIdentityLogText(user)
 
         val sessionCount = store.countSessions(user)
         val conversations = store.listConversations(user)
@@ -164,9 +190,11 @@ class SecurityInfoActivity : AppCompatActivity() {
                     runCatching {
                         resetLocalStateWithRemoteRetire(user)
                     }.onSuccess { message ->
+                        statusText.text = message
                         Toast.makeText(this@SecurityInfoActivity, message, Toast.LENGTH_SHORT).show()
                     }.onFailure {
                         val mapped = UiErrorMapper.fromThrowable(it, "Reset local state")
+                        statusText.text = mapped.headline
                         Toast.makeText(this@SecurityInfoActivity, mapped.headline, Toast.LENGTH_LONG).show()
                     }
                 }
@@ -181,6 +209,8 @@ class SecurityInfoActivity : AppCompatActivity() {
         listDevicesButton.isEnabled = hasUser
         linkDeviceButton.isEnabled = hasUser && hasManagedDevice
         revokeDeviceButton.isEnabled = hasUser && hasManagedDevice
+        listIdentityLogButton.isEnabled = hasUser
+        rotateIdentityButton.isEnabled = hasUser && hasManagedDevice
         prepareSecondaryDeviceButton.isEnabled = hasUser && hasManagedDevice
         copyOnboardingPackageButton.isEnabled = hasOnboardingPackage
         resetButton.isEnabled = hasUser
@@ -229,9 +259,11 @@ class SecurityInfoActivity : AppCompatActivity() {
                 block()
             }.onSuccess { message ->
                 renderSecurityInfo()
+                statusText.text = message
                 Toast.makeText(this@SecurityInfoActivity, message, Toast.LENGTH_SHORT).show()
             }.onFailure {
                 val mapped = UiErrorMapper.fromThrowable(it, action)
+                statusText.text = mapped.headline
                 Toast.makeText(this@SecurityInfoActivity, mapped.headline, Toast.LENGTH_LONG).show()
             }
         }
@@ -326,6 +358,124 @@ class SecurityInfoActivity : AppCompatActivity() {
         return "Prepared linked device ${response.linked_device_id} and copied onboarding package"
     }
 
+    private suspend fun loadIdentityLog(): String {
+        val user = requireCurrentUser()
+        val context = loadDeviceManagementContext(user)
+        val response = context.api.identityLog(
+            userId = user,
+            headers = buildIdentityLogAuthHeaders(context.keysJson, user).toHeaderMap(),
+        )
+        check(response.user_id == user) {
+            "identity log response user mismatch: expected '$user' got '${response.user_id}'"
+        }
+        lastIdentityLogSnapshot = response
+        return "Loaded ${response.events.size} identity event(s) for ${response.user_id}"
+    }
+
+    private suspend fun rotateIdentity(): String {
+        val user = requireCurrentUser()
+        val targetDevice = managedDeviceInput.text.toString().trim()
+        require(targetDevice.isNotBlank()) { "managed device id is empty" }
+        val context = loadDeviceManagementContext(user)
+        require(targetDevice != context.profile.deviceId) {
+            "managed device id must differ from the authenticated device id"
+        }
+
+        val nextKeysJson = generateIdentityKeys(
+            user,
+            targetDevice,
+            context.profile.suite,
+            16u,
+        )
+        val rotateInitPayload = buildRotateInitPayload(nextKeysJson)
+        val rotateInitResponse = context.api.rotateInit(
+            userId = user,
+            headers = buildRotateInitAuthHeaders(
+                context.keysJson,
+                user,
+                rotateInitPayload.newIdentityX25519Pub,
+                rotateInitPayload.newIdentitySigPub,
+            ).toHeaderMap(),
+            request = RotateInitRequest(
+                new_identity_x25519_pub = rotateInitPayload.newIdentityX25519Pub,
+                new_identity_sig_pub = rotateInitPayload.newIdentitySigPub,
+                new_device_id = rotateInitPayload.newDeviceId,
+            ),
+        )
+        check(rotateInitResponse.user_id == user) {
+            "rotate-init response user mismatch: expected '$user' got '${rotateInitResponse.user_id}'"
+        }
+
+        val rotateConfirmPayload = buildRotateConfirmPayload(
+            context.keysJson,
+            nextKeysJson,
+            user,
+            rotateInitResponse.challenge_id,
+            rotateInitResponse.challenge_nonce,
+        )
+        val rotateConfirmResponse = context.api.rotateConfirm(
+            userId = user,
+            headers = buildRotateConfirmAuthHeaders(
+                context.keysJson,
+                user,
+                rotateConfirmPayload.challengeId,
+                rotateConfirmPayload.sigByCurrentIdentity,
+                rotateConfirmPayload.sigByNewIdentity,
+            ).toHeaderMap(),
+            request = RotateConfirmRequest(
+                challenge_id = rotateConfirmPayload.challengeId,
+                sig_by_current_identity = rotateConfirmPayload.sigByCurrentIdentity,
+                sig_by_new_identity = rotateConfirmPayload.sigByNewIdentity,
+            ),
+        )
+        check(rotateConfirmResponse.user_id == user) {
+            "rotate-confirm response user mismatch: expected '$user' got '${rotateConfirmResponse.user_id}'"
+        }
+
+        val publishPayload = buildPublishPrekeysPayload(nextKeysJson)
+        context.api.publishPrekeys(
+            user,
+            buildPrekeysAuthHeaders(nextKeysJson, user).toHeaderMap(),
+            PublishPrekeysRequest(
+                signed_prekey_x25519_pub = publishPayload.signedPrekeyX25519Pub,
+                sig_over_spk = publishPayload.sigOverSpk,
+                pq_signed_prekey_pub_mlkem768 = publishPayload.pqSignedPrekeyPubMlkem768,
+                sig_over_pqspk = publishPayload.sigOverPqspk,
+                one_time_prekeys_x25519 = publishPayload.oneTimePrekeysX25519,
+                one_time_prekeys_mlkem768 = publishPayload.oneTimePrekeysMlkem768,
+            ),
+        )
+
+        val priorPeer = store.loadSetup().peerUserId.ifBlank { "bob" }
+        store.wipeUserState(user)
+        store.writeKeys(user, nextKeysJson)
+        store.saveSetup(
+            SetupConfig(
+                serverUrl = serverInput.text.toString().trim(),
+                userId = user,
+                deviceId = targetDevice,
+                suiteLabel = suiteLabel(context.profile.suite),
+                peerUserId = priorPeer,
+            ),
+        )
+        val nextProgress = SetupProgress().adoptLinkedDevice()
+        store.saveProgress(user, nextProgress)
+
+        lastDeviceSnapshot = context.api.listDevices(
+            userId = user,
+            headers = buildListDevicesAuthHeaders(nextKeysJson, user).toHeaderMap(),
+        )
+        lastIdentityLogSnapshot = context.api.identityLog(
+            userId = user,
+            headers = buildIdentityLogAuthHeaders(nextKeysJson, user).toHeaderMap(),
+        )
+        userInput.setText(user)
+        managedDeviceInput.setText(defaultManagedDeviceId(user))
+        renderSecurityInfo()
+        syncActionAvailability()
+        return "Rotated identity to ${targetDevice} (version ${rotateConfirmResponse.identity_key_version}) and published new prekeys"
+    }
+
     private fun copyOnboardingPackageToClipboard() {
         val packageJson = onboardingPackageInput.text.toString().trim()
         if (packageJson.isBlank()) {
@@ -390,6 +540,27 @@ class SecurityInfoActivity : AppCompatActivity() {
                         "revoked at ${device.revoked_at ?: "unknown"}"
                     }
                     "${device.device_id}: $state (linked ${device.linked_at})"
+                }
+            )
+        }
+    }
+
+    private fun buildIdentityLogText(user: String): String {
+        if (user.isBlank()) {
+            return "Identity Log\nEnter a user id to inspect identity events"
+        }
+        val snapshot = lastIdentityLogSnapshot
+        if (snapshot == null || snapshot.user_id != user) {
+            return "Identity Log\nNot checked for user '$user'"
+        }
+        if (snapshot.events.isEmpty()) {
+            return "Identity Log\nNo identity events returned for user '$user'"
+        }
+        return buildString {
+            append("Identity Log\n")
+            append(
+                snapshot.events.joinToString("\n") { event ->
+                    "v${event.version} ${event.event_type} ${event.device_id} ${event.changed_at}"
                 }
             )
         }

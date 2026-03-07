@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="pq_background">#FFF7F0</color>
+    <color name="pq_surface">#FFFFFC</color>
+    <color name="pq_surface_alt">#F3E8D9</color>
+    <color name="pq_hero">#17353D</color>
+    <color name="pq_hero_accent">#F67B50</color>
+    <color name="pq_ink">#1D2C30</color>
+    <color name="pq_ink_muted">#607276</color>
+    <color name="pq_line">#D9C9B8</color>
+    <color name="pq_success">#1B7F5A</color>
+    <color name="pq_warning">#A6552B</color>
+    <color name="pq_error">#9C2F2F</color>
+    <color name="pq_badge_bg">#17353D</color>
+    <color name="pq_badge_fg">#FFFFFC</color>
+    <color name="pq_log_surface">#F5EFE4</color>
+</resources>

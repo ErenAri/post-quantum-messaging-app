@@ -1,95 +1,173 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@drawable/bg_screen"
     android:orientation="vertical"
-    android:padding="16dp">
+    android:padding="20dp">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/conversations_title"
-        android:textSize="24sp" />
-
-    <EditText
-        android:id="@+id/editConversationsServer"
+    <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:hint="@string/hint_server"
-        android:inputType="textUri" />
+        app:cardBackgroundColor="@color/pq_hero"
+        app:strokeWidth="0dp">
 
-    <EditText
-        android:id="@+id/editConversationsUser"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:hint="@string/hint_user"
-        android:inputType="text" />
-
-    <EditText
-        android:id="@+id/editConversationsPeer"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:hint="@string/hint_peer"
-        android:inputType="text" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:orientation="horizontal">
-
-        <Button
-            android:id="@+id/buttonOpenPeerChat"
-            android:layout_width="0dp"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/button_open_peer_chat" />
+            android:orientation="vertical"
+            android:padding="22dp">
 
-        <Button
-            android:id="@+id/buttonRefreshConversations"
-            android:layout_width="0dp"
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Inbox"
+                android:textAppearance="@style/TextAppearance.PQMsg.Eyebrow"
+                android:textColor="@color/pq_hero_accent" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/conversations_title"
+                android:textAppearance="@style/TextAppearance.MaterialComponents.Headline4"
+                android:textColor="@color/pq_surface"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/textCurrentProfile"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textAppearance="@style/TextAppearance.MaterialComponents.Body1"
+                android:textColor="@color/pq_surface" />
+
+            <TextView
+                android:id="@+id/textConversationsStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/conversations_status_default"
+                android:textAppearance="@style/TextAppearance.MaterialComponents.Body2"
+                android:textColor="@color/pq_surface" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:text="@string/button_refresh_conversations" />
-    </LinearLayout>
+            android:orientation="vertical"
+            android:padding="18dp">
 
-    <Button
-        android:id="@+id/buttonOpenSecurityCenter"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:text="@string/button_open_security_center" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Actions"
+                android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
 
-    <TextView
-        android:id="@+id/textConversationsStatus"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="@string/conversations_status_default" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:orientation="horizontal">
 
-    <ListView
-        android:id="@+id/listConversations"
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonComposeConversation"
+                    style="@style/Widget.PQMsg.Button.Primary"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/button_compose_conversation" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonRefreshConversations"
+                    style="@style/Widget.PQMsg.Button.Secondary"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:text="@string/button_refresh_conversations" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonOpenMessageRequests"
+                    style="@style/Widget.PQMsg.Button.Tonal"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/button_open_message_requests"
+                    android:visibility="gone" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonShareInvite"
+                    style="@style/Widget.PQMsg.Button.Secondary"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:text="@string/button_share_invite" />
+            </LinearLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonOpenSecurityCenter"
+                style="@style/Widget.PQMsg.Button.Tonal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="@string/button_open_security_center" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_marginTop="8dp"
-        android:layout_weight="1" />
+        android:layout_marginTop="16dp"
+        android:layout_weight="1">
 
-    <TextView
-        android:id="@+id/textConversationsEmpty"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="@string/conversations_empty"
-        android:visibility="gone" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:paddingVertical="6dp">
 
-    <Button
-        android:id="@+id/buttonBackSetupFromConversations"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="@string/button_back_setup" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingHorizontal="18dp"
+                android:paddingTop="12dp"
+                android:text="Recent chats"
+                android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
+
+            <TextView
+                android:id="@+id/textConversationsEmpty"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingHorizontal="18dp"
+                android:paddingTop="10dp"
+                android:text="@string/conversations_empty"
+                android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted"
+                android:visibility="gone" />
+
+            <ListView
+                android:id="@+id/listConversations"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="8dp"
+                android:layout_weight="1"
+                android:divider="@color/pq_line"
+                android:dividerHeight="1dp" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
 </LinearLayout>

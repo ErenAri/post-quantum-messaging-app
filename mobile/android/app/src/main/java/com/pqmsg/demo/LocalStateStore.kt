@@ -5,6 +5,8 @@ import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedFile
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.util.LinkedHashSet
@@ -36,6 +38,20 @@ data class IdentityPinRecord(
     val pin: IdentityPin,
 )
 
+data class MessageRequestSummary(
+    val peerUserId: String,
+    val lastPreview: String,
+    val updatedAtMillis: Long,
+    val unreadCount: Int,
+)
+
+data class ThreadMessage(
+    val direction: String,
+    val body: String,
+    val sentAtMillis: Long,
+    val transportMessageId: Long?,
+)
+
 class LocalStateStore(context: Context) {
     private val legacyPrefs = context.getSharedPreferences("pqmsg_android_setup", Context.MODE_PRIVATE)
     private val rootDir = File(context.filesDir, "pqmsg")
@@ -50,6 +66,7 @@ class LocalStateStore(context: Context) {
         EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
+    private val gson = Gson()
 
     fun loadSetup(): SetupConfig {
         return SetupConfig(
@@ -262,6 +279,17 @@ class LocalStateStore(context: Context) {
         )
     }
 
+    fun setConversationUnreadCount(userId: String, peerUserId: String, unreadCount: Int) {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return
+        }
+        val keyBase = "conv_${userId}_$peerUserId"
+        prefs.edit()
+            .putInt("${keyBase}_unread", unreadCount.coerceAtLeast(0))
+            .apply()
+        removeLegacyKeys("${keyBase}_unread")
+    }
+
     fun markConversationRead(userId: String, peerUserId: String) {
         if (userId.isBlank() || peerUserId.isBlank()) {
             return
@@ -290,6 +318,115 @@ class LocalStateStore(context: Context) {
             .sortedByDescending { it.updatedAtMillis }
     }
 
+    fun isAcceptedPeer(userId: String, peerUserId: String): Boolean {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return false
+        }
+        return getStringSet(acceptedPeersKey(userId)).contains(peerUserId)
+    }
+
+    fun markPeerAccepted(userId: String, peerUserId: String) {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return
+        }
+        val accepted = LinkedHashSet(getStringSet(acceptedPeersKey(userId)))
+        accepted.add(peerUserId)
+        prefs.edit()
+            .putStringSet(acceptedPeersKey(userId), accepted)
+            .apply()
+        removeLegacyKeys(acceptedPeersKey(userId))
+    }
+
+    fun upsertMessageRequest(
+        userId: String,
+        peerUserId: String,
+        lastPreview: String,
+    ) {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return
+        }
+        val keyBase = "request_${userId}_$peerUserId"
+        val peers = readMessageRequestPeers(userId)
+        peers.add(peerUserId)
+        val cleanPreview = lastPreview.trim().ifBlank { "(empty)" }
+        val normalizedPreview = if (cleanPreview.length > 160) {
+            cleanPreview.take(157) + "..."
+        } else {
+            cleanPreview
+        }
+        val nextUnread = getInt("${keyBase}_unread", 0) + 1
+        prefs.edit()
+            .putStringSet(messageRequestPeersKey(userId), LinkedHashSet(peers))
+            .putString("${keyBase}_preview", normalizedPreview)
+            .putLong("${keyBase}_updated_ms", System.currentTimeMillis())
+            .putInt("${keyBase}_unread", nextUnread)
+            .apply()
+        removeLegacyKeys(
+            messageRequestPeersKey(userId),
+            "${keyBase}_preview",
+            "${keyBase}_updated_ms",
+            "${keyBase}_unread",
+        )
+    }
+
+    fun listMessageRequests(userId: String): List<MessageRequestSummary> {
+        if (userId.isBlank()) {
+            return emptyList()
+        }
+        return readMessageRequestPeers(userId)
+            .map { peer ->
+                val keyBase = "request_${userId}_$peer"
+                MessageRequestSummary(
+                    peerUserId = peer,
+                    lastPreview = getString("${keyBase}_preview", "New message request"),
+                    updatedAtMillis = getLong("${keyBase}_updated_ms", 0L),
+                    unreadCount = getInt("${keyBase}_unread", 0),
+                )
+            }
+            .sortedByDescending { it.updatedAtMillis }
+    }
+
+    fun acceptMessageRequest(userId: String, peerUserId: String) {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return
+        }
+        val request = listMessageRequests(userId).firstOrNull { it.peerUserId == peerUserId }
+        markPeerAccepted(userId, peerUserId)
+        if (request != null) {
+            upsertConversation(
+                userId = userId,
+                peerUserId = peerUserId,
+                lastPreview = request.lastPreview,
+                incrementUnread = false,
+            )
+            setConversationUnreadCount(userId, peerUserId, request.unreadCount)
+        }
+        dismissMessageRequest(userId, peerUserId)
+    }
+
+    fun dismissMessageRequest(userId: String, peerUserId: String) {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return
+        }
+        val peers = readMessageRequestPeers(userId)
+        if (!peers.remove(peerUserId)) {
+            return
+        }
+        val keyBase = "request_${userId}_$peerUserId"
+        prefs.edit()
+            .putStringSet(messageRequestPeersKey(userId), LinkedHashSet(peers))
+            .remove("${keyBase}_preview")
+            .remove("${keyBase}_updated_ms")
+            .remove("${keyBase}_unread")
+            .apply()
+        removeLegacyKeys(
+            messageRequestPeersKey(userId),
+            "${keyBase}_preview",
+            "${keyBase}_updated_ms",
+            "${keyBase}_unread",
+        )
+    }
+
     fun listIdentityPins(userId: String): List<IdentityPinRecord> {
         if (userId.isBlank()) {
             return emptyList()
@@ -312,6 +449,51 @@ class LocalStateStore(context: Context) {
             .toList()
     }
 
+    fun listThreadMessages(userId: String, peerUserId: String): List<ThreadMessage> {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return emptyList()
+        }
+        val path = File(rootDir, "threads/$userId/$peerUserId.json")
+        val raw = readProtectedFile(path) ?: return emptyList()
+        return runCatching {
+            val type = object : TypeToken<List<ThreadMessage>>() {}.type
+            gson.fromJson<List<ThreadMessage>>(raw, type) ?: emptyList()
+        }.getOrDefault(emptyList())
+    }
+
+    fun appendThreadMessage(
+        userId: String,
+        peerUserId: String,
+        direction: String,
+        body: String,
+        sentAtMillis: Long = System.currentTimeMillis(),
+        transportMessageId: Long? = null,
+    ) {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return
+        }
+        val normalizedBody = body.trim().ifBlank { "(empty)" }
+        val path = File(rootDir, "threads/$userId/$peerUserId.json")
+        val existing = listThreadMessages(userId, peerUserId).toMutableList()
+        if (transportMessageId != null &&
+            existing.any { it.transportMessageId == transportMessageId && it.direction == direction }
+        ) {
+            return
+        }
+        existing.add(
+            ThreadMessage(
+                direction = direction,
+                body = normalizedBody,
+                sentAtMillis = sentAtMillis,
+                transportMessageId = transportMessageId,
+            ),
+        )
+        while (existing.size > 300) {
+            existing.removeAt(0)
+        }
+        writeProtectedFile(path, gson.toJson(existing))
+    }
+
     fun countSessions(userId: String): Int {
         if (userId.isBlank()) {
             return 0
@@ -331,6 +513,7 @@ class LocalStateStore(context: Context) {
         }
         deletePath(File(rootDir, "keys/$userId.json"))
         deletePath(File(rootDir, "sessions/$userId"))
+        deletePath(File(rootDir, "threads/$userId"))
         removePrefsForUser(userId)
 
         val currentSetup = loadSetup()
@@ -353,6 +536,18 @@ class LocalStateStore(context: Context) {
         return "conv_peers_$userId"
     }
 
+    private fun readMessageRequestPeers(userId: String): LinkedHashSet<String> {
+        return LinkedHashSet(getStringSet(messageRequestPeersKey(userId)))
+    }
+
+    private fun messageRequestPeersKey(userId: String): String {
+        return "request_peers_$userId"
+    }
+
+    private fun acceptedPeersKey(userId: String): String {
+        return "accepted_peers_$userId"
+    }
+
     private fun removePrefsForUser(userId: String) {
         val sanitized = userId.ifBlank { "_" }
         removeKeysMatching(
@@ -360,6 +555,8 @@ class LocalStateStore(context: Context) {
             exactKeys = setOf(
                 "cursor_$userId",
                 conversationPeersKey(userId),
+                messageRequestPeersKey(userId),
+                acceptedPeersKey(userId),
             ),
             prefixes = listOf(
                 "progress_${sanitized}_",
@@ -368,6 +565,7 @@ class LocalStateStore(context: Context) {
                 "bundle_${userId}_",
                 "pin_${userId}_",
                 "conv_${userId}_",
+                "request_${userId}_",
             ),
         )
         removeKeysMatching(
@@ -375,6 +573,8 @@ class LocalStateStore(context: Context) {
             exactKeys = setOf(
                 "cursor_$userId",
                 conversationPeersKey(userId),
+                messageRequestPeersKey(userId),
+                acceptedPeersKey(userId),
             ),
             prefixes = listOf(
                 "progress_${sanitized}_",
@@ -383,6 +583,7 @@ class LocalStateStore(context: Context) {
                 "bundle_${userId}_",
                 "pin_${userId}_",
                 "conv_${userId}_",
+                "request_${userId}_",
             ),
         )
     }

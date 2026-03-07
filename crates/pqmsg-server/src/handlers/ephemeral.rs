@@ -197,13 +197,14 @@ async fn reap_stale_data(state: &AppState) -> Result<(), crate::error::AppError>
         .await?
         .rows_affected();
 
-    // 2. Consumed one-time prekeys (v2 tables; consumed = 1 means already used)
-    let otk_x_deleted = sqlx::query("DELETE FROM one_time_prekeys_x25519_v2 WHERE consumed = 1")
+    // 2. Consumed one-time prekeys from the live post-migration tables.
+    let otk_x_deleted = sqlx::query("DELETE FROM one_time_prekeys_x25519 WHERE consumed = 1")
         .execute(state.pool())
         .await?
         .rows_affected();
 
-    let otk_pq_deleted = sqlx::query("DELETE FROM one_time_prekeys_mlkem768_v2 WHERE consumed = 1")
+    let otk_pq_deleted =
+        sqlx::query("DELETE FROM one_time_prekeys_mlkem768 WHERE consumed = 1")
         .execute(state.pool())
         .await?
         .rows_affected();
@@ -228,4 +229,107 @@ async fn reap_stale_data(state: &AppState) -> Result<(), crate::error::AppError>
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reap_stale_data;
+    use crate::db::{init_db, parse_db_backend};
+    use crate::{AppState, RateLimiter};
+    use sqlx::any::AnyPoolOptions;
+    use std::sync::Arc;
+    use std::time::Duration as StdDuration;
+
+    #[tokio::test]
+    async fn stale_data_reaper_targets_live_one_time_prekey_tables() {
+        sqlx::any::install_default_drivers();
+        let database_url = "sqlite::memory:";
+        let db_backend = parse_db_backend(database_url).expect("sqlite backend");
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(database_url)
+            .await
+            .expect("connect sqlite memory");
+        init_db(&pool, db_backend).await.expect("migrate");
+
+        let rate_limiter = Arc::new(RateLimiter::new(
+            8.0,
+            1.0,
+            64,
+            StdDuration::from_secs(60),
+        ));
+        let state = AppState::new(pool.clone(), db_backend, rate_limiter);
+
+        sqlx::query(
+            "INSERT INTO users (
+                user_id,
+                identity_x25519_pub,
+                identity_sig_pub,
+                device_id,
+                created_at,
+                updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind("alice")
+        .bind(vec![1_u8; 32])
+        .bind(vec![2_u8; 32])
+        .bind("alice-dev-1")
+        .bind("2026-01-01T00:00:00Z")
+        .bind("2026-01-01T00:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert user");
+
+        sqlx::query(
+            "INSERT INTO one_time_prekeys_x25519 (
+                user_id,
+                device_id,
+                prekey,
+                consumed,
+                created_at
+            ) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind("alice")
+        .bind("alice-dev-1")
+        .bind(vec![3_u8; 32])
+        .bind(1_i64)
+        .bind("2026-01-01T00:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert consumed x25519 otk");
+
+        sqlx::query(
+            "INSERT INTO one_time_prekeys_mlkem768 (
+                user_id,
+                device_id,
+                prekey,
+                consumed,
+                created_at
+            ) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind("alice")
+        .bind("alice-dev-1")
+        .bind(vec![4_u8; 32])
+        .bind(1_i64)
+        .bind("2026-01-01T00:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert consumed mlkem otk");
+
+        reap_stale_data(&state).await.expect("reap stale data");
+
+        let remaining_x25519: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM one_time_prekeys_x25519")
+                .fetch_one(&pool)
+                .await
+                .expect("count x25519 otks");
+        let remaining_mlkem: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM one_time_prekeys_mlkem768")
+                .fetch_one(&pool)
+                .await
+                .expect("count mlkem otks");
+
+        assert_eq!(remaining_x25519, 0);
+        assert_eq!(remaining_mlkem, 0);
+    }
 }

@@ -1,133 +1,149 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@drawable/bg_screen"
     android:orientation="vertical"
-    android:padding="16dp">
+    android:padding="20dp">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/chat_title"
-        android:textSize="24sp" />
-
-    <TextView
-        android:id="@+id/textChatMeta"
+    <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:text="@string/chat_meta_default" />
+        app:cardBackgroundColor="@color/pq_hero"
+        app:strokeWidth="0dp">
 
-    <EditText
-        android:id="@+id/editChatServer"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:hint="@string/hint_server"
-        android:inputType="textUri" />
-
-    <EditText
-        android:id="@+id/editChatUser"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:hint="@string/hint_user"
-        android:inputType="text" />
-
-    <EditText
-        android:id="@+id/editChatPeer"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:hint="@string/hint_peer"
-        android:inputType="text" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:orientation="horizontal">
-
-        <Button
-            android:id="@+id/buttonFetchBundle"
-            android:layout_width="0dp"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/button_fetch_bundle" />
+            android:orientation="vertical"
+            android:padding="22dp">
 
-        <Button
-            android:id="@+id/buttonPoll"
-            android:layout_width="0dp"
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Direct chat"
+                android:textAppearance="@style/TextAppearance.PQMsg.Eyebrow"
+                android:textColor="@color/pq_hero_accent" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/chat_title"
+                android:textAppearance="@style/TextAppearance.MaterialComponents.Headline4"
+                android:textColor="@color/pq_surface"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/textChatMeta"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="@string/chat_meta_default"
+                android:textAppearance="@style/TextAppearance.MaterialComponents.Body1"
+                android:textColor="@color/pq_surface" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonSyncThread"
+                style="@style/Widget.PQMsg.Button.Secondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="@string/button_sync_thread" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:text="@string/button_poll" />
-    </LinearLayout>
+            android:orientation="vertical"
+            android:padding="18dp">
 
-    <EditText
-        android:id="@+id/editMessage"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:hint="@string/hint_message"
-        android:inputType="textMultiLine" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Message"
+                android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
 
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:orientation="horizontal">
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.PQMsg.TextInputLayout"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:hint="@string/hint_message">
 
-        <Button
-            android:id="@+id/buttonAttachMedia"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/button_attach_media" />
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/editMessage"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="top|start"
+                    android:inputType="textMultiLine"
+                    android:maxLines="4"
+                    android:minLines="3" />
+            </com.google.android.material.textfield.TextInputLayout>
 
-        <Button
-            android:id="@+id/buttonClearAttachment"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:text="@string/button_clear_attachment" />
-    </LinearLayout>
+            <TextView
+                android:id="@+id/textAttachmentInfo"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/chat_attachment_none"
+                android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
-    <TextView
-        android:id="@+id/textAttachmentInfo"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:text="@string/chat_attachment_none" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="horizontal">
 
-    <Button
-        android:id="@+id/buttonSend"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:text="@string/button_send" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonAttachMedia"
+                    style="@style/Widget.PQMsg.Button.Secondary"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/button_attach_media" />
 
-    <Button
-        android:id="@+id/buttonBackSetup"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:text="@string/button_back_conversations" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonClearAttachment"
+                    style="@style/Widget.PQMsg.Button.Secondary"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:text="@string/button_clear_attachment" />
+            </LinearLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonSend"
+                style="@style/Widget.PQMsg.Button.Primary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/button_send" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
 
     <TextView
         android:id="@+id/textErrorSummaryChat"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:textColor="#B00020"
+        android:layout_marginTop="12dp"
+        android:textColor="@color/pq_error"
         android:visibility="gone" />
 
-    <Button
+    <com.google.android.material.button.MaterialButton
         android:id="@+id/buttonToggleErrorDetailsChat"
+        style="@style/Widget.PQMsg.Button.Secondary"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
+        android:layout_marginTop="8dp"
         android:text="@string/button_show_error_details"
         android:visibility="gone" />
 
@@ -135,20 +151,57 @@
         android:id="@+id/textErrorDetailsChat"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:background="#F1F1F1"
-        android:padding="8dp"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_detail_panel"
+        android:padding="12dp"
+        android:textAppearance="@style/TextAppearance.PQMsg.Mono"
         android:textIsSelectable="true"
         android:visibility="gone" />
 
-    <TextView
-        android:id="@+id/textChatLog"
+    <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_marginTop="10dp"
-        android:layout_weight="1"
-        android:background="#EEEEEE"
-        android:padding="12dp"
-        android:text="@string/chat_log_empty"
-        android:textIsSelectable="true" />
+        android:layout_marginTop="12dp"
+        android:layout_weight="1">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:padding="18dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Messages"
+                android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
+
+            <androidx.core.widget.NestedScrollView
+                android:id="@+id/scrollChatLog"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="12dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_log_surface"
+                android:fillViewport="true">
+
+                <TextView
+                    android:id="@+id/textChatLog"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:padding="14dp"
+                    android:text="@string/chat_log_empty"
+                    android:textAppearance="@style/TextAppearance.PQMsg.Mono"
+                    android:textIsSelectable="true" />
+            </androidx.core.widget.NestedScrollView>
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/buttonBackSetup"
+        style="@style/Widget.PQMsg.Button.Secondary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="@string/button_back_conversations" />
 </LinearLayout>

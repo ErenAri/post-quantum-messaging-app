@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <plurals name="message_request_count">
+        <item quantity="one">%d message request</item>
+        <item quantity="other">%d message requests</item>
+    </plurals>
+</resources>

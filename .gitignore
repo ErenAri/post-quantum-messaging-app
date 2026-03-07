@@ -1,4 +1,5 @@
 /target
+/target-android-*/
 **/*.rs.bk
 .idea
 .vscode

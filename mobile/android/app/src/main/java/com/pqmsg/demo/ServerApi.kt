@@ -107,6 +107,47 @@ data class DeviceListResponse(
     val devices: List<DeviceRecord>,
 )
 
+data class RotateInitRequest(
+    val new_identity_x25519_pub: String,
+    val new_identity_sig_pub: String,
+    val new_device_id: String,
+)
+
+data class RotateInitResponse(
+    val user_id: String,
+    val challenge_id: String,
+    val challenge_nonce: String,
+    val expires_at: String,
+)
+
+data class RotateConfirmRequest(
+    val challenge_id: String,
+    val sig_by_current_identity: String,
+    val sig_by_new_identity: String,
+)
+
+data class RotateConfirmResponse(
+    val user_id: String,
+    val identity_key_version: Int,
+    val identity_fingerprint_sha256: String,
+    val rotated_at: String,
+)
+
+data class IdentityLogItem(
+    val version: Int,
+    val identity_x25519_pub: String,
+    val identity_sig_pub: String,
+    val device_id: String,
+    val event_type: String,
+    val changed_at: String,
+    val identity_fingerprint_sha256: String,
+)
+
+data class IdentityLogResponse(
+    val user_id: String,
+    val events: List<IdentityLogItem>,
+)
+
 data class BundleResponse(
     val user_id: String,
     val device_id: String,
@@ -233,6 +274,26 @@ interface PqmsgApi {
         @Path("target_device_id") targetDeviceId: String,
         @HeaderMap headers: Map<String, String>,
     ): RevokeDeviceResponse
+
+    @POST("/v1/users/{user_id}/rotate/init")
+    suspend fun rotateInit(
+        @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
+        @Body request: RotateInitRequest,
+    ): RotateInitResponse
+
+    @POST("/v1/users/{user_id}/rotate/confirm")
+    suspend fun rotateConfirm(
+        @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
+        @Body request: RotateConfirmRequest,
+    ): RotateConfirmResponse
+
+    @GET("/v1/users/{user_id}/identity-log")
+    suspend fun identityLog(
+        @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
+    ): IdentityLogResponse
 
     @GET("/v1/users/{user_id}/bundle")
     suspend fun getBundle(@Path("user_id") userId: String): BundleResponse

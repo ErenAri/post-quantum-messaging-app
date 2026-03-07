@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.PQMsg" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/pq_hero</item>
+        <item name="colorPrimaryVariant">@color/pq_hero</item>
+        <item name="colorSecondary">@color/pq_hero_accent</item>
+        <item name="colorSecondaryVariant">@color/pq_hero_accent</item>
+        <item name="colorSurface">@color/pq_surface</item>
+        <item name="colorOnPrimary">@color/pq_surface</item>
+        <item name="colorOnSecondary">@color/pq_ink</item>
+        <item name="colorOnSurface">@color/pq_ink</item>
+        <item name="android:colorBackground">@color/pq_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@color/pq_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="materialCardViewStyle">@style/Widget.PQMsg.Card</item>
+        <item name="shapeAppearanceSmallComponent">@style/ShapeAppearance.PQMsg.Small</item>
+        <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.PQMsg.Medium</item>
+    </style>
+</resources>

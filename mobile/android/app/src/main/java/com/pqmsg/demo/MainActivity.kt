@@ -7,19 +7,13 @@ import android.os.Bundle
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
-import uniffi.pqmsg_android.Suite
 import uniffi.pqmsg_android.activeCryptoProfile
-import uniffi.pqmsg_android.buildInboxAuthHeaders
-import uniffi.pqmsg_android.buildPrekeysAuthHeaders
-import uniffi.pqmsg_android.buildPublishPrekeysPayload
-import uniffi.pqmsg_android.buildPushTokenAuthHeaders
-import uniffi.pqmsg_android.buildRegisterPayload
-import uniffi.pqmsg_android.generateIdentityKeys
 import uniffi.pqmsg_android.loadUserProfile
 import uniffi.pqmsg_android.openSecondaryDevicePackage
 
@@ -29,74 +23,71 @@ class MainActivity : AppCompatActivity() {
     private lateinit var userInput: EditText
     private lateinit var deviceInput: EditText
     private lateinit var suiteInput: EditText
-    private lateinit var peerInput: EditText
     private lateinit var pushTokenInput: EditText
     private lateinit var onboardingPassphraseInput: EditText
     private lateinit var onboardingPackageInput: EditText
     private lateinit var presetAliceButton: Button
     private lateinit var presetBobButton: Button
-    private lateinit var generateButton: Button
-    private lateinit var registerButton: Button
-    private lateinit var publishButton: Button
-    private lateinit var verifyButton: Button
+    private lateinit var createProfileButton: Button
     private lateinit var pasteOnboardingButton: Button
     private lateinit var importOnboardingButton: Button
-    private lateinit var openChatButton: Button
+    private lateinit var toggleAdvancedButton: Button
+    private lateinit var advancedPanel: LinearLayout
     private lateinit var statusText: TextView
+    private lateinit var setupSummaryText: TextView
     private lateinit var cryptoProfileText: TextView
-    private lateinit var stepKeysText: TextView
-    private lateinit var stepRegisterText: TextView
-    private lateinit var stepPublishText: TextView
-    private lateinit var stepVerifyText: TextView
     private lateinit var errorSummaryText: TextView
     private lateinit var errorDetailsText: TextView
     private lateinit var errorToggleButton: Button
     private var errorExpanded = false
-    private var progressUserId = ""
-    private var progress = SetupProgress()
+    private var advancedVisible = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_setup)
         store = LocalStateStore(this)
+
         serverInput = findViewById(R.id.editServer)
         userInput = findViewById(R.id.editUser)
         deviceInput = findViewById(R.id.editDevice)
         suiteInput = findViewById(R.id.editSuite)
-        peerInput = findViewById(R.id.editPeer)
         pushTokenInput = findViewById(R.id.editPushToken)
         onboardingPassphraseInput = findViewById(R.id.editOnboardingPassphrase)
         onboardingPackageInput = findViewById(R.id.editOnboardingPackage)
         presetAliceButton = findViewById(R.id.buttonPresetAlice)
         presetBobButton = findViewById(R.id.buttonPresetBob)
-        generateButton = findViewById(R.id.buttonGenerate)
-        registerButton = findViewById(R.id.buttonRegister)
-        publishButton = findViewById(R.id.buttonPublish)
-        verifyButton = findViewById(R.id.buttonVerifyServer)
+        createProfileButton = findViewById(R.id.buttonCreateProfile)
         pasteOnboardingButton = findViewById(R.id.buttonPasteOnboardingPackage)
         importOnboardingButton = findViewById(R.id.buttonImportOnboardingPackage)
-        openChatButton = findViewById(R.id.buttonOpenChat)
+        toggleAdvancedButton = findViewById(R.id.buttonToggleAdvancedSetup)
+        advancedPanel = findViewById(R.id.layoutAdvancedSetup)
         statusText = findViewById(R.id.textStatusSetup)
+        setupSummaryText = findViewById(R.id.textSetupSummary)
         cryptoProfileText = findViewById(R.id.textCryptoProfile)
-        stepKeysText = findViewById(R.id.textStepKeys)
-        stepRegisterText = findViewById(R.id.textStepRegister)
-        stepPublishText = findViewById(R.id.textStepPublish)
-        stepVerifyText = findViewById(R.id.textStepVerify)
         errorSummaryText = findViewById(R.id.textErrorSummarySetup)
         errorDetailsText = findViewById(R.id.textErrorDetailsSetup)
         errorToggleButton = findViewById(R.id.buttonToggleErrorDetailsSetup)
 
         val setup = store.loadSetup()
+        if (hasConsumerProfile(setup)) {
+            openHome(finishCurrent = true)
+            return
+        }
+
         serverInput.setText(setup.serverUrl)
         userInput.setText(setup.userId)
         deviceInput.setText(setup.deviceId)
-        suiteInput.setText(setup.suiteLabel)
-        peerInput.setText(setup.peerUserId)
-        progressUserId = setup.userId
-        progress = store.loadProgress(progressUserId)
+        suiteInput.setText(
+            if (setup.suiteLabel.isBlank()) {
+                MessagingCoordinator.normalizeSuiteLabel("")
+            } else {
+                MessagingCoordinator.normalizeSuiteLabel(setup.suiteLabel)
+            },
+        )
 
         configureInputObservers()
         configureErrorToggle()
+        configureAdvancedToggle()
 
         presetAliceButton.setOnClickListener {
             applyPreset("alice", "bob")
@@ -106,133 +97,10 @@ class MainActivity : AppCompatActivity() {
             applyPreset("bob", "alice")
         }
 
-        generateButton.setOnClickListener {
+        createProfileButton.setOnClickListener {
             lifecycleScope.launch {
-                runAction("Generate identity keys") {
-                    val user = userInput.text.toString().trim()
-                    require(user.isNotBlank()) { "user id is empty" }
-                    val device = normalizedDeviceId(user, deviceInput.text.toString().trim())
-                    val suite = parseSuite(suiteInput.text.toString())
-                    val keysJson = generateIdentityKeys(user, device, suite, 16u)
-                    store.writeKeys(user, keysJson)
-                    saveSetup()
-                    val profile = loadUserProfile(keysJson)
-                    syncProgressUser()
-                    progress = progress.afterKeysGenerated()
-                    store.saveProgress(progressUserId, progress)
-                    "Generated keys for ${profile.userId} (${profile.deviceId})"
-                }
-            }
-        }
-
-        registerButton.setOnClickListener {
-            lifecycleScope.launch {
-                runAction("Register user") {
-                    val user = userInput.text.toString().trim()
-                    require(user.isNotBlank()) { "user id is empty" }
-                    val keysJson = requireKeys(user)
-                    val payload = buildRegisterPayload(keysJson)
-                    val api = ApiClientFactory.create(serverInput.text.toString())
-                    ApiClientFactory.validateCapabilities(
-                        api.getCapabilities(),
-                        suiteInput.text.toString(),
-                    )
-                    api.registerUser(
-                        RegisterUserRequest(
-                            user_id = payload.userId,
-                            identity_x25519_pub = payload.identityX25519Pub,
-                            identity_sig_pub = payload.identitySigPub,
-                            device_id = payload.deviceId,
-                        )
-                    )
-                    saveSetup()
-                    syncProgressUser()
-                    progress = progress.afterUserRegistered()
-                    store.saveProgress(progressUserId, progress)
-                    "Registered ${payload.userId}"
-                }
-            }
-        }
-
-        publishButton.setOnClickListener {
-            lifecycleScope.launch {
-                runAction("Publish prekeys") {
-                    val user = userInput.text.toString().trim()
-                    require(user.isNotBlank()) { "user id is empty" }
-                    val keysJson = requireKeys(user)
-                    val payload = buildPublishPrekeysPayload(keysJson)
-                    val api = ApiClientFactory.create(serverInput.text.toString())
-                    ApiClientFactory.validateCapabilities(
-                        api.getCapabilities(),
-                        suiteInput.text.toString(),
-                    )
-                    val auth = buildPrekeysAuthHeaders(keysJson, user)
-                    api.publishPrekeys(
-                        user,
-                        auth.toHeaderMap(),
-                        PublishPrekeysRequest(
-                            signed_prekey_x25519_pub = payload.signedPrekeyX25519Pub,
-                            sig_over_spk = payload.sigOverSpk,
-                            pq_signed_prekey_pub_mlkem768 = payload.pqSignedPrekeyPubMlkem768,
-                            sig_over_pqspk = payload.sigOverPqspk,
-                            one_time_prekeys_x25519 = payload.oneTimePrekeysX25519,
-                            one_time_prekeys_mlkem768 = payload.oneTimePrekeysMlkem768,
-                        )
-                    )
-                    saveSetup()
-                    syncProgressUser()
-                    progress = progress.afterPrekeysPublished()
-                    store.saveProgress(progressUserId, progress)
-                    "Published prekeys for $user"
-                }
-            }
-        }
-
-        verifyButton.setOnClickListener {
-            lifecycleScope.launch {
-                runAction("Verify server") {
-                    val user = userInput.text.toString().trim()
-                    require(user.isNotBlank()) { "user id is empty" }
-                    val keysJson = requireKeys(user)
-                    val api = ApiClientFactory.create(serverInput.text.toString())
-                    val capabilities = api.getCapabilities()
-                    ApiClientFactory.validateCapabilities(
-                        capabilities,
-                        suiteInput.text.toString(),
-                    )
-                    val inboxAuth = buildInboxAuthHeaders(
-                        keysJson = keysJson,
-                        userId = user,
-                        since = store.readCursor(user),
-                    )
-                    api.inbox(user, inboxAuth.toHeaderMap(), store.readCursor(user))
-                    val pushToken = pushTokenInput.text.toString().trim()
-                    if (pushToken.isNotEmpty()) {
-                        val pushAuth = buildPushTokenAuthHeaders(
-                            keysJson = keysJson,
-                            userId = user,
-                            fcmToken = pushToken,
-                        )
-                        api.registerPushToken(
-                            userId = user,
-                            headers = pushAuth.toHeaderMap(),
-                            request = RegisterPushTokenRequest(
-                                device_id = loadUserProfile(keysJson).deviceId,
-                                provider = "fcm",
-                                token = pushToken,
-                                fcm_token = null,
-                            ),
-                        )
-                    }
-                    saveSetup()
-                    syncProgressUser()
-                    progress = progress.afterServerVerified()
-                    store.saveProgress(progressUserId, progress)
-                    if (pushToken.isEmpty()) {
-                        "Server verified for $user (${capabilities.security_profile}/${capabilities.deployment_mode})"
-                    } else {
-                        "Server verified and push token registered for $user (${capabilities.security_profile}/${capabilities.deployment_mode})"
-                    }
+                runAction("Create secure profile") {
+                    bootstrapProfile()
                 }
             }
         }
@@ -243,26 +111,10 @@ class MainActivity : AppCompatActivity() {
 
         importOnboardingButton.setOnClickListener {
             lifecycleScope.launch {
-                runAction("Import secondary-device package") {
+                runAction("Import linked device") {
                     importSecondaryDevicePackage()
                 }
             }
-        }
-
-        openChatButton.setOnClickListener {
-            saveSetup()
-            syncProgressUser()
-            val peer = peerInput.text.toString().trim()
-            if (!progress.canOpenChat()) {
-                statusText.text = "Complete setup steps 1-4 before opening chat."
-                return@setOnClickListener
-            }
-            val intent = Intent(this, ConversationsActivity::class.java).apply {
-                putExtra("server", serverInput.text.toString().trim())
-                putExtra("user", userInput.text.toString().trim())
-                putExtra("peer_seed", peer)
-            }
-            startActivity(intent)
         }
 
         lifecycleScope.launch {
@@ -276,40 +128,23 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        refreshStepUi()
+        refreshSummary()
+        refreshAdvancedVisibility()
     }
 
-    private fun saveSetup() {
-        val user = userInput.text.toString().trim()
-        val device = normalizedDeviceId(user, deviceInput.text.toString().trim())
-        store.saveSetup(
-            SetupConfig(
-                serverUrl = serverInput.text.toString().trim(),
-                userId = user,
-                deviceId = device,
-                suiteLabel = suiteInput.text.toString().trim(),
-                peerUserId = peerInput.text.toString().trim(),
-            )
-        )
+    private fun hasConsumerProfile(setup: SetupConfig): Boolean {
+        if (setup.userId.isBlank() || setup.serverUrl.isBlank()) {
+            return false
+        }
+        return !store.readKeys(setup.userId).isNullOrBlank()
     }
 
     private fun configureInputObservers() {
-        userInput.doAfterTextChanged {
-            syncProgressUser()
-            refreshStepUi()
-        }
-        peerInput.doAfterTextChanged {
-            refreshStepUi()
-        }
-        suiteInput.doAfterTextChanged {
-            refreshStepUi()
-        }
-        serverInput.doAfterTextChanged {
-            refreshStepUi()
-        }
-        deviceInput.doAfterTextChanged {
-            refreshStepUi()
-        }
+        userInput.doAfterTextChanged { refreshSummary() }
+        serverInput.doAfterTextChanged { refreshSummary() }
+        suiteInput.doAfterTextChanged { refreshSummary() }
+        deviceInput.doAfterTextChanged { refreshSummary() }
+        pushTokenInput.doAfterTextChanged { refreshSummary() }
     }
 
     private fun configureErrorToggle() {
@@ -318,6 +153,24 @@ class MainActivity : AppCompatActivity() {
             refreshErrorDetailsVisibility()
         }
         renderError(null)
+    }
+
+    private fun configureAdvancedToggle() {
+        toggleAdvancedButton.setOnClickListener {
+            advancedVisible = !advancedVisible
+            refreshAdvancedVisibility()
+        }
+    }
+
+    private fun refreshAdvancedVisibility() {
+        advancedPanel.visibility = if (advancedVisible) View.VISIBLE else View.GONE
+        toggleAdvancedButton.setText(
+            if (advancedVisible) {
+                R.string.button_hide_advanced_setup
+            } else {
+                R.string.button_show_advanced_setup
+            },
+        )
     }
 
     private suspend fun runAction(action: String, block: suspend () -> String) {
@@ -330,46 +183,124 @@ class MainActivity : AppCompatActivity() {
             renderError(UiErrorMapper.fromThrowable(it, action))
             statusText.text = "${action} failed"
         }
-        refreshStepUi()
+        refreshSummary()
     }
 
     private fun applyPreset(userId: String, peerId: String) {
         userInput.setText(userId)
-        peerInput.setText(peerId)
-        if (deviceInput.text.toString().trim().isBlank()) {
-            deviceInput.setText("${userId}-android-1")
-        }
-        syncProgressUser()
-        saveSetup()
-        refreshStepUi()
+        deviceInput.setText(MessagingCoordinator.normalizedDeviceId(userId, ""))
+        val currentSetup = store.loadSetup()
+        store.saveSetup(currentSetup.copy(peerUserId = peerId))
+        refreshSummary()
     }
 
-    private fun syncProgressUser() {
-        val currentUser = userInput.text.toString().trim()
-        if (currentUser == progressUserId) {
+    private fun refreshSummary() {
+        val user = userInput.text.toString().trim()
+        val server = serverInput.text.toString().trim()
+        val pushToken = pushTokenInput.text.toString().trim()
+        setupSummaryText.text = when {
+            user.isBlank() ->
+                "Choose a username, create a secure profile, and land directly in your conversation hub."
+            server.isBlank() ->
+                "Enter the relay address for $user before creating the secure profile."
+            pushToken.isBlank() ->
+                "Create a secure profile for $user. Push can be added later from Advanced."
+            else ->
+                "Create a secure profile for $user with background registration and push setup."
+        }
+    }
+
+    private suspend fun bootstrapProfile(): String {
+        val user = userInput.text.toString().trim()
+        val server = serverInput.text.toString().trim()
+        val suite = MessagingCoordinator.normalizeSuiteLabel(suiteInput.text.toString())
+        val deviceId = deviceInput.text.toString().trim()
+        val pushToken = pushTokenInput.text.toString().trim()
+        require(user.isNotBlank()) { "username is empty" }
+        require(server.isNotBlank()) { "server URL is empty" }
+
+        MessagingCoordinator.ensureReady(
+            store = store,
+            serverUrl = server,
+            userId = user,
+            suiteLabel = suite,
+            deviceId = deviceId,
+            pushToken = pushToken,
+            onStep = { statusText.text = it },
+        )
+        openHome(finishCurrent = true)
+        return "Secure profile ready for $user"
+    }
+
+    private suspend fun importSecondaryDevicePackage(): String {
+        val packagePassphrase = onboardingPassphraseInput.text.toString()
+        require(packagePassphrase.isNotBlank()) { "onboarding package passphrase is empty" }
+        val packageJson = onboardingPackageInput.text.toString().trim()
+        require(packageJson.isNotBlank()) { "onboarding package is empty" }
+
+        val imported = openSecondaryDevicePackage(packageJson, packagePassphrase)
+        val profile = loadUserProfile(imported.keysJson)
+        val priorPeer = store.loadSetup().peerUserId.ifBlank { "bob" }
+        store.wipeUserState(imported.userId)
+        store.writeKeys(imported.userId, imported.keysJson)
+        store.saveSetup(
+            SetupConfig(
+                serverUrl = imported.serverUrl,
+                userId = imported.userId,
+                deviceId = imported.deviceId,
+                suiteLabel = MessagingCoordinator.normalizeSuiteLabel(
+                    if (profile.suite == uniffi.pqmsg_android.Suite.KYBER768) {
+                        "kyber768"
+                    } else {
+                        "ml-kem-768"
+                    },
+                ),
+                peerUserId = priorPeer,
+            ),
+        )
+        store.saveProgress(imported.userId, SetupProgress().adoptLinkedDevice())
+        userInput.setText(imported.userId)
+        serverInput.setText(imported.serverUrl)
+        deviceInput.setText(imported.deviceId)
+        suiteInput.setText(
+            MessagingCoordinator.normalizeSuiteLabel(
+                if (profile.suite == uniffi.pqmsg_android.Suite.KYBER768) {
+                    "kyber768"
+                } else {
+                    "ml-kem-768"
+                },
+            ),
+        )
+        onboardingPackageInput.setText("")
+        onboardingPassphraseInput.setText("")
+        MessagingCoordinator.ensureReady(
+            store = store,
+            serverUrl = imported.serverUrl,
+            userId = imported.userId,
+            suiteLabel = suiteInput.text.toString(),
+            deviceId = imported.deviceId,
+            onStep = { statusText.text = it },
+        )
+        openHome(finishCurrent = true)
+        return "Linked device imported for ${imported.userId}"
+    }
+
+    private fun pasteOnboardingPackageFromClipboard() {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip = clipboard.primaryClip
+        val itemText = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)
+        if (itemText.isNullOrBlank()) {
+            statusText.text = "Clipboard does not contain an onboarding package"
             return
         }
-        progressUserId = currentUser
-        progress = store.loadProgress(progressUserId)
+        onboardingPackageInput.setText(itemText.toString())
+        statusText.text = "Onboarding package pasted"
     }
 
-    private fun refreshStepUi() {
-        syncProgressUser()
-        stepKeysText.text = stepLabel("1) Generate keys", progress.keysGenerated)
-        stepRegisterText.text = stepLabel("2) Register user", progress.userRegistered)
-        stepPublishText.text = stepLabel("3) Publish prekeys", progress.prekeysPublished)
-        stepVerifyText.text = stepLabel("4) Verify server", progress.serverVerified)
-        registerButton.isEnabled = progress.canRegister()
-        publishButton.isEnabled = progress.canPublishPrekeys()
-        verifyButton.isEnabled = progress.canVerifyServer()
-        openChatButton.isEnabled = progress.canOpenChat()
-    }
-
-    private fun stepLabel(title: String, complete: Boolean): String {
-        return if (complete) {
-            "$title: done"
-        } else {
-            "$title: pending"
+    private fun openHome(finishCurrent: Boolean = false) {
+        startActivity(Intent(this, ConversationsActivity::class.java))
+        if (finishCurrent) {
+            finish()
         }
     }
 
@@ -394,96 +325,10 @@ class MainActivity : AppCompatActivity() {
     private fun refreshErrorDetailsVisibility() {
         if (errorExpanded) {
             errorDetailsText.visibility = View.VISIBLE
-            errorToggleButton.text = "Hide technical details"
+            errorToggleButton.setText(R.string.button_hide_error_details)
         } else {
             errorDetailsText.visibility = View.GONE
-            errorToggleButton.text = "Show technical details"
+            errorToggleButton.setText(R.string.button_show_error_details)
         }
     }
-
-    private fun requireKeys(user: String): String {
-        return store.readKeys(user) ?: throw IllegalStateException("missing keys for user '$user'")
-    }
-
-    private suspend fun importSecondaryDevicePackage(): String {
-        val packagePassphrase = onboardingPassphraseInput.text.toString()
-        require(packagePassphrase.isNotBlank()) { "onboarding package passphrase is empty" }
-        val packageJson = onboardingPackageInput.text.toString().trim()
-        require(packageJson.isNotBlank()) { "onboarding package is empty" }
-
-        val imported = openSecondaryDevicePackage(packageJson, packagePassphrase)
-        val suiteLabel = suiteLabel(imported.suite)
-        val api = ApiClientFactory.create(imported.serverUrl)
-        ApiClientFactory.validateCapabilities(api.getCapabilities(), suiteLabel)
-
-        val publishPayload = buildPublishPrekeysPayload(imported.keysJson)
-        val auth = buildPrekeysAuthHeaders(imported.keysJson, imported.userId)
-        api.publishPrekeys(
-            imported.userId,
-            auth.toHeaderMap(),
-            PublishPrekeysRequest(
-                signed_prekey_x25519_pub = publishPayload.signedPrekeyX25519Pub,
-                sig_over_spk = publishPayload.sigOverSpk,
-                pq_signed_prekey_pub_mlkem768 = publishPayload.pqSignedPrekeyPubMlkem768,
-                sig_over_pqspk = publishPayload.sigOverPqspk,
-                one_time_prekeys_x25519 = publishPayload.oneTimePrekeysX25519,
-                one_time_prekeys_mlkem768 = publishPayload.oneTimePrekeysMlkem768,
-            ),
-        )
-
-        store.wipeUserState(imported.userId)
-        store.writeKeys(imported.userId, imported.keysJson)
-
-        serverInput.setText(imported.serverUrl)
-        userInput.setText(imported.userId)
-        deviceInput.setText(imported.deviceId)
-        suiteInput.setText(suiteLabel)
-        if (peerInput.text.toString().trim().isBlank()) {
-            peerInput.setText("bob")
-        }
-        saveSetup()
-        syncProgressUser()
-        progress = progress.adoptLinkedDevice()
-        store.saveProgress(progressUserId, progress)
-        onboardingPackageInput.setText("")
-        onboardingPassphraseInput.setText("")
-        return "Imported linked device ${imported.deviceId} for ${imported.userId} and published prekeys"
-    }
-
-    private fun pasteOnboardingPackageFromClipboard() {
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val clip = clipboard.primaryClip
-        val itemText = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)
-        if (itemText.isNullOrBlank()) {
-            statusText.text = "Clipboard does not contain an onboarding package"
-            return
-        }
-        onboardingPackageInput.setText(itemText.toString())
-        statusText.text = "Pasted onboarding package from clipboard"
-    }
-
-    private fun parseSuite(value: String): Suite {
-        return if (value.equals("kyber768", ignoreCase = true)) {
-            Suite.KYBER768
-        } else {
-            Suite.ML_KEM768
-        }
-    }
-
-    private fun suiteLabel(suite: Suite): String {
-        return if (suite == Suite.KYBER768) {
-            "kyber768"
-        } else {
-            "ml-kem-768"
-        }
-    }
-
-    private fun normalizedDeviceId(user: String, device: String): String {
-        return if (device.isNotBlank()) {
-            device
-        } else {
-            "${user}-android-1"
-        }
-    }
-
 }

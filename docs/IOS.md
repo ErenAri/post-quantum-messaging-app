@@ -26,6 +26,7 @@ flowchart LR
 - first-seen identity keys are pinned and key changes are blocked by default,
 - relay and inbox requests use Ed25519 request-auth headers from Rust,
 - the Security tab can list linked devices, link a new device id, and revoke non-current linked devices through authenticated server requests,
+- the Security tab can rotate the current device identity to fresh keys and a new device id via `/rotate/init` + `/rotate/confirm`, automatically republish prekeys for the new identity, and inspect `/identity-log` rotation history,
 - the Security tab can prepare a portable linked-device onboarding package by first linking the target device id on the server and then sealing regenerated device prekeys with the existing identity keys using the `WrappedSecret` Argon2id + AES-256-GCM storage format,
 - the Setup tab can import that sealed onboarding package on the secondary device, persist the adopted keys, publish fresh prekeys automatically, and leave the final local step as `Verify server`,
 - APNs token registration is integrated and exposed through setup/security screens,
@@ -56,6 +57,8 @@ This script performs:
 2. release builds for `pqmsg-ios` with `pqmsg-core/pq-oqs`,
 3. UniFFI Swift binding generation into `mobile/ios/PQMsgDemo/Generated`,
 4. XCFramework assembly at `mobile/ios/Frameworks/pqmsg_iosFFI.xcframework`.
+
+When `crates/pqmsg-ios/src/lib.rs` changes, rerun this script before opening Xcode so the Swift bindings and XCFramework include the latest bridge exports.
 
 ## 6. Generate and Open Xcode Project
 
@@ -89,6 +92,8 @@ cargo run -p pqmsg-server
   - inspect active crypto profile, transport validity, pinned identities, and local state counts.
   - use `Secondary Device Onboarding` to enter a target device id, seal a passphrase-protected onboarding package, and copy the resulting package text to the secondary device.
   - use the Devices section to list linked devices, manually link a new device id, or revoke a non-current device.
+  - use `Rotate Identity` with a fresh managed device id to generate new identity keys for the current device, complete the server challenge-confirm rotation, republish prekeys, and return the setup flow to `Verify Server`.
+  - use `Load Identity Log` to inspect server-recorded initial and rotation identity events.
   - use `Reset Local State` to retire the current device on the server when possible and then purge the current user's local device material when rotating or revoking the account.
 
 ## 8. APNs Integration Notes

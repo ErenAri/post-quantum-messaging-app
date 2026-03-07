@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:background="@drawable/bg_screen"
+    android:clipToPadding="false"
+    android:fillViewport="true">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -9,217 +13,337 @@
         android:orientation="vertical"
         android:padding="20dp">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/setup_title"
-            android:textSize="24sp" />
-
-        <TextView
-            android:id="@+id/textCryptoProfile"
+        <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="@string/setup_crypto_profile_loading" />
+            app:cardBackgroundColor="@color/pq_hero"
+            app:strokeWidth="0dp">
 
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/buttonPresetAlice"
-                android:layout_width="0dp"
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/button_preset_alice" />
+                android:orientation="vertical"
+                android:padding="24dp">
 
-            <Button
-                android:id="@+id/buttonPresetBob"
-                android:layout_width="0dp"
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Private messaging"
+                    android:textAppearance="@style/TextAppearance.PQMsg.Eyebrow"
+                    android:textColor="@color/pq_hero_accent" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/setup_title"
+                    android:textAppearance="@style/TextAppearance.MaterialComponents.Headline4"
+                    android:textColor="@color/pq_surface"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/textSetupSummary"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:textAppearance="@style/TextAppearance.MaterialComponents.Body1"
+                    android:textColor="@color/pq_surface" />
+
+                <TextView
+                    android:id="@+id/textCryptoProfile"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:background="@drawable/bg_badge"
+                    android:paddingHorizontal="12dp"
+                    android:paddingVertical="8dp"
+                    android:text="@string/setup_crypto_profile_loading"
+                    android:textColor="@color/pq_badge_fg"
+                    android:textStyle="bold" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:text="@string/button_preset_bob" />
-        </LinearLayout>
+                android:orientation="vertical"
+                android:padding="20dp">
 
-        <EditText
-            android:id="@+id/editServer"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:hint="@string/hint_server"
-            android:inputType="textUri" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Create your profile"
+                    android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
 
-        <EditText
-            android:id="@+id/editUser"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:hint="@string/hint_user"
-            android:inputType="text" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Pick a username and the app will handle registration, prekeys, and verification for you."
+                    android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
-        <EditText
-            android:id="@+id/editDevice"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:hint="@string/hint_device"
-            android:inputType="text" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:orientation="horizontal">
 
-        <EditText
-            android:id="@+id/editSuite"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:hint="@string/hint_suite"
-            android:inputType="text" />
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/buttonPresetAlice"
+                        style="@style/Widget.PQMsg.Button.Secondary"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/button_preset_alice" />
 
-        <EditText
-            android:id="@+id/editPeer"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:hint="@string/hint_peer"
-            android:inputType="text" />
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/buttonPresetBob"
+                        style="@style/Widget.PQMsg.Button.Secondary"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="10dp"
+                        android:layout_weight="1"
+                        android:text="@string/button_preset_bob" />
+                </LinearLayout>
 
-        <EditText
-            android:id="@+id/editPushToken"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:hint="@string/hint_push_token"
-            android:inputType="text" />
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.PQMsg.TextInputLayout"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:hint="@string/hint_user">
 
-        <EditText
-            android:id="@+id/editOnboardingPassphrase"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:hint="@string/hint_onboarding_passphrase"
-            android:inputType="textPassword" />
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/editUser"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="text" />
+                </com.google.android.material.textfield.TextInputLayout>
 
-        <Button
-            android:id="@+id/buttonPasteOnboardingPackage"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="@string/button_paste_onboarding_package" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonCreateProfile"
+                    style="@style/Widget.PQMsg.Button.Primary"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:text="@string/button_create_profile" />
 
-        <Button
-            android:id="@+id/buttonImportOnboardingPackage"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="@string/button_import_onboarding_package" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonToggleAdvancedSetup"
+                    style="@style/Widget.PQMsg.Button.Secondary"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/button_show_advanced_setup" />
 
-        <EditText
-            android:id="@+id/editOnboardingPackage"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:gravity="top|start"
-            android:hint="@string/hint_onboarding_package"
-            android:inputType="textMultiLine"
-            android:minLines="6"
-            android:scrollbars="vertical"
-            android:textIsSelectable="true" />
+                <LinearLayout
+                    android:id="@+id/layoutAdvancedSetup"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:orientation="vertical"
+                    android:visibility="gone">
 
-        <TextView
-            android:id="@+id/textStepKeys"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="@string/setup_step_keys_pending" />
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.PQMsg.TextInputLayout"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:hint="@string/hint_server">
 
-        <TextView
-            android:id="@+id/textStepRegister"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/setup_step_register_pending" />
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/editServer"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="textUri" />
+                    </com.google.android.material.textfield.TextInputLayout>
 
-        <TextView
-            android:id="@+id/textStepPublish"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/setup_step_publish_pending" />
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.PQMsg.TextInputLayout"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:hint="@string/hint_device">
 
-        <TextView
-            android:id="@+id/textStepVerify"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/setup_step_verify_pending" />
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/editDevice"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="text" />
+                    </com.google.android.material.textfield.TextInputLayout>
 
-        <Button
-            android:id="@+id/buttonGenerate"
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.PQMsg.TextInputLayout"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:hint="@string/hint_suite">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/editSuite"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="text" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.PQMsg.TextInputLayout"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:hint="@string/hint_push_token">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/editPushToken"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="text" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="@string/button_generate" />
+            app:cardBackgroundColor="@color/pq_surface_alt">
 
-        <Button
-            android:id="@+id/buttonRegister"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="@string/button_register" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="20dp">
 
-        <Button
-            android:id="@+id/buttonPublish"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="@string/button_publish" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Import a linked device"
+                    android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
 
-        <Button
-            android:id="@+id/buttonVerifyServer"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="@string/button_verify_server" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Use this path when another trusted device prepared an onboarding package for this phone."
+                    android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
-        <Button
-            android:id="@+id/buttonOpenChat"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="@string/button_open_chat" />
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.PQMsg.TextInputLayout"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:hint="@string/hint_onboarding_passphrase">
 
-        <TextView
-            android:id="@+id/textStatusSetup"
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/editOnboardingPassphrase"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="textPassword" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/buttonPasteOnboardingPackage"
+                        style="@style/Widget.PQMsg.Button.Secondary"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/button_paste_onboarding_package" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/buttonImportOnboardingPackage"
+                        style="@style/Widget.PQMsg.Button.Tonal"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="10dp"
+                        android:layout_weight="1"
+                        android:text="@string/button_import_onboarding_package" />
+                </LinearLayout>
+
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.PQMsg.TextInputLayout"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:hint="@string/hint_onboarding_package">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/editOnboardingPackage"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="top|start"
+                        android:inputType="textMultiLine"
+                        android:minLines="5"
+                        android:scrollbars="vertical"
+                        android:textIsSelectable="true" />
+                </com.google.android.material.textfield.TextInputLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="@string/status_ready" />
+            android:layout_marginBottom="24dp">
 
-        <TextView
-            android:id="@+id/textErrorSummarySetup"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:textColor="#B00020"
-            android:visibility="gone" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="20dp">
 
-        <Button
-            android:id="@+id/buttonToggleErrorDetailsSetup"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/button_show_error_details"
-            android:visibility="gone" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Status"
+                    android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
 
-        <TextView
-            android:id="@+id/textErrorDetailsSetup"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:background="#F1F1F1"
-            android:padding="8dp"
-            android:textIsSelectable="true"
-            android:visibility="gone" />
+                <TextView
+                    android:id="@+id/textStatusSetup"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="@string/status_ready"
+                    android:textAppearance="@style/TextAppearance.MaterialComponents.Body1" />
+
+                <TextView
+                    android:id="@+id/textErrorSummarySetup"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:textColor="@color/pq_error"
+                    android:visibility="gone" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonToggleErrorDetailsSetup"
+                    style="@style/Widget.PQMsg.Button.Secondary"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/button_show_error_details"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/textErrorDetailsSetup"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/bg_detail_panel"
+                    android:padding="12dp"
+                    android:textAppearance="@style/TextAppearance.PQMsg.Mono"
+                    android:textIsSelectable="true"
+                    android:visibility="gone" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
     </LinearLayout>
-</ScrollView>
+</androidx.core.widget.NestedScrollView>

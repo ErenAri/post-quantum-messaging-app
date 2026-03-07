@@ -88,6 +88,41 @@ final class ApiClient {
         )
     }
 
+    func rotateInit(
+        userId: String,
+        headers: [String: String],
+        requestBody: RotateInitRequest
+    ) async throws -> RotateInitResponse {
+        try await request(
+            path: "v1/users/\(userId)/rotate/init",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    func rotateConfirm(
+        userId: String,
+        headers: [String: String],
+        requestBody: RotateConfirmRequest
+    ) async throws -> RotateConfirmResponse {
+        try await request(
+            path: "v1/users/\(userId)/rotate/confirm",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    func identityLog(userId: String, headers: [String: String]) async throws -> IdentityLogResponse {
+        try await request(
+            path: "v1/users/\(userId)/identity-log",
+            method: "GET",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
     private func request<T: Decodable, U: Encodable>(
         path: String,
         method: String,

@@ -132,6 +132,43 @@ struct SecurityView: View {
                     }
                 }
 
+                Section("Identity Rotation") {
+                    Text(appState.managedDeviceId.isEmpty ? "Set a managed device id above." : "Rotation target: \(appState.managedDeviceId)")
+                        .font(.caption)
+                    Button("Rotate Identity") {
+                        Task { await appState.rotateIdentity() }
+                    }
+                    .disabled(
+                        appState.setup.userId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                        appState.managedDeviceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
+                    Text("Generates fresh identity keys with the target device id, confirms the server challenge, republishes prekeys, and leaves local progress at Verify Server.")
+                        .font(.caption)
+                }
+
+                Section("Identity Log") {
+                    Button("Load Identity Log") {
+                        Task { await appState.loadIdentityLog() }
+                    }
+                    .disabled(appState.setup.userId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if appState.identityLogEvents.isEmpty {
+                        Text("No identity-log snapshot loaded.")
+                            .font(.caption)
+                    } else {
+                        ForEach(appState.identityLogEvents) { event in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("v\(event.version) \(event.event_type)")
+                                    .font(.headline)
+                                Text("\(event.device_id) • \(event.changed_at)")
+                                    .font(.caption2)
+                                Text(event.identity_fingerprint_sha256)
+                                    .font(.caption2)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+
                 Section("Local Security State") {
                     Text("Conversations: \(appState.conversations.count)")
                     Text("Sessions: \(LocalStateStore.shared.countSessions(userId: appState.setup.userId, peers: appState.conversations))")
