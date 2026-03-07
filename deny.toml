@@ -8,8 +8,8 @@ db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
 ignore = [
-  # Transitive through sqlx Any/MySQL support; pqmsg-server only supports SQLite and PostgreSQL.
-  "RUSTSEC-2023-0071",
+  # Transitive through axum-server's rustls-pemfile dependency until TLS PEM parsing is migrated.
+  "RUSTSEC-2025-0134",
 ]
 
 [licenses]
@@ -21,19 +21,21 @@ allow = [
   "BSD-2-Clause",
   "BSD-3-Clause",
   "CC0-1.0",
+  "CDLA-Permissive-2.0",
   "ISC",
   "MIT",
   "MPL-2.0",
   "OpenSSL",
   "Unicode-3.0",
-  "Unicode-DFS-2016",
   "Zlib",
   "0BSD",
 ]
 exceptions = []
 
 [bans]
-multiple-versions = "warn"
+# The workspace currently pulls unavoidable duplicate transitive versions from sqlx, reqwest,
+# uniffi, and platform support crates. Keep bans focused on wildcards and explicit denials.
+multiple-versions = "allow"
 wildcards = "deny"
 deny = []
 skip = []

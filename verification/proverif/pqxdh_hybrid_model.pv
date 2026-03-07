@@ -4,12 +4,12 @@ type pkey.
 free net: channel.
 
 fun pk(key): pkey.
-fun dh(key, pkey): bitstring.
-equation forall x:key, y:key; dh(x, pk(y)) = dh(y, pk(x)).
+fun shared_dh(key, pkey): bitstring.
+equation forall x : key, y : key; shared_dh(x, pk(y)) = shared_dh(y, pk(x)).
 
-fun sign(bitstring, key): bitstring.
-fun verify(bitstring, bitstring, pkey): bool.
-reduc forall m:bitstring, sk:key; verify(sign(m, sk), m, pk(sk)) = true.
+fun sig_sign(bitstring, key): bitstring.
+fun sig_verify(bitstring, bitstring, pkey): bool.
+reduc forall m:bitstring, sk:key; sig_verify(sig_sign(m, sk), m, pk(sk)) = true.
 
 fun kem_enc(pkey, bitstring): bitstring.
 fun kem_ss(key, bitstring): bitstring.
@@ -41,15 +41,15 @@ let Bob =
   let ik_b_pub = pk(ik_b) in
   let spk_b_pub = pk(spk_b) in
   let pqspk_b_pub = pk(pqspk_b) in
-  let sig_spk = sign(spk_b_pub, ik_b) in
-  let sig_pqspk = sign(pqspk_b_pub, ik_b) in
+  let sig_spk = sig_sign(spk_b_pub, ik_b) in
+  let sig_pqspk = sig_sign(pqspk_b_pub, ik_b) in
   event BobBundlePublished(bob_id, ik_b_pub, spk_b_pub, pqspk_b_pub);
   out(net, (bob_id, ik_b_pub, spk_b_pub, pqspk_b_pub, sig_spk, sig_pqspk));
   in(net, (ik_a_pub:pkey, ek_a_pub:pkey, pq_ct:bitstring, ad:bitstring, ciphertext:bitstring));
   let ss_pq = kem_ss(pqspk_b, pq_ct) in
-  let t1 = dh(spk_b, ik_a_pub) in
-  let t2 = dh(ik_b, ek_a_pub) in
-  let t3 = dh(spk_b, ek_a_pub) in
+  let t1 = shared_dh(spk_b, ik_a_pub) in
+  let t2 = shared_dh(ik_b, ek_a_pub) in
+  let t3 = shared_dh(spk_b, ek_a_pub) in
   let sk = hkdf(tuple4(t1, t2, t3, ss_pq), ad) in
   event BobSessionBound(ik_a_pub, ik_b_pub, sk);
   event BobComplete(alice_id, bob_id, sk).
@@ -58,15 +58,15 @@ let Alice =
   new ik_a:key;
   in(net, (target_id:bitstring, ik_b_pub:pkey, spk_b_pub:pkey, pqspk_b_pub:pkey, sig_spk:bitstring, sig_pqspk:bitstring));
   if target_id = bob_id then
-    if verify(sig_spk, spk_b_pub, ik_b_pub) = true then
-      if verify(sig_pqspk, pqspk_b_pub, ik_b_pub) = true then
+    if sig_verify(sig_spk, spk_b_pub, ik_b_pub) = true then
+      if sig_verify(sig_pqspk, pqspk_b_pub, ik_b_pub) = true then
         event AliceAcceptedBundle(alice_id, bob_id);
         new ek_a:key;
         new ss_pq:bitstring;
         let pq_ct = kem_enc(pqspk_b_pub, ss_pq) in
-        let t1 = dh(ik_a, spk_b_pub) in
-        let t2 = dh(ek_a, ik_b_pub) in
-        let t3 = dh(ek_a, spk_b_pub) in
+        let t1 = shared_dh(ik_a, spk_b_pub) in
+        let t2 = shared_dh(ek_a, ik_b_pub) in
+        let t3 = shared_dh(ek_a, spk_b_pub) in
         let ad = tuple3(pk(ik_a), ik_b_pub, protocol_v1) in
         let sk = hkdf(tuple4(t1, t2, t3, ss_pq), ad) in
         let ciphertext = aead_enc(plaintext0, sk, ad) in
@@ -78,14 +78,14 @@ let AliceFS =
   new ik_a:key;
   in(net, (target_id:bitstring, ik_b_pub:pkey, spk_b_pub:pkey, pqspk_b_pub:pkey, sig_spk:bitstring, sig_pqspk:bitstring));
   if target_id = bob_id then
-    if verify(sig_spk, spk_b_pub, ik_b_pub) = true then
-      if verify(sig_pqspk, pqspk_b_pub, ik_b_pub) = true then
+    if sig_verify(sig_spk, spk_b_pub, ik_b_pub) = true then
+      if sig_verify(sig_pqspk, pqspk_b_pub, ik_b_pub) = true then
         new ek_a:key;
         new ss_pq:bitstring;
         let pq_ct = kem_enc(pqspk_b_pub, ss_pq) in
-        let t1 = dh(ik_a, spk_b_pub) in
-        let t2 = dh(ek_a, ik_b_pub) in
-        let t3 = dh(ek_a, spk_b_pub) in
+        let t1 = shared_dh(ik_a, spk_b_pub) in
+        let t2 = shared_dh(ek_a, ik_b_pub) in
+        let t3 = shared_dh(ek_a, spk_b_pub) in
         let ad = tuple3(pk(ik_a), ik_b_pub, protocol_v1) in
         let sk = hkdf(tuple4(t1, t2, t3, ss_pq), ad) in
         let ciphertext = aead_enc(plaintext_fs, sk, ad) in

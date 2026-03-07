@@ -12,7 +12,7 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
-pqmsg-core = { path = "../pqmsg-core" }
+pqmsg-core = { version = "0.1.0", path = "../pqmsg-core" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
