@@ -5,7 +5,7 @@ free net: channel.
 
 fun pk(key): pkey.
 fun dh(key, pkey): bitstring.
-reduc forall x:key, y:key; dh(x, pk(y)) = dh(y, pk(x)).
+equation forall x:key, y:key; dh(x, pk(y)) = dh(y, pk(x)).
 
 fun sign(bitstring, key): bitstring.
 fun verify(bitstring, bitstring, pkey): bool.
