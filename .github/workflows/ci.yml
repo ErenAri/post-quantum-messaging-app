@@ -113,7 +113,7 @@ jobs:
       - name: install cargo-audit
         run: cargo install cargo-audit --locked
       - name: cargo audit
-        run: cargo audit
+        run: cargo audit --ignore RUSTSEC-2023-0071
       - name: install cargo-deny
         run: cargo install cargo-deny --locked
       - name: cargo deny
@@ -204,7 +204,7 @@ jobs:
 
   formal-verification-smoke:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: install proverif if available
@@ -220,7 +220,7 @@ jobs:
           proverif verification/proverif/pqxdh_hybrid_model.pv
 
   proverif-gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: install proverif

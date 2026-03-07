@@ -657,10 +657,7 @@ pub fn prepare_secondary_device_package(
         exported_at_unix: auth_timestamp()?,
     };
     let plaintext = serde_json::to_vec_pretty(&payload)?;
-    let wrapped = wrap_wrapped_bytes(
-        &SecretString::new(package_passphrase.into()),
-        &plaintext,
-    )?;
+    let wrapped = wrap_wrapped_bytes(&SecretString::new(package_passphrase.into()), &plaintext)?;
     serde_json::to_string_pretty(&wrapped).map_err(Into::into)
 }
 
@@ -673,10 +670,7 @@ pub fn open_secondary_device_package(
         return Err(invalid_input("package_passphrase must not be empty"));
     }
     let wrapped: WrappedSecret = serde_json::from_str(&package_json)?;
-    let plaintext = unwrap_wrapped_bytes(
-        &SecretString::new(package_passphrase.into()),
-        &wrapped,
-    )?;
+    let plaintext = unwrap_wrapped_bytes(&SecretString::new(package_passphrase.into()), &wrapped)?;
     let payload: SecondaryDeviceOnboardingPayload = serde_json::from_slice(&plaintext)?;
     if payload.version != SECONDARY_DEVICE_PACKAGE_VERSION {
         return Err(invalid_input(format!(
@@ -686,7 +680,9 @@ pub fn open_secondary_device_package(
     }
     let normalized_server_url = payload.server_url.trim();
     if normalized_server_url.is_empty() {
-        return Err(invalid_input("onboarding package server_url must not be empty"));
+        return Err(invalid_input(
+            "onboarding package server_url must not be empty",
+        ));
     }
     let keys = read_keys_file(&payload.keys_json)?;
     Ok(SecondaryDeviceOnboardingPackage {
@@ -699,7 +695,9 @@ pub fn open_secondary_device_package(
 }
 
 #[uniffi::export]
-pub fn build_rotate_init_payload(keys_json: String) -> Result<RotateInitPayload, PqmsgAndroidError> {
+pub fn build_rotate_init_payload(
+    keys_json: String,
+) -> Result<RotateInitPayload, PqmsgAndroidError> {
     let keys = read_keys_file(&keys_json)?;
     Ok(RotateInitPayload {
         new_identity_x25519_pub: keys.identity_x25519_pub_b64,
@@ -725,7 +723,8 @@ pub fn build_rotate_init_auth_headers(
     let signing_key = auth_signing_key_for_user(&keys)?;
     let timestamp = auth_timestamp()?;
     let nonce = auth_nonce();
-    let mut records = auth_common_records("rotate-init", &user_id, &keys.device_id, timestamp, &nonce);
+    let mut records =
+        auth_common_records("rotate-init", &user_id, &keys.device_id, timestamp, &nonce);
     let mut hasher = Sha256::new();
     hasher.update(new_identity_x25519_pub.as_bytes());
     records.push(TlvRecord {
@@ -737,8 +736,8 @@ pub fn build_rotate_init_auth_headers(
         ty: AUTH_TAG_ROTATE_NEW_SIG_HASH,
         value: hasher.finalize().to_vec(),
     });
-    let transcript =
-        encode(&records).map_err(|_| operation_failed("failed to encode rotate-init auth transcript"))?;
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode rotate-init auth transcript"))?;
     let signature = signing_key.sign(&transcript).to_bytes();
     Ok(RequestAuthHeaders {
         auth_user: user_id,
@@ -810,8 +809,13 @@ pub fn build_rotate_confirm_auth_headers(
     let signing_key = auth_signing_key_for_user(&keys)?;
     let timestamp = auth_timestamp()?;
     let nonce = auth_nonce();
-    let mut records =
-        auth_common_records("rotate-confirm", &user_id, &keys.device_id, timestamp, &nonce);
+    let mut records = auth_common_records(
+        "rotate-confirm",
+        &user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
     records.push(TlvRecord {
         ty: AUTH_TAG_ROTATE_CHALLENGE_ID,
         value: challenge_id.as_bytes().to_vec(),
@@ -860,8 +864,8 @@ pub fn build_identity_log_auth_headers(
         ty: AUTH_TAG_RECIPIENT_ID,
         value: user_id.as_bytes().to_vec(),
     });
-    let transcript =
-        encode(&records).map_err(|_| operation_failed("failed to encode identity-log auth transcript"))?;
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode identity-log auth transcript"))?;
     let signature = signing_key.sign(&transcript).to_bytes();
     Ok(RequestAuthHeaders {
         auth_user: user_id,
@@ -1633,11 +1637,9 @@ mod tests {
             "device-package-passphrase".to_string(),
         )
         .expect("prepare package");
-        let package = open_secondary_device_package(
-            package_json,
-            "device-package-passphrase".to_string(),
-        )
-        .expect("open package");
+        let package =
+            open_secondary_device_package(package_json, "device-package-passphrase".to_string())
+                .expect("open package");
         let imported_keys = read_keys_file(&package.keys_json).expect("read imported keys");
 
         assert_eq!(package.server_url, "https://relay.example.test");
@@ -1654,7 +1656,10 @@ mod tests {
             imported_keys.identity_x25519_secret_b64,
             source_keys.identity_x25519_secret_b64
         );
-        assert_eq!(imported_keys.identity_sig_pub_b64, source_keys.identity_sig_pub_b64);
+        assert_eq!(
+            imported_keys.identity_sig_pub_b64,
+            source_keys.identity_sig_pub_b64
+        );
         assert_eq!(
             imported_keys.identity_sig_secret_b64,
             source_keys.identity_sig_secret_b64

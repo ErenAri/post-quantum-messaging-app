@@ -334,22 +334,24 @@ mod tests {
         SecurityProfile::HighAssurance
             .enforce_suite_id(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305)
             .expect("mlkem suite allowed");
-        SecurityProfile::HighAssurance
-            .enforce_suite_id(SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305)
-            .expect("kyber alias suite allowed");
+        let kyber_result = SecurityProfile::HighAssurance
+            .enforce_suite_id(SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305);
+        if cfg!(feature = "fips") {
+            assert!(kyber_result.is_err());
+        } else {
+            kyber_result.expect("kyber alias suite allowed");
+        }
     }
 
     #[test]
     fn runtime_enforcement_matches_runtime_profile() {
         let runtime = runtime_crypto_profile().expect("runtime profile");
-        if runtime.pq_oqs_enabled {
-            let checked = enforce_runtime_security_profile(SecurityProfile::HighAssurance, None)
-                .expect("runtime enforcement");
-            assert_eq!(checked.suite_id, runtime.suite_id);
+        let enforcement = enforce_runtime_security_profile(SecurityProfile::HighAssurance, None);
+        if SecurityProfile::HighAssurance.requires_pq_backend() && !runtime.pq_oqs_enabled {
+            assert!(enforcement.is_err());
         } else {
-            assert!(
-                enforce_runtime_security_profile(SecurityProfile::HighAssurance, None).is_err()
-            );
+            let checked = enforcement.expect("runtime enforcement");
+            assert_eq!(checked.suite_id, runtime.suite_id);
         }
     }
 

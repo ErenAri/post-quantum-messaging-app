@@ -203,8 +203,7 @@ async fn reap_stale_data(state: &AppState) -> Result<(), crate::error::AppError>
         .await?
         .rows_affected();
 
-    let otk_pq_deleted =
-        sqlx::query("DELETE FROM one_time_prekeys_mlkem768 WHERE consumed = 1")
+    let otk_pq_deleted = sqlx::query("DELETE FROM one_time_prekeys_mlkem768 WHERE consumed = 1")
         .execute(state.pool())
         .await?
         .rows_affected();
@@ -252,12 +251,7 @@ mod tests {
             .expect("connect sqlite memory");
         init_db(&pool, db_backend).await.expect("migrate");
 
-        let rate_limiter = Arc::new(RateLimiter::new(
-            8.0,
-            1.0,
-            64,
-            StdDuration::from_secs(60),
-        ));
+        let rate_limiter = Arc::new(RateLimiter::new(8.0, 1.0, 64, StdDuration::from_secs(60)));
         let state = AppState::new(pool.clone(), db_backend, rate_limiter);
 
         sqlx::query(

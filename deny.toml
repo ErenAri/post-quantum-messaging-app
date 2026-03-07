@@ -9,7 +9,10 @@ vulnerability = "deny"
 unmaintained = "warn"
 unsound = "warn"
 yanked = "warn"
-ignore = []
+ignore = [
+  # Transitive through sqlx Any/MySQL support; pqmsg-server only supports SQLite and PostgreSQL.
+  "RUSTSEC-2023-0071",
+]
 
 [licenses]
 version = 2

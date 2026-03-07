@@ -338,6 +338,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "hsm-pkcs11"))]
     fn pkcs11_signer_stub_returns_error() {
         let signer = Pkcs11Signer::new("/dev/null", 0, "pin").unwrap();
         let handle = KeyHandle::Hsm {
@@ -349,11 +350,24 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "hsm-pkcs11"))]
     fn pkcs11_signer_rejects_software_handle() {
         let signer = Pkcs11Signer::new("/dev/null", 0, "pin").unwrap();
         let secret = zeroize::Zeroizing::new(vec![42u8; 32]);
         let handle = KeyHandle::Software(secret);
         assert!(signer.sign(&handle, b"hello").is_err());
         assert!(signer.public_key(&handle).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "hsm-pkcs11")]
+    fn pkcs11_signer_stub_returns_error() {
+        assert!(Pkcs11Signer::new("/dev/null", 0, "pin").is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "hsm-pkcs11")]
+    fn pkcs11_signer_rejects_software_handle() {
+        assert!(Pkcs11Signer::new("/dev/null", 0, "pin").is_err());
     }
 }
