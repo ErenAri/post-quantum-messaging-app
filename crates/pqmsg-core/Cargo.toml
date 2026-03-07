@@ -20,6 +20,10 @@ x25519-dalek.workspace = true
 zeroize.workspace = true
 oqs = { version = "0.11", default-features = false, features = ["vendored", "ml_kem", "kyber"], optional = true }
 cryptoki = { version = "0.7", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+getrandom = { version = "0.2", features = ["js"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [features]
 default = ["pq-oqs"]
@@ -27,6 +31,7 @@ pq-oqs = ["dep:oqs"]
 fips = ["pq-oqs"]
 classical-only-INSECURE = []
 hsm-pkcs11 = ["dep:cryptoki"]
+wasm = ["classical-only-INSECURE", "dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:getrandom", "dep:serde_json"]
 
 [dev-dependencies]
 rand.workspace = true

@@ -155,14 +155,16 @@ export function markConversationRead(userId: string, peerUserId: string): void {
   }
 }
 
-export function readCursor(userId: string): number {
+export function readCursor(userId: string, deviceId?: string): number {
   const cursors = parseRecord<Record<string, number>>(CURSORS_KEY, {});
-  return Number(cursors[userId] ?? 0);
+  const key = deviceId ? `${userId}:${deviceId}` : userId;
+  return Number(cursors[key] ?? 0);
 }
 
-export function writeCursor(userId: string, cursor: number): void {
+export function writeCursor(userId: string, cursor: number, deviceId?: string): void {
   const cursors = parseRecord<Record<string, number>>(CURSORS_KEY, {});
-  cursors[userId] = cursor;
+  const key = deviceId ? `${userId}:${deviceId}` : userId;
+  cursors[key] = cursor;
   localStorage.setItem(CURSORS_KEY, JSON.stringify(cursors));
 }
 
@@ -280,10 +282,12 @@ export function wipeLocalState(userId: string): void {
   writeRecord(PINS_KEY, pins);
 
   const cursors = parseRecord<Record<string, number>>(CURSORS_KEY, {});
-  if (normalizedUser in cursors) {
-    delete cursors[normalizedUser];
-    writeRecord(CURSORS_KEY, cursors);
+  for (const cursorKey of Object.keys(cursors)) {
+    if (cursorKey === normalizedUser || cursorKey.startsWith(`${normalizedUser}:`)) {
+      delete cursors[cursorKey];
+    }
   }
+  writeRecord(CURSORS_KEY, cursors);
 }
 
 function parseRecord<T>(key: string, fallback: T): T {

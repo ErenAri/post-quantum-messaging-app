@@ -10,6 +10,7 @@ import {
   utf8ToBytes
 } from "./base64";
 import { criticalType, encodeTlv, i64ToBeBytes, u16ToBeBytes } from "./tlv";
+import * as wasmCrypto from "./crypto-wasm";
 
 const AUTH_TAG_ENDPOINT = criticalType(0x3201);
 const AUTH_TAG_USER_ID = criticalType(0x3202);
@@ -98,7 +99,7 @@ export type PublishPrekeysPayload = {
 
 export type WireEnvelope = {
   v: 1;
-  mode: "webcrypto-fallback-v1";
+  mode: "webcrypto-fallback-v1" | "pqmsg-classical-v1";
   sender: string;
   recipient: string;
   salt_b64: string;
@@ -792,10 +793,75 @@ export function encodeWireEnvelopeBase64(envelope: WireEnvelope): string {
 
 export function decodeWireEnvelopeBase64(wireBase64: string): WireEnvelope {
   const wire = JSON.parse(bytesToUtf8(base64ToBytes(wireBase64))) as WireEnvelope;
-  if (wire.v !== 1 || wire.mode !== "webcrypto-fallback-v1") {
+  if (wire.v !== 1 || (wire.mode !== "webcrypto-fallback-v1" && wire.mode !== "pqmsg-classical-v1")) {
     throw new Error("unsupported wire mode");
   }
   return wire;
+}
+
+/** Try to initialize WASM crypto. Returns true if WASM is available. */
+export async function initWasmCrypto(): Promise<boolean> {
+  return wasmCrypto.initWasm();
+}
+
+/** Whether WASM crypto is loaded and available for message encryption. */
+export function isWasmCryptoAvailable(): boolean {
+  return wasmCrypto.wasmAvailable();
+}
+
+/**
+ * Encrypt a message using WASM (ChaCha20-Poly1305 via pqmsg-core).
+ * Falls back to WebCrypto AES-GCM if WASM is unavailable.
+ */
+export async function encryptMessage(
+  passphrase: string,
+  sender: string,
+  recipient: string,
+  plaintext: string
+): Promise<WireEnvelope> {
+  if (wasmCrypto.wasmAvailable()) {
+    const ad = wasmCrypto.conversationAd(sender, recipient);
+    const salt = randomBytes(16);
+    const key = wasmCrypto.hkdfSha256(utf8ToBytes(passphrase), salt, ad, 32);
+    const ct = wasmCrypto.encrypt(key, utf8ToBytes(plaintext), ad);
+    // ct = nonce(12) || ciphertext+tag
+    const nonce = ct.slice(0, 12);
+    const ciphertextBytes = ct.slice(12);
+    return {
+      v: 1,
+      mode: "pqmsg-classical-v1",
+      sender,
+      recipient,
+      salt_b64: bytesToBase64(salt),
+      iv_b64: bytesToBase64(nonce),
+      ct_b64: bytesToBase64(ciphertextBytes)
+    };
+  }
+  return encryptFallbackMessage(passphrase, sender, recipient, plaintext);
+}
+
+/**
+ * Decrypt a message — auto-detects mode from wire envelope.
+ */
+export async function decryptMessage(
+  passphrase: string,
+  wire: WireEnvelope
+): Promise<string> {
+  if (wire.mode === "pqmsg-classical-v1") {
+    if (!wasmCrypto.wasmAvailable()) {
+      throw new Error("WASM crypto required to decrypt pqmsg-classical-v1 messages");
+    }
+    const salt = base64ToBytes(wire.salt_b64);
+    const nonce = base64ToBytes(wire.iv_b64);
+    const ciphertext = base64ToBytes(wire.ct_b64);
+    const ad = wasmCrypto.conversationAd(wire.sender, wire.recipient);
+    const key = wasmCrypto.hkdfSha256(utf8ToBytes(passphrase), salt, ad, 32);
+    // Reconstruct nonce || ciphertext for WASM decrypt
+    const combined = concatBytes(nonce, ciphertext);
+    const pt = wasmCrypto.decrypt(key, combined, ad);
+    return bytesToUtf8(pt);
+  }
+  return decryptFallbackMessage(passphrase, wire);
 }
 
 export function identityFingerprint(identityX25519PubB64: string): string {

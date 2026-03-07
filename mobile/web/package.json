@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build:wasm": "wasm-pack build ../../crates/pqmsg-core --target web --no-default-features --features wasm --out-dir ../../mobile/web/pkg",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"

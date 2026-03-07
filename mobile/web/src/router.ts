@@ -15,7 +15,10 @@ export type AppView =
   | { screen: "create-group" }
   | { screen: "identity-log" }
   | { screen: "discovery" }
-  | { screen: "server-info" };
+  | { screen: "server-info" }
+  | { screen: "search" }
+  | { screen: "devices" }
+  | { screen: "link-device" };
 
 export type AppNotification = {
   id: number;

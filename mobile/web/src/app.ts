@@ -33,6 +33,9 @@ import {
   buildDiscoveryHandlesAuthHeaders,
   buildDiscoveryMatchAuthHeaders,
   buildPushTokenAuthHeaders,
+  buildListDevicesAuthHeaders,
+  buildLinkDeviceAuthHeaders,
+  buildRevokeDeviceAuthHeaders,
   decodeWireEnvelopeBase64,
   decryptFallbackMessage,
   encryptFallbackMessage,
@@ -49,6 +52,7 @@ import {
   type GroupMemberRecord,
   type IdentityLogItem,
   type DiscoveryMatchItem,
+  type DeviceRecord,
 } from "./server";
 import {
   DEFAULT_SETUP,
@@ -76,7 +80,15 @@ import {
   updateMessageStatus,
   getMessages,
   clearAllMessages,
+  searchMessages,
+  queueOutboxMessage,
+  getOutboxMessages,
+  removeOutboxMessage,
+  addReaction,
+  editStoredMessage,
+  getMessage,
   type StoredMessage,
+  type OutboxMessage,
 } from "./db";
 import { RealtimeInbox, type WsInboxMessage } from "./realtime";
 import {
@@ -149,6 +161,10 @@ onViewChange(render);
 onNotification(showToast);
 render(getCurrentView());
 
+// Offline banner
+window.addEventListener("offline", () => showOfflineBanner(true));
+window.addEventListener("online", () => { showOfflineBanner(false); void drainOutbox(); });
+
 // ---------------------------------------------------------------------------
 // Render dispatcher
 // ---------------------------------------------------------------------------
@@ -196,7 +212,22 @@ function render(view: AppView): void {
     case "server-info":
       renderServerInfo();
       break;
+    case "search":
+      renderSearch();
+      break;
+    case "devices":
+      renderDevices();
+      break;
+    case "link-device":
+      renderLinkDevice();
+      break;
   }
+
+  // Move focus to the main heading or first focusable element for screen readers
+  requestAnimationFrame(() => {
+    const heading = app.querySelector("h1, h2, h3, .topbar .chat-header-name, .search-input");
+    if (heading instanceof HTMLElement) heading.focus({ preventScroll: true });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -458,7 +489,12 @@ function renderConversations(): void {
       <header class="topbar">
         <h1 class="topbar-title">PQMsg</h1>
         <div class="topbar-actions">
-          <button id="conv-settings" class="icon-btn" title="Settings">
+          <button id="conv-search" class="icon-btn" title="Search messages" aria-label="Search messages">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+            </svg>
+          </button>
+          <button id="conv-settings" class="icon-btn" title="Settings" aria-label="Settings">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
             </svg>
@@ -468,12 +504,12 @@ function renderConversations(): void {
       <div class="shield-banner" id="shield-banner">
         <span class="shield-icon">🛡️</span>
         <span>Post-quantum encrypted — protected against future quantum computers</span>
-        <button id="dismiss-banner" class="dismiss-btn">×</button>
+        <button id="dismiss-banner" class="dismiss-btn" aria-label="Dismiss banner">×</button>
       </div>
-      <div class="conversation-list" id="conv-list">
+      <div class="conversation-list" id="conv-list" role="list">
         ${listHtml}
       </div>
-      <button id="fab-new" class="fab" title="New chat">
+      <button id="fab-new" class="fab" title="New chat" aria-label="New chat">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
           <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
         </svg>
@@ -512,6 +548,7 @@ function renderConversations(): void {
       }
     }), 0);
   });
+  q("#conv-search").addEventListener("click", () => navigateTo({ screen: "search" }));
   q("#conv-settings").addEventListener("click", () => navigateTo({ screen: "settings" }));
 
   // Bind conversation row clicks
@@ -628,7 +665,7 @@ async function renderChat(peerId: string): Promise<void> {
   app.innerHTML = `
     <div class="chat-shell">
       <header class="chat-header">
-        <button id="chat-back" class="icon-btn">
+        <button id="chat-back" class="icon-btn" aria-label="Back to conversations">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
@@ -648,7 +685,7 @@ async function renderChat(peerId: string): Promise<void> {
         <span class="typing-text">${escHtml(displayName)} is typing</span>
       </div>
       <div class="messages-container" id="messages-container">
-        <div class="messages" id="messages-list"></div>
+        <div class="messages" id="messages-list" role="log" aria-live="polite"></div>
       </div>
       <div class="chat-options-bar">
         <label class="chat-option" title="Sealed sender hides your identity from the server">
@@ -667,13 +704,13 @@ async function renderChat(peerId: string): Promise<void> {
         </label>
       </div>
       <div class="chat-input-bar">
-        <button id="chat-attach" class="icon-btn attach-btn" title="Attach file">
+        <button id="chat-attach" class="icon-btn attach-btn" title="Attach file" aria-label="Attach file">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
           </svg>
         </button>
-        <input id="chat-input" type="text" placeholder="Message" autocomplete="off" />
-        <button id="chat-send" class="send-btn" disabled>
+        <input id="chat-input" type="text" placeholder="Message" autocomplete="off" aria-label="Message" />
+        <button id="chat-send" class="send-btn" disabled aria-label="Send message">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
           </svg>
@@ -713,6 +750,27 @@ async function renderChat(peerId: string): Promise<void> {
     input.value = "";
     sendBtn.disabled = true;
 
+    // Handle edit mode
+    if (editContext) {
+      const { msgId } = editContext;
+      editContext = null;
+      sendBtn.textContent = "";
+      sendBtn.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>`;
+      const updated = await editStoredMessage(msgId, text);
+      if (updated) {
+        const bubble = document.getElementById(`msg-${msgId}`);
+        if (bubble) {
+          const btEl = bubble.querySelector(".bubble-text");
+          if (btEl) btEl.textContent = text;
+          const timeEl = bubble.querySelector(".bubble-time");
+          if (timeEl && !timeEl.querySelector(".edit-indicator")) {
+            timeEl.insertAdjacentHTML("beforeend", ' <span class="edit-indicator">(edited)</span>');
+          }
+        }
+      }
+      return;
+    }
+
     const useSealed = (document.getElementById("opt-sealed") as HTMLInputElement)?.checked ?? false;
     const ephTtl = Number((document.getElementById("opt-ephemeral") as HTMLSelectElement)?.value ?? 0);
 
@@ -726,7 +784,16 @@ async function renderChat(peerId: string): Promise<void> {
       text: labelPrefix + text,
       timestamp: Date.now(),
       status: "sending",
+      replyToId: replyContext?.msgId,
+      replyPreview: replyContext?.preview,
+      contentType: replyContext ? "reply" : "text",
     };
+
+    // Clear reply bar
+    if (replyContext) {
+      replyContext = null;
+      document.querySelector(".reply-compose-bar")?.remove();
+    }
 
     // Optimistic: show immediately
     await saveMessage(msg);
@@ -813,6 +880,9 @@ async function renderChat(peerId: string): Promise<void> {
         text: fileText,
         timestamp: Date.now(),
         status: "sent",
+        fileId: res.file_id,
+        mimeType: file.type || "application/octet-stream",
+        fileName: file.name,
       };
       await saveMessage(msg);
       appendBubble(msgList, msg, container);
@@ -824,14 +894,15 @@ async function renderChat(peerId: string): Promise<void> {
     fileInput.value = "";
   });
 
-  // Message deletion via context menu (right-click / long-press)
+  // Message context menu (right-click / long-press) — Reply, React, Edit, Delete
   msgList.addEventListener("contextmenu", (e) => {
     e.preventDefault();
-    const bubble = (e.target as HTMLElement).closest(".bubble-sent") as HTMLElement | null;
+    const bubble = (e.target as HTMLElement).closest(".bubble") as HTMLElement | null;
     if (!bubble) return;
+    const msgId = bubble.id.replace("msg-", "");
+    const isMine = bubble.classList.contains("bubble-sent");
     const serverMid = bubble.getAttribute("data-server-mid");
-    if (!serverMid) return;
-    showDeleteConfirm(bubble, Number(serverMid));
+    showBubbleContextMenu(e as MouseEvent, msgId, isMine, serverMid ? Number(serverMid) : null, bubble, input, sendBtn, peerId);
   });
 
   // Load history from IndexedDB
@@ -884,11 +955,54 @@ function appendBubble(container: HTMLElement, msg: StoredMessage, scrollContaine
   scrollToBottom(scrollContainer);
 }
 
+// Blob URL cache for downloaded file previews
+const mediaBlobCache = new Map<string, string>();
+
+function renderMediaContent(msg: StoredMessage): string {
+  if (!msg.fileId) return `<div class="bubble-text">${escHtml(msg.text)}</div>`;
+  const mime = msg.mimeType || "application/octet-stream";
+  const name = msg.fileName || msg.fileId;
+  const blobUrl = mediaBlobCache.get(msg.fileId);
+  if (mime.startsWith("image/") && blobUrl) {
+    return `<img src="${blobUrl}" alt="${escHtml(name)}" class="media-img" loading="lazy" data-file-id="${escHtml(msg.fileId)}" />`;
+  }
+  if (mime.startsWith("audio/") && blobUrl) {
+    return `<audio controls src="${blobUrl}" class="media-audio"></audio>`;
+  }
+  if (mime.startsWith("video/") && blobUrl) {
+    return `<video controls src="${blobUrl}" class="media-video"></video>`;
+  }
+  // Show loading placeholder or download link
+  if (mime.startsWith("image/") || mime.startsWith("audio/") || mime.startsWith("video/")) {
+    return `<div class="media-loading" data-file-id="${escHtml(msg.fileId)}">Loading media…</div>`;
+  }
+  return `<a class="media-file-link" href="#" data-file-id="${escHtml(msg.fileId)}">📎 ${escHtml(name)}</a>`;
+}
+
+function renderReplyQuote(msg: StoredMessage): string {
+  if (!msg.replyToId || !msg.replyPreview) return "";
+  return `<div class="reply-quote">${escHtml(msg.replyPreview)}</div>`;
+}
+
+function renderReactions(msg: StoredMessage): string {
+  if (!msg.reactions || msg.reactions.length === 0) return "";
+  const counts = new Map<string, number>();
+  for (const r of msg.reactions) counts.set(r.emoji, (counts.get(r.emoji) ?? 0) + 1);
+  const pills = Array.from(counts.entries())
+    .map(([emoji, count]) => `<span class="reaction-pill" data-emoji="${emoji}">${emoji}${count > 1 ? ` ${count}` : ""}</span>`)
+    .join("");
+  return `<div class="reaction-pills">${pills}</div>`;
+}
+
 function appendBubbleElement(container: HTMLElement, msg: StoredMessage): void {
+  // Skip rendering standalone reaction messages as bubbles
+  if (msg.contentType === "reaction") return;
+
   const isMine = msg.sender === setup.userId;
   const bubble = document.createElement("div");
   bubble.className = `bubble ${isMine ? "bubble-sent" : "bubble-received"}`;
   bubble.id = `msg-${msg.id}`;
+  bubble.setAttribute("role", "listitem");
   bubble.setAttribute("data-date", new Date(msg.timestamp).toLocaleDateString());
   if (msg.serverMessageId) {
     bubble.setAttribute("data-server-mid", String(msg.serverMessageId));
@@ -896,16 +1010,37 @@ function appendBubbleElement(container: HTMLElement, msg: StoredMessage): void {
 
   const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const statusIcon = isMine ? statusSvg(msg.status) : "";
+  const editedTag = msg.editedAt ? ' <span class="edit-indicator">(edited)</span>' : "";
 
   bubble.innerHTML = `
-    <div class="bubble-text">${escHtml(msg.text)}</div>
+    ${renderReplyQuote(msg)}
+    ${msg.fileId ? renderMediaContent(msg) : `<div class="bubble-text">${escHtml(msg.text)}</div>`}
     <div class="bubble-meta">
-      <span class="bubble-time">${time}</span>
+      <span class="bubble-time">${time}${editedTag}</span>
       ${statusIcon}
     </div>
+    ${renderReactions(msg)}
   `;
 
   container.appendChild(bubble);
+
+  // Lazy-load media if fileId present and not cached
+  if (msg.fileId && !mediaBlobCache.has(msg.fileId)) {
+    void loadMediaBlob(msg.fileId, bubble);
+  }
+
+  // Click image for lightbox
+  const img = bubble.querySelector<HTMLImageElement>(".media-img");
+  if (img) img.addEventListener("click", () => showLightbox(img.src));
+
+  // Download link for non-previewable files
+  const fileLink = bubble.querySelector<HTMLAnchorElement>(".media-file-link");
+  if (fileLink) {
+    fileLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      void downloadAndOpenFile(fileLink.dataset.fileId!);
+    });
+  }
 }
 
 function updateBubbleStatus(msgId: string, status: StoredMessage["status"]): void {
@@ -957,7 +1092,7 @@ function renderNewChat(): void {
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
-        <button id="nc-back" class="icon-btn">
+        <button id="nc-back" class="icon-btn" aria-label="Back">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
@@ -1037,7 +1172,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
   app.innerHTML = `
     <div class="chat-shell">
       <header class="chat-header">
-        <button id="gc-back" class="icon-btn">
+        <button id="gc-back" class="icon-btn" aria-label="Back to conversations">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
@@ -1049,7 +1184,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
           <span class="chat-header-name">${escHtml(groupId)}</span>
           <span class="chat-header-status" id="gc-member-count">group</span>
         </div>
-        <button id="gc-info" class="icon-btn" title="Group info">
+        <button id="gc-info" class="icon-btn" title="Group info" aria-label="Group info">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>
           </svg>
@@ -1057,11 +1192,11 @@ async function renderGroupChat(groupId: string): Promise<void> {
         <div class="chat-header-shield" title="Post-quantum encrypted">🛡️</div>
       </header>
       <div class="messages-container" id="messages-container">
-        <div class="messages" id="messages-list"></div>
+        <div class="messages" id="messages-list" role="log" aria-live="polite"></div>
       </div>
       <div class="chat-input-bar">
-        <input id="gc-input" type="text" placeholder="Message to group" autocomplete="off" />
-        <button id="gc-send" class="send-btn" disabled>
+        <input id="gc-input" type="text" placeholder="Message to group" autocomplete="off" aria-label="Message to group" />
+        <button id="gc-send" class="send-btn" disabled aria-label="Send message">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
           </svg>
@@ -1090,6 +1225,27 @@ async function renderGroupChat(groupId: string): Promise<void> {
     input.value = "";
     sendBtn.disabled = true;
 
+    // Handle edit mode
+    if (editContext) {
+      const { msgId } = editContext;
+      editContext = null;
+      sendBtn.textContent = "";
+      sendBtn.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>`;
+      const updated = await editStoredMessage(msgId, text);
+      if (updated) {
+        const bubble = document.getElementById(`msg-${msgId}`);
+        if (bubble) {
+          const btEl = bubble.querySelector(".bubble-text");
+          if (btEl) btEl.textContent = text;
+          const timeEl = bubble.querySelector(".bubble-time");
+          if (timeEl && !timeEl.querySelector(".edit-indicator")) {
+            timeEl.insertAdjacentHTML("beforeend", ' <span class="edit-indicator">(edited)</span>');
+          }
+        }
+      }
+      return;
+    }
+
     const tempId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const msg: StoredMessage = {
       id: tempId,
@@ -1099,7 +1255,16 @@ async function renderGroupChat(groupId: string): Promise<void> {
       text,
       timestamp: Date.now(),
       status: "sending",
+      replyToId: replyContext?.msgId,
+      replyPreview: replyContext?.preview,
+      contentType: replyContext ? "reply" : "text",
     };
+
+    // Clear reply bar
+    if (replyContext) {
+      replyContext = null;
+      document.querySelector(".reply-compose-bar")?.remove();
+    }
 
     await saveMessage(msg);
     appendBubble(msgList, msg, container);
@@ -1134,6 +1299,17 @@ async function renderGroupChat(groupId: string): Promise<void> {
   scrollToBottom(container);
   input.focus();
 
+  // Group chat context menu
+  msgList.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    const bubble = (e.target as HTMLElement).closest(".bubble") as HTMLElement | null;
+    if (!bubble) return;
+    const msgId = bubble.id.replace("msg-", "");
+    const isMine = bubble.classList.contains("bubble-sent");
+    const serverMid = bubble.getAttribute("data-server-mid");
+    showBubbleContextMenu(e as MouseEvent, msgId, isMine, serverMid ? Number(serverMid) : null, bubble, input, sendBtn);
+  });
+
   // Load members count
   void loadGroupMembersCount(groupId);
 }
@@ -1160,7 +1336,7 @@ async function renderGroupInfo(groupId: string): Promise<void> {
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
-        <button id="gi-back" class="icon-btn">
+        <button id="gi-back" class="icon-btn" aria-label="Back to group chat">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
@@ -1259,7 +1435,7 @@ function renderCreateGroup(): void {
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
-        <button id="cg-back" class="icon-btn">
+        <button id="cg-back" class="icon-btn" aria-label="Back">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
@@ -1350,7 +1526,7 @@ function renderSettings(): void {
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
-        <button id="set-back" class="icon-btn">
+        <button id="set-back" class="icon-btn" aria-label="Back to conversations">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
@@ -1423,6 +1599,13 @@ function renderSettings(): void {
             <button id="set-push-register" class="btn-sm">Register</button>
           </div>
           <div id="push-status"></div>
+        </div>
+        <div class="settings-section">
+          <h3>Devices</h3>
+          <p class="text-secondary settings-desc">Manage linked devices for your account.</p>
+          <div class="settings-row">
+            <button id="set-devices" class="btn-sm">📱 Manage Devices</button>
+          </div>
         </div>
         <div class="settings-section">
           <h3>Server</h3>
@@ -1505,6 +1688,7 @@ function renderSettings(): void {
 
   // Server info navigation
   q("#set-server-info").addEventListener("click", () => navigateTo({ screen: "server-info" }));
+  q("#set-devices").addEventListener("click", () => navigateTo({ screen: "devices" }));
 
   // Push token registration
   q("#set-push-register").addEventListener("click", async () => {
@@ -1589,6 +1773,123 @@ function renderSettings(): void {
     saveSetup(setup);
     navigateTo({ screen: "onboarding" });
     notify("Account deleted", "info");
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Device management
+// ---------------------------------------------------------------------------
+
+async function renderDevices(): Promise<void> {
+  app.innerHTML = `
+    <div class="app-shell">
+      <header class="topbar">
+        <button id="dev-back" class="icon-btn" aria-label="Back to settings">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 12H5M12 19l-7-7 7-7"/>
+          </svg>
+        </button>
+        <h1 class="topbar-title">Devices</h1>
+      </header>
+      <div class="settings-body">
+        <div id="device-list"><p class="text-secondary">Loading devices…</p></div>
+        <button id="dev-link" class="btn-primary" style="margin-top:1rem;">+ Link New Device</button>
+      </div>
+    </div>
+  `;
+  q("#dev-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
+  q("#dev-link").addEventListener("click", () => navigateTo({ screen: "link-device" }));
+
+  try {
+    const k = await ensureKeys();
+    const api = new PqmsgApi(setup.serverUrl);
+    const headers = buildListDevicesAuthHeaders(k);
+    const resp = await api.listDevices(k.userId, headers);
+    const listEl = q("#device-list");
+    if (resp.devices.length === 0) {
+      listEl.innerHTML = `<p class="text-secondary">No devices found.</p>`;
+      return;
+    }
+    listEl.innerHTML = resp.devices.map(d => {
+      const isCurrent = d.device_id === setup.deviceId;
+      const statusLabel = d.active ? (isCurrent ? "This device" : "Active") : "Revoked";
+      const statusClass = d.active ? (isCurrent ? "text-success" : "") : "text-danger";
+      const linked = new Date(d.linked_at).toLocaleDateString();
+      const revokeBtn = d.active && !isCurrent
+        ? `<button class="btn-sm btn-danger-sm" data-revoke-device="${escHtml(d.device_id)}">Revoke</button>`
+        : "";
+      return `
+        <div class="device-row">
+          <div class="device-info">
+            <span class="mono">${escHtml(d.device_id)}</span>
+            <span class="${statusClass}">${statusLabel}</span>
+            <span class="text-secondary">Linked ${linked}</span>
+            ${d.revoked_at ? `<span class="text-secondary">Revoked ${new Date(d.revoked_at).toLocaleDateString()}</span>` : ""}
+          </div>
+          ${revokeBtn}
+        </div>
+      `;
+    }).join("");
+
+    listEl.querySelectorAll("[data-revoke-device]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        const targetDeviceId = (e.currentTarget as HTMLElement).dataset.revokeDevice!;
+        if (!confirm(`Revoke device "${targetDeviceId}"? This cannot be undone.`)) return;
+        try {
+          const rk = await ensureKeys();
+          const rHeaders = buildRevokeDeviceAuthHeaders(rk, targetDeviceId);
+          await api.revokeDevice(rk.userId, targetDeviceId, rHeaders);
+          notify(`Device ${targetDeviceId} revoked`, "success");
+          renderDevices();
+        } catch (err) {
+          notify(`Revoke failed: ${errorMsg(err)}`, "error");
+        }
+      });
+    });
+  } catch (e) {
+    q("#device-list").innerHTML = `<p class="text-danger">Failed to load devices: ${escHtml(errorMsg(e))}</p>`;
+  }
+}
+
+function renderLinkDevice(): void {
+  app.innerHTML = `
+    <div class="app-shell">
+      <header class="topbar">
+        <button id="ld-back" class="icon-btn" aria-label="Back to devices">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 12H5M12 19l-7-7 7-7"/>
+          </svg>
+        </button>
+        <h1 class="topbar-title">Link New Device</h1>
+      </header>
+      <div class="settings-body">
+        <p class="text-secondary">Enter a device ID for the new device. Keys will be generated and linked to your account.</p>
+        <label class="field">
+          <span>New Device ID</span>
+          <input id="ld-device-id" type="text" placeholder="e.g. my-phone-1" />
+        </label>
+        <button id="ld-submit" class="btn-primary">Link Device</button>
+        <div id="ld-status"></div>
+      </div>
+    </div>
+  `;
+
+  q("#ld-back").addEventListener("click", () => navigateTo({ screen: "devices" }));
+  q("#ld-submit").addEventListener("click", async () => {
+    const newDeviceId = q<HTMLInputElement>("#ld-device-id").value.trim();
+    if (!newDeviceId) { q<HTMLInputElement>("#ld-device-id").focus(); return; }
+    const statusEl = q("#ld-status");
+    statusEl.textContent = "Linking device…";
+    try {
+      const k = await ensureKeys();
+      const api = new PqmsgApi(setup.serverUrl);
+      const headers = buildLinkDeviceAuthHeaders(k, newDeviceId);
+      const result = await api.linkDevice(k.userId, newDeviceId, headers);
+      statusEl.innerHTML = `<p class="text-success">✓ Device "${escHtml(result.linked_device_id)}" linked at ${new Date(result.linked_at).toLocaleString()}</p>`;
+      notify(`Device ${result.linked_device_id} linked`, "success");
+    } catch (e) {
+      statusEl.innerHTML = `<p class="text-danger">Link failed: ${escHtml(errorMsg(e))}</p>`;
+    }
   });
 }
 
@@ -1720,6 +2021,347 @@ async function pollInboxSilent(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Rich interaction helpers (Reply, React, Edit)
+// ---------------------------------------------------------------------------
+
+const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
+
+// State for reply compose
+let replyContext: { msgId: string; preview: string } | null = null;
+// State for edit compose
+let editContext: { msgId: string; originalText: string } | null = null;
+
+function showBubbleContextMenu(
+  e: MouseEvent,
+  msgId: string,
+  isMine: boolean,
+  serverMid: number | null,
+  bubble: HTMLElement,
+  inputEl: HTMLInputElement,
+  sendBtnEl: HTMLButtonElement,
+  peerId?: string,
+): void {
+  // Remove any existing context menu
+  document.querySelector(".ctx-menu")?.remove();
+
+  const menu = document.createElement("div");
+  menu.className = "ctx-menu";
+  menu.style.top = `${e.clientY}px`;
+  menu.style.left = `${e.clientX}px`;
+
+  let items = `<div class="ctx-item" data-action="reply">↩️ Reply</div>
+    <div class="ctx-item" data-action="react">😀 React</div>`;
+  if (isMine) {
+    items += `<div class="ctx-item" data-action="edit">✏️ Edit</div>`;
+    if (serverMid) items += `<div class="ctx-item ctx-danger" data-action="delete">🗑️ Delete</div>`;
+  }
+  menu.innerHTML = items;
+  document.body.appendChild(menu);
+
+  const dismiss = () => menu.remove();
+  setTimeout(() => document.addEventListener("click", dismiss, { once: true }), 0);
+
+  menu.addEventListener("click", async (ev) => {
+    const action = (ev.target as HTMLElement).dataset.action;
+    menu.remove();
+    if (!action) return;
+
+    if (action === "reply") {
+      const text = bubble.querySelector(".bubble-text")?.textContent || "";
+      replyContext = { msgId, preview: text.slice(0, 60) };
+      showReplyBar(inputEl);
+      inputEl.focus();
+    }
+
+    if (action === "react") {
+      showReactionPicker(e.clientX, e.clientY, msgId, bubble, peerId);
+    }
+
+    if (action === "edit") {
+      const text = bubble.querySelector(".bubble-text")?.textContent || "";
+      editContext = { msgId, originalText: text };
+      inputEl.value = text;
+      sendBtnEl.disabled = false;
+      sendBtnEl.textContent = "Save";
+      inputEl.focus();
+    }
+
+    if (action === "delete" && serverMid) {
+      showDeleteConfirm(bubble, serverMid);
+    }
+  });
+}
+
+function showReplyBar(inputEl: HTMLInputElement): void {
+  // Remove existing reply bar
+  document.querySelector(".reply-compose-bar")?.remove();
+
+  if (!replyContext) return;
+  const bar = document.createElement("div");
+  bar.className = "reply-compose-bar";
+  bar.innerHTML = `<span class="reply-bar-text">↩️ ${escHtml(replyContext.preview)}</span>
+    <button class="reply-bar-close icon-btn" aria-label="Cancel reply">✕</button>`;
+  bar.querySelector(".reply-bar-close")!.addEventListener("click", () => {
+    replyContext = null;
+    bar.remove();
+  });
+  inputEl.parentElement!.insertBefore(bar, inputEl.parentElement!.firstChild);
+}
+
+function showReactionPicker(x: number, y: number, msgId: string, bubble: HTMLElement, peerId?: string): void {
+  document.querySelector(".reaction-picker")?.remove();
+  const picker = document.createElement("div");
+  picker.className = "reaction-picker";
+  picker.style.top = `${y}px`;
+  picker.style.left = `${x}px`;
+  picker.innerHTML = QUICK_REACTIONS.map(e => `<span class="reaction-option" data-emoji="${e}">${e}</span>`).join("");
+  document.body.appendChild(picker);
+
+  setTimeout(() => document.addEventListener("click", () => picker.remove(), { once: true }), 0);
+
+  picker.addEventListener("click", async (ev) => {
+    const emoji = (ev.target as HTMLElement).dataset.emoji;
+    if (!emoji) return;
+    picker.remove();
+    const updated = await addReaction(msgId, emoji, setup.userId);
+    if (updated) {
+      // Re-render reaction pills on the bubble
+      let pills = bubble.querySelector(".reaction-pills");
+      if (pills) pills.remove();
+      const newHtml = renderReactions(updated);
+      if (newHtml) bubble.insertAdjacentHTML("beforeend", newHtml);
+      // Add click handler for toggling on newly rendered pills
+      bubble.querySelectorAll(".reaction-pill").forEach(pill => {
+        pill.addEventListener("click", async () => {
+          const em = (pill as HTMLElement).dataset.emoji!;
+          const u = await addReaction(msgId, em, setup.userId);
+          if (u) {
+            bubble.querySelector(".reaction-pills")?.remove();
+            const h = renderReactions(u);
+            if (h) bubble.insertAdjacentHTML("beforeend", h);
+          }
+        });
+      });
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Media helpers
+// ---------------------------------------------------------------------------
+
+async function loadMediaBlob(fileId: string, bubbleEl: HTMLElement): Promise<void> {
+  try {
+    const k = await ensureKeys();
+    const api = new PqmsgApi(setup.serverUrl);
+    const headers = buildFileDownloadAuthHeaders(k, fileId);
+    const res = await api.downloadFile(fileId, headers);
+    const bytes = Uint8Array.from(atob(res.file_bytes_base64), c => c.charCodeAt(0));
+    const blob = new Blob([bytes], { type: res.mime_type });
+    const url = URL.createObjectURL(blob);
+    mediaBlobCache.set(fileId, url);
+    // Re-render the placeholder
+    const placeholder = bubbleEl.querySelector(`[data-file-id="${fileId}"]`);
+    if (placeholder) {
+      if (res.mime_type.startsWith("image/")) {
+        const img = document.createElement("img");
+        img.src = url;
+        img.className = "media-img";
+        img.loading = "lazy";
+        img.addEventListener("click", () => showLightbox(url));
+        placeholder.replaceWith(img);
+      } else if (res.mime_type.startsWith("audio/")) {
+        const audio = document.createElement("audio");
+        audio.controls = true;
+        audio.src = url;
+        audio.className = "media-audio";
+        placeholder.replaceWith(audio);
+      } else if (res.mime_type.startsWith("video/")) {
+        const video = document.createElement("video");
+        video.controls = true;
+        video.src = url;
+        video.className = "media-video";
+        placeholder.replaceWith(video);
+      }
+    }
+  } catch {
+    // Leave placeholder as-is
+  }
+}
+
+function showLightbox(src: string): void {
+  const overlay = document.createElement("div");
+  overlay.className = "media-lightbox";
+  overlay.innerHTML = `<img src="${src}" class="lightbox-img" />`;
+  overlay.addEventListener("click", () => overlay.remove());
+  document.addEventListener("keydown", function handler(e) {
+    if (e.key === "Escape") { overlay.remove(); document.removeEventListener("keydown", handler); }
+  });
+  document.body.appendChild(overlay);
+}
+
+async function downloadAndOpenFile(fileId: string): Promise<void> {
+  try {
+    const k = await ensureKeys();
+    const api = new PqmsgApi(setup.serverUrl);
+    const headers = buildFileDownloadAuthHeaders(k, fileId);
+    const res = await api.downloadFile(fileId, headers);
+    const bytes = Uint8Array.from(atob(res.file_bytes_base64), c => c.charCodeAt(0));
+    const blob = new Blob([bytes], { type: res.mime_type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileId;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) {
+    notify(`Download failed: ${errorMsg(e)}`, "error");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+let searchDebounce: ReturnType<typeof setTimeout> | null = null;
+
+function renderSearch(): void {
+  app.innerHTML = `
+    <div class="app-shell">
+      <header class="topbar">
+        <button id="search-back" class="icon-btn" aria-label="Back to conversations">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 12H5M12 19l-7-7 7-7"/>
+          </svg>
+        </button>
+        <input id="search-input" type="text" class="search-input" placeholder="Search messages…" autocomplete="off" aria-label="Search messages" />
+      </header>
+      <div class="search-results" id="search-results" role="list">
+        <p class="empty-state">Type to search your messages</p>
+      </div>
+    </div>
+  `;
+
+  const input = q<HTMLInputElement>("#search-input");
+  const results = q("#search-results");
+
+  q("#search-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
+
+  input.addEventListener("input", () => {
+    if (searchDebounce) clearTimeout(searchDebounce);
+    const query = input.value.trim();
+    if (!query) {
+      results.innerHTML = `<p class="empty-state">Type to search your messages</p>`;
+      return;
+    }
+    searchDebounce = setTimeout(async () => {
+      const msgs = await searchMessages(query);
+      if (msgs.length === 0) {
+        results.innerHTML = `<p class="empty-state">No results for "${escHtml(query)}"</p>`;
+        return;
+      }
+      results.innerHTML = msgs.slice(0, 50).map(m => {
+        const isGroup = m.conversationId.startsWith("group:");
+        const peer = isGroup ? m.conversationId.replace("group:", "") : (m.sender === setup.userId ? m.recipient : m.sender);
+        const time = new Date(m.timestamp).toLocaleDateString([], { month: "short", day: "numeric" });
+        const preview = m.text.length > 80 ? m.text.slice(0, 80) + "…" : m.text;
+        return `<div class="search-result-item" role="listitem" data-search-peer="${escHtml(peer)}" data-search-group="${isGroup ? "1" : ""}">
+          <div class="avatar avatar-sm">${peer.slice(0, 2).toUpperCase()}</div>
+          <div class="search-result-body">
+            <div class="search-result-header">
+              <span class="search-result-name">${escHtml(peer)}</span>
+              <span class="search-result-time">${time}</span>
+            </div>
+            <div class="search-result-preview">${escHtml(preview)}</div>
+          </div>
+        </div>`;
+      }).join("");
+
+      for (const row of results.querySelectorAll(".search-result-item")) {
+        row.addEventListener("click", () => {
+          const peer = (row as HTMLElement).dataset.searchPeer!;
+          const isGroup = (row as HTMLElement).dataset.searchGroup === "1";
+          if (isGroup) {
+            navigateTo({ screen: "group-chat", groupId: peer });
+          } else {
+            navigateTo({ screen: "chat", peerId: peer });
+          }
+        });
+      }
+    }, 300);
+  });
+
+  input.focus();
+}
+
+// ---------------------------------------------------------------------------
+// Offline banner & outbox
+// ---------------------------------------------------------------------------
+
+function showOfflineBanner(offline: boolean): void {
+  let banner = document.getElementById("offline-banner");
+  if (offline) {
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.id = "offline-banner";
+      banner.className = "offline-banner";
+      banner.setAttribute("role", "status");
+      banner.textContent = "No internet connection";
+      document.body.appendChild(banner);
+    }
+  } else {
+    banner?.remove();
+  }
+}
+
+async function drainOutbox(): Promise<void> {
+  try {
+    const k = await ensureKeys();
+    const api = new PqmsgApi(setup.serverUrl);
+    const passphrase = getPassphrase();
+    const queued = await getOutboxMessages();
+    for (const item of queued) {
+      try {
+        if (item.groupId) {
+          const envelope = await encryptFallbackMessage(passphrase, k.userId, item.groupId, item.text);
+          const messageBytesBase64 = encodeWireEnvelopeBase64(envelope);
+          const headers = buildGroupRelayAuthHeaders(k, item.groupId, messageBytesBase64);
+          await api.relayGroupMessage(item.groupId, {
+            sender_user_id: k.userId, device_id: k.deviceId, message_bytes_base64: messageBytesBase64,
+          }, headers);
+        } else if (item.sealed) {
+          const envelope = await encryptFallbackMessage(passphrase, k.userId, item.peerId, item.text);
+          const messageBytesBase64 = encodeWireEnvelopeBase64(envelope);
+          await api.sealedRelay(item.peerId, { message_bytes_base64: messageBytesBase64 });
+        } else if (item.ephemeralTtl > 0) {
+          const envelope = await encryptFallbackMessage(passphrase, k.userId, item.peerId, item.text);
+          const messageBytesBase64 = encodeWireEnvelopeBase64(envelope);
+          const headers = buildEphemeralRelayAuthHeaders(k, item.peerId, item.ephemeralTtl);
+          await api.relayEphemeral(item.peerId, {
+            sender_user_id: k.userId, device_id: k.deviceId,
+            message_bytes_base64: messageBytesBase64, ttl_seconds: item.ephemeralTtl,
+          }, headers);
+        } else {
+          const envelope = await encryptFallbackMessage(passphrase, k.userId, item.peerId, item.text);
+          const messageBytesBase64 = encodeWireEnvelopeBase64(envelope);
+          const headers = buildRelayAuthHeaders(k, item.peerId, messageBytesBase64);
+          await api.relay(item.peerId, {
+            sender_user_id: k.userId, device_id: k.deviceId, message_bytes_base64: messageBytesBase64,
+          }, headers);
+        }
+        await removeOutboxMessage(item.id);
+        await updateMessageStatus(item.id, "sent");
+        updateBubbleStatus(item.id, "sent");
+      } catch {
+        // Leave in outbox for next retry
+      }
+    }
+  } catch {
+    // Keys not available or no passphrase — skip drain
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Toast notifications
 // ---------------------------------------------------------------------------
 
@@ -1728,6 +2370,8 @@ function showToast(n: AppNotification): void {
   if (!toast) {
     toast = document.createElement("div");
     toast.id = "toast";
+    toast.setAttribute("role", "alert");
+    toast.setAttribute("aria-live", "assertive");
     document.body.appendChild(toast);
   }
   toast.textContent = n.text;
@@ -1889,7 +2533,7 @@ async function renderIdentityLog(): Promise<void> {
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
-        <button id="idlog-back" class="icon-btn">
+        <button id="idlog-back" class="icon-btn" aria-label="Back to settings">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
@@ -1998,7 +2642,7 @@ async function renderDiscovery(): Promise<void> {
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
-        <button id="disc-back" class="icon-btn">
+        <button id="disc-back" class="icon-btn" aria-label="Back to settings">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
@@ -2107,7 +2751,7 @@ async function renderServerInfo(): Promise<void> {
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
-        <button id="sinfo-back" class="icon-btn">
+        <button id="sinfo-back" class="icon-btn" aria-label="Back to settings">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>

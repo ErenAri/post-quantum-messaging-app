@@ -19,6 +19,7 @@ type WsListener = (msg: WsInboxMessage) => void;
 export class RealtimeInbox {
   private ws: WebSocket | null = null;
   private listeners: WsListener[] = [];
+  private reconnectListeners: Array<() => void> = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionallyClosed = false;
   private serverUrl: string;
@@ -31,6 +32,10 @@ export class RealtimeInbox {
 
   onMessage(listener: WsListener): void {
     this.listeners.push(listener);
+  }
+
+  onReconnect(listener: () => void): void {
+    this.reconnectListeners.push(listener);
   }
 
   connect(): void {
@@ -73,6 +78,9 @@ export class RealtimeInbox {
 
     ws.onopen = () => {
       console.log("[ws] connected");
+      for (const listener of this.reconnectListeners) {
+        listener();
+      }
     };
 
     ws.onmessage = (event) => {

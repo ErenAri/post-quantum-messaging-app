@@ -12,11 +12,32 @@ export type StoredMessage = {
   timestamp: number;
   status: "sending" | "sent" | "delivered" | "failed";
   serverMessageId?: number;
+  // B1: Media preview fields
+  fileId?: string;
+  mimeType?: string;
+  fileName?: string;
+  // B2: Rich interactions
+  replyToId?: string;
+  replyPreview?: string;
+  reactions?: Array<{ emoji: string; sender: string }>;
+  editedAt?: number;
+  contentType?: "text" | "reply" | "reaction" | "edit";
 };
 
 const DB_NAME = "pqmsg-web";
-const DB_VERSION = 1;
+const DB_VERSION = 3;
 const MESSAGES_STORE = "messages";
+const OUTBOX_STORE = "outbox";
+
+export type OutboxMessage = {
+  id: string;
+  peerId: string;
+  groupId?: string;
+  text: string;
+  timestamp: number;
+  sealed: boolean;
+  ephemeralTtl: number;
+};
 
 let dbInstance: IDBDatabase | null = null;
 
@@ -24,12 +45,15 @@ function open(): Promise<IDBDatabase> {
   if (dbInstance) return Promise.resolve(dbInstance);
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result;
       if (!db.objectStoreNames.contains(MESSAGES_STORE)) {
         const store = db.createObjectStore(MESSAGES_STORE, { keyPath: "id" });
         store.createIndex("by_conversation", "conversationId", { unique: false });
         store.createIndex("by_timestamp", ["conversationId", "timestamp"], { unique: false });
+      }
+      if (!db.objectStoreNames.contains(OUTBOX_STORE)) {
+        db.createObjectStore(OUTBOX_STORE, { keyPath: "id" });
       }
     };
     request.onsuccess = () => {
@@ -115,5 +139,112 @@ export async function clearAllMessages(): Promise<void> {
     tx.objectStore(MESSAGES_STORE).clear();
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function searchMessages(query: string): Promise<StoredMessage[]> {
+  const db = await open();
+  const lower = query.toLowerCase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MESSAGES_STORE, "readonly");
+    const store = tx.objectStore(MESSAGES_STORE);
+    const results: StoredMessage[] = [];
+    const request = store.openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (cursor) {
+        const msg = cursor.value as StoredMessage;
+        if (msg.text.toLowerCase().includes(lower)) {
+          results.push(msg);
+        }
+        cursor.continue();
+      }
+    };
+    tx.oncomplete = () => {
+      results.sort((a, b) => b.timestamp - a.timestamp);
+      resolve(results);
+    };
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function queueOutboxMessage(msg: OutboxMessage): Promise<void> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OUTBOX_STORE, "readwrite");
+    tx.objectStore(OUTBOX_STORE).put(msg);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function getOutboxMessages(): Promise<OutboxMessage[]> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OUTBOX_STORE, "readonly");
+    const request = tx.objectStore(OUTBOX_STORE).getAll();
+    request.onsuccess = () => resolve(request.result as OutboxMessage[]);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function removeOutboxMessage(id: string): Promise<void> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OUTBOX_STORE, "readwrite");
+    tx.objectStore(OUTBOX_STORE).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/** Add or toggle a reaction on a stored message. */
+export async function addReaction(messageId: string, emoji: string, sender: string): Promise<StoredMessage | null> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MESSAGES_STORE, "readwrite");
+    const store = tx.objectStore(MESSAGES_STORE);
+    const req = store.get(messageId);
+    req.onsuccess = () => {
+      const msg = req.result as StoredMessage | undefined;
+      if (!msg) { resolve(null); return; }
+      const reactions = msg.reactions ?? [];
+      const idx = reactions.findIndex(r => r.emoji === emoji && r.sender === sender);
+      if (idx >= 0) reactions.splice(idx, 1); else reactions.push({ emoji, sender });
+      msg.reactions = reactions;
+      store.put(msg);
+      tx.oncomplete = () => resolve(msg);
+    };
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/** Update the text of a stored message (for edits). */
+export async function editStoredMessage(messageId: string, newText: string): Promise<StoredMessage | null> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MESSAGES_STORE, "readwrite");
+    const store = tx.objectStore(MESSAGES_STORE);
+    const req = store.get(messageId);
+    req.onsuccess = () => {
+      const msg = req.result as StoredMessage | undefined;
+      if (!msg) { resolve(null); return; }
+      msg.text = newText;
+      msg.editedAt = Date.now();
+      store.put(msg);
+      tx.oncomplete = () => resolve(msg);
+    };
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/** Get a single stored message by ID. */
+export async function getMessage(id: string): Promise<StoredMessage | null> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MESSAGES_STORE, "readonly");
+    const req = tx.objectStore(MESSAGES_STORE).get(id);
+    req.onsuccess = () => resolve((req.result as StoredMessage) ?? null);
+    req.onerror = () => reject(req.error);
   });
 }

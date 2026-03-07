@@ -18,5 +18,8 @@ pub mod storage;
 pub mod tlv;
 pub mod wire;
 
+#[cfg(feature = "wasm")]
+pub mod wasm_bindings;
+
 pub use alg as algorithms;
 pub use error::CoreError;
