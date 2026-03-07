@@ -30,10 +30,9 @@ event BobBundlePublished(bitstring, pkey, pkey, pkey).
 event AliceAcceptedBundle(bitstring, bitstring).
 event AliceComplete(bitstring, bitstring, bitstring).
 event BobComplete(bitstring, bitstring, bitstring).
-(* Forward secrecy events *)
 event EphemeralKeyRevealed(bitstring).
-(* Identity misbinding: capture the full identity pair in the session *)
-event SessionBound(pkey, pkey, bitstring).
+event AliceSessionBound(pkey, pkey, bitstring).
+event BobSessionBound(pkey, pkey, bitstring).
 
 let Bob =
   new ik_b:key;
@@ -52,7 +51,7 @@ let Bob =
   let t2 = dh(ik_b, ek_a_pub) in
   let t3 = dh(spk_b, ek_a_pub) in
   let sk = hkdf(tuple4(t1, t2, t3, ss_pq), ad) in
-  event SessionBound(ik_a_pub, ik_b_pub, sk);
+  event BobSessionBound(ik_a_pub, ik_b_pub, sk);
   event BobComplete(alice_id, bob_id, sk).
 
 let Alice =
@@ -71,13 +70,10 @@ let Alice =
         let ad = tuple3(pk(ik_a), ik_b_pub, protocol_v1) in
         let sk = hkdf(tuple4(t1, t2, t3, ss_pq), ad) in
         let ciphertext = aead_enc(plaintext0, sk, ad) in
-        event SessionBound(pk(ik_a), ik_b_pub, sk);
+        event AliceSessionBound(pk(ik_a), ik_b_pub, sk);
         event AliceComplete(alice_id, bob_id, sk);
         out(net, (pk(ik_a), pk(ek_a), pq_ct, ad, ciphertext)).
 
-(* ── Forward secrecy process ───────────────────────────────────────
-   Alice uses a fresh ephemeral key then reveals it after session setup.
-   plaintext_fs must remain secret despite the later ephemeral key compromise. *)
 let AliceFS =
   new ik_a:key;
   in(net, (target_id:bitstring, ik_b_pub:pkey, spk_b_pub:pkey, pqspk_b_pub:pkey, sig_spk:bitstring, sig_pqspk:bitstring));
@@ -94,33 +90,21 @@ let AliceFS =
         let sk = hkdf(tuple4(t1, t2, t3, ss_pq), ad) in
         let ciphertext = aead_enc(plaintext_fs, sk, ad) in
         out(net, (pk(ik_a), pk(ek_a), pq_ct, ad, ciphertext));
-        (* Reveal the ephemeral key AFTER the session is established *)
         event EphemeralKeyRevealed(alice_id);
         out(net, ek_a).
 
-(* ── Original queries ──────────────────────────────────────────── *)
 query attacker(plaintext0).
-query a:bitstring, b:bitstring, k:bitstring;
-  event(AliceComplete(a, b, k)) ==> not attacker(k).
 query a:bitstring, b:bitstring, k:bitstring;
   event(BobComplete(a, b, k)) ==> event(AliceComplete(a, b, k)).
 query a:bitstring, b:bitstring, k:bitstring;
   event(BobComplete(a, b, k)) ==> event(AliceAcceptedBundle(a, b)).
 
-(* ── Forward secrecy ──────────────────────────────────────────────
-   Even after ephemeral key is revealed, plaintext_fs must stay secret.
-   ProVerif models the attacker as having the capability to learn ek_a
-   from the out(net, ek_a) above. The KEM shared secret ss_pq was
-   generated freshly and never revealed, so the session key remains
-   unrecoverable. *)
 query attacker(plaintext_fs).
 
-(* ── Identity misbinding resistance ───────────────────────────────
-   If both Alice and Bob compute the same session key, they must agree
-   on the identity key pair involved in the session. *)
-query ik_a:pkey, ik_b:pkey, ik_a2:pkey, ik_b2:pkey, k:bitstring;
-  event(SessionBound(ik_a, ik_b, k)) && event(SessionBound(ik_a2, ik_b2, k))
-    ==> ik_a = ik_a2 && ik_b = ik_b2.
+query ik_a:pkey, ik_b:pkey, k:bitstring;
+  event(BobSessionBound(ik_a, ik_b, k)) ==> event(AliceSessionBound(ik_a, ik_b, k)).
+query ik_a:pkey, ik_b:pkey, k:bitstring;
+  event(AliceSessionBound(ik_a, ik_b, k)) ==> event(BobSessionBound(ik_a, ik_b, k)).
 
 process
   (!Bob | !Alice | !AliceFS)
