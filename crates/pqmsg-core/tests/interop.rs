@@ -6,7 +6,7 @@
 //! Android client, an iOS client and a server implementation exchange
 //! bytes over the network.
 
-use pqmsg_core::dh::{generate_keypair, DhKeyPair, DhPublicKey, DhSecretKey};
+use pqmsg_core::dh::generate_keypair;
 use pqmsg_core::session::{SessionRole, SessionSnapshot, SessionState};
 use pqmsg_core::wire::WireMessage;
 use rand_chacha::ChaCha20Rng;

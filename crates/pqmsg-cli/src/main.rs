@@ -8,8 +8,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use pqmsg_core::ad::conversation_associated_data;
 use pqmsg_core::alg::{
-    enforce_runtime_security_profile, runtime_crypto_profile, AlgorithmSuite, KemAlgorithm,
-    RuntimeCryptoProfile, SecurityProfile, SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+    enforce_runtime_security_profile, AlgorithmSuite, KemAlgorithm, RuntimeCryptoProfile,
+    SecurityProfile, SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
     SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305,
 };
 use pqmsg_core::dh::{DhKeyPair, DhPublicKey};
@@ -4651,6 +4651,7 @@ fn decode_b64_32(field: &'static str, value: &str) -> Result<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pqmsg_core::alg::runtime_crypto_profile;
     use tempfile::tempdir;
 
     #[test]
