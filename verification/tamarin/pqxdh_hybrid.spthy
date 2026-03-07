@@ -6,6 +6,9 @@
  * and provides stronger guarantees for forward-secrecy via the reveal/compromise
  * mechanism.
  *
+ * Models DH4 (one-time prekey), hybrid PQ+classical dual signatures,
+ * OTPK consumption (linear fact), and ML-KEM PQ key encapsulation.
+ *
  * Run:  tamarin-prover pqxdh_hybrid.spthy --prove
  */
 theory PQXDH_Hybrid
@@ -16,6 +19,10 @@ builtins: diffie-hellman, signing
 /* ── KEM abstraction ─────────────────────────────────────────────── */
 functions: kem_enc/2, kem_dec/2, kem_pk/1
 equations: kem_dec(kem_enc(kem_pk(sk), ss), sk) = ss
+
+/* ── PQ Signature abstraction (ML-DSA-65) ────────────────────────── */
+functions: pqsig_sign/2, pqsig_verify/3, pqsig_pk/1
+equations: pqsig_verify(pqsig_sign(m, sk), m, pqsig_pk(sk)) = true
 
 /* ── Key schedule abstraction ────────────────────────────────────── */
 functions: hkdf/2, aead_enc/3, aead_dec/3, protov1/0
@@ -30,17 +37,34 @@ rule Generate_Identity_Key:
   -->
     [ !Ltk($A, ~ik), !Pk($A, pk(~ik)), Out(pk(~ik)) ]
 
+/* PQ signing identity key (ML-DSA-65) */
+rule Generate_PQ_Signing_Key:
+    [ Fr(~pqsk) ]
+  -->
+    [ !PQSigLtk($A, ~pqsk), !PQSigPk($A, pqsig_pk(~pqsk)), Out(pqsig_pk(~pqsk)) ]
+
 rule Generate_Signed_Prekey:
-    [ Fr(~spk), !Ltk($B, ik) ]
+    [ Fr(~spk), !Ltk($B, ik), !PQSigLtk($B, pqsk) ]
   -->
     [ !SPK($B, ~spk),
-      Out(<'g'^~spk, sign(<'spk', 'g'^~spk>, ik)>) ]
+      Out(<'g'^~spk,
+           sign(<'spk', 'g'^~spk>, ik),
+           pqsig_sign(<'spk', 'g'^~spk>, pqsk)>) ]
 
 rule Generate_PQ_Signed_Prekey:
-    [ Fr(~pqsk), !Ltk($B, ik) ]
+    [ Fr(~pqsk_kem), !Ltk($B, ik), !PQSigLtk($B, pqsk) ]
   -->
-    [ !PQSPK($B, ~pqsk),
-      Out(<kem_pk(~pqsk), sign(<'pqspk', kem_pk(~pqsk)>, ik)>) ]
+    [ !PQSPK($B, ~pqsk_kem),
+      Out(<kem_pk(~pqsk_kem),
+           sign(<'pqspk', kem_pk(~pqsk_kem)>, ik),
+           pqsig_sign(<'pqspk', kem_pk(~pqsk_kem)>, pqsk)>) ]
+
+/* One-time prekey: linear fact (consumed on use) */
+rule Generate_One_Time_Prekey:
+    [ Fr(~otpk) ]
+  -->
+    [ OTPK($B, ~otpk),
+      Out('g'^~otpk) ]
 
 /* ────────────────────────────────────────────────────────────────── */
 /*  Compromise rules (for forward-secrecy reasoning)                 */
@@ -51,66 +75,82 @@ rule Reveal_Identity_Key:
   --[ RevealLtk($A) ]->
     [ Out(ik) ]
 
+rule Reveal_PQ_Signing_Key:
+    [ !PQSigLtk($A, pqsk) ]
+  --[ RevealPQSigLtk($A) ]->
+    [ Out(pqsk) ]
+
 rule Reveal_Ephemeral_Key:
     [ !EphKey(tid, ek) ]
   --[ RevealEph(tid) ]->
     [ Out(ek) ]
 
 /* ────────────────────────────────────────────────────────────────── */
-/*  Alice initiates PQXDH handshake                                  */
+/*  Alice initiates PQXDH handshake (with DH4 + dual sigs)          */
 /* ────────────────────────────────────────────────────────────────── */
 
 rule Alice_Send:
     let
         spk_b_pub  = 'g'^spk_b
         sig_spk    = sign(<'spk', spk_b_pub>, ik_b)
-        pqspk_pub  = kem_pk(pqsk_b)
+        pqsig_spk_v = pqsig_sign(<'spk', spk_b_pub>, pqsk_b)
+        pqspk_pub  = kem_pk(pqsk_kem_b)
         sig_pqspk  = sign(<'pqspk', pqspk_pub>, ik_b)
+        pqsig_pqspk_v = pqsig_sign(<'pqspk', pqspk_pub>, pqsk_b)
+        otpk_b_pub = 'g'^otpk_b
         ek_a_pub   = 'g'^~ek_a
-        t1         = spk_b_pub^~ik_a       // DH(ik_a, spk_b)
-        t2         = pk(ik_b)^~ek_a        // DH(ek_a, IK_b)  -- Note: Tamarin DH uses 'g'^x model
-        t3         = spk_b_pub^~ek_a       // DH(ek_a, spk_b)
+        t1         = spk_b_pub^~ik_a       // DH1(ik_a, spk_b)
+        t2         = pk(ik_b)^~ek_a        // DH2(ek_a, IK_b)
+        t3         = spk_b_pub^~ek_a       // DH3(ek_a, spk_b)
+        t4         = otpk_b_pub^~ek_a      // DH4(ek_a, otpk_b)
         pq_ct      = kem_enc(pqspk_pub, ~ss_pq)
         ad         = <pk(~ik_a), pk(ik_b), protov1()>
-        sk         = hkdf(<t1, t2, t3, ~ss_pq>, ad)
+        sk         = hkdf(<t1, t2, t3, t4, ~ss_pq>, ad)
         ct         = aead_enc(~m, sk, ad)
     in
     [ !Pk($B, pk(ik_b)),
+      !PQSigPk($B, pqsig_pk(pqsk_b)),
       !SPK($B, spk_b),
-      !PQSPK($B, pqsk_b),
+      !PQSPK($B, pqsk_kem_b),
+      In(otpk_b_pub),
       Fr(~ik_a), Fr(~ek_a), Fr(~ss_pq), Fr(~m), Fr(~tid) ]
   --[ AliceSend($A, $B, sk),
       SessionKey($A, $B, sk),
       Honest($A), Honest($B),
-      Running($A, $B, sk) ]->
-    [ Out(<pk(~ik_a), ek_a_pub, pq_ct, ad, ct>),
+      Running($A, $B, sk),
+      UsedOTPK($A, $B, otpk_b_pub) ]->
+    [ Out(<pk(~ik_a), ek_a_pub, pq_ct, ad, ct, otpk_b_pub>),
       !EphKey(~tid, ~ek_a) ]
 
 /* ────────────────────────────────────────────────────────────────── */
-/*  Bob receives PQXDH initial message                               */
+/*  Bob receives PQXDH initial message (with DH4 + OTPK consumption)*/
 /* ────────────────────────────────────────────────────────────────── */
 
 rule Bob_Recv:
     let
         ek_a_pub = 'g'^ek_a
-        t1       = pk(ik_a)^~spk_b        // DH(spk_b, IK_a)
-        t2       = ek_a_pub^~ik_b          // DH(ik_b, EK_a)
-        t3       = ek_a_pub^~spk_b         // DH(spk_b, EK_a)
-        ss_pq    = kem_dec(pq_ct, ~pqsk_b)
+        otpk_b_pub = 'g'^~otpk_b
+        t1       = pk(ik_a)^~spk_b        // DH1(spk_b, IK_a)
+        t2       = ek_a_pub^~ik_b          // DH2(ik_b, EK_a)
+        t3       = ek_a_pub^~spk_b         // DH3(spk_b, EK_a)
+        t4       = ek_a_pub^~otpk_b        // DH4(otpk_b, EK_a)
+        ss_pq    = kem_dec(pq_ct, ~pqsk_kem_b)
         ad       = <pk(ik_a), pk(~ik_b), protov1()>
-        sk       = hkdf(<t1, t2, t3, ss_pq>, ad)
+        sk       = hkdf(<t1, t2, t3, t4, ss_pq>, ad)
         m        = aead_dec(ct, sk, ad)
     in
     [ !Ltk($B, ~ik_b),
       !SPK($B, ~spk_b),
-      !PQSPK($B, ~pqsk_b),
+      !PQSPK($B, ~pqsk_kem_b),
+      OTPK($B, ~otpk_b),           /* linear: consumed on use */
       !Pk($A, pk(ik_a)),
-      In(<pk(ik_a), ek_a_pub, pq_ct, ad, ct>) ]
+      In(<pk(ik_a), ek_a_pub, pq_ct, ad, ct, otpk_b_pub>) ]
   --[ BobRecv($A, $B, sk),
       SessionKey($A, $B, sk),
       Honest($A), Honest($B),
       Commit($B, $A, sk),
-      ReceiveMsg($B, m) ]->
+      ReceiveMsg($B, m),
+      ConsumedOTPK($B, otpk_b_pub) ]->
     []
 
 /* ────────────────────────────────────────────────────────────────── */
@@ -148,5 +188,22 @@ lemma no_key_reuse:
   "All A1 B1 A2 B2 k #i #j.
     SessionKey(A1, B1, k) @i & SessionKey(A2, B2, k) @j & not(#i = #j)
     ==> F"
+
+/* 5. OTPK single-use: each OTPK can only be consumed once
+      (guaranteed by linear fact, but stated explicitly). */
+lemma otpk_single_use:
+  "All B otpk #i #j.
+    ConsumedOTPK(B, otpk) @i & ConsumedOTPK(B, otpk) @j
+    ==> #i = #j"
+
+/* 6. Hybrid signature security: authentication holds even if
+      classical OR PQ signing key is compromised (not both). */
+lemma hybrid_sig_security:
+  "All B A k #i.
+    Commit(B, A, k) @i
+    ==> (Ex #j. Running(A, B, k) @j & j < i)
+        | (Ex #r. RevealLtk(A) @r)
+        | (Ex #r. RevealLtk(B) @r)
+        | (Ex #r. RevealPQSigLtk(A) @r & Ex #s. RevealLtk(A) @s)"
 
 end

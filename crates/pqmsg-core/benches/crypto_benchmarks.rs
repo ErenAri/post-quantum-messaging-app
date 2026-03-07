@@ -321,7 +321,7 @@ fn bench_handshake(c: &mut Criterion) {
                 (bob_id, bob_spk, bob_pq_spk, decoded)
             },
             |(bob_id, bob_spk, bob_pq_spk, msg)| {
-                bob_receive(&kem, &bob_id, &bob_spk, &bob_pq_spk, &msg).unwrap()
+                bob_receive(&kem, &bob_id, &bob_spk, &bob_pq_spk, None, &msg).unwrap()
             },
             criterion::BatchSize::SmallInput,
         )

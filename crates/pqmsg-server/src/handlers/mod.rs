@@ -1,3 +1,5 @@
+mod calls;
+mod channels;
 mod discovery;
 mod ephemeral;
 mod groups;
@@ -6,8 +8,11 @@ mod messaging;
 mod prekeys;
 mod profile;
 mod receipts;
+mod stories;
 mod util;
 
+pub(crate) use calls::*;
+pub(crate) use channels::*;
 pub(crate) use discovery::*;
 pub use ephemeral::run_message_expiry_reaper;
 pub(crate) use ephemeral::*;
@@ -17,6 +22,7 @@ pub(crate) use messaging::*;
 pub(crate) use prekeys::*;
 pub(crate) use profile::*;
 pub(crate) use receipts::*;
+pub(crate) use stories::*;
 pub(crate) use util::*;
 
 use axum::extract::State;

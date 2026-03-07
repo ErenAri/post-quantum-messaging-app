@@ -218,6 +218,104 @@ final class LocalStateStore {
         peers.filter { readSession(userId: userId, peerUserId: $0.peerUserId) != nil }.count
     }
 
+    // MARK: - Groups
+
+    func upsertGroupConversation(userId: String, group: GroupSummary) {
+        var items = listGroups(userId: userId)
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        if let idx = items.firstIndex(where: { $0.groupId == group.groupId }) {
+            var current = items[idx]
+            current.displayName = group.displayName
+            current.memberCount = group.memberCount
+            current.lastPreview = group.lastPreview
+            current.updatedAtMillis = now
+            items[idx] = current
+        } else {
+            var g = group
+            g.updatedAtMillis = now
+            items.append(g)
+        }
+        persistProtected(items.sorted { $0.updatedAtMillis > $1.updatedAtMillis }, at: groupsURL(userId: userId))
+    }
+
+    func markGroupRead(userId: String, groupId: String) {
+        var items = listGroups(userId: userId)
+        guard let idx = items.firstIndex(where: { $0.groupId == groupId }) else { return }
+        var current = items[idx]
+        current.unreadCount = 0
+        items[idx] = current
+        persistProtected(items, at: groupsURL(userId: userId))
+    }
+
+    func listGroups(userId: String) -> [GroupSummary] {
+        readProtectedCodable(at: groupsURL(userId: userId)) ?? []
+    }
+
+    func removeGroup(userId: String, groupId: String) {
+        var items = listGroups(userId: userId)
+        items.removeAll { $0.groupId == groupId }
+        persistProtected(items, at: groupsURL(userId: userId))
+    }
+
+    // MARK: - Group Thread Messages
+
+    func appendGroupThreadMessage(userId: String, groupId: String, line: String) {
+        var lines: [String] = readProtectedCodable(at: groupThreadURL(userId: userId, groupId: groupId)) ?? []
+        lines.append(line)
+        if lines.count > 500 {
+            lines = Array(lines.suffix(500))
+        }
+        persistProtected(lines, at: groupThreadURL(userId: userId, groupId: groupId))
+    }
+
+    func listGroupThreadMessages(userId: String, groupId: String) -> [String] {
+        readProtectedCodable(at: groupThreadURL(userId: userId, groupId: groupId)) ?? []
+    }
+
+    // MARK: - Outbox Queue
+
+    struct OutboxItem: Codable {
+        let id: String
+        let peerUserId: String
+        let plaintext: String
+        let createdAtMillis: Int64
+        let ephemeralTtlSeconds: Int?
+        let sealedSender: Bool
+    }
+
+    func enqueueOutbox(userId: String, item: OutboxItem) {
+        var items: [OutboxItem] = readProtectedCodable(at: outboxURL(userId: userId)) ?? []
+        items.append(item)
+        persistProtected(items, at: outboxURL(userId: userId))
+    }
+
+    func listOutbox(userId: String) -> [OutboxItem] {
+        readProtectedCodable(at: outboxURL(userId: userId)) ?? []
+    }
+
+    func removeOutboxItem(userId: String, itemId: String) {
+        var items: [OutboxItem] = readProtectedCodable(at: outboxURL(userId: userId)) ?? []
+        items.removeAll { $0.id == itemId }
+        persistProtected(items, at: outboxURL(userId: userId))
+    }
+
+    func clearOutbox(userId: String) {
+        removeProtectedItem(at: outboxURL(userId: userId))
+    }
+
+    // MARK: - Receipt Tracking
+
+    func updateMessageReceipt(userId: String, peerUserId: String, messageId: Int64, receiptType: String) {
+        let key = "receipt.\(userId).\(peerUserId).\(messageId)"
+        let existing: String? = readProtectedCodable(at: receiptURL(key: key))
+        let priority = ["sent": 0, "delivered": 1, "read": 2]
+        let currentPriority = priority[existing ?? ""] ?? -1
+        let newPriority = priority[receiptType] ?? -1
+        if newPriority > currentPriority {
+            persistProtected(receiptType, at: receiptURL(key: key))
+        }
+    }
+
     func wipeUserState(userId: String) {
         guard !userId.isEmpty else {
             return
@@ -356,6 +454,35 @@ final class LocalStateStore {
         protectedRoot
             .appendingPathComponent("conversations", isDirectory: true)
             .appendingPathComponent(safeComponent(userId))
+            .appendingPathExtension("json")
+    }
+
+    private func groupsURL(userId: String) -> URL {
+        protectedRoot
+            .appendingPathComponent("groups", isDirectory: true)
+            .appendingPathComponent(safeComponent(userId))
+            .appendingPathExtension("json")
+    }
+
+    private func groupThreadURL(userId: String, groupId: String) -> URL {
+        protectedRoot
+            .appendingPathComponent("group-threads", isDirectory: true)
+            .appendingPathComponent(safeComponent(userId), isDirectory: true)
+            .appendingPathComponent(safeComponent(groupId))
+            .appendingPathExtension("json")
+    }
+
+    private func outboxURL(userId: String) -> URL {
+        protectedRoot
+            .appendingPathComponent("outbox", isDirectory: true)
+            .appendingPathComponent(safeComponent(userId))
+            .appendingPathExtension("json")
+    }
+
+    private func receiptURL(key: String) -> URL {
+        protectedRoot
+            .appendingPathComponent("receipts", isDirectory: true)
+            .appendingPathComponent(safeComponent(key))
             .appendingPathExtension("json")
     }
 

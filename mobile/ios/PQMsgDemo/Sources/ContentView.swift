@@ -13,6 +13,13 @@ struct ContentView: View {
                     Label("Chats", systemImage: "message")
                 }
 
+            NavigationStack {
+                ContactDiscoveryView()
+            }
+            .tabItem {
+                Label("Contacts", systemImage: "person.crop.circle")
+            }
+
             SecurityView()
                 .tabItem {
                     Label("Security", systemImage: "lock.shield")

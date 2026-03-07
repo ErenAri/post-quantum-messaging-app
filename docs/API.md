@@ -54,6 +54,19 @@ sequenceDiagram
     C->>S: GET /users/{id}/receipts/poll?since_id=n
     C->>S: POST /ephemeral-relay/{peer}
     C->>S: GET /ws/inbox/{id}?since=n (WebSocket)
+    C->>S: POST /call/offer
+    C->>S: POST /call/{call_id}/answer
+    C->>S: POST /call/{call_id}/ice
+    C->>S: POST /call/{call_id}/hangup
+    C->>S: GET /call/{call_id}/signals?since=0
+    C->>S: POST /stories
+    C->>S: GET /stories/feed
+    C->>S: POST /stories/{story_id}/view
+    C->>S: POST /channels
+    C->>S: GET /channels
+    C->>S: GET /channels/{channel_id}/messages
+    C->>S: POST /channels/{channel_id}/messages
+    C->>S: POST /channels/{channel_id}/subscribe
     C->>S: GET /metrics
 ```
 
@@ -140,6 +153,19 @@ The following endpoints require request authentication headers:
 - `POST /v1/inbox/{user_id}/delete`
 - `GET /v1/ws/inbox/{user_id}`
 - `POST /v1/users/{user_id}/push-token`
+- `POST /v1/call/offer`
+- `POST /v1/call/{call_id}/answer`
+- `POST /v1/call/{call_id}/ice`
+- `POST /v1/call/{call_id}/hangup`
+- `GET /v1/call/{call_id}/signals`
+- `POST /v1/stories`
+- `GET /v1/stories/feed`
+- `POST /v1/stories/{story_id}/view`
+- `POST /v1/channels`
+- `GET /v1/channels`
+- `GET /v1/channels/{channel_id}/messages`
+- `POST /v1/channels/{channel_id}/messages`
+- `POST /v1/channels/{channel_id}/subscribe`
 
 Required headers:
 
@@ -1269,3 +1295,301 @@ Messages are fanned out to all active recipient devices. Duplicate detection use
 
 Plain HTTP is acceptable only for local demonstration.  
 Operational deployments must terminate TLS and should enforce certificate pinning at clients.
+
+## 7. Call Signaling Endpoints
+
+All call endpoints use format-string authentication where the signature message is constructed as `{action}:{user_id}:{device_id}:{target}`.
+
+### 7.1 Create Call Offer
+
+`POST /v1/call/offer`
+
+Auth message format: `call-offer:{user_id}:{device_id}:{callee_user_id}`
+
+Request:
+
+```json
+{
+  "callee_user_id": "bob",
+  "sdp_offer_base64": "base64(SDP offer)",
+  "call_type": "audio"
+}
+```
+
+Response:
+
+```json
+{
+  "call_id": "uuid-v4",
+  "created_at": "2026-03-08T12:00:00Z"
+}
+```
+
+### 7.2 Answer Call
+
+`POST /v1/call/{call_id}/answer`
+
+Auth message format: `call-answer:{user_id}:{device_id}:{call_id}`
+
+Request:
+
+```json
+{
+  "sdp_answer_base64": "base64(SDP answer)"
+}
+```
+
+### 7.3 ICE Candidate
+
+`POST /v1/call/{call_id}/ice`
+
+Auth message format: `call-ice:{user_id}:{device_id}:{call_id}`
+
+Request:
+
+```json
+{
+  "candidate_base64": "base64(ICE candidate)"
+}
+```
+
+### 7.4 Hangup Call
+
+`POST /v1/call/{call_id}/hangup`
+
+Auth message format: `call-hangup:{user_id}:{device_id}:{call_id}`
+
+Request:
+
+```json
+{
+  "reason": "user_ended"
+}
+```
+
+### 7.5 Poll Call Signals
+
+`GET /v1/call/{call_id}/signals?since=0`
+
+Auth message format: `call-signals:{user_id}:{device_id}:{call_id}`
+
+Response:
+
+```json
+{
+  "signals": [
+    {
+      "signal_id": 1,
+      "signal_type": "answer",
+      "from_user_id": "bob",
+      "payload_base64": "base64(...)",
+      "created_at": "2026-03-08T12:00:01Z"
+    }
+  ]
+}
+```
+
+## 8. Stories Endpoints
+
+All stories endpoints use format-string authentication.
+
+### 8.1 Create Story
+
+`POST /v1/stories`
+
+Auth message format: `story-create:{user_id}:{device_id}`
+
+Request:
+
+```json
+{
+  "author_user_id": "alice",
+  "device_id": "alice-device-1",
+  "content_base64": "base64(encrypted story content, max 512KB)",
+  "media_type": "text"
+}
+```
+
+Valid `media_type` values: `text`, `image`, `video`.
+
+Response:
+
+```json
+{
+  "story_id": "uuid-v4",
+  "expires_at": "2026-03-09T12:00:00Z"
+}
+```
+
+### 8.2 Get Stories Feed
+
+`GET /v1/stories/feed[?user_id=alice]`
+
+Auth message format: `story-feed:{user_id}:{device_id}`
+
+Response:
+
+```json
+{
+  "stories": [
+    {
+      "story_id": "uuid-v4",
+      "author_user_id": "alice",
+      "content_base64": "base64(...)",
+      "media_type": "text",
+      "created_at": "2026-03-08T12:00:00Z",
+      "expires_at": "2026-03-09T12:00:00Z",
+      "view_count": 5
+    }
+  ]
+}
+```
+
+### 8.3 View Story
+
+`POST /v1/stories/{story_id}/view`
+
+Auth message format: `story-view:{user_id}:{device_id}:{story_id}`
+
+Request:
+
+```json
+{
+  "viewer_user_id": "bob",
+  "device_id": "bob-device-1"
+}
+```
+
+Response:
+
+```json
+{
+  "viewed": true
+}
+```
+
+## 9. Channel Endpoints
+
+All channel endpoints use format-string authentication.
+
+### 9.1 Create Channel
+
+`POST /v1/channels`
+
+Auth message format: `channel-create:{user_id}:{device_id}`
+
+Request:
+
+```json
+{
+  "owner_user_id": "alice",
+  "device_id": "alice-device-1",
+  "display_name": "PQ Crypto News",
+  "description": "Post-quantum cryptography updates"
+}
+```
+
+Validation: `display_name` max 128 chars, `description` max 1024 chars.
+
+Response:
+
+```json
+{
+  "channel_id": "uuid-v4",
+  "created_at": "2026-03-08T12:00:00Z"
+}
+```
+
+### 9.2 List Channels
+
+`GET /v1/channels`
+
+Auth message format: `channel-list:{user_id}:{device_id}`
+
+Response:
+
+```json
+{
+  "channels": [
+    {
+      "channel_id": "uuid-v4",
+      "owner_user_id": "alice",
+      "display_name": "PQ Crypto News",
+      "description": "Post-quantum cryptography updates",
+      "subscriber_count": 42,
+      "created_at": "2026-03-08T12:00:00Z"
+    }
+  ]
+}
+```
+
+### 9.3 Get Channel Messages
+
+`GET /v1/channels/{channel_id}/messages[?since=0]`
+
+Auth message format: `channel-messages:{user_id}:{device_id}:{channel_id}`
+
+Requires the requesting user to be a subscriber. Returns up to 100 messages.
+
+Response:
+
+```json
+{
+  "messages": [
+    {
+      "message_id": 1,
+      "content_base64": "base64(encrypted message)",
+      "created_at": "2026-03-08T12:00:00Z"
+    }
+  ]
+}
+```
+
+### 9.4 Post Channel Message
+
+`POST /v1/channels/{channel_id}/messages`
+
+Auth message format: `channel-post:{user_id}:{device_id}:{channel_id}`
+
+Only the channel owner (admin) can post messages. Max 256KB content.
+
+Request:
+
+```json
+{
+  "author_user_id": "alice",
+  "device_id": "alice-device-1",
+  "content_base64": "base64(encrypted message)"
+}
+```
+
+Response:
+
+```json
+{
+  "message_id": 1
+}
+```
+
+### 9.5 Subscribe to Channel
+
+`POST /v1/channels/{channel_id}/subscribe`
+
+Auth message format: `channel-subscribe:{user_id}:{device_id}:{channel_id}`
+
+Request:
+
+```json
+{
+  "subscriber_user_id": "bob",
+  "device_id": "bob-device-1"
+}
+```
+
+Response:
+
+```json
+{
+  "subscribed": true
+}
+```

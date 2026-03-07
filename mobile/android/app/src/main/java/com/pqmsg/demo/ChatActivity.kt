@@ -14,9 +14,13 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.NestedScrollView
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import uniffi.pqmsg_android.ServerBundle
+import uniffi.pqmsg_android.buildInboxAuthHeaders
 import uniffi.pqmsg_android.buildRelayAuthHeaders
 import uniffi.pqmsg_android.encryptWithSession
 import uniffi.pqmsg_android.initiateSessionAndEncrypt
@@ -48,6 +52,13 @@ class ChatActivity : AppCompatActivity() {
     private var pendingAttachment: PendingAttachment? = null
     private var activePeerUserId = ""
     private var syncInFlight = false
+    private var typingJob: Job? = null
+    private var presencePollingJob: Job? = null
+    private var typingPollingJob: Job? = null
+    private var peerPresenceOnline = false
+    private var peerIsTyping = false
+    private var sealedSenderEnabled = false
+    private var ephemeralTtlSeconds: Long? = null
 
     private val pickAttachmentLauncher =
         registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -116,6 +127,20 @@ class ChatActivity : AppCompatActivity() {
         backButton.setOnClickListener {
             finish()
         }
+
+        findViewById<Button>(R.id.buttonCallAudio).setOnClickListener {
+            startActivity(Intent(this, CallActivity::class.java).apply {
+                putExtra("peer", activePeerUserId)
+                putExtra("call_type", "audio")
+            })
+        }
+
+        findViewById<Button>(R.id.buttonCallVideo).setOnClickListener {
+            startActivity(Intent(this, CallActivity::class.java).apply {
+                putExtra("peer", activePeerUserId)
+                putExtra("call_type", "video")
+            })
+        }
     }
 
     override fun onResume() {
@@ -127,10 +152,23 @@ class ChatActivity : AppCompatActivity() {
         renderThreadHistory()
         refreshMeta()
         syncThread()
+        startPresencePolling()
+        startTypingPolling()
+        sendPresenceHeartbeat()
+        sendReadReceipts()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        presencePollingJob?.cancel()
+        typingPollingJob?.cancel()
     }
 
     private fun configureInputObservers() {
-        messageInput.doAfterTextChanged { syncActionAvailability() }
+        messageInput.doAfterTextChanged {
+            syncActionAvailability()
+            notifyTyping()
+        }
     }
 
     private fun configureErrorToggle() {
@@ -226,20 +264,54 @@ class ChatActivity : AppCompatActivity() {
         }
 
         store.writeSession(context.profile.userId, activePeerUserId, sendResult.sessionJson)
-        val relay = context.api.relay(
-            recipientUserId = activePeerUserId,
-            headers = buildRelayAuthHeaders(
-                keysJson = keysJson,
-                senderUserId = context.profile.userId,
+
+        if (ephemeralTtlSeconds != null) {
+            // Send as ephemeral message
+            context.api.relayEphemeralMessage(
                 recipientUserId = activePeerUserId,
-                messageBytesBase64 = sendResult.messageBytesBase64,
-            ).toHeaderMap(),
-            request = RelayRequest(
-                sender_user_id = context.profile.userId,
-                device_id = context.profile.deviceId,
-                message_bytes_base64 = sendResult.messageBytesBase64,
-            ),
-        )
+                headers = buildRelayAuthHeaders(
+                    keysJson = keysJson,
+                    senderUserId = context.profile.userId,
+                    recipientUserId = activePeerUserId,
+                    messageBytesBase64 = sendResult.messageBytesBase64,
+                ).toHeaderMap(),
+                request = RelayEphemeralRequest(
+                    sender_user_id = context.profile.userId,
+                    device_id = context.profile.deviceId,
+                    message_bytes_base64 = sendResult.messageBytesBase64,
+                    ttl_seconds = ephemeralTtlSeconds!!,
+                ),
+            )
+        } else if (sealedSenderEnabled) {
+            // Send as sealed sender (no sender metadata visible to server)
+            context.api.sealedRelay(
+                recipientUserId = activePeerUserId,
+                headers = buildRelayAuthHeaders(
+                    keysJson = keysJson,
+                    senderUserId = context.profile.userId,
+                    recipientUserId = activePeerUserId,
+                    messageBytesBase64 = sendResult.messageBytesBase64,
+                ).toHeaderMap(),
+                request = SealedRelayRequest(
+                    message_bytes_base64 = sendResult.messageBytesBase64,
+                ),
+            )
+        } else {
+            val relay = context.api.relay(
+                recipientUserId = activePeerUserId,
+                headers = buildRelayAuthHeaders(
+                    keysJson = keysJson,
+                    senderUserId = context.profile.userId,
+                    recipientUserId = activePeerUserId,
+                    messageBytesBase64 = sendResult.messageBytesBase64,
+                ).toHeaderMap(),
+                request = RelayRequest(
+                    sender_user_id = context.profile.userId,
+                    device_id = context.profile.deviceId,
+                    message_bytes_base64 = sendResult.messageBytesBase64,
+                ),
+            )
+        }
         store.markPeerAccepted(context.profile.userId, activePeerUserId)
         store.upsertConversation(
             userId = context.profile.userId,
@@ -253,7 +325,7 @@ class ChatActivity : AppCompatActivity() {
             peerUserId = activePeerUserId,
             direction = "outbound",
             body = outbound.preview,
-            transportMessageId = relay.message_id,
+            transportMessageId = null,
         )
         messageInput.setText("")
         pendingAttachment = null
@@ -408,8 +480,12 @@ class ChatActivity : AppCompatActivity() {
             "Peer bundle cached at $bundleFetched"
         }
         val syncLabel = if (syncInFlight) "Syncing..." else "Ready"
+        val presenceLabel = if (peerPresenceOnline) "online" else "offline"
+        val typingLabel = if (peerIsTyping) " • typing…" else ""
+        val sealedLabel = if (sealedSenderEnabled) " | Sealed" else ""
+        val ephemeralLabel = ephemeralTtlSeconds?.let { " | ${it}s TTL" } ?: ""
         chatMeta.text =
-            "Chatting with $activePeerUserId\nSigned in as ${setup.userId}\n$bundleLine\nStatus: $syncLabel | Cursor: $cursor"
+            "Chatting with $activePeerUserId ($presenceLabel$typingLabel)\nSigned in as ${setup.userId}\n$bundleLine\nStatus: $syncLabel | Cursor: $cursor$sealedLabel$ephemeralLabel"
     }
 
     private fun renderThreadHistory() {
@@ -506,6 +582,141 @@ class ChatActivity : AppCompatActivity() {
             }
         }
         return uri.lastPathSegment
+    }
+
+    // Typing indicators
+
+    private fun notifyTyping() {
+        typingJob?.cancel()
+        typingJob = lifecycleScope.launch {
+            delay(300) // debounce
+            runCatching {
+                val setup = currentSetup()
+                val keysJson = store.readKeys(setup.userId) ?: return@launch
+                val api = ApiClientFactory.create(setup.serverUrl)
+                api.updateTyping(
+                    peerUserId = activePeerUserId,
+                    headers = buildInboxAuthHeaders(
+                        keysJson = keysJson,
+                        userId = setup.userId,
+                        since = 0L,
+                    ).toHeaderMap(),
+                    request = TypingUpdateRequest(is_typing = true),
+                )
+            }
+        }
+    }
+
+    private fun startTypingPolling() {
+        typingPollingJob?.cancel()
+        typingPollingJob = lifecycleScope.launch {
+            while (isActive) {
+                runCatching {
+                    val setup = currentSetup()
+                    val keysJson = store.readKeys(setup.userId) ?: return@launch
+                    val api = ApiClientFactory.create(setup.serverUrl)
+                    val response = api.getTyping(
+                        userId = setup.userId,
+                        headers = buildInboxAuthHeaders(
+                            keysJson = keysJson,
+                            userId = setup.userId,
+                            since = 0L,
+                        ).toHeaderMap(),
+                    )
+                    val wasTyping = peerIsTyping
+                    peerIsTyping = response.typing.any { it.sender_user_id == activePeerUserId }
+                    if (peerIsTyping != wasTyping) refreshMeta()
+                }
+                delay(3000)
+            }
+        }
+    }
+
+    // Presence
+
+    private fun sendPresenceHeartbeat() {
+        lifecycleScope.launch {
+            runCatching {
+                val setup = currentSetup()
+                val keysJson = store.readKeys(setup.userId) ?: return@launch
+                val api = ApiClientFactory.create(setup.serverUrl)
+                api.updatePresence(
+                    userId = setup.userId,
+                    headers = buildInboxAuthHeaders(
+                        keysJson = keysJson,
+                        userId = setup.userId,
+                        since = 0L,
+                    ).toHeaderMap(),
+                    request = PresenceUpdateRequest(status = "online"),
+                )
+            }
+        }
+    }
+
+    private fun startPresencePolling() {
+        presencePollingJob?.cancel()
+        presencePollingJob = lifecycleScope.launch {
+            while (isActive) {
+                runCatching {
+                    val setup = currentSetup()
+                    val api = ApiClientFactory.create(setup.serverUrl)
+                    val response = api.getPresence(userId = activePeerUserId)
+                    val wasOnline = peerPresenceOnline
+                    peerPresenceOnline = response.active
+                    if (peerPresenceOnline != wasOnline) refreshMeta()
+                }
+                delay(10000)
+            }
+        }
+    }
+
+    // Read receipts
+
+    private fun sendReadReceipts() {
+        lifecycleScope.launch {
+            runCatching {
+                val setup = currentSetup()
+                val keysJson = store.readKeys(setup.userId) ?: return@launch
+                val api = ApiClientFactory.create(setup.serverUrl)
+                val messages = store.listThreadMessages(setup.userId, activePeerUserId)
+                val lastInbound = messages.lastOrNull { it.direction == "inbound" && it.transportMessageId != null }
+                if (lastInbound?.transportMessageId != null) {
+                    api.sendReceipt(
+                        userId = setup.userId,
+                        headers = buildInboxAuthHeaders(
+                            keysJson = keysJson,
+                            userId = setup.userId,
+                            since = 0L,
+                        ).toHeaderMap(),
+                        request = SendReceiptRequest(
+                            message_id = lastInbound.transportMessageId,
+                            receipt_type = "read",
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    // Sealed sender toggle
+
+    fun toggleSealedSender() {
+        sealedSenderEnabled = !sealedSenderEnabled
+        refreshMeta()
+    }
+
+    // Ephemeral TTL
+
+    fun showEphemeralDialog() {
+        val options = arrayOf("Off", "30 seconds", "5 minutes", "1 hour", "24 hours")
+        val values = arrayOf(null, 30L, 300L, 3600L, 86400L)
+        AlertDialog.Builder(this)
+            .setTitle(R.string.ephemeral_dialog_title)
+            .setItems(options) { _, which ->
+                ephemeralTtlSeconds = values[which]
+                refreshMeta()
+            }
+            .show()
     }
 
     private fun renderError(error: UiError?) {

@@ -582,3 +582,174 @@ pub(crate) struct RelayEphemeralRequest {
     pub(crate) message_bytes_base64: String,
     pub(crate) ttl_seconds: u64,
 }
+
+// ── Call Signaling ──
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CallOfferRequest {
+    pub(crate) caller_user_id: String,
+    pub(crate) device_id: String,
+    pub(crate) sdp_offer_base64: String,
+    pub(crate) call_type: String, // "audio" | "video"
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CallOfferResponse {
+    pub(crate) call_id: String,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CallAnswerRequest {
+    pub(crate) callee_user_id: String,
+    pub(crate) device_id: String,
+    pub(crate) sdp_answer_base64: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CallAnswerResponse {
+    pub(crate) call_id: String,
+    pub(crate) answered_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct IceCandidateRequest {
+    pub(crate) sender_user_id: String,
+    pub(crate) device_id: String,
+    pub(crate) candidate_base64: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct IceCandidateResponse {
+    pub(crate) call_id: String,
+    pub(crate) queued_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CallHangupRequest {
+    pub(crate) user_id: String,
+    pub(crate) device_id: String,
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CallHangupResponse {
+    pub(crate) call_id: String,
+    pub(crate) ended_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CallSignal {
+    pub(crate) signal_type: String,
+    pub(crate) from_user_id: String,
+    pub(crate) payload_base64: String,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PollCallSignalsResponse {
+    pub(crate) call_id: String,
+    pub(crate) signals: Vec<CallSignal>,
+}
+
+// ── Stories ──
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CreateStoryRequest {
+    pub(crate) author_user_id: String,
+    pub(crate) device_id: String,
+    pub(crate) content_base64: String,
+    pub(crate) media_type: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CreateStoryResponse {
+    pub(crate) story_id: String,
+    pub(crate) created_at: String,
+    pub(crate) expires_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct StoryItem {
+    pub(crate) story_id: String,
+    pub(crate) author_user_id: String,
+    pub(crate) content_base64: String,
+    pub(crate) media_type: String,
+    pub(crate) created_at: String,
+    pub(crate) expires_at: String,
+    pub(crate) view_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct StoriesFeedResponse {
+    pub(crate) stories: Vec<StoryItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ViewStoryResponse {
+    pub(crate) story_id: String,
+    pub(crate) viewed_at: String,
+}
+
+// ── Channels ──
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CreateChannelRequest {
+    pub(crate) owner_user_id: String,
+    pub(crate) device_id: String,
+    pub(crate) display_name: String,
+    pub(crate) description: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CreateChannelResponse {
+    pub(crate) channel_id: String,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ChannelMessageRequest {
+    pub(crate) owner_user_id: String,
+    pub(crate) device_id: String,
+    pub(crate) content_base64: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ChannelMessageResponse {
+    pub(crate) message_id: i64,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ChannelMessageItem {
+    pub(crate) message_id: i64,
+    pub(crate) content_base64: String,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ChannelMessagesResponse {
+    pub(crate) channel_id: String,
+    pub(crate) messages: Vec<ChannelMessageItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ChannelInfo {
+    pub(crate) channel_id: String,
+    pub(crate) owner_user_id: String,
+    pub(crate) display_name: String,
+    pub(crate) description: String,
+    pub(crate) subscriber_count: i64,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ChannelListResponse {
+    pub(crate) channels: Vec<ChannelInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SubscribeChannelResponse {
+    pub(crate) channel_id: String,
+    pub(crate) subscribed_at: String,
+}

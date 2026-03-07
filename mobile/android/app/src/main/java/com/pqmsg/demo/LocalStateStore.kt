@@ -50,6 +50,29 @@ data class ThreadMessage(
     val body: String,
     val sentAtMillis: Long,
     val transportMessageId: Long?,
+    val ephemeralTtlSeconds: Long? = null,
+    val expiresAtMillis: Long? = null,
+    val receiptStatus: String? = null,
+    val replyToId: Long? = null,
+    val reactions: Map<String, String>? = null,
+)
+
+data class OutboxItem(
+    val id: Long,
+    val peerUserId: String,
+    val plaintext: String,
+    val createdAtMillis: Long,
+    val ephemeralTtlSeconds: Long?,
+    val sealedSender: Boolean,
+)
+
+data class GroupSummary(
+    val groupId: String,
+    val displayName: String,
+    val memberCount: Int,
+    val lastPreview: String,
+    val updatedAtMillis: Long,
+    val unreadCount: Int,
 )
 
 class LocalStateStore(context: Context) {
@@ -505,6 +528,158 @@ class LocalStateStore(context: Context) {
         return sessionsDir.listFiles()
             ?.count { it.isFile && it.name.endsWith(".json") }
             ?: 0
+    }
+
+    // Group conversations
+
+    fun upsertGroupConversation(
+        userId: String,
+        groupId: String,
+        displayName: String,
+        memberCount: Int,
+        lastPreview: String,
+        incrementUnread: Boolean,
+    ) {
+        if (userId.isBlank() || groupId.isBlank()) return
+        val keyBase = "group_${userId}_$groupId"
+        val groups = readGroupIds(userId)
+        groups.add(groupId)
+        val preview = lastPreview.trim().ifBlank { "(empty)" }.take(160)
+        val nextUnread = if (incrementUnread) getInt("${keyBase}_unread", 0) + 1 else getInt("${keyBase}_unread", 0)
+        prefs.edit()
+            .putStringSet(groupIdsKey(userId), LinkedHashSet(groups))
+            .putString("${keyBase}_name", displayName)
+            .putInt("${keyBase}_members", memberCount)
+            .putString("${keyBase}_preview", preview)
+            .putLong("${keyBase}_updated_ms", System.currentTimeMillis())
+            .putInt("${keyBase}_unread", nextUnread)
+            .apply()
+    }
+
+    fun markGroupRead(userId: String, groupId: String) {
+        if (userId.isBlank() || groupId.isBlank()) return
+        prefs.edit().putInt("group_${userId}_${groupId}_unread", 0).apply()
+    }
+
+    fun listGroups(userId: String): List<GroupSummary> {
+        if (userId.isBlank()) return emptyList()
+        return readGroupIds(userId).map { gid ->
+            val keyBase = "group_${userId}_$gid"
+            GroupSummary(
+                groupId = gid,
+                displayName = getString("${keyBase}_name", gid),
+                memberCount = getInt("${keyBase}_members", 0),
+                lastPreview = getString("${keyBase}_preview", "No messages yet"),
+                updatedAtMillis = getLong("${keyBase}_updated_ms", 0L),
+                unreadCount = getInt("${keyBase}_unread", 0),
+            )
+        }.sortedByDescending { it.updatedAtMillis }
+    }
+
+    fun removeGroup(userId: String, groupId: String) {
+        if (userId.isBlank() || groupId.isBlank()) return
+        val groups = readGroupIds(userId)
+        groups.remove(groupId)
+        val keyBase = "group_${userId}_$groupId"
+        prefs.edit()
+            .putStringSet(groupIdsKey(userId), LinkedHashSet(groups))
+            .remove("${keyBase}_name").remove("${keyBase}_members")
+            .remove("${keyBase}_preview").remove("${keyBase}_updated_ms")
+            .remove("${keyBase}_unread")
+            .apply()
+        deletePath(File(rootDir, "threads/$userId/group_$groupId.json"))
+    }
+
+    fun listGroupThreadMessages(userId: String, groupId: String): List<ThreadMessage> {
+        if (userId.isBlank() || groupId.isBlank()) return emptyList()
+        val path = File(rootDir, "threads/$userId/group_$groupId.json")
+        val raw = readProtectedFile(path) ?: return emptyList()
+        return runCatching {
+            val type = object : TypeToken<List<ThreadMessage>>() {}.type
+            gson.fromJson<List<ThreadMessage>>(raw, type) ?: emptyList()
+        }.getOrDefault(emptyList())
+    }
+
+    fun appendGroupThreadMessage(
+        userId: String,
+        groupId: String,
+        senderUserId: String,
+        body: String,
+        sentAtMillis: Long = System.currentTimeMillis(),
+        transportMessageId: Long? = null,
+    ) {
+        if (userId.isBlank() || groupId.isBlank()) return
+        val path = File(rootDir, "threads/$userId/group_$groupId.json")
+        val existing = listGroupThreadMessages(userId, groupId).toMutableList()
+        if (transportMessageId != null && existing.any { it.transportMessageId == transportMessageId }) return
+        val direction = if (senderUserId == userId) "outbound" else "inbound"
+        val label = if (direction == "outbound") "You" else senderUserId
+        existing.add(ThreadMessage(direction = direction, body = "$label: ${body.trim().ifBlank { "(empty)" }}", sentAtMillis = sentAtMillis, transportMessageId = transportMessageId))
+        while (existing.size > 300) existing.removeAt(0)
+        writeProtectedFile(path, gson.toJson(existing))
+    }
+
+    private fun readGroupIds(userId: String): LinkedHashSet<String> {
+        return LinkedHashSet(getStringSet(groupIdsKey(userId)))
+    }
+
+    private fun groupIdsKey(userId: String) = "group_ids_$userId"
+
+    // Outbox (offline queue)
+
+    fun enqueueOutbox(
+        userId: String,
+        peerUserId: String,
+        plaintext: String,
+        ephemeralTtlSeconds: Long? = null,
+        sealedSender: Boolean = false,
+    ) {
+        if (userId.isBlank() || peerUserId.isBlank()) return
+        val path = File(rootDir, "outbox/$userId.json")
+        val existing = listOutbox(userId).toMutableList()
+        val nextId = (existing.maxOfOrNull { it.id } ?: 0L) + 1
+        existing.add(OutboxItem(id = nextId, peerUserId = peerUserId, plaintext = plaintext, createdAtMillis = System.currentTimeMillis(), ephemeralTtlSeconds = ephemeralTtlSeconds, sealedSender = sealedSender))
+        writeProtectedFile(path, gson.toJson(existing))
+    }
+
+    fun listOutbox(userId: String): List<OutboxItem> {
+        if (userId.isBlank()) return emptyList()
+        val path = File(rootDir, "outbox/$userId.json")
+        val raw = readProtectedFile(path) ?: return emptyList()
+        return runCatching {
+            val type = object : TypeToken<List<OutboxItem>>() {}.type
+            gson.fromJson<List<OutboxItem>>(raw, type) ?: emptyList()
+        }.getOrDefault(emptyList())
+    }
+
+    fun removeOutboxItem(userId: String, itemId: Long) {
+        if (userId.isBlank()) return
+        val path = File(rootDir, "outbox/$userId.json")
+        val existing = listOutbox(userId).toMutableList()
+        existing.removeAll { it.id == itemId }
+        writeProtectedFile(path, gson.toJson(existing))
+    }
+
+    fun clearOutbox(userId: String) {
+        if (userId.isBlank()) return
+        deletePath(File(rootDir, "outbox/$userId.json"))
+    }
+
+    // Receipt tracking
+
+    fun updateMessageReceipt(userId: String, peerUserId: String, transportMessageId: Long, receiptType: String) {
+        if (userId.isBlank() || peerUserId.isBlank()) return
+        val messages = listThreadMessages(userId, peerUserId).toMutableList()
+        val idx = messages.indexOfFirst { it.transportMessageId == transportMessageId && it.direction == "outbound" }
+        if (idx < 0) return
+        val msg = messages[idx]
+        val priority = mapOf("sent" to 0, "delivered" to 1, "read" to 2)
+        val currentPriority = priority[msg.receiptStatus] ?: -1
+        val newPriority = priority[receiptType] ?: -1
+        if (newPriority <= currentPriority) return
+        messages[idx] = msg.copy(receiptStatus = receiptType)
+        val path = File(rootDir, "threads/$userId/$peerUserId.json")
+        writeProtectedFile(path, gson.toJson(messages))
     }
 
     fun wipeUserState(userId: String) {

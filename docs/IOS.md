@@ -8,7 +8,7 @@ This document specifies the reproducible path for running the iOS demo client wi
 
 ```mermaid
 flowchart LR
-    UI[SwiftUI Setup and Chat UI] --> NET[URLSession JSON transport]
+    UI[SwiftUI Setup, Chat, Call, and Security UI] --> NET[URLSession JSON transport]
     UI --> STORE[Keychain and file-protected app state]
     UI --> SWIFT[UniFFI Swift bindings]
     SWIFT --> XC[pqmsg_iosFFI.xcframework]
@@ -32,6 +32,17 @@ flowchart LR
 - APNs token registration is integrated and exposed through setup/security screens,
 - the Security tab exposes a destructive reset action that first retires the authenticated current device on the server when keys are still present, then removes per-user keys, sessions, pins, cursors, conversation metadata, and the stored APNs token,
 - HTTP transport is accepted only for local debug hosts; production builds require HTTPS.
+
+## 3A. Voice and Video Calling
+
+The iOS client includes PQ-encrypted 1:1 voice and video calling:
+
+- **CallView**: SwiftUI sheet with dark gradient background, peer avatar, call status, timer, and PQ-Protected badge,
+- **Call buttons**: phone and video icons in the Chat toolbar trigger `startOutgoingCall(peerUserId:callType:)`,
+- **Incoming calls**: accept/decline buttons with polling-based signal detection,
+- **PQ key exchange**: UniFFI `buildFormatStringAuthHeaders()` signs call signaling requests with the user's Ed25519 identity key,
+- **Signaling**: REST-based call signaling via `callOffer()`, `callAnswer()`, `callIceCandidate()`, `callHangup()`, and `pollCallSignals()` on `ApiClient`,
+- **State management**: `AppState` manages call lifecycle with `@Published` properties (`activeCallId`, `callStatus`, `callElapsedSeconds`, `showCallView`).
 
 ## 4. Prerequisites
 
@@ -87,7 +98,8 @@ cargo run -p pqmsg-server
   - request APNs token if push entitlements are configured.
 - Chats tab:
   - open peer conversation,
-  - fetch bundle, send encrypted message, poll inbox.
+  - fetch bundle, send encrypted message, poll inbox,
+  - tap phone or video icon in the chat toolbar to initiate a PQ-encrypted call.
 - Security tab:
   - inspect active crypto profile, transport validity, pinned identities, and local state counts.
   - use `Secondary Device Onboarding` to enter a target device id, seal a passphrase-protected onboarding package, and copy the resulting package text to the secondary device.

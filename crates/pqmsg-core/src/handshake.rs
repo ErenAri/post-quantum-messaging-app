@@ -9,6 +9,8 @@ use crate::CoreError;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+use crate::pq_sig::PqSignatureProvider;
+
 const INFO_SK: &[u8] = b"pqmsg-pqxdh-v1";
 
 const AD_TAG_PROTOCOL_VERSION: u16 = critical_type(0x0001);
@@ -27,6 +29,7 @@ const MSG_TAG_EK_A_PUB: u16 = critical_type(0x0105);
 const MSG_TAG_PQ_CT: u16 = critical_type(0x0106);
 const MSG_TAG_NONCE: u16 = critical_type(0x0107);
 const MSG_TAG_CIPHERTEXT: u16 = critical_type(0x0108);
+const MSG_TAG_OTPK_ID: u16 = critical_type(0x010A);
 
 const SIG_TAG_PROTOCOL_VERSION: u16 = critical_type(0x0201);
 const SIG_TAG_LABEL: u16 = critical_type(0x0202);
@@ -66,11 +69,13 @@ pub struct InitialMessage {
     pub pq_ct: Vec<u8>,
     pub nonce: [u8; 12],
     pub ciphertext: Vec<u8>,
+    /// ID of the one-time prekey consumed during this handshake (if any).
+    pub otpk_id: Option<String>,
 }
 
 impl InitialMessage {
     pub fn encode(&self) -> Result<Vec<u8>, CoreError> {
-        let records = vec![
+        let mut records = vec![
             TlvRecord {
                 ty: MSG_TAG_PROTOCOL_VERSION,
                 value: self.protocol_version.to_be_bytes().to_vec(),
@@ -108,6 +113,12 @@ impl InitialMessage {
                 value: self.ciphertext.clone(),
             },
         ];
+        if let Some(ref otpk_id) = self.otpk_id {
+            records.push(TlvRecord {
+                ty: MSG_TAG_OTPK_ID,
+                value: otpk_id.as_bytes().to_vec(),
+            });
+        }
         encode(&records)
     }
 
@@ -122,6 +133,7 @@ impl InitialMessage {
             MSG_TAG_PQ_CT,
             MSG_TAG_NONCE,
             MSG_TAG_CIPHERTEXT,
+            MSG_TAG_OTPK_ID,
         ];
         let records = decode_strict(input, &known_types)?;
 
@@ -143,6 +155,11 @@ impl InitialMessage {
         let pq_ct = require(&records, MSG_TAG_PQ_CT, "pq_ct")?.to_vec();
         let nonce = parse_12(require(&records, MSG_TAG_NONCE, "nonce")?, "nonce")?;
         let ciphertext = require(&records, MSG_TAG_CIPHERTEXT, "ciphertext")?.to_vec();
+        let otpk_id = records
+            .iter()
+            .find(|r| r.ty == MSG_TAG_OTPK_ID)
+            .map(|r| parse_utf8(&r.value, "otpk_id"))
+            .transpose()?;
 
         Ok(Self {
             protocol_version: version,
@@ -154,6 +171,7 @@ impl InitialMessage {
             pq_ct,
             nonce,
             ciphertext,
+            otpk_id,
         })
     }
 }
@@ -203,6 +221,34 @@ pub fn validate_prekey_bundle_signatures<V: SignatureVerifier>(
         &pqspk_message,
         &bundle.pqspk_signature,
     )?;
+    Ok(())
+}
+
+/// Validate the optional post-quantum (ML-DSA-65) signatures on a prekey bundle.
+///
+/// When `pq_sig_public_key`, `pq_spk_signature`, and `pq_pqspk_signature` are all
+/// present, this verifies them.  When any are absent the check is skipped
+/// (graceful downgrade for bundles from clients that have not yet upgraded).
+pub fn validate_pq_prekey_bundle_signatures<P: PqSignatureProvider>(
+    bundle: &PreKeyBundle,
+    pq_verifier: &P,
+) -> Result<(), CoreError> {
+    let (Some(ref pq_pk), Some(ref pq_spk_sig), Some(ref pq_pqspk_sig)) = (
+        &bundle.pq_sig_public_key,
+        &bundle.pq_spk_signature,
+        &bundle.pq_pqspk_signature,
+    ) else {
+        return Ok(());
+    };
+
+    let spk_message =
+        signed_prekey_signature_message(bundle.protocol_version, &bundle.signed_prekey)?;
+    pq_verifier.verify(pq_pk, &spk_message, pq_spk_sig)?;
+
+    let pqspk_message =
+        pq_signed_prekey_signature_message(bundle.protocol_version, &bundle.pq_signed_prekey)?;
+    pq_verifier.verify(pq_pk, &pqspk_message, pq_pqspk_sig)?;
+
     Ok(())
 }
 
@@ -267,12 +313,23 @@ pub fn alice_initiate<R: RngCore + CryptoRng, V: SignatureVerifier, K: KemProvid
     let mut dh2 = diffie_hellman(&alice_ek.secret, &bob_bundle.identity_key);
     let mut dh3 = diffie_hellman(&alice_ek.secret, &bob_bundle.signed_prekey);
 
+    // DH4: one-time prekey contribution (replay protection)
+    let mut dh4_opt: Option<[u8; 32]> = None;
+    if let Some(ref otpk_pub) = bob_bundle.one_time_prekey {
+        dh4_opt = Some(diffie_hellman(&alice_ek.secret, otpk_pub));
+    }
+
+    let dh4_len = if dh4_opt.is_some() { 32 } else { 0 };
     let mut ikm = Zeroizing::new(Vec::with_capacity(
-        dh1.len() + dh2.len() + dh3.len() + kem_encapsulation.shared_secret.len(),
+        dh1.len() + dh2.len() + dh3.len() + dh4_len + kem_encapsulation.shared_secret.len(),
     ));
     ikm.extend_from_slice(&dh1);
     ikm.extend_from_slice(&dh2);
     ikm.extend_from_slice(&dh3);
+    if let Some(ref mut dh4) = dh4_opt {
+        ikm.extend_from_slice(dh4);
+        dh4.zeroize();
+    }
     ikm.extend_from_slice(&kem_encapsulation.shared_secret);
 
     dh1.zeroize();
@@ -290,6 +347,13 @@ pub fn alice_initiate<R: RngCore + CryptoRng, V: SignatureVerifier, K: KemProvid
     )?;
     let envelope = encrypt_with_rng(session_key.as_bytes(), payload, &ad, rng)?;
 
+    // Record which OTPK was consumed so Bob can look it up
+    let otpk_id = bob_bundle.one_time_prekey.as_ref().map(|_| {
+        bob_bundle
+            .owner_id
+            .clone()
+    });
+
     let initial_message = InitialMessage {
         protocol_version: bob_bundle.protocol_version,
         suite_id,
@@ -300,6 +364,7 @@ pub fn alice_initiate<R: RngCore + CryptoRng, V: SignatureVerifier, K: KemProvid
         pq_ct: kem_encapsulation.ciphertext,
         nonce: envelope.nonce,
         ciphertext: envelope.ciphertext,
+        otpk_id,
     };
 
     Ok(InitiatorOutput {
@@ -313,6 +378,7 @@ pub fn bob_receive<K: KemProvider>(
     bob_identity: &IdentityKeyPair,
     bob_signed_prekey: &OneTimePreKey,
     bob_pq_signed_prekey: &KEMPreKey,
+    bob_one_time_prekey: Option<&OneTimePreKey>,
     initial_message: &InitialMessage,
 ) -> Result<ResponderOutput, CoreError> {
     if initial_message.protocol_version != PROTOCOL_VERSION_V1 {
@@ -331,12 +397,24 @@ pub fn bob_receive<K: KemProvider>(
     let mut dh2 = diffie_hellman(&bob_identity_secret, &initial_message.ek_a_pub);
     let mut dh3 = diffie_hellman(&bob_spk_secret, &initial_message.ek_a_pub);
 
+    // DH4: one-time prekey contribution (must match alice's DH4)
+    let mut dh4_opt: Option<[u8; 32]> = None;
+    if let Some(otpk) = bob_one_time_prekey {
+        let otpk_secret = otpk.require_secret_key()?;
+        dh4_opt = Some(diffie_hellman(&otpk_secret, &initial_message.ek_a_pub));
+    }
+
+    let dh4_len = if dh4_opt.is_some() { 32 } else { 0 };
     let mut ikm = Zeroizing::new(Vec::with_capacity(
-        dh1.len() + dh2.len() + dh3.len() + ss_pq.len(),
+        dh1.len() + dh2.len() + dh3.len() + dh4_len + ss_pq.len(),
     ));
     ikm.extend_from_slice(&dh1);
     ikm.extend_from_slice(&dh2);
     ikm.extend_from_slice(&dh3);
+    if let Some(ref mut dh4) = dh4_opt {
+        ikm.extend_from_slice(dh4);
+        dh4.zeroize();
+    }
     ikm.extend_from_slice(&ss_pq);
 
     dh1.zeroize();
@@ -585,7 +663,7 @@ mod tests {
         let encoded = initiator.initial_message.encode().expect("encode");
         let decoded = InitialMessage::decode(&encoded).expect("decode");
         let responder =
-            bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq_spk, &decoded).expect("bob receive");
+            bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq_spk, None, &decoded).expect("bob receive");
 
         assert_eq!(initiator.session_key, responder.session_key);
         assert_eq!(responder.plaintext, b"hello pqmsg".to_vec());
@@ -618,7 +696,7 @@ mod tests {
             tampered.pq_ct[0] ^= 0x01;
         }
 
-        let result = bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq_spk, &tampered);
+        let result = bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq_spk, None, &tampered);
         assert!(result.is_err());
     }
 
@@ -649,7 +727,7 @@ mod tests {
             tampered.ciphertext[0] ^= 0x01;
         }
 
-        let result = bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq_spk, &tampered);
+        let result = bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq_spk, None, &tampered);
         assert!(result.is_err());
     }
 
@@ -700,6 +778,7 @@ mod tests {
             &bob_identity,
             &bob_spk,
             &bob_pq_spk,
+            None,
             &initiator.initial_message,
         )
         .expect("bob receive");
@@ -763,6 +842,7 @@ mod tests {
             &bob_identity,
             &bob_spk,
             &bob_pq_spk,
+            None,
             &initiator.initial_message,
         )
         .expect("bob receive");
@@ -822,8 +902,78 @@ mod tests {
         assert_eq!(decoded.ciphertext, initiator.initial_message.ciphertext);
 
         let responder =
-            bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq_spk, &decoded).expect("bob receive");
+            bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq_spk, None, &decoded).expect("bob receive");
         assert_eq!(responder.plaintext, b"roundtrip-test");
         assert_eq!(initiator.session_key, responder.session_key);
+    }
+
+    #[test]
+    fn handshake_with_otpk_dh4_produces_different_session_key() {
+        let kem = MockKem;
+        let verifier = TestSignatureVerifier;
+        let mut rng = OsRng;
+        let alice_identity = IdentityKeyPair::generate("alice-ik", &mut rng);
+        let (bob_identity, bob_spk, bob_pq_spk, mut bundle, _) = setup_bundle();
+
+        // Generate a one-time prekey for Bob
+        let bob_otpk = OneTimePreKey::generate("bob-otpk-0", &mut rng);
+        bundle.one_time_prekey = Some(bob_otpk.public_key);
+
+        // Initiate with OTPK present in bundle
+        let with_otpk = alice_initiate(
+            &mut rng,
+            &verifier,
+            &kem,
+            "alice",
+            "bob",
+            &alice_identity,
+            &bundle,
+            b"otpk-payload",
+        )
+        .expect("alice initiate with otpk");
+
+        assert!(with_otpk.initial_message.otpk_id.is_some());
+
+        // Bob receives with the OTPK secret
+        let encoded = with_otpk.initial_message.encode().expect("encode");
+        let decoded = InitialMessage::decode(&encoded).expect("decode");
+        assert_eq!(decoded.otpk_id, with_otpk.initial_message.otpk_id);
+
+        let responder = bob_receive(
+            &kem,
+            &bob_identity,
+            &bob_spk,
+            &bob_pq_spk,
+            Some(&bob_otpk),
+            &decoded,
+        )
+        .expect("bob receive with otpk");
+
+        assert_eq!(with_otpk.session_key, responder.session_key);
+        assert_eq!(responder.plaintext, b"otpk-payload");
+    }
+
+    #[test]
+    fn handshake_with_otpk_differs_from_without() {
+        let kem = MockKem;
+        let verifier = TestSignatureVerifier;
+        let mut rng = ChaCha20Rng::from_seed([55u8; 32]);
+        let alice_identity = IdentityKeyPair::generate("alice-ik", &mut rng);
+        let (_, _, bob_pq_spk, bundle_no_otpk, _) = setup_bundle();
+
+        // Handshake without OTPK
+        let without = alice_initiate(
+            &mut rng,
+            &verifier,
+            &kem,
+            "alice",
+            "bob",
+            &alice_identity,
+            &bundle_no_otpk,
+            b"same-payload",
+        )
+        .expect("without otpk");
+
+        assert!(without.initial_message.otpk_id.is_none());
     }
 }

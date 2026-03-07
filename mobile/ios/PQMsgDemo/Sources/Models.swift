@@ -184,6 +184,236 @@ struct RelayResponse: Codable {
     let received_at: String
 }
 
+// MARK: - Group Models
+
+struct CreateGroupRequest: Codable {
+    let group_name: String
+    let member_user_ids: [String]
+}
+
+struct CreateGroupResponse: Codable {
+    let group_id: String
+    let group_name: String
+    let created_at: String
+}
+
+struct GroupMemberRecord: Codable, Hashable, Identifiable {
+    let user_id: String
+    let role: String
+    let joined_at: String
+
+    var id: String { user_id }
+}
+
+struct GroupMembersResponse: Codable {
+    let group_id: String
+    let members: [GroupMemberRecord]
+}
+
+struct GroupMemberMutationResponse: Codable {
+    let group_id: String
+    let user_id: String
+    let action: String
+}
+
+struct GroupRelayRequest: Codable {
+    let sender_user_id: String
+    let device_id: String
+    let recipients: [GroupRelayRecipient]
+}
+
+struct GroupRelayRecipient: Codable {
+    let recipient_user_id: String
+    let message_bytes_base64: String
+}
+
+struct GroupRelayResponse: Codable {
+    let group_id: String
+    let relayed_count: Int
+}
+
+// MARK: - Sealed Sender Models
+
+struct SealedRelayRequest: Codable {
+    let sender_user_id: String
+    let device_id: String
+    let message_bytes_base64: String
+}
+
+struct SealedRelayResponse: Codable {
+    let message_id: Int64
+    let received_at: String
+}
+
+struct SealedInboxItem: Codable {
+    let message_id: Int64
+    let message_bytes_base64: String
+    let received_at: String
+}
+
+struct SealedInboxResponse: Codable {
+    let user_id: String
+    let messages: [SealedInboxItem]
+}
+
+// MARK: - Discovery & Contact Models
+
+struct DiscoveryHandlesUploadRequest: Codable {
+    let hashed_handles: [String]
+}
+
+struct DiscoveryHandlesUploadResponse: Codable {
+    let uploaded_count: Int
+}
+
+struct DiscoveryMatchItem: Codable, Hashable {
+    let hashed_handle: String
+    let user_id: String
+}
+
+struct DiscoveryMatchRequest: Codable {
+    let hashed_handles: [String]
+}
+
+struct DiscoveryMatchResponse: Codable {
+    let matches: [DiscoveryMatchItem]
+}
+
+struct UpsertContactRequest: Codable {
+    let contact_user_id: String
+    let alias: String?
+    let verified: Bool?
+}
+
+struct UpsertContactResponse: Codable {
+    let owner_user_id: String
+    let contact_user_id: String
+}
+
+struct ContactListItem: Codable, Hashable, Identifiable {
+    let contact_user_id: String
+    let alias: String?
+    let verified: Bool
+    let created_at: String
+
+    var id: String { contact_user_id }
+}
+
+struct ContactListResponse: Codable {
+    let contacts: [ContactListItem]
+}
+
+struct RemoveContactResponse: Codable {
+    let owner_user_id: String
+    let removed_user_id: String
+}
+
+// MARK: - Profile Models
+
+struct UpsertProfileRequest: Codable {
+    let display_name: String?
+    let avatar_url: String?
+    let status_text: String?
+}
+
+struct UserProfileResponse: Codable {
+    let user_id: String
+    let display_name: String?
+    let avatar_url: String?
+    let status_text: String?
+}
+
+// MARK: - Presence Models
+
+struct PresenceUpdateRequest: Codable {
+    let status: String
+}
+
+struct PresenceResponse: Codable {
+    let user_id: String
+    let status: String
+    let last_seen: String?
+}
+
+// MARK: - Typing Indicator Models
+
+struct TypingUpdateRequest: Codable {
+    let is_typing: Bool
+}
+
+struct TypingUpdateResponse: Codable {
+    let user_id: String
+    let peer_user_id: String
+}
+
+struct TypingIndicator: Codable {
+    let from_user_id: String
+    let is_typing: Bool
+    let updated_at: String
+}
+
+struct TypingInboxResponse: Codable {
+    let indicators: [TypingIndicator]
+}
+
+// MARK: - Receipt Models
+
+struct SendReceiptRequest: Codable {
+    let message_id: Int64
+    let receipt_type: String
+}
+
+struct SendReceiptResponse: Codable {
+    let message_id: Int64
+    let receipt_type: String
+}
+
+struct ReceiptItem: Codable, Hashable {
+    let message_id: Int64
+    let from_user_id: String
+    let receipt_type: String
+    let created_at: String
+}
+
+struct ReceiptsResponse: Codable {
+    let receipts: [ReceiptItem]
+}
+
+// MARK: - Ephemeral Models
+
+struct RelayEphemeralRequest: Codable {
+    let sender_user_id: String
+    let device_id: String
+    let message_bytes_base64: String
+    let ttl_seconds: Int
+}
+
+// MARK: - File Upload/Download Models
+
+struct FileUploadResponse: Codable {
+    let file_id: String
+    let uploaded_at: String
+}
+
+struct FileDownloadResponse: Codable {
+    let file_id: String
+    let data_base64: String
+    let uploaded_at: String
+}
+
+// MARK: - Group Summary (Local)
+
+struct GroupSummary: Codable, Identifiable, Hashable {
+    var groupId: String
+    var displayName: String
+    var memberCount: Int
+    var lastPreview: String
+    var updatedAtMillis: Int64
+    var unreadCount: Int
+
+    var id: String { groupId }
+}
+
 struct InboxMessage: Codable, Hashable {
     let message_id: Int64
     let sender_user_id: String
@@ -643,4 +873,66 @@ enum IdentityRotationSupport {
         var bigEndian = value.bigEndian
         return Data(bytes: &bigEndian, count: MemoryLayout<Int64>.size)
     }
+}
+
+// MARK: - Call Signaling Models
+
+struct CallOfferRequest: Codable {
+    let caller_user_id: String
+    let device_id: String
+    let call_type: String
+    let sdp_offer_base64: String
+}
+
+struct CallOfferResponse: Codable {
+    let call_id: String
+    let created_at: String
+}
+
+struct CallAnswerRequest: Codable {
+    let callee_user_id: String
+    let device_id: String
+    let sdp_answer_base64: String
+}
+
+struct CallAnswerResponse: Codable {
+    let call_id: String
+    let answered_at: String
+}
+
+struct IceCandidateRequest: Codable {
+    let sender_user_id: String
+    let device_id: String
+    let candidate_base64: String
+}
+
+struct IceCandidateResponse: Codable {
+    let call_id: String
+    let accepted: Bool
+}
+
+struct CallHangupRequest: Codable {
+    let user_id: String
+    let device_id: String
+    let reason: String
+}
+
+struct CallHangupResponse: Codable {
+    let call_id: String
+    let ended_at: String
+}
+
+struct CallSignal: Codable, Identifiable {
+    let signal_id: Int64
+    let signal_type: String
+    let from_user_id: String
+    let payload_base64: String
+    let created_at: String
+
+    var id: Int64 { signal_id }
+}
+
+struct PollCallSignalsResponse: Codable {
+    let call_id: String
+    let signals: [CallSignal]
 }

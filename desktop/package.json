@@ -1,0 +1,10 @@
+{
+  "name": "pqmsg-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "cd src-tauri && cargo tauri dev",
+    "build": "cd src-tauri && cargo tauri build",
+    "tauri": "cargo tauri"
+  }
+}

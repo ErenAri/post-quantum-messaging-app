@@ -2629,7 +2629,7 @@ async fn poll_inbox_flow(
             let identity = to_identity_keypair(keys)?;
             let spk = to_signed_prekey(keys)?;
             let pqspk = to_pq_signed_prekey(keys)?;
-            let responder = bob_receive(&kem, &identity, &spk, &pqspk, &initial)?;
+            let responder = bob_receive(&kem, &identity, &spk, &pqspk, None, &initial)?;
             let text = String::from_utf8(responder.plaintext.clone())
                 .unwrap_or_else(|_| format!("<{} bytes binary>", responder.plaintext.len()));
             println!("[{}] {}", sender, text);
@@ -3142,6 +3142,8 @@ fn to_identity_keypair(keys: &UserKeysFile) -> Result<IdentityKeyPair> {
             "identity_x25519_secret_b64",
             &keys.identity_x25519_secret_b64,
         )?),
+        pq_sig_public_key: None,
+        pq_sig_secret_key: None,
     })
 }
 
@@ -5169,7 +5171,7 @@ mod tests {
         let bob_spk = to_signed_prekey(&bob_keys).expect("bob spk");
         let bob_pq = to_pq_signed_prekey(&bob_keys).expect("bob pq");
         let first_plain =
-            bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq, &decoded).expect("bob receive");
+            bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq, None, &decoded).expect("bob receive");
         assert_eq!(first_plain.plaintext, b"hello");
 
         let mut alice_session = SessionState::from_handshake(

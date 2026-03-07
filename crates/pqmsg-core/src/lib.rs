@@ -11,6 +11,7 @@ pub mod hsm;
 pub mod kdf;
 pub mod kem;
 pub mod keys;
+pub mod pq_sig;
 pub mod ratchet;
 pub mod sealed;
 pub mod session;
@@ -18,7 +19,7 @@ pub mod storage;
 pub mod tlv;
 pub mod wire;
 
-#[cfg(feature = "wasm")]
+#[cfg(any(feature = "wasm", feature = "wasm-pq"))]
 pub mod wasm_bindings;
 
 pub use alg as algorithms;

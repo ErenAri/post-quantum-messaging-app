@@ -22,8 +22,13 @@ flowchart LR
 
 | Suite ID | KEM | DH | KDF | AEAD | Signature Interface |
 |---|---|---|---|---|---|
-| `1` | ML-KEM-768 | X25519 | HKDF-SHA256 | ChaCha20Poly1305 | External abstraction |
-| `2` | Kyber768 alias | X25519 | HKDF-SHA256 | ChaCha20Poly1305 | External abstraction |
+| `1` | ML-KEM-768 | X25519 | HKDF-SHA256 | ChaCha20Poly1305 | Hybrid Ed25519 + ML-DSA-65 |
+| `2` | Kyber768 alias | X25519 | HKDF-SHA256 | ChaCha20Poly1305 | Hybrid Ed25519 + ML-DSA-65 |
+
+The `AlgorithmSuite` now includes a `signature_algorithm` field:
+
+- `Ed25519`: classical-only signature verification (backward compatibility),
+- `HybridEd25519MlDsa65`: dual-signature verification (default for PQ-enabled builds).
 
 ## 4. Fail-Closed Behavior
 

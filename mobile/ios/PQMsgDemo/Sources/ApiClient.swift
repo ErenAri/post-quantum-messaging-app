@@ -123,6 +123,275 @@ final class ApiClient {
         )
     }
 
+    // MARK: - Groups
+
+    func createGroup(headers: [String: String], requestBody: CreateGroupRequest) async throws -> CreateGroupResponse {
+        try await request(path: "v1/groups", method: "POST", headers: headers, body: requestBody)
+    }
+
+    func listGroupMembers(groupId: String, headers: [String: String]) async throws -> GroupMembersResponse {
+        try await request(
+            path: "v1/groups/\(groupId)/members",
+            method: "GET",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
+    func addGroupMember(groupId: String, headers: [String: String], userId: String) async throws -> GroupMemberMutationResponse {
+        try await request(
+            path: "v1/groups/\(groupId)/members",
+            method: "POST",
+            headers: headers,
+            body: ["user_id": userId]
+        )
+    }
+
+    func removeGroupMember(groupId: String, memberId: String, headers: [String: String]) async throws -> GroupMemberMutationResponse {
+        try await request(
+            path: "v1/groups/\(groupId)/members/\(memberId)",
+            method: "DELETE",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
+    func relayGroupMessage(groupId: String, headers: [String: String], requestBody: GroupRelayRequest) async throws -> GroupRelayResponse {
+        try await request(
+            path: "v1/groups/\(groupId)/relay",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    // MARK: - Sealed Sender
+
+    func sealedRelay(recipientUserId: String, headers: [String: String], requestBody: SealedRelayRequest) async throws -> SealedRelayResponse {
+        try await request(
+            path: "v1/sealed/\(recipientUserId)",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    func sealedInbox(userId: String, since: Int64, headers: [String: String]) async throws -> SealedInboxResponse {
+        try await request(
+            path: "v1/sealed/inbox/\(userId)?since=\(since)",
+            method: "GET",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
+    // MARK: - Discovery
+
+    func uploadDiscoveryHandles(userId: String, headers: [String: String], requestBody: DiscoveryHandlesUploadRequest) async throws -> DiscoveryHandlesUploadResponse {
+        try await request(
+            path: "v1/discovery/\(userId)/handles",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    func matchDiscoveryHashes(userId: String, headers: [String: String], requestBody: DiscoveryMatchRequest) async throws -> DiscoveryMatchResponse {
+        try await request(
+            path: "v1/discovery/\(userId)/match",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    // MARK: - Contacts
+
+    func listContacts(userId: String, headers: [String: String]) async throws -> ContactListResponse {
+        try await request(
+            path: "v1/users/\(userId)/contacts",
+            method: "GET",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
+    func upsertContact(userId: String, headers: [String: String], requestBody: UpsertContactRequest) async throws -> UpsertContactResponse {
+        try await request(
+            path: "v1/users/\(userId)/contacts",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    func removeContact(userId: String, contactUserId: String, headers: [String: String]) async throws -> RemoveContactResponse {
+        try await request(
+            path: "v1/users/\(userId)/contacts/\(contactUserId)",
+            method: "DELETE",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
+    // MARK: - Profile
+
+    func getUserProfile(userId: String, headers: [String: String]) async throws -> UserProfileResponse {
+        try await request(
+            path: "v1/users/\(userId)/profile",
+            method: "GET",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
+    func upsertUserProfile(userId: String, headers: [String: String], requestBody: UpsertProfileRequest) async throws -> UserProfileResponse {
+        try await request(
+            path: "v1/users/\(userId)/profile",
+            method: "PUT",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    // MARK: - Presence
+
+    func getPresence(userId: String) async throws -> PresenceResponse {
+        try await request(
+            path: "v1/presence/\(userId)",
+            method: "GET",
+            headers: [:],
+            body: Optional<String>.none
+        )
+    }
+
+    func updatePresence(userId: String, headers: [String: String], requestBody: PresenceUpdateRequest) async throws -> PresenceResponse {
+        try await request(
+            path: "v1/presence/\(userId)",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    // MARK: - Typing Indicators
+
+    func getTyping(userId: String, headers: [String: String]) async throws -> TypingInboxResponse {
+        try await request(
+            path: "v1/typing/\(userId)",
+            method: "GET",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
+    func updateTyping(peerUserId: String, headers: [String: String], requestBody: TypingUpdateRequest) async throws -> TypingUpdateResponse {
+        try await request(
+            path: "v1/typing/\(peerUserId)",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    // MARK: - Receipts
+
+    func sendReceipt(peerUserId: String, headers: [String: String], requestBody: SendReceiptRequest) async throws -> SendReceiptResponse {
+        try await request(
+            path: "v1/receipts/\(peerUserId)",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    func getReceipts(userId: String, headers: [String: String]) async throws -> ReceiptsResponse {
+        try await request(
+            path: "v1/receipts/\(userId)",
+            method: "GET",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
+    // MARK: - Ephemeral
+
+    func relayEphemeralMessage(recipientUserId: String, headers: [String: String], requestBody: RelayEphemeralRequest) async throws -> RelayResponse {
+        try await request(
+            path: "v1/ephemeral/\(recipientUserId)",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    // MARK: - File Upload/Download
+
+    func uploadFile(userId: String, headers: [String: String], dataBase64: String) async throws -> FileUploadResponse {
+        try await request(
+            path: "v1/files/\(userId)",
+            method: "POST",
+            headers: headers,
+            body: ["data_base64": dataBase64]
+        )
+    }
+
+    func downloadFile(fileId: String, headers: [String: String]) async throws -> FileDownloadResponse {
+        try await request(
+            path: "v1/files/\(fileId)",
+            method: "GET",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
+    // MARK: - Calls
+
+    func callOffer(calleeUserId: String, headers: [String: String], requestBody: CallOfferRequest) async throws -> CallOfferResponse {
+        try await request(
+            path: "v1/calls/\(calleeUserId)/offer",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    func callAnswer(callId: String, headers: [String: String], requestBody: CallAnswerRequest) async throws -> CallAnswerResponse {
+        try await request(
+            path: "v1/calls/\(callId)/answer",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    func callIceCandidate(callId: String, headers: [String: String], requestBody: IceCandidateRequest) async throws -> IceCandidateResponse {
+        try await request(
+            path: "v1/calls/\(callId)/ice",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    func callHangup(callId: String, headers: [String: String], requestBody: CallHangupRequest) async throws -> CallHangupResponse {
+        try await request(
+            path: "v1/calls/\(callId)/hangup",
+            method: "POST",
+            headers: headers,
+            body: requestBody
+        )
+    }
+
+    func pollCallSignals(callId: String, since: Int64, headers: [String: String]) async throws -> PollCallSignalsResponse {
+        try await request(
+            path: "v1/calls/\(callId)/signals?since=\(since)",
+            method: "GET",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
     private func request<T: Decodable, U: Encodable>(
         path: String,
         method: String,

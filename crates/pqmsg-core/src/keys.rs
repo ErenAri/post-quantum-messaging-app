@@ -55,6 +55,12 @@ pub struct IdentityKeyPair {
     pub public_key: DhPublicKey,
     #[serde(default, skip_serializing)]
     pub secret_key: SecretBytes,
+    /// ML-DSA-65 post-quantum signature public key (optional, for hybrid mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pq_sig_public_key: Option<Vec<u8>>,
+    /// ML-DSA-65 post-quantum signature secret key (optional, for hybrid mode).
+    #[serde(default, skip_serializing)]
+    pub pq_sig_secret_key: Option<SecretBytes>,
 }
 
 impl IdentityKeyPair {
@@ -64,6 +70,8 @@ impl IdentityKeyPair {
             key_id: key_id.into(),
             public_key: keypair.public,
             secret_key: SecretBytes::new(keypair.secret.0.to_vec()),
+            pq_sig_public_key: None,
+            pq_sig_secret_key: None,
         }
     }
 
@@ -120,6 +128,12 @@ pub struct PreKeyBundle {
     pub signature_public_key: Vec<u8>,
     pub one_time_prekey: Option<DhPublicKey>,
     pub one_time_pq_prekey: Option<Vec<u8>>,
+    /// ML-DSA-65 public key for hybrid PQ signature verification.
+    pub pq_sig_public_key: Option<Vec<u8>>,
+    /// Hybrid Ed25519+ML-DSA-65 signature over SPK (when in hybrid mode).
+    pub pq_spk_signature: Option<Vec<u8>>,
+    /// Hybrid Ed25519+ML-DSA-65 signature over PQSPK (when in hybrid mode).
+    pub pq_pqspk_signature: Option<Vec<u8>>,
 }
 
 impl PreKeyBundle {
@@ -144,6 +158,9 @@ impl PreKeyBundle {
             signature_public_key,
             one_time_prekey: None,
             one_time_pq_prekey: None,
+            pq_sig_public_key: None,
+            pq_spk_signature: None,
+            pq_pqspk_signature: None,
         }
     }
 }

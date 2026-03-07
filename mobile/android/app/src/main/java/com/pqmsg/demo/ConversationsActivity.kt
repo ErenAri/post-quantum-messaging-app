@@ -19,6 +19,8 @@ class ConversationsActivity : AppCompatActivity() {
     private lateinit var openSecurityButton: Button
     private lateinit var refreshButton: Button
     private lateinit var shareInviteButton: Button
+    private lateinit var groupsButton: Button
+    private lateinit var contactsButton: Button
     private lateinit var statusText: TextView
     private lateinit var profileText: TextView
     private lateinit var emptyText: TextView
@@ -41,6 +43,8 @@ class ConversationsActivity : AppCompatActivity() {
         openSecurityButton = findViewById(R.id.buttonOpenSecurityCenter)
         refreshButton = findViewById(R.id.buttonRefreshConversations)
         shareInviteButton = findViewById(R.id.buttonShareInvite)
+        groupsButton = findViewById(R.id.buttonOpenGroups)
+        contactsButton = findViewById(R.id.buttonOpenContacts)
         statusText = findViewById(R.id.textConversationsStatus)
         profileText = findViewById(R.id.textCurrentProfile)
         emptyText = findViewById(R.id.textConversationsEmpty)
@@ -90,6 +94,10 @@ class ConversationsActivity : AppCompatActivity() {
         shareInviteButton.setOnClickListener { shareInvite() }
         openSecurityButton.setOnClickListener {
             startActivity(Intent(this, SecurityInfoActivity::class.java))
+        }
+        groupsButton.setOnClickListener { showGroupsDialog() }
+        contactsButton.setOnClickListener {
+            startActivity(Intent(this, ContactDiscoveryActivity::class.java))
         }
     }
 
@@ -236,6 +244,108 @@ class ConversationsActivity : AppCompatActivity() {
             putExtra(Intent.EXTRA_TEXT, invite)
         }
         startActivity(Intent.createChooser(intent, getString(R.string.share_invite_chooser_title)))
+    }
+
+    private fun showGroupsDialog() {
+        val user = store.loadSetup().userId
+        val groups = store.listGroups(user)
+        if (groups.isEmpty()) {
+            showCreateGroupDialog()
+            return
+        }
+        val labels = groups.map { "${it.displayName} (${it.memberCount} members)\n${it.lastPreview}" }.toTypedArray()
+        val options = labels + arrayOf("+ Create new group")
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.button_open_groups))
+            .setItems(options) { _, which ->
+                if (which < groups.size) {
+                    val group = groups[which]
+                    startActivity(
+                        Intent(this, GroupChatActivity::class.java).apply {
+                            putExtra("group_id", group.groupId)
+                            putExtra("group_name", group.displayName)
+                        },
+                    )
+                } else {
+                    showCreateGroupDialog()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showCreateGroupDialog() {
+        val layout = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 8)
+        }
+        val nameInput = EditText(this).apply {
+            hint = getString(R.string.hint_group_name)
+        }
+        val membersInput = EditText(this).apply {
+            hint = "Members (comma-separated usernames)"
+        }
+        layout.addView(nameInput)
+        layout.addView(membersInput)
+
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.create_group_dialog_title))
+            .setView(layout)
+            .setPositiveButton(getString(R.string.button_create_group)) { _, _ ->
+                val groupName = nameInput.text.toString().trim()
+                val members = membersInput.text.toString().split(",").map { it.trim() }.filter { it.isNotBlank() }
+                if (groupName.isNotBlank() && members.isNotEmpty()) {
+                    createGroup(groupName, members)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun createGroup(groupName: String, members: List<String>) {
+        val setup = store.loadSetup()
+        lifecycleScope.launch {
+            runCatching {
+                val context = MessagingCoordinator.ensureReady(
+                    store = store,
+                    serverUrl = setup.serverUrl,
+                    userId = setup.userId,
+                    suiteLabel = setup.suiteLabel,
+                )
+                val keysJson = context.keysJson
+                val groupId = "${setup.userId}-${groupName.lowercase().replace(" ", "-")}-${System.currentTimeMillis() % 10000}"
+                val allMembers = (members + setup.userId).distinct()
+                val response = context.api.createGroup(
+                    headers = uniffi.pqmsg_android.buildRelayAuthHeaders(
+                        keysJson = keysJson,
+                        senderUserId = context.profile.userId,
+                        recipientUserId = groupId,
+                        messageBytesBase64 = "",
+                    ).toHeaderMap(),
+                    request = CreateGroupRequest(
+                        group_id = groupId,
+                        member_user_ids = allMembers,
+                    ),
+                )
+                store.upsertGroupConversation(
+                    userId = setup.userId,
+                    groupId = groupId,
+                    displayName = groupName,
+                    memberCount = response.member_count,
+                    lastPreview = "Group created",
+                    incrementUnread = false,
+                )
+                statusText.text = "Group '$groupName' created"
+                startActivity(
+                    Intent(this@ConversationsActivity, GroupChatActivity::class.java).apply {
+                        putExtra("group_id", groupId)
+                        putExtra("group_name", groupName)
+                    },
+                )
+            }.onFailure {
+                statusText.text = UiErrorMapper.fromThrowable(it, "Create group").headline
+            }
+        }
     }
 
     private fun openChat(peerUserId: String) {

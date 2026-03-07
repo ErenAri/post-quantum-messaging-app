@@ -1609,6 +1609,23 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/ephemeral-relay/:recipient_user_id",
             post(relay_ephemeral_message),
         )
+        .route("/v1/calls/:callee_user_id/offer", post(call_offer))
+        .route("/v1/calls/:call_id/answer", post(call_answer))
+        .route("/v1/calls/:call_id/ice", post(call_ice_candidate))
+        .route("/v1/calls/:call_id/hangup", post(call_hangup))
+        .route("/v1/calls/:call_id/signals", get(poll_call_signals))
+        .route("/v1/stories", post(create_story))
+        .route("/v1/stories/feed", get(get_stories_feed))
+        .route("/v1/stories/:story_id/view", post(view_story))
+        .route("/v1/channels", get(list_channels).post(create_channel))
+        .route(
+            "/v1/channels/:channel_id/messages",
+            get(get_channel_messages).post(post_channel_message),
+        )
+        .route(
+            "/v1/channels/:channel_id/subscribe",
+            post(subscribe_channel),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
         .layer(axum::middleware::from_fn_with_state(

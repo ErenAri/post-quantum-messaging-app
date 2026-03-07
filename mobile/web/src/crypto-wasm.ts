@@ -110,3 +110,90 @@ export function conversationAd(sender: string, recipient: string): Uint8Array {
   if (!wasmModule) throw new Error("WASM not initialized");
   return wasmModule.wasm_conversation_ad(sender, recipient) as unknown as Uint8Array;
 }
+
+// ---------------------------------------------------------------------------
+// KEM operations (ML-KEM-768) — available when WASM built with wasm-pq feature
+// ---------------------------------------------------------------------------
+
+export interface KemKeyPair {
+  public_key: Uint8Array;
+  secret_key: Uint8Array;
+}
+
+export interface KemEncapsulateResult {
+  ciphertext: Uint8Array;
+  shared_secret: Uint8Array;
+}
+
+/** Check if PQ KEM operations are available in WASM. */
+export function kemAvailable(): boolean {
+  return wasmModule !== null && typeof wasmModule.wasm_kem_keypair === "function";
+}
+
+/** Generate an ML-KEM-768 keypair via WASM. */
+export function kemKeypair(): KemKeyPair {
+  if (!wasmModule) throw new Error("WASM not initialized");
+  if (typeof wasmModule.wasm_kem_keypair !== "function") {
+    throw new Error("KEM not available — WASM built without pq-oqs");
+  }
+  return wasmModule.wasm_kem_keypair() as KemKeyPair;
+}
+
+/** Encapsulate a shared secret using an ML-KEM-768 public key. */
+export function kemEncapsulate(recipientPublicKey: Uint8Array): KemEncapsulateResult {
+  if (!wasmModule) throw new Error("WASM not initialized");
+  if (typeof wasmModule.wasm_kem_encapsulate !== "function") {
+    throw new Error("KEM not available — WASM built without pq-oqs");
+  }
+  return wasmModule.wasm_kem_encapsulate(recipientPublicKey) as KemEncapsulateResult;
+}
+
+/** Decapsulate a shared secret from a ciphertext using an ML-KEM-768 secret key. */
+export function kemDecapsulate(secretKey: Uint8Array, ciphertext: Uint8Array): Uint8Array {
+  if (!wasmModule) throw new Error("WASM not initialized");
+  if (typeof wasmModule.wasm_kem_decapsulate !== "function") {
+    throw new Error("KEM not available — WASM built without pq-oqs");
+  }
+  return wasmModule.wasm_kem_decapsulate(secretKey, ciphertext) as unknown as Uint8Array;
+}
+
+// ---------------------------------------------------------------------------
+// PQ Signature operations (ML-DSA-65)
+// ---------------------------------------------------------------------------
+
+export interface PqSigKeyPair {
+  public_key: Uint8Array;
+  secret_key: Uint8Array;
+}
+
+/** Check if PQ signature operations are available in WASM. */
+export function pqSigAvailable(): boolean {
+  return wasmModule !== null && typeof wasmModule.wasm_ml_dsa_keypair === "function";
+}
+
+/** Generate an ML-DSA-65 keypair via WASM. */
+export function mlDsaKeypair(): PqSigKeyPair {
+  if (!wasmModule) throw new Error("WASM not initialized");
+  if (typeof wasmModule.wasm_ml_dsa_keypair !== "function") {
+    throw new Error("ML-DSA not available — WASM built without pq-oqs");
+  }
+  return wasmModule.wasm_ml_dsa_keypair() as PqSigKeyPair;
+}
+
+/** Sign a message using an ML-DSA-65 secret key. */
+export function mlDsaSign(secretKey: Uint8Array, message: Uint8Array): Uint8Array {
+  if (!wasmModule) throw new Error("WASM not initialized");
+  if (typeof wasmModule.wasm_ml_dsa_sign !== "function") {
+    throw new Error("ML-DSA not available — WASM built without pq-oqs");
+  }
+  return wasmModule.wasm_ml_dsa_sign(secretKey, message) as unknown as Uint8Array;
+}
+
+/** Verify an ML-DSA-65 signature. */
+export function mlDsaVerify(publicKey: Uint8Array, message: Uint8Array, signature: Uint8Array): void {
+  if (!wasmModule) throw new Error("WASM not initialized");
+  if (typeof wasmModule.wasm_ml_dsa_verify !== "function") {
+    throw new Error("ML-DSA not available — WASM built without pq-oqs");
+  }
+  wasmModule.wasm_ml_dsa_verify(publicKey, message, signature);
+}

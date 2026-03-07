@@ -1263,6 +1263,25 @@ pub fn build_retire_device_auth_headers(
 }
 
 #[uniffi::export]
+pub fn build_format_string_auth_headers(
+    keys_json: String,
+    message: String,
+) -> Result<RequestAuthHeaders, PqmsgIosError> {
+    let keys = read_keys_file(&keys_json)?;
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let signature = signing_key.sign(message.as_bytes()).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: keys.user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
 pub fn initiate_session_and_encrypt(
     keys_json: String,
     from_user_id: String,
@@ -1400,7 +1419,7 @@ pub fn decrypt_message(
         let identity = to_identity_keypair(&keys)?;
         let signed_prekey = to_signed_prekey(&keys)?;
         let pq_signed_prekey = to_pq_signed_prekey(&keys)?;
-        let responder = bob_receive(&kem, &identity, &signed_prekey, &pq_signed_prekey, &initial)?;
+        let responder = bob_receive(&kem, &identity, &signed_prekey, &pq_signed_prekey, None, &initial)?;
         let local_dh = DhKeyPair {
             public: signed_prekey.public_key,
             secret: signed_prekey.require_secret_key()?,
@@ -1492,6 +1511,8 @@ fn to_identity_keypair(keys: &UserKeysFile) -> Result<IdentityKeyPair, PqmsgIosE
             "identity_x25519_secret_b64",
             &keys.identity_x25519_secret_b64,
         )?),
+        pq_sig_public_key: None,
+        pq_sig_secret_key: None,
     })
 }
 

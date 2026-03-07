@@ -172,3 +172,120 @@ pub fn wasm_conversation_ad(sender: &str, recipient: &str) -> Result<Vec<u8>, Js
     conversation_associated_data(sender, recipient)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
+
+// ---------------------------------------------------------------------------
+// KEM operations (ML-KEM-768) — only available with `wasm-pq` feature
+// ---------------------------------------------------------------------------
+
+/// Generate an ML-KEM-768 keypair. Returns JSON: {public_key: number[], secret_key: number[]}.
+#[wasm_bindgen]
+#[cfg(feature = "pq-oqs")]
+pub fn wasm_kem_keypair() -> Result<JsValue, JsValue> {
+    use crate::kem::MlKem768;
+    use crate::alg::KemAlgorithm;
+
+    let kem = MlKem768::new(KemAlgorithm::MlKem768)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let kp = kem.keypair().map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    #[derive(Serialize)]
+    struct KemKeyPairResult {
+        public_key: Vec<u8>,
+        secret_key: Vec<u8>,
+    }
+
+    let result = KemKeyPairResult {
+        public_key: kp.public_key,
+        secret_key: kp.secret_key.as_slice().to_vec(),
+    };
+    serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Encapsulate a shared secret using an ML-KEM-768 public key.
+/// Returns JSON: {ciphertext: number[], shared_secret: number[]}.
+#[wasm_bindgen]
+#[cfg(feature = "pq-oqs")]
+pub fn wasm_kem_encapsulate(recipient_public_key: &[u8]) -> Result<JsValue, JsValue> {
+    use crate::kem::{KemProvider, MlKem768};
+    use crate::alg::KemAlgorithm;
+
+    let kem = MlKem768::new(KemAlgorithm::MlKem768)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let enc = kem.encapsulate(recipient_public_key)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    #[derive(Serialize)]
+    struct KemEncapsulateResult {
+        ciphertext: Vec<u8>,
+        shared_secret: Vec<u8>,
+    }
+
+    let result = KemEncapsulateResult {
+        ciphertext: enc.ciphertext,
+        shared_secret: enc.shared_secret.to_vec(),
+    };
+    serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Decapsulate a shared secret from a ciphertext using an ML-KEM-768 secret key.
+/// Returns the shared secret bytes.
+#[wasm_bindgen]
+#[cfg(feature = "pq-oqs")]
+pub fn wasm_kem_decapsulate(secret_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, JsValue> {
+    use crate::kem::{KemProvider, MlKem768};
+    use crate::alg::KemAlgorithm;
+
+    let kem = MlKem768::new(KemAlgorithm::MlKem768)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let shared_secret = kem.decapsulate(secret_key, ciphertext)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(shared_secret.to_vec())
+}
+
+// ---------------------------------------------------------------------------
+// PQ Signature operations (ML-DSA-65) — only available with `pq-oqs` feature
+// ---------------------------------------------------------------------------
+
+/// Generate an ML-DSA-65 keypair. Returns JSON: {public_key: number[], secret_key: number[]}.
+#[wasm_bindgen]
+#[cfg(feature = "pq-oqs")]
+pub fn wasm_ml_dsa_keypair() -> Result<JsValue, JsValue> {
+    use crate::pq_sig::{MlDsa65, PqSignatureProvider};
+
+    let provider = MlDsa65::new().map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let kp = provider.keypair().map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    #[derive(Serialize)]
+    struct PqSigKeyPairResult {
+        public_key: Vec<u8>,
+        secret_key: Vec<u8>,
+    }
+
+    let result = PqSigKeyPairResult {
+        public_key: kp.public_key,
+        secret_key: kp.secret_key.as_slice().to_vec(),
+    };
+    serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Sign a message using an ML-DSA-65 secret key.
+#[wasm_bindgen]
+#[cfg(feature = "pq-oqs")]
+pub fn wasm_ml_dsa_sign(secret_key: &[u8], message: &[u8]) -> Result<Vec<u8>, JsValue> {
+    use crate::pq_sig::{MlDsa65, PqSignatureProvider};
+
+    let provider = MlDsa65::new().map_err(|e| JsValue::from_str(&e.to_string()))?;
+    provider.sign(secret_key, message)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Verify an ML-DSA-65 signature.
+#[wasm_bindgen]
+#[cfg(feature = "pq-oqs")]
+pub fn wasm_ml_dsa_verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), JsValue> {
+    use crate::pq_sig::{MlDsa65, PqSignatureProvider};
+
+    let provider = MlDsa65::new().map_err(|e| JsValue::from_str(&e.to_string()))?;
+    provider.verify(public_key, message, signature)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}

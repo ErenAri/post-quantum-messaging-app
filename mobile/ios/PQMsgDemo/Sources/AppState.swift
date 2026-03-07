@@ -18,6 +18,28 @@ final class AppState: ObservableObject {
     @Published var preparedOnboardingPackage: OnboardingPackageRecord?
     @Published var identityLogEvents: [IdentityLogItem]
 
+    // MARK: - Extended Feature State
+    @Published var groups: [GroupSummary]
+    @Published var groupChatLog: [String]
+    @Published var contacts: [ContactListItem]
+    @Published var peerPresenceOnline: Bool
+    @Published var peerIsTyping: Bool
+    @Published var sealedSenderEnabled: Bool
+    @Published var ephemeralTtlSeconds: Int
+
+    // MARK: - Call State
+    @Published var activeCallId: String?
+    @Published var activeCallPeer: String?
+    @Published var activeCallType: String?
+    @Published var callStatus: String
+    @Published var callElapsedSeconds: Int
+    @Published var showCallView: Bool
+    @Published var isIncomingCall: Bool
+    @Published var incomingCallSdpBase64: String?
+
+    private var callPollingTask: Task<Void, Never>?
+    private var callTimerTask: Task<Void, Never>?
+
     private let store: LocalStateStore
     private var latestBundleByPeer: [String: BundleResponse]
 
@@ -40,6 +62,21 @@ final class AppState: ObservableObject {
         self.preparedOnboardingPackage = nil
         self.identityLogEvents = []
         self.latestBundleByPeer = [:]
+        self.groups = store.listGroups(userId: loadedSetup.userId)
+        self.groupChatLog = []
+        self.contacts = []
+        self.peerPresenceOnline = false
+        self.peerIsTyping = false
+        self.sealedSenderEnabled = false
+        self.ephemeralTtlSeconds = 0
+        self.activeCallId = nil
+        self.activeCallPeer = nil
+        self.activeCallType = nil
+        self.callStatus = "Idle"
+        self.callElapsedSeconds = 0
+        self.showCallView = false
+        self.isIncomingCall = false
+        self.incomingCallSdpBase64 = nil
         refreshSecuritySnapshot()
     }
 
@@ -349,6 +386,7 @@ final class AppState: ObservableObject {
     func refreshConversations() {
         conversations = store.listConversations(userId: setup.userId)
         pinnedIdentities = store.listIdentityPins(userId: setup.userId)
+        groups = store.listGroups(userId: setup.userId)
     }
 
     func refreshSecuritySnapshot() {
@@ -728,6 +766,380 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Group Chat
+
+    func createGroup(name: String, memberIds: [String]) async {
+        await runChatAction("Create group") {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let keys = try requireKeys(user)
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
+            let response = try await api.createGroup(
+                headers: headers,
+                requestBody: CreateGroupRequest(group_name: name, member_user_ids: memberIds)
+            )
+            let summary = GroupSummary(
+                groupId: response.group_id,
+                displayName: response.group_name,
+                memberCount: memberIds.count + 1,
+                lastPreview: "Group created",
+                updatedAtMillis: Int64(Date().timeIntervalSince1970 * 1000),
+                unreadCount: 0
+            )
+            store.upsertGroupConversation(userId: user, group: summary)
+            refreshConversations()
+            statusLine = "Created group '\(name)'"
+        }
+    }
+
+    func sendGroupMessage(groupId: String, text: String) async {
+        await runChatAction("Send group message") {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let keys = try requireKeys(user)
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let profile = try loadUserProfile(keysJson: keys)
+
+            let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
+            let membersResponse = try await api.listGroupMembers(groupId: groupId, headers: headers)
+            let otherMembers = membersResponse.members.filter { $0.user_id != user }
+
+            var recipients: [GroupRelayRecipient] = []
+            for member in otherMembers {
+                let session = store.readSession(userId: user, peerUserId: member.user_id)
+                let sendResult: SendResult
+                if let session, !session.isEmpty {
+                    sendResult = try encryptWithSession(
+                        sessionJson: session,
+                        senderUserId: user,
+                        peerUserId: member.user_id,
+                        plaintextUtf8: text
+                    )
+                } else {
+                    let bundle = try await loadBundleForPeer(api: api, peer: member.user_id)
+                    sendResult = try initiateSessionAndEncrypt(
+                        keysJson: keys,
+                        fromUserId: user,
+                        peerUserId: member.user_id,
+                        peerBundle: bundle.toRustBundle(),
+                        plaintextUtf8: text,
+                        suiteOverride: nil
+                    )
+                }
+                try store.writeSession(userId: user, peerUserId: member.user_id, sessionJson: sendResult.sessionJson)
+                recipients.append(GroupRelayRecipient(
+                    recipient_user_id: member.user_id,
+                    message_bytes_base64: sendResult.messageBytesBase64
+                ))
+            }
+
+            let relayHeaders = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
+            _ = try await api.relayGroupMessage(
+                groupId: groupId,
+                headers: relayHeaders,
+                requestBody: GroupRelayRequest(
+                    sender_user_id: profile.userId,
+                    device_id: profile.deviceId,
+                    recipients: recipients
+                )
+            )
+
+            let logLine = "me: \(text)"
+            store.appendGroupThreadMessage(userId: user, groupId: groupId, line: logLine)
+            groupChatLog = store.listGroupThreadMessages(userId: user, groupId: groupId)
+
+            var g = store.listGroups(userId: user).first { $0.groupId == groupId }
+                ?? GroupSummary(groupId: groupId, displayName: groupId, memberCount: 0, lastPreview: "", updatedAtMillis: 0, unreadCount: 0)
+            g.lastPreview = "You: \(text)"
+            store.upsertGroupConversation(userId: user, group: g)
+            refreshConversations()
+            statusLine = "Group message sent"
+        }
+    }
+
+    func loadGroupChatLog(groupId: String) {
+        groupChatLog = store.listGroupThreadMessages(userId: setup.userId, groupId: groupId)
+    }
+
+    func listGroupMembers(groupId: String) async -> [GroupMemberRecord] {
+        do {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let keys = try requireKeys(user)
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
+            let response = try await api.listGroupMembers(groupId: groupId, headers: headers)
+            return response.members
+        } catch {
+            errorLine = "List members failed: \(error.localizedDescription)"
+            return []
+        }
+    }
+
+    func addGroupMember(groupId: String, memberId: String) async {
+        await runChatAction("Add group member") {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let keys = try requireKeys(user)
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
+            _ = try await api.addGroupMember(groupId: groupId, headers: headers, userId: memberId)
+            statusLine = "Added \(memberId) to group"
+        }
+    }
+
+    // MARK: - Contacts
+
+    func loadContacts() async {
+        await runChatAction("Load contacts") {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let keys = try requireKeys(user)
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
+            let response = try await api.listContacts(userId: user, headers: headers)
+            contacts = response.contacts
+            statusLine = "Loaded \(contacts.count) contact(s)"
+        }
+    }
+
+    func addContact(contactUserId: String, alias: String) async {
+        await runChatAction("Add contact") {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let keys = try requireKeys(user)
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
+            _ = try await api.upsertContact(
+                userId: user,
+                headers: headers,
+                requestBody: UpsertContactRequest(
+                    contact_user_id: contactUserId,
+                    alias: alias.isEmpty ? nil : alias,
+                    verified: nil
+                )
+            )
+            await loadContacts()
+            statusLine = "Added contact \(contactUserId)"
+        }
+    }
+
+    func removeContact(contactUserId: String) async {
+        await runChatAction("Remove contact") {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let keys = try requireKeys(user)
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
+            _ = try await api.removeContact(userId: user, contactUserId: contactUserId, headers: headers)
+            contacts.removeAll { $0.contact_user_id == contactUserId }
+            statusLine = "Removed contact \(contactUserId)"
+        }
+    }
+
+    // MARK: - Typing Indicators
+
+    func notifyTyping(peerUserId: String, isTyping: Bool) async {
+        do {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let keys = try requireKeys(user)
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
+            _ = try await api.updateTyping(
+                peerUserId: peerUserId,
+                headers: headers,
+                requestBody: TypingUpdateRequest(is_typing: isTyping)
+            )
+        } catch {
+            // Typing indicator failures are non-fatal
+        }
+    }
+
+    func pollTyping() async {
+        do {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let keys = try requireKeys(user)
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
+            let response = try await api.getTyping(userId: user, headers: headers)
+            peerIsTyping = response.indicators.contains { $0.from_user_id == selectedPeer && $0.is_typing }
+        } catch {
+            // Non-fatal
+        }
+    }
+
+    // MARK: - Presence
+
+    func sendPresenceHeartbeat() async {
+        do {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let keys = try requireKeys(user)
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
+            _ = try await api.updatePresence(
+                userId: user,
+                headers: headers,
+                requestBody: PresenceUpdateRequest(status: "online")
+            )
+        } catch {
+            // Non-fatal
+        }
+    }
+
+    func pollPresence(peerUserId: String) async {
+        do {
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let response = try await api.getPresence(userId: peerUserId)
+            peerPresenceOnline = response.status == "online"
+        } catch {
+            peerPresenceOnline = false
+        }
+    }
+
+    // MARK: - Read Receipts
+
+    func sendReadReceipt(peerUserId: String, messageId: Int64) async {
+        do {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let keys = try requireKeys(user)
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
+            _ = try await api.sendReceipt(
+                peerUserId: peerUserId,
+                headers: headers,
+                requestBody: SendReceiptRequest(message_id: messageId, receipt_type: "read")
+            )
+            store.updateMessageReceipt(userId: user, peerUserId: peerUserId, messageId: messageId, receiptType: "read")
+        } catch {
+            // Non-fatal
+        }
+    }
+
+    // MARK: - Sealed Sender
+
+    func toggleSealedSender() {
+        sealedSenderEnabled.toggle()
+        statusLine = sealedSenderEnabled ? "Sealed sender ON" : "Sealed sender OFF"
+    }
+
+    func sendSealedMessage(peerUserId: String) async {
+        await runChatAction("Send sealed message") {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let peer = peerUserId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = draftMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                throw RustBridgeError.missingKeys("message is empty")
+            }
+            let keys = try requireKeys(user)
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let profile = try loadUserProfile(keysJson: keys)
+            let session = store.readSession(userId: user, peerUserId: peer)
+
+            let sendResult: SendResult
+            if let session, !session.isEmpty {
+                sendResult = try encryptWithSession(
+                    sessionJson: session,
+                    senderUserId: user,
+                    peerUserId: peer,
+                    plaintextUtf8: text
+                )
+            } else {
+                let bundle = try await loadBundleForPeer(api: api, peer: peer)
+                try enforceIdentityPin(localUser: user, peerUser: peer, bundle: bundle)
+                sendResult = try initiateSessionAndEncrypt(
+                    keysJson: keys,
+                    fromUserId: user,
+                    peerUserId: peer,
+                    peerBundle: bundle.toRustBundle(),
+                    plaintextUtf8: text,
+                    suiteOverride: nil
+                )
+            }
+            try store.writeSession(userId: user, peerUserId: peer, sessionJson: sendResult.sessionJson)
+            let relayHeaders = try buildRelayAuthHeaders(
+                keysJson: keys,
+                senderUserId: user,
+                recipientUserId: peer,
+                messageBytesBase64: sendResult.messageBytesBase64
+            ).toHeaderMap()
+            _ = try await api.sealedRelay(
+                recipientUserId: peer,
+                headers: relayHeaders,
+                requestBody: SealedRelayRequest(
+                    sender_user_id: profile.userId,
+                    device_id: profile.deviceId,
+                    message_bytes_base64: sendResult.messageBytesBase64
+                )
+            )
+            appendChatLog("me->\(peer) [sealed]: \(text)")
+            store.upsertConversation(userId: user, peerUserId: peer, lastPreview: "You [sealed]: \(text)", incrementUnread: false)
+            store.markConversationRead(userId: user, peerUserId: peer)
+            refreshConversations()
+            draftMessage = ""
+            statusLine = "Sealed message sent"
+        }
+    }
+
+    // MARK: - Ephemeral Messages
+
+    func setEphemeralTtl(_ seconds: Int) {
+        ephemeralTtlSeconds = seconds
+        statusLine = seconds > 0 ? "Ephemeral TTL: \(seconds)s" : "Ephemeral OFF"
+    }
+
+    func sendEphemeralMessage(peerUserId: String) async {
+        await runChatAction("Send ephemeral message") {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let peer = peerUserId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = draftMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                throw RustBridgeError.missingKeys("message is empty")
+            }
+            let keys = try requireKeys(user)
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let profile = try loadUserProfile(keysJson: keys)
+            let session = store.readSession(userId: user, peerUserId: peer)
+
+            let sendResult: SendResult
+            if let session, !session.isEmpty {
+                sendResult = try encryptWithSession(
+                    sessionJson: session,
+                    senderUserId: user,
+                    peerUserId: peer,
+                    plaintextUtf8: text
+                )
+            } else {
+                let bundle = try await loadBundleForPeer(api: api, peer: peer)
+                try enforceIdentityPin(localUser: user, peerUser: peer, bundle: bundle)
+                sendResult = try initiateSessionAndEncrypt(
+                    keysJson: keys,
+                    fromUserId: user,
+                    peerUserId: peer,
+                    peerBundle: bundle.toRustBundle(),
+                    plaintextUtf8: text,
+                    suiteOverride: nil
+                )
+            }
+            try store.writeSession(userId: user, peerUserId: peer, sessionJson: sendResult.sessionJson)
+            let relayHeaders = try buildRelayAuthHeaders(
+                keysJson: keys,
+                senderUserId: user,
+                recipientUserId: peer,
+                messageBytesBase64: sendResult.messageBytesBase64
+            ).toHeaderMap()
+            _ = try await api.relayEphemeralMessage(
+                recipientUserId: peer,
+                headers: relayHeaders,
+                requestBody: RelayEphemeralRequest(
+                    sender_user_id: profile.userId,
+                    device_id: profile.deviceId,
+                    message_bytes_base64: sendResult.messageBytesBase64,
+                    ttl_seconds: ephemeralTtlSeconds
+                )
+            )
+            appendChatLog("me->\(peer) [ephemeral \(ephemeralTtlSeconds)s]: \(text)")
+            store.upsertConversation(userId: user, peerUserId: peer, lastPreview: "You [ephemeral]: \(text)", incrementUnread: false)
+            store.markConversationRead(userId: user, peerUserId: peer)
+            refreshConversations()
+            draftMessage = ""
+            statusLine = "Ephemeral message sent (TTL: \(ephemeralTtlSeconds)s)"
+        }
+    }
+
     func resetLocalState() async -> Bool {
         let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !user.isEmpty else {
@@ -970,5 +1382,178 @@ final class AppState: ObservableObject {
             return ""
         }
         return "\(trimmed)-device-2"
+    }
+
+    // MARK: - Call Signaling
+
+    private func buildCallAuth(message: String) throws -> [String: String] {
+        let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keys = try requireKeys(user)
+        return try buildFormatStringAuthHeaders(keysJson: keys, message: message).toHeaderMap()
+    }
+
+    func startOutgoingCall(peerUserId: String, callType: String) async {
+        await runChatAction("Start call") {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let device = setup.deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let peer = peerUserId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let api = try ApiClient(serverURL: setup.serverURL)
+
+            let sdpOfferPlaceholder = Data("placeholder-sdp-offer".utf8).base64EncodedString()
+            let authMessage = "call-offer:\(user):\(device):\(peer)"
+            let headers = try buildCallAuth(message: authMessage)
+
+            let response = try await api.callOffer(
+                calleeUserId: peer,
+                headers: headers,
+                requestBody: CallOfferRequest(
+                    caller_user_id: user,
+                    device_id: device,
+                    call_type: callType,
+                    sdp_offer_base64: sdpOfferPlaceholder
+                )
+            )
+
+            activeCallId = response.call_id
+            activeCallPeer = peer
+            activeCallType = callType
+            callStatus = "Ringing..."
+            callElapsedSeconds = 0
+            isIncomingCall = false
+            showCallView = true
+            startCallSignalPolling()
+        }
+    }
+
+    func acceptIncomingCall() async {
+        await runChatAction("Accept call") {
+            guard let callId = activeCallId,
+                  let peer = activeCallPeer else { return }
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let device = setup.deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let api = try ApiClient(serverURL: setup.serverURL)
+
+            let sdpAnswerPlaceholder = Data("placeholder-sdp-answer".utf8).base64EncodedString()
+            let authMessage = "call-answer:\(user):\(device):\(callId)"
+            let headers = try buildCallAuth(message: authMessage)
+
+            _ = try await api.callAnswer(
+                callId: callId,
+                headers: headers,
+                requestBody: CallAnswerRequest(
+                    callee_user_id: user,
+                    device_id: device,
+                    sdp_answer_base64: sdpAnswerPlaceholder
+                )
+            )
+
+            callStatus = "Connected"
+            startCallTimer()
+            startCallSignalPolling()
+        }
+    }
+
+    func hangupCall(reason: String = "user-hangup") async {
+        callPollingTask?.cancel()
+        callPollingTask = nil
+        callTimerTask?.cancel()
+        callTimerTask = nil
+
+        if let callId = activeCallId {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let device = setup.deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            do {
+                let api = try ApiClient(serverURL: setup.serverURL)
+                let authMessage = "call-hangup:\(user):\(device):\(callId)"
+                let headers = try buildCallAuth(message: authMessage)
+                _ = try await api.callHangup(
+                    callId: callId,
+                    headers: headers,
+                    requestBody: CallHangupRequest(
+                        user_id: user,
+                        device_id: device,
+                        reason: reason
+                    )
+                )
+            } catch {
+                // Best-effort hangup notification
+            }
+        }
+
+        activeCallId = nil
+        activeCallPeer = nil
+        activeCallType = nil
+        callStatus = "Ended"
+        callElapsedSeconds = 0
+
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        showCallView = false
+        callStatus = "Idle"
+    }
+
+    func declineIncomingCall() async {
+        await hangupCall(reason: "declined")
+    }
+
+    private func startCallSignalPolling() {
+        callPollingTask?.cancel()
+        callPollingTask = Task { [weak self] in
+            var lastSignalId: Int64 = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, let callId = self.activeCallId else { break }
+
+                do {
+                    let user = self.setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let device = self.setup.deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let api = try ApiClient(serverURL: self.setup.serverURL)
+                    let authMessage = "call-signals:\(user):\(device):\(callId)"
+                    let headers = try self.buildCallAuth(message: authMessage)
+                    let response = try await api.pollCallSignals(
+                        callId: callId,
+                        since: lastSignalId,
+                        headers: headers
+                    )
+                    for signal in response.signals {
+                        lastSignalId = max(lastSignalId, signal.signal_id)
+                        await self.handleCallSignal(signal)
+                    }
+                } catch {
+                    // Continue polling
+                }
+            }
+        }
+    }
+
+    private func handleCallSignal(_ signal: CallSignal) async {
+        switch signal.signal_type {
+        case "answer":
+            callStatus = "Connected"
+            startCallTimer()
+        case "hangup":
+            callPollingTask?.cancel()
+            callTimerTask?.cancel()
+            callStatus = "Ended"
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            showCallView = false
+            activeCallId = nil
+            activeCallPeer = nil
+            activeCallType = nil
+            callStatus = "Idle"
+        default:
+            break
+        }
+    }
+
+    private func startCallTimer() {
+        callTimerTask?.cancel()
+        callElapsedSeconds = 0
+        callTimerTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self else { break }
+                self.callElapsedSeconds += 1
+            }
+        }
     }
 }

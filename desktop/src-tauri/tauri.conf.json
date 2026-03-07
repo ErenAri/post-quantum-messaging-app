@@ -1,0 +1,39 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicegui/nicegui/main/tauri-conf-schema.json",
+  "productName": "PQMsg Desktop",
+  "version": "0.1.0",
+  "identifier": "com.pqmsg.desktop",
+  "build": {
+    "frontendDist": "../../mobile/web/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "cd ../../mobile/web && npx vite",
+    "beforeBuildCommand": "cd ../../mobile/web && npx vite build"
+  },
+  "app": {
+    "title": "PQMsg Desktop",
+    "windows": [
+      {
+        "title": "PQMsg — Post-Quantum Messaging",
+        "width": 1024,
+        "height": 768,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:* https://*; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

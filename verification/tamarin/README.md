@@ -12,9 +12,11 @@ The ProVerif model in `../proverif/` gives fast symbolic verification of secrecy
 The Tamarin model complements it with:
 
 - **State-based reasoning** via multiset rewriting rules.
-- **Compromise rules** (`RevealLtk`, `RevealEph`) for explicit forward-secrecy proofs.
+- **Compromise rules** (`RevealLtk`, `RevealEph`, `RevealPQSigLtk`) for explicit forward-secrecy and hybrid-signature proofs.
 - **Injective agreement** for authentication.
 - **Key uniqueness** across sessions.
+- **OTPK single-use** via linear fact consumption (one-time prekeys cannot be reused).
+- **Hybrid signature security** — authentication holds even if the PQ signing key is compromised (and vice versa).
 
 ## Security Lemmas
 
@@ -22,6 +24,8 @@ The Tamarin model complements it with:
 2. **Authentication** — injective agreement; Bob's commit implies a prior Alice running action.
 3. **Forward secrecy** — a compromised long-term key only affects sessions established after the compromise.
 4. **No key reuse** — distinct sessions produce distinct session keys.
+5. **OTPK single-use** — each one-time prekey can only be consumed once (guaranteed by linear fact).
+6. **Hybrid signature security** — authentication holds even if classical OR PQ signing key is compromised (not both).
 
 ## Run
 

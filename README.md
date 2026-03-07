@@ -3,7 +3,7 @@
 ## Abstract
 
 This repository presents a research-grade prototype for hybrid post-quantum asynchronous messaging.  
-The design composes X25519-based classical Diffie-Hellman with ML-KEM-family encapsulation in a PQXDH-style initiation path, followed by a minimal ratcheting channel.
+The design composes X25519-based classical Diffie-Hellman with ML-KEM-family encapsulation in a PQXDH-style initiation path (including DH4 one-time prekey consumption for replay protection), followed by a minimal ratcheting channel. Identity authentication uses hybrid dual signatures (Ed25519 + ML-DSA-65) for quantum-resistant bundle verification.
 
 The implementation objective is not product completeness; it is security-measurable protocol engineering with reproducible tests, strict parsers, and explicit failure modes.
 
@@ -18,19 +18,27 @@ The strongest contributions are:
 - explicit protocol specification and wire framing,
 - deterministic KAT coverage for handshake transcripts,
 - strict TLV/wire parsing behavior and fuzz targets,
-- hybrid handshake and ratchet state model suitable for further formalization.
+- hybrid handshake and ratchet state model suitable for further formalization,
+- DH4 one-time prekey consumption preventing replay of captured `InitialMessage` payloads,
+- hybrid dual-signature authentication (Ed25519 + ML-DSA-65) for quantum-resistant identity and prekey verification,
+- post-quantum encrypted voice and video calling via WebRTC with PQ key exchange,
+- five-platform reach: CLI, Android, iOS, Web PWA, and Desktop (Tauri),
+- stories (24h ephemeral broadcasts) and channels (admin-only broadcast groups).
 
 ## System Architecture
 
 ```mermaid
 flowchart LR
-    C[pqmsg-cli / Android / iOS / Web] -->|HTTP JSON + TLS| S[pqmsg-server]
+    C[pqmsg-cli / Android / iOS / Web / Desktop] -->|HTTP JSON + TLS| S[pqmsg-server]
     S -->|WebSocket inbox stream| C
+    S -->|Call signaling REST| C
     C -->|UniFFI bridge| A[pqmsg-android]
     C -->|UniFFI bridge| I[pqmsg-ios]
+    D[Desktop Tauri] -->|wraps Web SPA| W[Web PWA]
     A --> CORE[pqmsg-core]
     I --> CORE
     C --> CORE
+    W -->|WASM bridge| CORE
     CORE -.->|optional| HSM[PKCS#11 HSM]
     S --> DB[(PostgreSQL / SQLite)]
     S --> RD[(Redis rate limiter)]
@@ -56,8 +64,14 @@ flowchart TD
     R10[Push circuit breaker + audit events] --> D
     R11[PII scrubbing in structured logs] --> L[Operational data hygiene]
     R12[ProVerif + Tamarin CI gate] --> V[Verified protocol correctness]
+    R13[DH4 one-time prekey consumption] --> G
+    R14[ML-DSA-65 dual signatures on prekey bundles] --> Q
+    R15[PQ key exchange for call media encryption] --> M
 ```
 
+- DH4 one-time prekey (OTPK) consumption in handshake key schedule prevents replay of captured `InitialMessage` payloads; consumed OTPKs are marked used in the server database.
+- Hybrid dual-signature authentication (Ed25519 + ML-DSA-65) on prekey bundles; verifiers check BOTH signatures (security holds if EITHER scheme is secure).
+- Post-quantum encrypted voice and video calling: PQ key exchange (via WASM or UniFFI) derives `media_key` before WebRTC SDP exchange; Insertable Streams encrypt/decrypt RTP payloads with ChaCha20-Poly1305.
 - FIPS feature gate (`--features fips`) restricts algorithm suite to ML-KEM-768 only; compile-time conflict with `classical-only-INSECURE`.
 - PKCS#11 HSM signing abstraction in `pqmsg-core::hsm` supports software and hardware-backed key handles; real PKCS#11 implementation via `cryptoki` crate gated behind `hsm-pkcs11` feature.
 - All secret key material is zeroized on drop via explicit `Drop` implementations (`DhKeyPair`, `SessionState`, `SessionSnapshot`, `RootStepOutput`, `PqStepOutput`, `SkippedMessageKeys`).
@@ -100,6 +114,7 @@ flowchart TD
 | `mobile/android` | Minimal Kotlin demo UI and transport layer |
 | `mobile/ios` | Minimal SwiftUI demo UI and iOS build scripts |
 | `mobile/web` | Progressive web app shell with WebCrypto fallback mode |
+| `desktop` | Tauri desktop app wrapping web SPA with native Rust crypto |
 | `deploy` | Container, Kubernetes, and Helm deployment assets |
 | `observability` | Prometheus, Grafana, Loki, and Promtail stack assets |
 | `docs` | Normative and security documentation corpus |
@@ -121,7 +136,8 @@ CI/CD quality gates additionally enforce:
 - **Coverage**: `cargo-llvm-cov` with a minimum 50% line-coverage threshold,
 - **SBOM**: CycloneDX JSON bill-of-materials generated and uploaded as artifact,
 - **Benchmarks**: Criterion performance benchmarks for all crypto primitives (results as CI artifact),
-- **ProVerif gate**: blocking CI job verifying all symbolic protocol queries pass on every push/PR,
+- **ProVerif gate**: blocking CI job verifying all symbolic protocol queries pass on every push/PR (DH4 + dual-signature model),
+- **Tamarin gate**: complementary Tamarin prover verification with OTPK single-use and hybrid-signature lemmas,
 - **FIPS build gate**: CI job confirming the `fips` feature flag compiles cleanly,
 - **Android build**: full APK assembly,
 - **Fuzz smoke** (nightly): 5 libFuzzer targets covering TLV, wire, handshake, sealed-sender, and algorithm dispatch,
@@ -291,6 +307,14 @@ npm install
 npm run dev
 ```
 
+Desktop app (Tauri — wraps web client with native window):
+
+```bash
+cd desktop
+npm install
+npm run dev
+```
+
 3. In Android Studio:
 
 - open `mobile/android`,
@@ -378,7 +402,7 @@ cargo run -p pqmsg-server --bin migrate_sqlite_to_postgres -- --sqlite-url "sqli
 | [PENETRATION_TESTING](docs/PENETRATION_TESTING.md) | Penetration test methodology |
 | [ANDROID](docs/ANDROID.md) | Android build and integration guide |
 | [IOS](docs/IOS.md) | iOS build and integration guide |
-| [WEB](docs/WEB.md) | Web client fallback mode |
+| [WEB](docs/WEB.md) | Web client with WASM PQ crypto and WebRTC calling |
 | [TLS_ROTATION](docs/TLS_ROTATION.md) | TLS certificate rotation procedures |
 | [AUDIT_READINESS](docs/AUDIT_READINESS.md) | Comprehensive audit readiness package |
 | [SECURITY](SECURITY.md) | Vulnerability disclosure policy |

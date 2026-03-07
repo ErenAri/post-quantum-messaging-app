@@ -128,8 +128,18 @@ export function generateIdentityKeys(
   const identitySigPub = ed25519.getPublicKey(identitySigSecret);
   const signedPrekeySecret = x25519.utils.randomPrivateKey();
   const signedPrekeyPub = x25519.getPublicKey(signedPrekeySecret);
-  const pqSignedPrekeySecret = randomBytes(2400);
-  const pqSignedPrekeyPub = randomBytes(1184);
+
+  // PQ signed prekey: use real ML-KEM-768 via WASM if available, else fallback
+  let pqSignedPrekeySecret: Uint8Array;
+  let pqSignedPrekeyPub: Uint8Array;
+  if (wasmCrypto.kemAvailable()) {
+    const kemKp = wasmCrypto.kemKeypair();
+    pqSignedPrekeyPub = kemKp.public_key;
+    pqSignedPrekeySecret = kemKp.secret_key;
+  } else {
+    pqSignedPrekeySecret = randomBytes(2400);
+    pqSignedPrekeyPub = randomBytes(1184);
+  }
 
   const oneTimePrekeysX25519: string[] = [];
   const oneTimePrekeysX25519Secret: string[] = [];
@@ -141,8 +151,17 @@ export function generateIdentityKeys(
     const xPub = x25519.getPublicKey(xSecret);
     oneTimePrekeysX25519.push(bytesToBase64(xPub));
     oneTimePrekeysX25519Secret.push(bytesToBase64(xSecret));
-    const pqSecret = randomBytes(2400);
-    const pqPub = randomBytes(1184);
+    // PQ one-time prekeys: real KEM when WASM available
+    let pqPub: Uint8Array;
+    let pqSecret: Uint8Array;
+    if (wasmCrypto.kemAvailable()) {
+      const kemOtKp = wasmCrypto.kemKeypair();
+      pqPub = kemOtKp.public_key;
+      pqSecret = kemOtKp.secret_key;
+    } else {
+      pqSecret = randomBytes(2400);
+      pqPub = randomBytes(1184);
+    }
     oneTimePrekeysMlkem768.push(bytesToBase64(pqPub));
     oneTimePrekeysMlkem768Secret.push(bytesToBase64(pqSecret));
   }

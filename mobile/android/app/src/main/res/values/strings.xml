@@ -79,4 +79,37 @@
     <string name="reset_local_state_message">Retire the current device on the server when keys are still available, then delete all local keys, sessions, pins, cursors, conversations, and message history for %1$s on this device?</string>
     <string name="status_ready">Ready</string>
     <string name="chat_log_empty">Messages will appear here after you start the conversation.</string>
+
+    <!-- Group chat -->
+    <string name="group_chat_title">Group Chat</string>
+    <string name="button_create_group">Create Group</string>
+    <string name="button_open_groups">Groups</string>
+    <string name="button_add_member">Add Member</string>
+    <string name="button_remove_member">Remove Member</string>
+    <string name="button_group_info">Group Info</string>
+    <string name="hint_group_name">Group name</string>
+    <string name="hint_member_user_id">Member username</string>
+    <string name="create_group_dialog_title">Create a new group</string>
+    <string name="group_info_title">Group Info</string>
+    <string name="group_chat_log_empty">Group messages will appear here.</string>
+
+    <!-- Contact discovery -->
+    <string name="discovery_title">Contact Discovery</string>
+    <string name="button_open_contacts">Contacts</string>
+    <string name="button_discover_contacts">Discover Contacts</string>
+    <string name="button_add_contact">Add Contact</string>
+    <string name="button_remove_contact">Remove</string>
+    <string name="hint_contact_hash">Phone or email SHA-256 hash</string>
+    <string name="hint_contact_user_id">Contact username</string>
+    <string name="hint_contact_alias">Alias (optional)</string>
+
+    <!-- Typing / Presence / Receipts -->
+    <string name="typing_indicator">typing…</string>
+    <string name="presence_online">online</string>
+    <string name="presence_offline">offline</string>
+
+    <!-- Ephemeral / Sealed sender -->
+    <string name="button_sealed_sender">Sealed Sender</string>
+    <string name="button_ephemeral">Ephemeral</string>
+    <string name="ephemeral_dialog_title">Disappearing message TTL</string>
 </resources>

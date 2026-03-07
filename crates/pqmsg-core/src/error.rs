@@ -28,6 +28,8 @@ pub enum CoreError {
     DhOperation,
     #[error("KEM operation failed")]
     KemOperation,
+    #[error("PQ signature operation failed: {0}")]
+    PqSigOperation(&'static str),
     #[error("unsupported algorithm: {0}")]
     UnsupportedAlgorithm(&'static str),
     #[error("message parsing failed: {0}")]

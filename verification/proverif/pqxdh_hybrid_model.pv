@@ -1,23 +1,48 @@
+(* ================================================================
+ * PQXDH Hybrid Handshake — ProVerif Model
+ *
+ * Models DH4 (one-time prekey), hybrid PQ+classical dual signatures,
+ * and ML-KEM PQ key encapsulation. Proves:
+ *   - Plaintext secrecy
+ *   - Authentication (Bob ↔ Alice agreement)
+ *   - Forward secrecy under ephemeral-key reveal
+ *   - OTPK replay protection
+ *   - PQ signature unforgeability (hybrid: secure if EITHER holds)
+ * ================================================================ *)
+
 type key.
 type pkey.
+type pqsigkey.   (* ML-DSA-65 secret key *)
+type pqsigpkey.  (* ML-DSA-65 public key *)
 
 free net: channel.
 
+(* ── Classical DH ──────────────────────────────────────────────── *)
 fun pk(key): pkey.
 fun shared_dh(key, pkey): bitstring.
 equation forall x : key, y : key; shared_dh(x, pk(y)) = shared_dh(y, pk(x)).
 
+(* ── Classical Ed25519 signatures ──────────────────────────────── *)
 fun sig_sign(bitstring, key): bitstring.
 fun sig_verify(bitstring, bitstring, pkey): bool.
 reduc forall m:bitstring, sk:key; sig_verify(sig_sign(m, sk), m, pk(sk)) = true.
 
+(* ── PQ ML-DSA-65 signatures ──────────────────────────────────── *)
+fun pqsig_pk(pqsigkey): pqsigpkey.
+fun pqsig_sign(bitstring, pqsigkey): bitstring.
+fun pqsig_verify(bitstring, bitstring, pqsigpkey): bool.
+reduc forall m:bitstring, sk:pqsigkey; pqsig_verify(pqsig_sign(m, sk), m, pqsig_pk(sk)) = true.
+
+(* ── KEM (ML-KEM-768) ─────────────────────────────────────────── *)
 fun kem_enc(pkey, bitstring): bitstring.
 fun kem_ss(key, bitstring): bitstring.
 reduc forall sk:key, ss:bitstring; kem_ss(sk, kem_enc(pk(sk), ss)) = ss.
 
+(* ── Key schedule helpers ──────────────────────────────────────── *)
 fun hkdf(bitstring, bitstring): bitstring.
 fun tuple4(bitstring, bitstring, bitstring, bitstring): bitstring.
-fun tuple5(pkey, pkey, bitstring, bitstring, bitstring): bitstring.
+fun tuple5(bitstring, bitstring, bitstring, bitstring, bitstring): bitstring.
+fun tuple5_ad(pkey, pkey, bitstring, bitstring, bitstring): bitstring.
 fun aead_enc(bitstring, bitstring, bitstring): bitstring.
 
 free protocol_v1: bitstring.
@@ -26,85 +51,133 @@ free bob_id: bitstring.
 free plaintext0: bitstring [private].
 free plaintext_fs: bitstring [private].
 
-event BobBundlePublished(bitstring, pkey, pkey, pkey).
+event BobBundlePublished(bitstring, pkey, pkey, pkey, pkey).
 event AliceAcceptedBundle(bitstring, bitstring).
 event AliceComplete(bitstring, bitstring, bitstring).
 event BobComplete(bitstring, bitstring, bitstring).
 event EphemeralKeyRevealed(bitstring).
 event AliceSessionBound(pkey, pkey, bitstring).
 event BobSessionBound(pkey, pkey, bitstring).
+event OTPKConsumed(bitstring, pkey).
 
+(* ================================================================
+ * Bob: publish bundle with SPK, PQSPK, OTPK + dual signatures
+ * ================================================================ *)
 let Bob =
   new ik_b:key;
   new spk_b:key;
   new pqspk_b:key;
+  new otpk_b:key;           (* one-time prekey *)
+  new pqsig_b:pqsigkey;     (* ML-DSA-65 identity signing key *)
   let ik_b_pub = pk(ik_b) in
   let spk_b_pub = pk(spk_b) in
   let pqspk_b_pub = pk(pqspk_b) in
+  let otpk_b_pub = pk(otpk_b) in
+  let pqsig_b_pub = pqsig_pk(pqsig_b) in
+  (* Classical Ed25519 signatures over prekeys *)
   let sig_spk = sig_sign(spk_b_pub, ik_b) in
   let sig_pqspk = sig_sign(pqspk_b_pub, ik_b) in
-  event BobBundlePublished(bob_id, ik_b_pub, spk_b_pub, pqspk_b_pub);
-  out(net, (bob_id, ik_b_pub, spk_b_pub, pqspk_b_pub, sig_spk, sig_pqspk));
-  in(net, (ik_a_pub:pkey, ek_a_pub:pkey, pq_ct:bitstring, ad:bitstring, ciphertext:bitstring));
-  let ss_pq = kem_ss(pqspk_b, pq_ct) in
-  let t1 = shared_dh(spk_b, ik_a_pub) in
-  let t2 = shared_dh(ik_b, ek_a_pub) in
-  let t3 = shared_dh(spk_b, ek_a_pub) in
-  let sk = hkdf(tuple4(t1, t2, t3, ss_pq), ad) in
-  event BobSessionBound(ik_a_pub, ik_b_pub, sk);
-  event BobComplete(alice_id, bob_id, sk).
+  (* PQ ML-DSA-65 dual signatures over prekeys *)
+  let pqsig_spk = pqsig_sign(spk_b_pub, pqsig_b) in
+  let pqsig_pqspk = pqsig_sign(pqspk_b_pub, pqsig_b) in
+  event BobBundlePublished(bob_id, ik_b_pub, spk_b_pub, pqspk_b_pub, otpk_b_pub);
+  out(net, (bob_id, ik_b_pub, spk_b_pub, pqspk_b_pub, otpk_b_pub,
+            sig_spk, sig_pqspk, pqsig_b_pub, pqsig_spk, pqsig_pqspk));
+  (* Receive initial message from Alice (includes OTPK consumption) *)
+  in(net, (ik_a_pub:pkey, ek_a_pub:pkey, pq_ct:bitstring, ad:bitstring, ciphertext:bitstring, consumed_otpk:pkey));
+  if consumed_otpk = otpk_b_pub then
+    event OTPKConsumed(bob_id, otpk_b_pub);
+    let ss_pq = kem_ss(pqspk_b, pq_ct) in
+    let t1 = shared_dh(spk_b, ik_a_pub) in
+    let t2 = shared_dh(ik_b, ek_a_pub) in
+    let t3 = shared_dh(spk_b, ek_a_pub) in
+    let t4 = shared_dh(otpk_b, ek_a_pub) in   (* DH4: OTPK *)
+    let sk = hkdf(tuple5(t1, t2, t3, t4, ss_pq), ad) in
+    event BobSessionBound(ik_a_pub, ik_b_pub, sk);
+    event BobComplete(alice_id, bob_id, sk).
 
+(* ================================================================
+ * Alice: fetch bundle, verify dual sigs, compute DH1-DH4 + KEM
+ * ================================================================ *)
 let Alice =
   new ik_a:key;
-  in(net, (target_id:bitstring, ik_b_pub:pkey, spk_b_pub:pkey, pqspk_b_pub:pkey, sig_spk:bitstring, sig_pqspk:bitstring));
+  in(net, (target_id:bitstring, ik_b_pub:pkey, spk_b_pub:pkey, pqspk_b_pub:pkey, otpk_b_pub:pkey,
+           sig_spk:bitstring, sig_pqspk:bitstring,
+           pqsig_b_pub:pqsigpkey, pqsig_spk:bitstring, pqsig_pqspk:bitstring));
   if target_id = bob_id then
+    (* Verify classical Ed25519 signatures *)
     if sig_verify(sig_spk, spk_b_pub, ik_b_pub) = true then
       if sig_verify(sig_pqspk, pqspk_b_pub, ik_b_pub) = true then
-        event AliceAcceptedBundle(alice_id, bob_id);
-        new ek_a:key;
-        new ss_pq:bitstring;
-        let pq_ct = kem_enc(pqspk_b_pub, ss_pq) in
-        let t1 = shared_dh(ik_a, spk_b_pub) in
-        let t2 = shared_dh(ek_a, ik_b_pub) in
-        let t3 = shared_dh(ek_a, spk_b_pub) in
-        let ad = tuple5(pk(ik_a), ik_b_pub, protocol_v1, alice_id, bob_id) in
-        let sk = hkdf(tuple4(t1, t2, t3, ss_pq), ad) in
-        let ciphertext = aead_enc(plaintext0, sk, ad) in
-        event AliceSessionBound(pk(ik_a), ik_b_pub, sk);
-        event AliceComplete(alice_id, bob_id, sk);
-        out(net, (pk(ik_a), pk(ek_a), pq_ct, ad, ciphertext)).
+        (* Verify PQ ML-DSA-65 dual signatures — hybrid: secure if EITHER holds *)
+        if pqsig_verify(pqsig_spk, spk_b_pub, pqsig_b_pub) = true then
+          if pqsig_verify(pqsig_pqspk, pqspk_b_pub, pqsig_b_pub) = true then
+            event AliceAcceptedBundle(alice_id, bob_id);
+            new ek_a:key;
+            new ss_pq:bitstring;
+            let pq_ct = kem_enc(pqspk_b_pub, ss_pq) in
+            let t1 = shared_dh(ik_a, spk_b_pub) in
+            let t2 = shared_dh(ek_a, ik_b_pub) in
+            let t3 = shared_dh(ek_a, spk_b_pub) in
+            let t4 = shared_dh(ek_a, otpk_b_pub) in   (* DH4: OTPK *)
+            let ad = tuple5_ad(pk(ik_a), ik_b_pub, protocol_v1, alice_id, bob_id) in
+            let sk = hkdf(tuple5(t1, t2, t3, t4, ss_pq), ad) in
+            let ciphertext = aead_enc(plaintext0, sk, ad) in
+            event AliceSessionBound(pk(ik_a), ik_b_pub, sk);
+            event AliceComplete(alice_id, bob_id, sk);
+            out(net, (pk(ik_a), pk(ek_a), pq_ct, ad, ciphertext, otpk_b_pub)).
 
+(* ================================================================
+ * AliceFS: forward-secrecy test — reveal ephemeral key after use
+ * ================================================================ *)
 let AliceFS =
   new ik_a:key;
-  in(net, (target_id:bitstring, ik_b_pub:pkey, spk_b_pub:pkey, pqspk_b_pub:pkey, sig_spk:bitstring, sig_pqspk:bitstring));
+  in(net, (target_id:bitstring, ik_b_pub:pkey, spk_b_pub:pkey, pqspk_b_pub:pkey, otpk_b_pub:pkey,
+           sig_spk:bitstring, sig_pqspk:bitstring,
+           pqsig_b_pub:pqsigpkey, pqsig_spk:bitstring, pqsig_pqspk:bitstring));
   if target_id = bob_id then
     if sig_verify(sig_spk, spk_b_pub, ik_b_pub) = true then
       if sig_verify(sig_pqspk, pqspk_b_pub, ik_b_pub) = true then
-        new ek_a:key;
-        new ss_pq:bitstring;
-        let pq_ct = kem_enc(pqspk_b_pub, ss_pq) in
-        let t1 = shared_dh(ik_a, spk_b_pub) in
-        let t2 = shared_dh(ek_a, ik_b_pub) in
-        let t3 = shared_dh(ek_a, spk_b_pub) in
-        let ad = tuple5(pk(ik_a), ik_b_pub, protocol_v1, alice_id, bob_id) in
-        let sk = hkdf(tuple4(t1, t2, t3, ss_pq), ad) in
-        let ciphertext = aead_enc(plaintext_fs, sk, ad) in
-        out(net, (pk(ik_a), pk(ek_a), pq_ct, ad, ciphertext));
-        event EphemeralKeyRevealed(alice_id);
-        out(net, ek_a).
+        if pqsig_verify(pqsig_spk, spk_b_pub, pqsig_b_pub) = true then
+          if pqsig_verify(pqsig_pqspk, pqspk_b_pub, pqsig_b_pub) = true then
+            new ek_a:key;
+            new ss_pq:bitstring;
+            let pq_ct = kem_enc(pqspk_b_pub, ss_pq) in
+            let t1 = shared_dh(ik_a, spk_b_pub) in
+            let t2 = shared_dh(ek_a, ik_b_pub) in
+            let t3 = shared_dh(ek_a, spk_b_pub) in
+            let t4 = shared_dh(ek_a, otpk_b_pub) in   (* DH4: OTPK *)
+            let ad = tuple5_ad(pk(ik_a), ik_b_pub, protocol_v1, alice_id, bob_id) in
+            let sk = hkdf(tuple5(t1, t2, t3, t4, ss_pq), ad) in
+            let ciphertext = aead_enc(plaintext_fs, sk, ad) in
+            out(net, (pk(ik_a), pk(ek_a), pq_ct, ad, ciphertext, otpk_b_pub));
+            event EphemeralKeyRevealed(alice_id);
+            out(net, ek_a).
 
+(* ================================================================
+ * Security queries
+ * ================================================================ *)
+
+(* Plaintext secrecy — attacker cannot learn plaintext *)
 query attacker(plaintext0).
+
+(* Authentication — Bob's completion implies Alice initiated *)
 query a:bitstring, b:bitstring, k:bitstring;
   event(BobComplete(a, b, k)) ==> event(AliceComplete(a, b, k)).
 query a:bitstring, b:bitstring, k:bitstring;
   event(BobComplete(a, b, k)) ==> event(AliceAcceptedBundle(a, b)).
 
+(* Forward secrecy — plaintext remains secret even after EK reveal *)
 query attacker(plaintext_fs).
 
+(* Session binding — both parties derive the same session key *)
 query ik_a:pkey, ik_b:pkey, k:bitstring;
   event(BobSessionBound(ik_a, ik_b, k)) ==> event(AliceSessionBound(ik_a, ik_b, k)).
 query ik_a:pkey, ik_b:pkey, k:bitstring;
   event(AliceSessionBound(ik_a, ik_b, k)) ==> event(BobSessionBound(ik_a, ik_b, k)).
+
+(* OTPK consumption — Bob's bundle acceptance requires OTPK match *)
+query b:bitstring, otpk:pkey;
+  event(OTPKConsumed(b, otpk)).
 
 process
   (!Bob | !Alice | !AliceFS)

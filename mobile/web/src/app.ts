@@ -91,6 +91,7 @@ import {
   type OutboxMessage,
 } from "./db";
 import { RealtimeInbox, type WsInboxMessage } from "./realtime";
+import { CallManager, type CallInfo } from "./call";
 import {
   getCurrentView,
   navigateTo,
@@ -129,6 +130,10 @@ let cachedGroupMembers: Record<string, GroupMemberRecord[]> = {};
 let sealedSenderEnabled = false;
 let sealedInboxCursor = 0;
 let sealedInboxPollTimer: ReturnType<typeof setInterval> | null = null;
+
+// Call state
+let callManager: CallManager | null = null;
+let currentCallInfo: CallInfo | null = null;
 
 const ONBOARDING_LOGO = `
   <div class="onboarding-icon">
@@ -220,6 +225,12 @@ function render(view: AppView): void {
       break;
     case "link-device":
       renderLinkDevice();
+      break;
+    case "call":
+      renderCall(view.peerId, view.callType);
+      break;
+    case "incoming-call":
+      renderIncomingCall(view.callId, view.peerId, view.callType, view.sdpOfferBase64);
       break;
   }
 
@@ -679,6 +690,17 @@ async function renderChat(peerId: string): Promise<void> {
           <span class="chat-header-status ${presenceClass}" id="chat-status">${presenceText}</span>
         </div>
         <div class="chat-header-shield" title="Post-quantum encrypted">🛡️</div>
+        <button id="call-audio" class="icon-btn" title="Voice call" aria-label="Voice call">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/>
+          </svg>
+        </button>
+        <button id="call-video" class="icon-btn" title="Video call" aria-label="Video call">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="23 7 16 12 23 17 23 7"/>
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+          </svg>
+        </button>
       </header>
       <div id="typing-indicator" class="typing-indicator hidden">
         <span class="typing-dots"><span></span><span></span><span></span></span>
@@ -729,6 +751,14 @@ async function renderChat(peerId: string): Promise<void> {
     activeChatPeer = null;
     stopChatTimers();
     navigateTo({ screen: "conversations" });
+  });
+
+  // Call buttons
+  q("#call-audio").addEventListener("click", () => {
+    navigateTo({ screen: "call", peerId, callType: "audio" });
+  });
+  q("#call-video").addEventListener("click", () => {
+    navigateTo({ screen: "call", peerId, callType: "video" });
   });
 
   // Enable send when input has content
@@ -1889,6 +1919,206 @@ function renderLinkDevice(): void {
       notify(`Device ${result.linked_device_id} linked`, "success");
     } catch (e) {
       statusEl.innerHTML = `<p class="text-danger">Link failed: ${escHtml(errorMsg(e))}</p>`;
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Call UI
+// ---------------------------------------------------------------------------
+
+async function renderCall(peerId: string, callType: "audio" | "video"): Promise<void> {
+  const contact = cachedContacts.find(ct => ct.contact_user_id === peerId);
+  const displayName = contact?.alias || peerId;
+
+  app.innerHTML = `
+    <div class="call-shell">
+      <div class="call-overlay">
+        <div class="call-avatar">
+          <div class="avatar avatar-lg">${displayName.slice(0, 2).toUpperCase()}</div>
+        </div>
+        <h2 class="call-name">${escHtml(displayName)}</h2>
+        <p class="call-status" id="call-status">Calling…</p>
+        <p class="call-timer" id="call-timer"></p>
+        <div class="call-pq-badge" id="call-pq-badge" style="display:none">🛡️ PQ E2E Encrypted</div>
+        <div class="call-media">
+          <video id="remote-video" autoplay playsinline style="display:none"></video>
+          <video id="local-video" autoplay playsinline muted style="display:none"></video>
+        </div>
+        <div class="call-controls">
+          <button id="call-mute" class="call-btn" title="Mute">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/>
+              <path d="M19 10v2a7 7 0 01-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/>
+              <line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
+          </button>
+          ${callType === "video" ? `
+          <button id="call-cam" class="call-btn" title="Toggle camera">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="23 7 16 12 23 17 23 7"/>
+              <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+            </svg>
+          </button>
+          ` : ""}
+          <button id="call-hangup" class="call-btn call-btn-hangup" title="Hang up">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10.68 13.31a16 16 0 003.41 2.6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6A19.79 19.79 0 012.12 4.18 2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91"/>
+              <line x1="1" y1="1" x2="23" y2="23"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  try {
+    const k = await ensureKeys();
+    const api = new PqmsgApi(setup.serverUrl);
+
+    callManager = new CallManager(api, k);
+
+    let callTimerInterval: ReturnType<typeof setInterval> | null = null;
+
+    callManager.onStateChange((info: CallInfo) => {
+      currentCallInfo = info;
+      const statusEl = document.getElementById("call-status");
+      const timerEl = document.getElementById("call-timer");
+      const pqBadge = document.getElementById("call-pq-badge");
+
+      if (statusEl) {
+        switch (info.state) {
+          case "outgoing-ringing": statusEl.textContent = "Ringing…"; break;
+          case "connecting": statusEl.textContent = "Connecting…"; break;
+          case "active":
+            statusEl.textContent = "Connected";
+            if (pqBadge) pqBadge.style.display = "";
+            // Start call timer
+            if (!callTimerInterval && timerEl) {
+              const startTime = Date.now();
+              callTimerInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                const mins = Math.floor(elapsed / 60).toString().padStart(2, "0");
+                const secs = (elapsed % 60).toString().padStart(2, "0");
+                timerEl.textContent = `${mins}:${secs}`;
+              }, 1000);
+            }
+            break;
+          case "ended":
+            statusEl.textContent = "Call ended";
+            if (callTimerInterval) { clearInterval(callTimerInterval); callTimerInterval = null; }
+            setTimeout(() => navigateTo({ screen: "chat", peerId }), 1500);
+            break;
+        }
+      }
+
+      // Show video elements when active
+      if (info.state === "active" && callType === "video") {
+        const remoteVideo = document.getElementById("remote-video") as HTMLVideoElement | null;
+        const localVideo = document.getElementById("local-video") as HTMLVideoElement | null;
+        if (remoteVideo && callManager?.getRemoteStream()) {
+          remoteVideo.srcObject = callManager.getRemoteStream();
+          remoteVideo.style.display = "";
+        }
+        if (localVideo && callManager?.getLocalStream()) {
+          localVideo.srcObject = callManager.getLocalStream();
+          localVideo.style.display = "";
+        }
+      }
+    });
+
+    // Start the outgoing call
+    await callManager.startCall(peerId, callType);
+
+    // Show local video preview immediately
+    if (callType === "video") {
+      const localVideo = document.getElementById("local-video") as HTMLVideoElement | null;
+      if (localVideo && callManager.getLocalStream()) {
+        localVideo.srcObject = callManager.getLocalStream();
+        localVideo.style.display = "";
+      }
+    }
+
+  } catch (e) {
+    const statusEl = document.getElementById("call-status");
+    if (statusEl) statusEl.textContent = `Call failed: ${errorMsg(e)}`;
+    notify(`Call failed: ${errorMsg(e)}`, "error");
+  }
+
+  // Controls
+  document.getElementById("call-hangup")?.addEventListener("click", () => {
+    void callManager?.hangup();
+  });
+  document.getElementById("call-mute")?.addEventListener("click", (e) => {
+    const muted = callManager?.toggleMute();
+    const btn = e.currentTarget as HTMLButtonElement;
+    btn.classList.toggle("call-btn-active", muted === true);
+  });
+  document.getElementById("call-cam")?.addEventListener("click", (e) => {
+    const disabled = callManager?.toggleVideo();
+    const btn = e.currentTarget as HTMLButtonElement;
+    btn.classList.toggle("call-btn-active", disabled === true);
+  });
+}
+
+async function renderIncomingCall(
+  callId: string,
+  peerId: string,
+  callType: "audio" | "video",
+  sdpOfferBase64: string
+): Promise<void> {
+  const contact = cachedContacts.find(ct => ct.contact_user_id === peerId);
+  const displayName = contact?.alias || peerId;
+
+  app.innerHTML = `
+    <div class="call-shell">
+      <div class="call-overlay">
+        <div class="call-avatar">
+          <div class="avatar avatar-lg">${displayName.slice(0, 2).toUpperCase()}</div>
+        </div>
+        <h2 class="call-name">${escHtml(displayName)}</h2>
+        <p class="call-status">Incoming ${callType} call…</p>
+        <div class="call-controls">
+          <button id="call-decline" class="call-btn call-btn-hangup" title="Decline">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10.68 13.31a16 16 0 003.41 2.6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6A19.79 19.79 0 012.12 4.18 2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91"/>
+              <line x1="1" y1="1" x2="23" y2="23"/>
+            </svg>
+          </button>
+          <button id="call-accept" class="call-btn call-btn-accept" title="Accept">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  q("#call-decline").addEventListener("click", () => {
+    navigateTo({ screen: "conversations" });
+  });
+
+  q("#call-accept").addEventListener("click", async () => {
+    try {
+      const k = await ensureKeys();
+      const api = new PqmsgApi(setup.serverUrl);
+      callManager = new CallManager(api, k);
+
+      callManager.onStateChange((info: CallInfo) => {
+        currentCallInfo = info;
+        if (info.state === "ended") {
+          setTimeout(() => navigateTo({ screen: "conversations" }), 1500);
+        }
+      });
+
+      await callManager.acceptCall(callId, peerId, callType, sdpOfferBase64);
+      // Re-render to active call UI
+      navigateTo({ screen: "call", peerId, callType });
+    } catch (e) {
+      notify(`Failed to accept call: ${errorMsg(e)}`, "error");
+      navigateTo({ screen: "conversations" });
     }
   });
 }

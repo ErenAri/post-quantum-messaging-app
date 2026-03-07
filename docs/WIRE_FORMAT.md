@@ -50,7 +50,24 @@ The initial handshake message carries:
 3. sender/recipient identifiers,
 4. initiator identity and ephemeral X25519 public keys,
 5. PQ KEM ciphertext,
-6. AEAD nonce and ciphertext.
+6. AEAD nonce and ciphertext,
+7. consumed one-time prekey ID (`otpk_id`, optional).
+
+When `otpk_id` is present, the key schedule includes DH4(EK_A, OTPK_B) before the PQ shared secret.
+
+## 3A. Prekey Bundle Signature Fields
+
+Bundles include dual-signature fields for quantum-resistant authentication:
+
+| Field | Description |
+|---|---|
+| `sig_over_spk` | Ed25519 signature over SPK transcript |
+| `sig_over_pqspk` | Ed25519 signature over PQSPK transcript |
+| `pq_sig_over_spk` | ML-DSA-65 signature over SPK transcript (optional) |
+| `pq_sig_over_pqspk` | ML-DSA-65 signature over PQSPK transcript (optional) |
+| `pq_sig_public_key` | ML-DSA-65 identity public key (optional) |
+
+When PQ signature fields are present, verifiers MUST check both Ed25519 and ML-DSA-65 signatures (hybrid security: holds if EITHER scheme is secure).
 
 ## 4. AEAD Associated Data Binding
 

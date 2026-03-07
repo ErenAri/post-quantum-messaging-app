@@ -172,12 +172,15 @@ impl AeadAlgorithm {
 pub enum SignatureAlgorithm {
     #[default]
     External,
+    /// Hybrid Ed25519 + ML-DSA-65 dual-signature scheme.
+    HybridEd25519MlDsa65,
 }
 
 impl SignatureAlgorithm {
     pub const fn as_id(self) -> VersionedAlgorithmId {
         match self {
             Self::External => VersionedAlgorithmId::new(ALGORITHM_REGISTRY_V1, 0x0401),
+            Self::HybridEd25519MlDsa65 => VersionedAlgorithmId::new(ALGORITHM_REGISTRY_V1, 0x0402),
         }
     }
 }
@@ -193,20 +196,18 @@ pub struct AlgorithmSuite {
 
 impl AlgorithmSuite {
     pub fn suite_id(self) -> Result<u16, CoreError> {
-        match (self.kem, self.dh, self.kdf, self.aead, self.signature) {
+        match (self.kem, self.dh, self.kdf, self.aead) {
             (
                 KemAlgorithm::MlKem768,
                 DhAlgorithm::X25519,
                 KdfAlgorithm::HkdfSha256,
                 AeadAlgorithm::ChaCha20Poly1305,
-                SignatureAlgorithm::External,
             ) => Ok(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305),
             (
                 KemAlgorithm::Kyber768Alias,
                 DhAlgorithm::X25519,
                 KdfAlgorithm::HkdfSha256,
                 AeadAlgorithm::ChaCha20Poly1305,
-                SignatureAlgorithm::External,
             ) => Ok(SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305),
         }
     }

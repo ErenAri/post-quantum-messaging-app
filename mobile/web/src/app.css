@@ -1277,3 +1277,98 @@ html, body {
   gap: 2px;
   font-size: 0.85rem;
 }
+
+/* === Call UI === */
+.call-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: linear-gradient(135deg, #0d1117 0%, #1a2332 50%, #0d1117 100%);
+}
+.call-overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 12px;
+  padding: 32px;
+}
+.call-avatar .avatar-lg {
+  width: 80px;
+  height: 80px;
+  font-size: 2rem;
+  line-height: 80px;
+  border: 3px solid rgba(26, 140, 255, 0.6);
+  box-shadow: 0 0 30px rgba(26, 140, 255, 0.3);
+}
+.call-name {
+  color: #fff;
+  font-size: 1.4rem;
+  margin: 8px 0 0;
+}
+.call-status {
+  color: rgba(255,255,255,0.65);
+  font-size: 0.95rem;
+  margin: 0;
+}
+.call-timer {
+  color: rgba(255,255,255,0.5);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+}
+.call-pq-badge {
+  font-size: 0.8rem;
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.1);
+  padding: 4px 12px;
+  border-radius: 12px;
+}
+.call-media {
+  position: relative;
+  width: 100%;
+  max-width: 600px;
+  margin: 16px auto;
+}
+.call-media video {
+  border-radius: 12px;
+  width: 100%;
+  background: #000;
+}
+.call-media #local-video {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  width: 120px;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-radius: 8px;
+}
+.call-controls {
+  display: flex;
+  gap: 20px;
+  margin-top: 24px;
+}
+.call-btn {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255,255,255,0.15);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+.call-btn:hover { background: rgba(255,255,255,0.25); }
+.call-btn-active { background: rgba(255,100,100,0.4); }
+.call-btn-hangup {
+  background: #e53e3e;
+}
+.call-btn-hangup:hover { background: #c53030; }
+.call-btn-accept {
+  background: #38a169;
+}
+.call-btn-accept:hover { background: #2f855a; }

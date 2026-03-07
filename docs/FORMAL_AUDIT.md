@@ -42,7 +42,14 @@ Mandatory scope:
 
 ## 3A. Formal Verification CI Gate
 
-The `proverif-gate` CI job runs on every push and pull request. It installs ProVerif, executes the symbolic model, and blocks merge if any query returns `false`. The Tamarin model (`verification/tamarin/pqxdh_hybrid.spthy`) provides complementary verification with compromise rules (`RevealLtk`, `RevealEph`) and four security lemmas: session key secrecy, authentication, forward secrecy, and no key reuse.
+The `proverif-gate` CI job runs on every push and pull request. It installs ProVerif, executes the symbolic model, and blocks merge if any query returns `false`. The Tamarin model (`verification/tamarin/pqxdh_hybrid.spthy`) provides complementary verification with compromise rules (`RevealLtk`, `RevealEph`, `RevealPQSigLtk`) and six security lemmas: session key secrecy, authentication, forward secrecy, no key reuse, OTPK single-use, and hybrid-signature security.
+
+Both models now verify:
+
+- **DH4 one-time prekey**: the key schedule includes `DH4(EK_A, OTPK_B)` and the Tamarin model enforces single-use via linear fact consumption,
+- **Hybrid dual signatures**: Alice verifies both Ed25519 and ML-DSA-65 signatures on Bob's prekey bundle,
+- **OTPK consumption**: Bob checks the consumed OTPK matches and emits a tracking event,
+- **PQ signature unforgeability**: the ProVerif model includes `pqsig_sign`/`pqsig_verify` equations for ML-DSA-65.
 
 ## 4. Acceptance Criteria
 

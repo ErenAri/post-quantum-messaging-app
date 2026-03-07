@@ -565,6 +565,7 @@ mod tests {
             &bob_identity,
             &bob_spk,
             &bob_pq_spk,
+            None,
             &initiator.initial_message,
         )
         .expect("bob receive");

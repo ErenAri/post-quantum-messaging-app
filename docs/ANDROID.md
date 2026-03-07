@@ -8,11 +8,12 @@ This document specifies a reproducible Android demonstration workflow for the PQ
 
 ```mermaid
 flowchart LR
-    UI[Kotlin Setup + Conversations + Chat + Security UI] --> NET[Retrofit + OkHttp]
+    UI[Kotlin Setup + Conversations + Chat + Call + Security UI] --> NET[Retrofit + OkHttp]
     UI --> UNI[UniFFI Kotlin bindings]
     UNI --> SO[libpqmsg_android.so]
     SO --> CORE[pqmsg-core]
     NET --> SRV[pqmsg-server]
+    UI --> WEBRTC[WebRTC media engine]
 ```
 
 ## 3. Guided Setup State Model
@@ -36,11 +37,14 @@ flowchart TD
     A[Setup] --> B[Conversations]
     B --> C[Chat]
     B --> D[Security Center]
+    C --> E[Call]
     C --> B
     D --> B
+    E --> C
 ```
 
 The Conversations screen now acts as the runtime hub after provisioning is complete.
+The Chat screen includes audio and video call buttons that launch the Call screen.
 
 ## 3.3 Security Enforcement in Client
 
@@ -60,6 +64,16 @@ The Conversations screen now acts as the runtime hub after provisioning is compl
 - the Setup screen can paste and import a secondary-device onboarding package, decrypt it locally, publish fresh prekeys for the linked device automatically, and mark the adopted device as provisioned without re-registering the user,
 - the Security Center exposes a destructive reset action that first retires the authenticated current device on the server when keys are still present, then purges per-user keys, sessions, pins, cursors, and conversation metadata after confirmation,
 - optional media attachments are encapsulated in the encrypted payload path and remain opaque to the server.
+
+## 3.4 Voice and Video Calling
+
+The Android client includes PQ-encrypted 1:1 voice and video calling:
+
+- **CallActivity**: full-screen call UI with peer avatar, call status, timer, and PQ-encrypted badge,
+- **Call buttons**: audio and video call buttons in the Chat screen toolbar,
+- **PQ key exchange**: UniFFI `buildFormatStringAuthHeaders()` signs call signaling requests with the user's Ed25519 identity key,
+- **Signaling**: REST-based call signaling via `POST /v1/call/offer`, `/answer`, `/ice`, `/hangup`, and `GET /v1/call/:call_id/signals`,
+- **Media encryption**: WebRTC with PQ-derived media key for end-to-end encrypted RTP payloads.
 
 ## 4. Prerequisites
 
@@ -146,6 +160,10 @@ sequenceDiagram
     A->>S: Relay encrypted wire message
     B->>S: Poll inbox
     B->>B: Decrypt via Rust session
+    A->>S: POST /v1/call/offer (PQ auth)
+    B->>S: GET /v1/call/{id}/signals
+    B->>S: POST /v1/call/{id}/answer
+    A-->>B: WebRTC media (PQ E2E encrypted)
 ```
 
 ## 10. Troubleshooting Matrix

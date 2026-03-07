@@ -18,7 +18,9 @@ export type AppView =
   | { screen: "server-info" }
   | { screen: "search" }
   | { screen: "devices" }
-  | { screen: "link-device" };
+  | { screen: "link-device" }
+  | { screen: "call"; peerId: string; callType: "audio" | "video" }
+  | { screen: "incoming-call"; callId: string; peerId: string; callType: "audio" | "video"; sdpOfferBase64: string };
 
 export type AppNotification = {
   id: number;

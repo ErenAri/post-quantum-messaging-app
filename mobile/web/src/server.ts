@@ -364,6 +364,65 @@ export type RelayEphemeralResponse = {
   received_at: string;
 };
 
+// --- Call signaling types ---
+
+export type CallOfferRequest = {
+  caller_user_id: string;
+  device_id: string;
+  sdp_offer_base64: string;
+  call_type: "audio" | "video";
+};
+
+export type CallOfferResponse = {
+  call_id: string;
+  created_at: string;
+};
+
+export type CallAnswerRequest = {
+  callee_user_id: string;
+  device_id: string;
+  sdp_answer_base64: string;
+};
+
+export type CallAnswerResponse = {
+  call_id: string;
+  answered_at: string;
+};
+
+export type IceCandidateRequest = {
+  sender_user_id: string;
+  device_id: string;
+  candidate_base64: string;
+};
+
+export type IceCandidateResponse = {
+  call_id: string;
+  queued_at: string;
+};
+
+export type CallHangupRequest = {
+  user_id: string;
+  device_id: string;
+  reason: string;
+};
+
+export type CallHangupResponse = {
+  call_id: string;
+  ended_at: string;
+};
+
+export type CallSignal = {
+  signal_type: string;
+  from_user_id: string;
+  payload_base64: string;
+  created_at: string;
+};
+
+export type PollCallSignalsResponse = {
+  call_id: string;
+  signals: CallSignal[];
+};
+
 // Phase 5: Discovery
 export type DiscoveryHandlesUploadRequest = {
   phone_hashes_sha256: string[];
@@ -959,6 +1018,73 @@ export class PqmsgApi {
       "POST",
       `/v1/users/${encodeURIComponent(userId)}/push-token`,
       payload,
+      headers
+    );
+  }
+
+  // --- Call signaling API methods ---
+
+  async callOffer(
+    calleeUserId: string,
+    payload: CallOfferRequest,
+    headers: RequestAuthHeaders
+  ): Promise<CallOfferResponse> {
+    return this.request<CallOfferResponse>(
+      "POST",
+      `/v1/calls/${encodeURIComponent(calleeUserId)}/offer`,
+      payload,
+      headers
+    );
+  }
+
+  async callAnswer(
+    callId: string,
+    payload: CallAnswerRequest,
+    headers: RequestAuthHeaders
+  ): Promise<CallAnswerResponse> {
+    return this.request<CallAnswerResponse>(
+      "POST",
+      `/v1/calls/${encodeURIComponent(callId)}/answer`,
+      payload,
+      headers
+    );
+  }
+
+  async callIceCandidate(
+    callId: string,
+    payload: IceCandidateRequest,
+    headers: RequestAuthHeaders
+  ): Promise<IceCandidateResponse> {
+    return this.request<IceCandidateResponse>(
+      "POST",
+      `/v1/calls/${encodeURIComponent(callId)}/ice`,
+      payload,
+      headers
+    );
+  }
+
+  async callHangup(
+    callId: string,
+    payload: CallHangupRequest,
+    headers: RequestAuthHeaders
+  ): Promise<CallHangupResponse> {
+    return this.request<CallHangupResponse>(
+      "POST",
+      `/v1/calls/${encodeURIComponent(callId)}/hangup`,
+      payload,
+      headers
+    );
+  }
+
+  async pollCallSignals(
+    callId: string,
+    sinceSignalId: number,
+    headers: RequestAuthHeaders
+  ): Promise<PollCallSignalsResponse> {
+    return this.request<PollCallSignalsResponse>(
+      "GET",
+      `/v1/calls/${encodeURIComponent(callId)}/signals?since=${encodeURIComponent(String(sinceSignalId))}`,
+      undefined,
       headers
     );
   }
