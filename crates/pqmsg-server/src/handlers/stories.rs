@@ -41,10 +41,7 @@ pub(crate) async fn create_story(
             "auth user_id must match author_user_id",
         ));
     }
-    let auth_message = format!(
-        "story-create:{}:{}",
-        auth.user_id, auth.device_id
-    );
+    let auth_message = format!("story-create:{}:{}", auth.user_id, auth.device_id);
     verify_request_auth(&state, &auth, auth_message.as_bytes()).await?;
     ensure_user_exists(state.pool(), &request.author_user_id).await?;
 
@@ -105,11 +102,12 @@ pub(crate) async fn get_stories_feed(
 
         let mut items = Vec::with_capacity(rows.len());
         for (sid, auid, content, mt, cat, eat) in rows {
-            let vc: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM story_views WHERE story_id = $1")
-                .bind(&sid)
-                .fetch_one(state.pool())
-                .await
-                .unwrap_or(0);
+            let vc: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM story_views WHERE story_id = $1")
+                    .bind(&sid)
+                    .fetch_one(state.pool())
+                    .await
+                    .unwrap_or(0);
             items.push(StoryItem {
                 story_id: sid,
                 author_user_id: auid,
@@ -136,11 +134,12 @@ pub(crate) async fn get_stories_feed(
 
         let mut items = Vec::with_capacity(rows.len());
         for (sid, auid, content, mt, cat, eat) in rows {
-            let vc: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM story_views WHERE story_id = $1")
-                .bind(&sid)
-                .fetch_one(state.pool())
-                .await
-                .unwrap_or(0);
+            let vc: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM story_views WHERE story_id = $1")
+                    .bind(&sid)
+                    .fetch_one(state.pool())
+                    .await
+                    .unwrap_or(0);
             items.push(StoryItem {
                 story_id: sid,
                 author_user_id: auid,
@@ -164,7 +163,10 @@ pub(crate) async fn view_story(
     headers: HeaderMap,
 ) -> Result<Json<ViewStoryResponse>, AppError> {
     let auth = parse_request_auth(&headers)?;
-    let auth_message = format!("story-view:{}:{}:{}", auth.user_id, auth.device_id, story_id);
+    let auth_message = format!(
+        "story-view:{}:{}:{}",
+        auth.user_id, auth.device_id, story_id
+    );
     verify_request_auth(&state, &auth, auth_message.as_bytes()).await?;
 
     // Verify story exists and is not expired
@@ -183,7 +185,9 @@ pub(crate) async fn view_story(
 
     let now = Utc::now().to_rfc3339();
     sqlx::query(
-        "INSERT OR IGNORE INTO story_views (story_id, viewer_user_id, viewed_at) VALUES ($1, $2, $3)",
+        "INSERT INTO story_views (story_id, viewer_user_id, viewed_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (story_id, viewer_user_id) DO NOTHING",
     )
     .bind(&story_id)
     .bind(&auth.user_id)

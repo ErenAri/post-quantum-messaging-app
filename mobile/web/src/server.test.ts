@@ -208,6 +208,15 @@ describe("PqmsgApi methods", () => {
     expect(url).toBe("http://localhost:8080/v1/users/alice/receipts/poll?since_id=10");
   });
 
+  it("createInboxWsTicket sends POST with since query", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ ticket: "ws-ticket", expires_at: "2026-03-08T00:00:30Z" }));
+    await api.createInboxWsTicket("alice", 10, fakeHeaders);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("http://localhost:8080/v1/ws/inbox/alice/ticket?since=10");
+    expect(opts.method).toBe("POST");
+    expect(opts.headers.get("x-pqmsg-auth-user")).toBe("alice");
+  });
+
   it("listContacts sends GET", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ contacts: [] }));
     await api.listContacts("alice", fakeHeaders);

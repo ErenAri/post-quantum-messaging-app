@@ -455,6 +455,7 @@ pub(crate) struct InboxQuery {
 #[derive(Debug, Deserialize)]
 pub(crate) struct WsInboxQuery {
     pub(crate) since: Option<i64>,
+    pub(crate) ticket: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -495,6 +496,12 @@ pub(crate) struct WsInboxEnvelope {
     pub(crate) event: &'static str,
     pub(crate) user_id: String,
     pub(crate) messages: Vec<InboxItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct WsInboxTicketResponse {
+    pub(crate) ticket: String,
+    pub(crate) expires_at: String,
 }
 
 #[derive(Debug, Serialize)]

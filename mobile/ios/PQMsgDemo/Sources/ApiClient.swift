@@ -140,19 +140,19 @@ final class ApiClient {
 
     func addGroupMember(groupId: String, headers: [String: String], userId: String) async throws -> GroupMemberMutationResponse {
         try await request(
-            path: "v1/groups/\(groupId)/members",
+            path: "v1/groups/\(groupId)/members/add",
             method: "POST",
             headers: headers,
-            body: ["user_id": userId]
+            body: ["member_user_id": userId]
         )
     }
 
     func removeGroupMember(groupId: String, memberId: String, headers: [String: String]) async throws -> GroupMemberMutationResponse {
         try await request(
-            path: "v1/groups/\(groupId)/members/\(memberId)",
-            method: "DELETE",
+            path: "v1/groups/\(groupId)/members/remove",
+            method: "POST",
             headers: headers,
-            body: Optional<String>.none
+            body: ["member_user_id": memberId]
         )
     }
 
@@ -169,7 +169,7 @@ final class ApiClient {
 
     func sealedRelay(recipientUserId: String, headers: [String: String], requestBody: SealedRelayRequest) async throws -> SealedRelayResponse {
         try await request(
-            path: "v1/sealed/\(recipientUserId)",
+            path: "v1/sealed-relay/\(recipientUserId)",
             method: "POST",
             headers: headers,
             body: requestBody
@@ -178,7 +178,7 @@ final class ApiClient {
 
     func sealedInbox(userId: String, since: Int64, headers: [String: String]) async throws -> SealedInboxResponse {
         try await request(
-            path: "v1/sealed/inbox/\(userId)?since=\(since)",
+            path: "v1/sealed-inbox/\(userId)?since=\(since)",
             method: "GET",
             headers: headers,
             body: Optional<String>.none
@@ -227,10 +227,10 @@ final class ApiClient {
 
     func removeContact(userId: String, contactUserId: String, headers: [String: String]) async throws -> RemoveContactResponse {
         try await request(
-            path: "v1/users/\(userId)/contacts/\(contactUserId)",
-            method: "DELETE",
+            path: "v1/users/\(userId)/contacts/remove",
+            method: "POST",
             headers: headers,
-            body: Optional<String>.none
+            body: ["contact_user_id": contactUserId]
         )
     }
 
@@ -248,7 +248,7 @@ final class ApiClient {
     func upsertUserProfile(userId: String, headers: [String: String], requestBody: UpsertProfileRequest) async throws -> UserProfileResponse {
         try await request(
             path: "v1/users/\(userId)/profile",
-            method: "PUT",
+            method: "POST",
             headers: headers,
             body: requestBody
         )
@@ -256,18 +256,18 @@ final class ApiClient {
 
     // MARK: - Presence
 
-    func getPresence(userId: String) async throws -> PresenceResponse {
+    func getPresence(userId: String, headers: [String: String]) async throws -> PresenceResponse {
         try await request(
-            path: "v1/presence/\(userId)",
+            path: "v1/users/\(userId)/presence",
             method: "GET",
-            headers: [:],
+            headers: headers,
             body: Optional<String>.none
         )
     }
 
     func updatePresence(userId: String, headers: [String: String], requestBody: PresenceUpdateRequest) async throws -> PresenceResponse {
         try await request(
-            path: "v1/presence/\(userId)",
+            path: "v1/users/\(userId)/presence",
             method: "POST",
             headers: headers,
             body: requestBody
@@ -296,18 +296,18 @@ final class ApiClient {
 
     // MARK: - Receipts
 
-    func sendReceipt(peerUserId: String, headers: [String: String], requestBody: SendReceiptRequest) async throws -> SendReceiptResponse {
+    func sendReceipt(userId: String, headers: [String: String], requestBody: SendReceiptRequest) async throws -> SendReceiptResponse {
         try await request(
-            path: "v1/receipts/\(peerUserId)",
+            path: "v1/users/\(userId)/receipts",
             method: "POST",
             headers: headers,
             body: requestBody
         )
     }
 
-    func getReceipts(userId: String, headers: [String: String]) async throws -> ReceiptsResponse {
+    func getReceipts(userId: String, sinceId: Int64, headers: [String: String]) async throws -> ReceiptsResponse {
         try await request(
-            path: "v1/receipts/\(userId)",
+            path: "v1/users/\(userId)/receipts/poll?since_id=\(sinceId)",
             method: "GET",
             headers: headers,
             body: Optional<String>.none
@@ -318,7 +318,7 @@ final class ApiClient {
 
     func relayEphemeralMessage(recipientUserId: String, headers: [String: String], requestBody: RelayEphemeralRequest) async throws -> RelayResponse {
         try await request(
-            path: "v1/ephemeral/\(recipientUserId)",
+            path: "v1/ephemeral-relay/\(recipientUserId)",
             method: "POST",
             headers: headers,
             body: requestBody
@@ -327,12 +327,12 @@ final class ApiClient {
 
     // MARK: - File Upload/Download
 
-    func uploadFile(userId: String, headers: [String: String], dataBase64: String) async throws -> FileUploadResponse {
+    func uploadFile(requestBody: [String: String], headers: [String: String]) async throws -> FileUploadResponse {
         try await request(
-            path: "v1/files/\(userId)",
+            path: "v1/files/upload",
             method: "POST",
             headers: headers,
-            body: ["data_base64": dataBase64]
+            body: requestBody
         )
     }
 

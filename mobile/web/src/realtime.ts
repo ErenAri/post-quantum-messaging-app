@@ -1,10 +1,11 @@
 /**
  * WebSocket real-time inbox delivery.
- * Connects to /v1/ws/inbox/:user_id with auth headers as query params.
+ * Fetches a short-lived ticket, then connects to /v1/ws/inbox/:user_id.
  */
 
 import type { GeneratedKeys } from "./crypto";
 import { buildInboxAuthHeaders } from "./crypto";
+import { PqmsgApi } from "./server";
 import { readCursor } from "./storage";
 
 export type WsInboxMessage = {
@@ -12,6 +13,12 @@ export type WsInboxMessage = {
   sender_user_id: string;
   message_bytes_base64: string;
   received_at: string;
+};
+
+type WsInboxEnvelope = {
+  event: "sync" | "relay";
+  user_id: string;
+  messages: WsInboxMessage[];
 };
 
 type WsListener = (msg: WsInboxMessage) => void;
@@ -40,7 +47,7 @@ export class RealtimeInbox {
 
   connect(): void {
     this.intentionallyClosed = false;
-    this.doConnect();
+    void this.doConnect();
   }
 
   disconnect(): void {
@@ -55,7 +62,7 @@ export class RealtimeInbox {
     }
   }
 
-  private doConnect(): void {
+  private async doConnect(): Promise<void> {
     if (this.intentionallyClosed) return;
     if (this.ws) {
       this.ws.close();
@@ -64,15 +71,21 @@ export class RealtimeInbox {
 
     const since = readCursor(this.keys.userId);
     const headers = buildInboxAuthHeaders(this.keys, since);
-
-    // Build WebSocket URL with auth as query params
-    const base = this.serverUrl.replace(/^http/, "ws");
-    const params = new URLSearchParams();
-    for (const [k, v] of Object.entries(headers)) {
-      params.set(k, v);
+    const api = new PqmsgApi(this.serverUrl);
+    let ticket: string;
+    try {
+      const issued = await api.createInboxWsTicket(this.keys.userId, since, headers);
+      ticket = issued.ticket;
+    } catch (error) {
+      console.warn("[ws] failed to create inbox ticket", error);
+      this.scheduleReconnect();
+      return;
     }
-    params.set("since", String(since));
-    const url = `${base}/v1/ws/inbox/${encodeURIComponent(this.keys.userId)}?${params.toString()}`;
+
+    const base = this.serverUrl.replace(/^http/, "ws");
+    const url =
+      `${base}/v1/ws/inbox/${encodeURIComponent(this.keys.userId)}` +
+      `?ticket=${encodeURIComponent(ticket)}`;
 
     const ws = new WebSocket(url);
 
@@ -85,9 +98,11 @@ export class RealtimeInbox {
 
     ws.onmessage = (event) => {
       try {
-        const msg = JSON.parse(String(event.data)) as WsInboxMessage;
-        for (const listener of this.listeners) {
-          listener(msg);
+        const envelope = JSON.parse(String(event.data)) as WsInboxEnvelope;
+        for (const msg of envelope.messages ?? []) {
+          for (const listener of this.listeners) {
+            listener(msg);
+          }
         }
       } catch (e) {
         console.warn("[ws] failed to parse message", e);
@@ -113,7 +128,7 @@ export class RealtimeInbox {
     if (this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.doConnect();
+      void this.doConnect();
     }, 3000);
   }
 }

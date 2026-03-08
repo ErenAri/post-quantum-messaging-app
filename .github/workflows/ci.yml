@@ -178,6 +178,24 @@ jobs:
           name: android-debug-apk
           path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
 
+  web-tests:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/web/package-lock.json
+      - name: install web dependencies
+        run: npm ci
+      - name: run web tests
+        run: npm test
+
   fuzz-smoke:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest

@@ -13,7 +13,8 @@ use pqmsg_core::dh::DhPublicKey;
 use pqmsg_core::handshake::{pq_signed_prekey_signature_message, signed_prekey_signature_message};
 use pqmsg_core::tlv::{critical_type, encode, TlvRecord};
 use pqmsg_server::{
-    build_router, init_db, parse_db_backend, AppState, AuditLogger, DosHardeningPolicy, RateLimiter,
+    build_router, init_db, parse_db_backend, AppState, AuditLogger, DbBackend, DosHardeningPolicy,
+    RateLimiter,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -202,6 +203,55 @@ async fn test_app_with_audit_log(audit_log_path: &str) -> axum::Router {
         AuditLogger::with_path(audit_log_path).expect("audit logger"),
     ));
     build_router(state)
+}
+
+fn with_postgres_search_path(database_url: &str, schema: &str) -> String {
+    let separator = if database_url.contains('?') { "&" } else { "?" };
+    format!("{database_url}{separator}options=-csearch_path%3D{schema}")
+}
+
+async fn test_app_with_postgres_env() -> Option<axum::Router> {
+    sqlx::any::install_default_drivers();
+    let base_url = std::env::var("PQMSG_DATABASE_URL").ok()?;
+    let db_backend = parse_db_backend(&base_url).ok()?;
+    if db_backend != DbBackend::Postgres {
+        return None;
+    }
+
+    let schema = format!(
+        "pqmsg_test_{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let admin_pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(&base_url)
+        .await
+        .expect("connect postgres base database");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin_pool)
+        .await
+        .expect("create postgres test schema");
+
+    let scoped_url = with_postgres_search_path(&base_url, &schema);
+    let pool = AnyPoolOptions::new()
+        .max_connections(5)
+        .connect(&scoped_url)
+        .await
+        .expect("connect postgres schema");
+    init_db(&pool, db_backend)
+        .await
+        .expect("migrate postgres schema");
+    let state = AppState::new(
+        pool,
+        db_backend,
+        Arc::new(RateLimiter::new(
+            1_000.0,
+            1_000.0,
+            100_000,
+            StdDuration::from_secs(600),
+        )),
+    );
+    Some(build_router(state))
 }
 
 async fn spawn_http_server(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
@@ -586,6 +636,24 @@ fn ws_inbox_auth_headers(
     });
     let message = encode(&records).expect("ws-inbox auth transcript");
     let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn format_string_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    message: impl AsRef<[u8]>,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!("fmt-{}", NONCE_COUNTER.fetch_add(1, Ordering::Relaxed));
+    let signature = signing_key.sign(message.as_ref()).to_bytes();
     vec![
         (AUTH_HEADER_USER, user_id.to_string()),
         (AUTH_HEADER_DEVICE, device_id.to_string()),
@@ -2818,6 +2886,91 @@ async fn websocket_inbox_streams_relay_messages() {
 }
 
 #[tokio::test]
+async fn websocket_inbox_accepts_one_time_ticket_query() {
+    let app = test_app().await;
+    let bob_sig = signing_key(93);
+    let alice_sig = signing_key(94);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [3u8; 32], &bob_sig);
+    let (status_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_bob, StatusCode::OK);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", [4u8; 32], &alice_sig);
+    let (status_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_alice, StatusCode::OK);
+
+    let ticket_headers = inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0);
+    let (status_ticket, ticket_body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/ws/inbox/bob/ticket?since=0",
+        json!({}),
+        &ticket_headers,
+    )
+    .await;
+    assert_eq!(status_ticket, StatusCode::OK);
+    let ticket = ticket_body["ticket"].as_str().expect("ticket").to_string();
+
+    let (base_ws_url, server_handle) = spawn_http_server(app.clone()).await;
+    let (mut ws_stream, _) =
+        connect_async(format!("{base_ws_url}/v1/ws/inbox/bob?ticket={ticket}"))
+            .await
+            .expect("ws connect");
+
+    let replay_connect =
+        connect_async(format!("{base_ws_url}/v1/ws/inbox/bob?ticket={ticket}")).await;
+    match replay_connect {
+        Ok(_) => panic!("ticket reuse should fail"),
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        Err(err) => panic!("unexpected websocket error: {err}"),
+    }
+
+    let relay = json!({
+        "sender_user_id": "alice",
+        "device_id": "alice-dev-1",
+        "message_bytes_base64": B64.encode("ticket-ciphertext")
+    });
+    let relay_headers = relay_auth_headers(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "bob",
+        b"ticket-ciphertext",
+    );
+    let (status_relay, relay_body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob",
+        relay,
+        &relay_headers,
+    )
+    .await;
+    assert_eq!(status_relay, StatusCode::OK);
+    let expected_message_id = relay_body["message_id"].as_i64().expect("message id");
+
+    let inbound = timeout(Duration::from_secs(3), ws_stream.next())
+        .await
+        .expect("timeout waiting for websocket frame");
+    let Some(Ok(Message::Text(frame))) = inbound else {
+        panic!("expected websocket text frame");
+    };
+    let payload: Value = serde_json::from_str(&frame).expect("ws payload json");
+    assert_eq!(payload["event"].as_str(), Some("relay"));
+    let messages = payload["messages"].as_array().expect("messages");
+    assert_eq!(
+        messages[0]["message_id"].as_i64(),
+        Some(expected_message_id)
+    );
+    assert_eq!(messages[0]["sender_user_id"].as_str(), Some("alice"));
+
+    server_handle.abort();
+}
+
+#[tokio::test]
 async fn multi_device_link_list_revoke_and_bundle_selection() {
     let app = test_app().await;
     let bob_sig = signing_key(101);
@@ -4710,6 +4863,187 @@ async fn websocket_inbox_disconnect_and_reconnect_delivers_messages() {
             .iter()
             .any(|m| m["message_bytes_base64"].as_str() == Some(B64.encode("ws-msg-2").as_str())),
         "reconnect should deliver missed message: {parsed_2}"
+    );
+}
+
+#[tokio::test]
+async fn postgres_channel_subscribe_is_idempotent() {
+    let Some(app) = test_app_with_postgres_env().await else {
+        return;
+    };
+    let alice_sig = signing_key(193);
+    let bob_sig = signing_key(194);
+
+    let reg_alice = register_payload("alice-pg-chan", "alice-pg-chan-dev", [21u8; 32], &alice_sig);
+    let (status_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_alice, StatusCode::OK);
+
+    let reg_bob = register_payload("bob-pg-chan", "bob-pg-chan-dev", [22u8; 32], &bob_sig);
+    let (status_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_bob, StatusCode::OK);
+
+    let create_channel_body = json!({
+        "owner_user_id": "alice-pg-chan",
+        "device_id": "alice-pg-chan-dev",
+        "display_name": "General",
+        "description": "postgres coverage"
+    });
+    let create_headers = format_string_auth_headers(
+        &alice_sig,
+        "alice-pg-chan",
+        "alice-pg-chan-dev",
+        "channel-create:alice-pg-chan:alice-pg-chan-dev",
+    );
+    let (status_create, create_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/channels",
+        create_channel_body,
+        &create_headers,
+    )
+    .await;
+    assert_eq!(status_create, StatusCode::OK);
+    let channel_id = create_payload["channel_id"]
+        .as_str()
+        .expect("channel_id")
+        .to_string();
+
+    let subscribe_message = format!(
+        "channel-subscribe:{}:{}:{}",
+        "bob-pg-chan", "bob-pg-chan-dev", channel_id
+    );
+    let subscribe_headers = format_string_auth_headers(
+        &bob_sig,
+        "bob-pg-chan",
+        "bob-pg-chan-dev",
+        subscribe_message,
+    );
+    for _ in 0..2 {
+        let (status_subscribe, _) = json_request_with_headers(
+            app.clone(),
+            Method::POST,
+            &format!("/v1/channels/{channel_id}/subscribe"),
+            json!({}),
+            &subscribe_headers,
+        )
+        .await;
+        assert_eq!(status_subscribe, StatusCode::OK);
+    }
+
+    let list_headers = format_string_auth_headers(
+        &bob_sig,
+        "bob-pg-chan",
+        "bob-pg-chan-dev",
+        "channel-list:bob-pg-chan:bob-pg-chan-dev",
+    );
+    let (status_list, list_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/channels",
+        json!({}),
+        &list_headers,
+    )
+    .await;
+    assert_eq!(status_list, StatusCode::OK);
+    let channels = list_payload["channels"].as_array().expect("channels");
+    assert_eq!(channels.len(), 1);
+    assert_eq!(
+        channels[0]["subscriber_count"].as_i64(),
+        Some(2),
+        "owner + one subscriber should be present after repeated subscribe"
+    );
+}
+
+#[tokio::test]
+async fn postgres_story_view_is_idempotent() {
+    let Some(app) = test_app_with_postgres_env().await else {
+        return;
+    };
+    let alice_sig = signing_key(197);
+    let bob_sig = signing_key(198);
+
+    let reg_alice = register_payload(
+        "alice-pg-story",
+        "alice-pg-story-dev",
+        [23u8; 32],
+        &alice_sig,
+    );
+    let (status_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_alice, StatusCode::OK);
+
+    let reg_bob = register_payload("bob-pg-story", "bob-pg-story-dev", [24u8; 32], &bob_sig);
+    let (status_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_bob, StatusCode::OK);
+
+    let create_story_body = json!({
+        "author_user_id": "alice-pg-story",
+        "device_id": "alice-pg-story-dev",
+        "content_base64": B64.encode("story-payload"),
+        "media_type": "text"
+    });
+    let create_headers = format_string_auth_headers(
+        &alice_sig,
+        "alice-pg-story",
+        "alice-pg-story-dev",
+        "story-create:alice-pg-story:alice-pg-story-dev",
+    );
+    let (status_create, create_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/stories",
+        create_story_body,
+        &create_headers,
+    )
+    .await;
+    assert_eq!(status_create, StatusCode::OK);
+    let story_id = create_payload["story_id"]
+        .as_str()
+        .expect("story_id")
+        .to_string();
+
+    let view_message = format!(
+        "story-view:{}:{}:{}",
+        "bob-pg-story", "bob-pg-story-dev", story_id
+    );
+    let view_headers =
+        format_string_auth_headers(&bob_sig, "bob-pg-story", "bob-pg-story-dev", view_message);
+    for _ in 0..2 {
+        let (status_view, _) = json_request_with_headers(
+            app.clone(),
+            Method::POST,
+            &format!("/v1/stories/{story_id}/view"),
+            json!({}),
+            &view_headers,
+        )
+        .await;
+        assert_eq!(status_view, StatusCode::OK);
+    }
+
+    let feed_headers = format_string_auth_headers(
+        &bob_sig,
+        "bob-pg-story",
+        "bob-pg-story-dev",
+        "story-feed:bob-pg-story:bob-pg-story-dev",
+    );
+    let (status_feed, feed_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/stories/feed?user_id=alice-pg-story",
+        json!({}),
+        &feed_headers,
+    )
+    .await;
+    assert_eq!(status_feed, StatusCode::OK);
+    let stories = feed_payload["stories"].as_array().expect("stories");
+    assert_eq!(stories.len(), 1);
+    assert_eq!(
+        stories[0]["view_count"].as_i64(),
+        Some(1),
+        "repeated view requests should keep a single story view record"
     );
 }
 

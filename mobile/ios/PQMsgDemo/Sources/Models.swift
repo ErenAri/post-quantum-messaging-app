@@ -193,13 +193,15 @@ struct CreateGroupRequest: Codable {
 
 struct CreateGroupResponse: Codable {
     let group_id: String
-    let group_name: String
+    let group_name: String?
+    let owner_user_id: String?
+    let member_count: Int?
     let created_at: String
 }
 
 struct GroupMemberRecord: Codable, Hashable, Identifiable {
     let user_id: String
-    let role: String
+    let role: String?
     let joined_at: String
 
     var id: String { user_id }
@@ -212,8 +214,12 @@ struct GroupMembersResponse: Codable {
 
 struct GroupMemberMutationResponse: Codable {
     let group_id: String
-    let user_id: String
-    let action: String
+    let user_id: String?
+    let action: String?
+    let member_user_id: String?
+    let owner_user_id: String?
+    let changed: Bool?
+    let updated_at: String?
 }
 
 struct GroupRelayRequest: Codable {
@@ -241,7 +247,9 @@ struct SealedRelayRequest: Codable {
 }
 
 struct SealedRelayResponse: Codable {
-    let message_id: Int64
+    let message_id: Int64?
+    let delivered_device_count: Int?
+    let first_message_id: Int64?
     let received_at: String
 }
 
@@ -286,8 +294,13 @@ struct UpsertContactRequest: Codable {
 }
 
 struct UpsertContactResponse: Codable {
-    let owner_user_id: String
+    let owner_user_id: String?
+    let user_id: String?
     let contact_user_id: String
+    let alias: String?
+    let verified_by_qr: Bool?
+    let verified_fingerprint_sha256: String?
+    let updated_at: String?
 }
 
 struct ContactListItem: Codable, Hashable, Identifiable {
@@ -295,6 +308,17 @@ struct ContactListItem: Codable, Hashable, Identifiable {
     let alias: String?
     let verified: Bool
     let created_at: String
+    let updated_at: String?
+    let verified_fingerprint_sha256: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case contact_user_id
+        case alias
+        case verified = "verified_by_qr"
+        case created_at
+        case updated_at
+        case verified_fingerprint_sha256
+    }
 
     var id: String { contact_user_id }
 }
@@ -304,8 +328,12 @@ struct ContactListResponse: Codable {
 }
 
 struct RemoveContactResponse: Codable {
-    let owner_user_id: String
-    let removed_user_id: String
+    let owner_user_id: String?
+    let user_id: String?
+    let removed_user_id: String?
+    let removed_contact_user_id: String?
+    let removed: Bool?
+    let removed_at: String?
 }
 
 // MARK: - Profile Models
@@ -333,6 +361,9 @@ struct PresenceResponse: Codable {
     let user_id: String
     let status: String
     let last_seen: String?
+    let active: Bool?
+    let updated_at: String?
+    let expires_at: String?
 }
 
 // MARK: - Typing Indicator Models

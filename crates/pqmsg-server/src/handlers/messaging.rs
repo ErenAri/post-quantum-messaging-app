@@ -7,7 +7,7 @@ use axum::response::Response;
 use axum::Json;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
 use sqlx::{AnyPool, Row};
@@ -31,6 +31,24 @@ pub(crate) async fn ws_inbox(
     validate_id("user_id", &user_id)?;
     ensure_user_exists(&state.pool, &user_id).await?;
 
+    let (device_id, since) =
+        authenticate_ws_inbox_connection(&state, &user_id, &headers, &query).await?;
+
+    Ok(ws.on_upgrade(move |socket| async move {
+        handle_ws_inbox_socket(state, user_id, device_id, since, socket).await;
+    }))
+}
+
+pub(crate) async fn create_ws_inbox_ticket(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<InboxQuery>,
+) -> Result<Json<WsInboxTicketResponse>, AppError> {
+    check_rate_limit(&state, &format!("ws-inbox-ticket:{user_id}"))?;
+    validate_id("user_id", &user_id)?;
+    ensure_user_exists(&state.pool, &user_id).await?;
+
     let since = query.since.unwrap_or(0);
     if since < 0 {
         return Err(AppError::bad_request("since must be non-negative"));
@@ -40,14 +58,105 @@ pub(crate) async fn ws_inbox(
     if auth.user_id != user_id {
         return Err(AppError::bad_request("auth user_id mismatch"));
     }
-    let auth_message = ws_inbox_auth_message(&auth, &user_id, since)?;
+    let auth_message = inbox_auth_message(&auth, &user_id, since)?;
     verify_request_auth(&state, &auth, &auth_message).await?;
     enforce_inbox_cursor_monotonic(&state, &user_id, &auth.device_id, since).await?;
-    let device_id = auth.device_id.clone();
 
-    Ok(ws.on_upgrade(move |socket| async move {
-        handle_ws_inbox_socket(state, user_id, device_id, since, socket).await;
+    purge_expired_ws_inbox_tickets(&state).await?;
+    let issued_at = Utc::now();
+    let expires_at = issued_at + Duration::seconds(30);
+    let ticket = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO ws_inbox_tickets (ticket, user_id, device_id, since, issued_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(&ticket)
+    .bind(&user_id)
+    .bind(&auth.device_id)
+    .bind(since)
+    .bind(issued_at.to_rfc3339())
+    .bind(expires_at.to_rfc3339())
+    .execute(state.pool())
+    .await?;
+
+    Ok(Json(WsInboxTicketResponse {
+        ticket,
+        expires_at: expires_at.to_rfc3339(),
     }))
+}
+
+async fn authenticate_ws_inbox_connection(
+    state: &AppState,
+    user_id: &str,
+    headers: &HeaderMap,
+    query: &WsInboxQuery,
+) -> Result<(String, i64), AppError> {
+    if let Some(ticket) = query.ticket.as_deref() {
+        return consume_ws_inbox_ticket(state, user_id, ticket).await;
+    }
+
+    let since = query.since.unwrap_or(0);
+    if since < 0 {
+        return Err(AppError::bad_request("since must be non-negative"));
+    }
+
+    let auth = parse_request_auth(headers)?;
+    if auth.user_id != user_id {
+        return Err(AppError::bad_request("auth user_id mismatch"));
+    }
+    let auth_message = ws_inbox_auth_message(&auth, user_id, since)?;
+    verify_request_auth(state, &auth, &auth_message).await?;
+    enforce_inbox_cursor_monotonic(state, user_id, &auth.device_id, since).await?;
+
+    Ok((auth.device_id, since))
+}
+
+async fn consume_ws_inbox_ticket(
+    state: &AppState,
+    user_id: &str,
+    ticket: &str,
+) -> Result<(String, i64), AppError> {
+    let trimmed_ticket = ticket.trim();
+    if trimmed_ticket.is_empty() || trimmed_ticket.len() > 128 {
+        return Err(AppError::bad_request("ticket must be 1..=128 characters"));
+    }
+
+    purge_expired_ws_inbox_tickets(state).await?;
+    let now = Utc::now().to_rfc3339();
+    let row = sqlx::query(
+        "DELETE FROM ws_inbox_tickets
+         WHERE ticket = $1
+         RETURNING user_id, device_id, since, expires_at",
+    )
+    .bind(trimmed_ticket)
+    .fetch_optional(state.pool())
+    .await?;
+    let Some(row) = row else {
+        return Err(AppError::bad_request("invalid or expired websocket ticket"));
+    };
+
+    let ticket_user_id: String = row.try_get("user_id")?;
+    if ticket_user_id != user_id {
+        return Err(AppError::bad_request("websocket ticket user_id mismatch"));
+    }
+    let expires_at: String = row.try_get("expires_at")?;
+    if expires_at <= now {
+        return Err(AppError::bad_request("invalid or expired websocket ticket"));
+    }
+
+    let device_id: String = row.try_get("device_id")?;
+    let since: i64 = row.try_get("since")?;
+    enforce_inbox_cursor_monotonic(state, user_id, &device_id, since).await?;
+    Ok((device_id, since))
+}
+
+async fn purge_expired_ws_inbox_tickets(state: &AppState) -> Result<(), AppError> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query("DELETE FROM ws_inbox_tickets WHERE expires_at <= $1")
+        .bind(now)
+        .execute(state.pool())
+        .await?;
+    Ok(())
 }
 
 pub(crate) async fn relay_message(

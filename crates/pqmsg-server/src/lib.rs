@@ -1162,11 +1162,7 @@ impl RealtimeHub {
     /// drops the subscriber. Prevents unbounded memory growth from slow clients.
     const SUBSCRIBER_CHANNEL_CAPACITY: usize = 256;
 
-    fn subscribe(
-        &self,
-        user_id: &str,
-        device_id: &str,
-    ) -> (u64, mpsc::Receiver<InboxItem>) {
+    fn subscribe(&self, user_id: &str, device_id: &str) -> (u64, mpsc::Receiver<InboxItem>) {
         let (sender, receiver) = mpsc::channel(Self::SUBSCRIBER_CHANNEL_CAPACITY);
         let subscriber_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let key = inbox_stream_key(user_id, device_id);
@@ -1606,6 +1602,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/inbox/:user_id", get(get_inbox))
         .route("/v1/sealed-inbox/:user_id", get(get_sealed_inbox))
         .route("/v1/inbox/:user_id/delete", post(delete_inbox_messages))
+        .route("/v1/ws/inbox/:user_id/ticket", post(create_ws_inbox_ticket))
         .route("/v1/ws/inbox/:user_id", get(ws_inbox))
         .route("/v1/users/:user_id/receipts", post(send_receipt))
         .route("/v1/users/:user_id/receipts/poll", get(get_receipts))

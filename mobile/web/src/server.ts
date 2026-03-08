@@ -163,6 +163,11 @@ export type ReceiptsResponse = {
   receipts: ReceiptEntry[];
 };
 
+export type WsInboxTicketResponse = {
+  ticket: string;
+  expires_at: string;
+};
+
 export type ContactEntry = {
   contact_user_id: string;
   alias: string | null;
@@ -739,6 +744,19 @@ export class PqmsgApi {
     return this.request<ReceiptsResponse>(
       "GET",
       `/v1/users/${encodeURIComponent(userId)}/receipts/poll?since_id=${encodeURIComponent(String(sinceId))}`,
+      undefined,
+      headers
+    );
+  }
+
+  async createInboxWsTicket(
+    userId: string,
+    since: number,
+    headers: RequestAuthHeaders
+  ): Promise<WsInboxTicketResponse> {
+    return this.request<WsInboxTicketResponse>(
+      "POST",
+      `/v1/ws/inbox/${encodeURIComponent(userId)}/ticket?since=${encodeURIComponent(String(since))}`,
       undefined,
       headers
     );

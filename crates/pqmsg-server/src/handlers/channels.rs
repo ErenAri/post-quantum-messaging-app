@@ -26,15 +26,21 @@ pub(crate) async fn create_channel(
     validate_id("device_id", &request.device_id)?;
 
     if request.display_name.trim().is_empty() || request.display_name.len() > MAX_CHANNEL_NAME_LEN {
-        return Err(AppError::bad_request("display_name must be 1..=128 characters"));
+        return Err(AppError::bad_request(
+            "display_name must be 1..=128 characters",
+        ));
     }
     if request.description.len() > MAX_CHANNEL_DESC_LEN {
-        return Err(AppError::bad_request("description must be <= 1024 characters"));
+        return Err(AppError::bad_request(
+            "description must be <= 1024 characters",
+        ));
     }
 
     let auth = parse_request_auth(&headers)?;
     if auth.user_id != request.owner_user_id {
-        return Err(AppError::bad_request("auth user_id must match owner_user_id"));
+        return Err(AppError::bad_request(
+            "auth user_id must match owner_user_id",
+        ));
     }
     let auth_message = format!("channel-create:{}:{}", auth.user_id, auth.device_id);
     verify_request_auth(&state, &auth, auth_message.as_bytes()).await?;
@@ -153,7 +159,9 @@ pub(crate) async fn post_channel_message(
 
     let auth = parse_request_auth(&headers)?;
     if auth.user_id != request.owner_user_id {
-        return Err(AppError::bad_request("auth user_id must match owner_user_id"));
+        return Err(AppError::bad_request(
+            "auth user_id must match owner_user_id",
+        ));
     }
     let auth_message = format!(
         "channel-post:{}:{}:{}",
@@ -162,17 +170,18 @@ pub(crate) async fn post_channel_message(
     verify_request_auth(&state, &auth, auth_message.as_bytes()).await?;
 
     // Verify the user is the channel owner (admin-only send)
-    let owner: Option<String> = sqlx::query_scalar(
-        "SELECT owner_user_id FROM channels WHERE channel_id = $1",
-    )
-    .bind(&channel_id)
-    .fetch_optional(state.pool())
-    .await?;
+    let owner: Option<String> =
+        sqlx::query_scalar("SELECT owner_user_id FROM channels WHERE channel_id = $1")
+            .bind(&channel_id)
+            .fetch_optional(state.pool())
+            .await?;
 
     match owner {
         None => return Err(AppError::not_found("channel not found")),
         Some(ref o) if o != &request.owner_user_id => {
-            return Err(AppError::bad_request("only the channel owner can post messages"));
+            return Err(AppError::bad_request(
+                "only the channel owner can post messages",
+            ));
         }
         _ => {}
     }
@@ -209,13 +218,12 @@ pub(crate) async fn subscribe_channel(
     verify_request_auth(&state, &auth, auth_message.as_bytes()).await?;
 
     // Verify channel exists
-    let exists: bool = sqlx::query_scalar(
-        "SELECT COUNT(*) > 0 FROM channels WHERE channel_id = $1",
-    )
-    .bind(&channel_id)
-    .fetch_one(state.pool())
-    .await
-    .unwrap_or(false);
+    let exists: bool =
+        sqlx::query_scalar("SELECT COUNT(*) > 0 FROM channels WHERE channel_id = $1")
+            .bind(&channel_id)
+            .fetch_one(state.pool())
+            .await
+            .unwrap_or(false);
 
     if !exists {
         return Err(AppError::not_found("channel not found"));
@@ -223,7 +231,9 @@ pub(crate) async fn subscribe_channel(
 
     let now = Utc::now().to_rfc3339();
     sqlx::query(
-        "INSERT OR IGNORE INTO channel_subscribers (channel_id, user_id, subscribed_at) VALUES ($1, $2, $3)",
+        "INSERT INTO channel_subscribers (channel_id, user_id, subscribed_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (channel_id, user_id) DO NOTHING",
     )
     .bind(&channel_id)
     .bind(&auth.user_id)

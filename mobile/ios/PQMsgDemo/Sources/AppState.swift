@@ -982,8 +982,11 @@ final class AppState: ObservableObject {
 
     func pollPresence(peerUserId: String) async {
         do {
+            let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let keys = try requireKeys(user)
             let api = try ApiClient(serverURL: setup.serverURL)
-            let response = try await api.getPresence(userId: peerUserId)
+            let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
+            let response = try await api.getPresence(userId: peerUserId, headers: headers)
             peerPresenceOnline = response.status == "online"
         } catch {
             peerPresenceOnline = false
@@ -995,11 +998,11 @@ final class AppState: ObservableObject {
     func sendReadReceipt(peerUserId: String, messageId: Int64) async {
         do {
             let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
-            let keys = try requireKeys(user)
+            let device = setup.deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
             let api = try ApiClient(serverURL: setup.serverURL)
-            let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
+            let headers = try buildCallAuth(message: "receipt:\(user):\(device):\(messageId):read")
             _ = try await api.sendReceipt(
-                peerUserId: peerUserId,
+                userId: user,
                 headers: headers,
                 requestBody: SendReceiptRequest(message_id: messageId, receipt_type: "read")
             )
