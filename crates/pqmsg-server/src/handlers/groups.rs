@@ -283,29 +283,31 @@ pub(crate) async fn relay_group_message(
         return Err(AppError::conflict("duplicate group relay payload"));
     }
 
-    let member_user_ids = load_active_group_member_user_ids(state.pool(), &group_id).await?;
-    if member_user_ids.is_empty() {
+    let all_member_devices = load_active_group_member_devices(state.pool(), &group_id).await?;
+    if all_member_devices.is_empty() {
         return Err(AppError::not_found("group not found"));
     }
 
-    let mut delivery_targets: Vec<(String, String)> = Vec::new();
-    for recipient_user_id in &member_user_ids {
-        let recipient_devices = load_active_device_ids(state.pool(), recipient_user_id).await?;
-        for recipient_device_id in recipient_devices {
-            if *recipient_user_id == request.sender_user_id
-                && recipient_device_id == request.device_id
-            {
-                continue;
-            }
-            delivery_targets.push((recipient_user_id.clone(), recipient_device_id));
-        }
-    }
+    let delivery_targets: Vec<&(String, String)> = all_member_devices
+        .iter()
+        .filter(|(user_id, device_id)| {
+            !(user_id == &request.sender_user_id && device_id == &request.device_id)
+        })
+        .collect();
+
+    let member_user_ids: Vec<&str> = all_member_devices
+        .iter()
+        .map(|(user_id, _)| user_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
 
     let now = Utc::now().to_rfc3339();
     let mut tx = state.pool().begin().await?;
-    let mut deliveries: Vec<(String, String, i64, InboxItem)> =
-        Vec::with_capacity(delivery_targets.len());
-    for (recipient_user_id, recipient_device_id) in &delivery_targets {
+    let delivery_count = delivery_targets.len();
+    let mut deliveries: Vec<(&str, &str, i64, InboxItem)> =
+        Vec::with_capacity(delivery_count);
+    for (recipient_user_id, recipient_device_id) in delivery_targets {
         let message_id = sqlx::query_scalar::<_, i64>(
             "INSERT INTO relay_messages (
                 recipient_user_id,
@@ -317,8 +319,8 @@ pub(crate) async fn relay_group_message(
             ) VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING message_id",
         )
-        .bind(recipient_user_id)
-        .bind(recipient_device_id)
+        .bind(recipient_user_id.as_str())
+        .bind(recipient_device_id.as_str())
         .bind(&request.sender_user_id)
         .bind(&request.device_id)
         .bind(&blob)
@@ -326,8 +328,8 @@ pub(crate) async fn relay_group_message(
         .fetch_one(&mut *tx)
         .await?;
         deliveries.push((
-            recipient_user_id.clone(),
-            recipient_device_id.clone(),
+            recipient_user_id.as_str(),
+            recipient_device_id.as_str(),
             message_id,
             InboxItem {
                 message_id,
@@ -345,19 +347,12 @@ pub(crate) async fn relay_group_message(
             .publish(recipient_user_id, recipient_device_id, item.clone());
     }
 
-    let mut delivered_recipient_users: Vec<String> = deliveries
+    let delivered_users = deliveries
         .iter()
-        .filter_map(|(recipient_user_id, _, _, _)| {
-            if recipient_user_id == &request.sender_user_id {
-                None
-            } else {
-                Some(recipient_user_id.clone())
-            }
-        })
-        .collect();
-    delivered_recipient_users.sort_unstable();
-    delivered_recipient_users.dedup();
-    let delivered_users = delivered_recipient_users.len();
+        .filter(|(recipient_user_id, _, _, _)| *recipient_user_id != request.sender_user_id)
+        .map(|(recipient_user_id, _, _, _)| *recipient_user_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
 
     for recipient_user_id in &member_user_ids {
         if *recipient_user_id == request.sender_user_id {
@@ -371,7 +366,7 @@ pub(crate) async fn relay_group_message(
 
     Ok(Json(GroupRelayResponse {
         group_id,
-        delivered_message_count: deliveries.len(),
+        delivered_message_count: delivery_count,
         delivered_user_count: delivered_users,
         first_message_id,
         received_at: now,

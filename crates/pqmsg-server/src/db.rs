@@ -121,22 +121,26 @@ pub(crate) async fn count_active_group_members(
     Ok(count)
 }
 
-pub(crate) async fn load_active_group_member_user_ids(
+/// Batch-load all active devices for every active member of a group in a single
+/// JOIN query instead of the N+1 pattern of fetching member user IDs then
+/// calling `load_active_device_ids` per member.
+pub(crate) async fn load_active_group_member_devices(
     pool: &AnyPool,
     group_id: &str,
-) -> Result<Vec<String>, AppError> {
+) -> Result<Vec<(String, String)>, AppError> {
     let rows = sqlx::query(
-        "SELECT user_id
-         FROM group_members
-         WHERE group_id = $1 AND removed_at IS NULL
-         ORDER BY joined_at ASC, user_id ASC",
+        "SELECT gm.user_id, ud.device_id
+         FROM group_members gm
+         JOIN user_devices ud ON ud.user_id = gm.user_id AND ud.active = 1
+         WHERE gm.group_id = $1 AND gm.removed_at IS NULL
+         ORDER BY gm.user_id, ud.device_id",
     )
     .bind(group_id)
     .fetch_all(pool)
     .await?;
-    let mut user_ids = Vec::with_capacity(rows.len());
+    let mut result = Vec::with_capacity(rows.len());
     for row in rows {
-        user_ids.push(row.try_get("user_id")?);
+        result.push((row.try_get("user_id")?, row.try_get("device_id")?));
     }
-    Ok(user_ids)
+    Ok(result)
 }

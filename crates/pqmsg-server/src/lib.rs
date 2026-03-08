@@ -486,7 +486,7 @@ pub struct RealtimeHub {
 #[derive(Clone)]
 struct RealtimeSubscriber {
     id: u64,
-    sender: mpsc::UnboundedSender<InboxItem>,
+    sender: mpsc::Sender<InboxItem>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1158,12 +1158,16 @@ impl RealtimeHub {
         self.redis_client.is_some()
     }
 
+    /// Maximum buffered messages per WebSocket subscriber before backpressure
+    /// drops the subscriber. Prevents unbounded memory growth from slow clients.
+    const SUBSCRIBER_CHANNEL_CAPACITY: usize = 256;
+
     fn subscribe(
         &self,
         user_id: &str,
         device_id: &str,
-    ) -> (u64, mpsc::UnboundedReceiver<InboxItem>) {
-        let (sender, receiver) = mpsc::unbounded_channel();
+    ) -> (u64, mpsc::Receiver<InboxItem>) {
+        let (sender, receiver) = mpsc::channel(Self::SUBSCRIBER_CHANNEL_CAPACITY);
         let subscriber_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let key = inbox_stream_key(user_id, device_id);
         if let Ok(mut map) = self.inner.lock() {
@@ -1218,7 +1222,7 @@ impl RealtimeHub {
         let Some(subscribers) = map.get_mut(&key) else {
             return;
         };
-        subscribers.retain(|subscriber| subscriber.sender.send(message.clone()).is_ok());
+        subscribers.retain(|subscriber| subscriber.sender.try_send(message.clone()).is_ok());
         if subscribers.is_empty() {
             map.remove(&key);
         }
@@ -1316,7 +1320,7 @@ impl RealtimeHub {
                     let item = envelope.message;
                     if let Ok(mut map) = inner.lock() {
                         if let Some(subscribers) = map.get_mut(key) {
-                            subscribers.retain(|sub| sub.sender.send(item.clone()).is_ok());
+                            subscribers.retain(|sub| sub.sender.try_send(item.clone()).is_ok());
                             if subscribers.is_empty() {
                                 map.remove(key);
                             }
@@ -1634,6 +1638,9 @@ pub fn build_router(state: AppState) -> Router {
         ))
         .layer(axum::middleware::from_fn(security_headers_middleware));
 
+    // When no CORS origins are configured, deny all cross-origin requests
+    // by not adding any allowed origins (CorsLayer::new() defaults to none).
+    // Previously this was ambiguous; now it's explicit.
     let cors_layer = if cors_origins.is_empty() {
         CorsLayer::new()
     } else {
