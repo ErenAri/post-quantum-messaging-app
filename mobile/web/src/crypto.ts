@@ -578,7 +578,7 @@ export function buildInboxDeleteAuthHeaders(
   records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
   // Hash sorted deduplicated message IDs as concatenated big-endian i64
   const sorted = [...new Set(messageIds)].sort((a, b) => a - b);
-  const idBytes = concatBytes(...sorted.map(id => i64ToBeBytes(id)));
+  const idBytes = concatBytes(sorted.map(id => i64ToBeBytes(id)));
   records.push({ ty: AUTH_TAG_DELETE_IDS_HASH, value: sha256(idBytes) });
   if (deleteBeforeId !== undefined) {
     records.push({ ty: AUTH_TAG_DELETE_BEFORE_ID, value: i64ToBeBytes(deleteBeforeId) });
@@ -673,11 +673,13 @@ export function buildDiscoveryHandlesAuthHeaders(
 ): RequestAuthHeaders {
   const sortedPhones = [...phoneHashes].sort().join(",");
   const sortedEmails = [...emailHashes].sort().join(",");
-  return signAuthHeaders(keys, "discovery-handles", [
-    { typeVal: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) },
-    { typeVal: AUTH_TAG_DISCOVERY_PHONE_HASHES_HASH, value: sha256(utf8ToBytes(sortedPhones)) },
-    { typeVal: AUTH_TAG_DISCOVERY_EMAIL_HASHES_HASH, value: sha256(utf8ToBytes(sortedEmails)) },
-  ]);
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("discovery-handles", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  records.push({ ty: AUTH_TAG_DISCOVERY_PHONE_HASHES_HASH, value: sha256(utf8ToBytes(sortedPhones)) });
+  records.push({ ty: AUTH_TAG_DISCOVERY_EMAIL_HASHES_HASH, value: sha256(utf8ToBytes(sortedEmails)) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
 }
 
 export function buildDiscoveryMatchAuthHeaders(
@@ -685,21 +687,25 @@ export function buildDiscoveryMatchAuthHeaders(
   queryHashes: string[]
 ): RequestAuthHeaders {
   const sorted = [...queryHashes].sort().join(",");
-  return signAuthHeaders(keys, "discovery-match", [
-    { typeVal: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) },
-    { typeVal: AUTH_TAG_DISCOVERY_QUERY_HASHES_HASH, value: sha256(utf8ToBytes(sorted)) },
-  ]);
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("discovery-match", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  records.push({ ty: AUTH_TAG_DISCOVERY_QUERY_HASHES_HASH, value: sha256(utf8ToBytes(sorted)) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
 }
 
 export function buildPushTokenAuthHeaders(
   keys: GeneratedKeys,
   token: string
 ): RequestAuthHeaders {
-  return signAuthHeaders(keys, "push-token", [
-    { typeVal: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) },
-    { typeVal: AUTH_TAG_PUSH_DEVICE_ID, value: utf8ToBytes(keys.deviceId) },
-    { typeVal: AUTH_TAG_PUSH_TOKEN_HASH, value: sha256(utf8ToBytes(token)) },
-  ]);
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("push-token", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  records.push({ ty: AUTH_TAG_PUSH_DEVICE_ID, value: utf8ToBytes(keys.deviceId) });
+  records.push({ ty: AUTH_TAG_PUSH_TOKEN_HASH, value: sha256(utf8ToBytes(token)) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
 }
 
 export async function sealJsonWithPassphrase<T>(value: T, passphrase: string): Promise<string> {
@@ -712,11 +718,11 @@ export async function sealJsonWithPassphrase<T>(value: T, passphrase: string): P
     await crypto.subtle.encrypt(
       {
         name: "AES-GCM",
-        iv,
-        additionalData: aad
+        iv: iv.buffer as ArrayBuffer,
+        additionalData: aad.buffer as ArrayBuffer
       },
       key,
-      plaintext
+      plaintext.buffer as ArrayBuffer
     )
   );
   const payload: SealedPayload = {
@@ -741,11 +747,11 @@ export async function openJsonWithPassphrase<T>(
     await crypto.subtle.decrypt(
       {
         name: "AES-GCM",
-        iv,
-        additionalData: aad
+        iv: iv.buffer as ArrayBuffer,
+        additionalData: aad.buffer as ArrayBuffer
       },
       key,
-      ciphertext
+      ciphertext.buffer as ArrayBuffer
     )
   );
   return JSON.parse(bytesToUtf8(plaintext)) as T;
@@ -765,11 +771,11 @@ export async function encryptFallbackMessage(
     await crypto.subtle.encrypt(
       {
         name: "AES-GCM",
-        iv,
-        additionalData: aad
+        iv: iv.buffer as ArrayBuffer,
+        additionalData: aad.buffer as ArrayBuffer
       },
       key,
-      utf8ToBytes(plaintext)
+      utf8ToBytes(plaintext).buffer as ArrayBuffer
     )
   );
   return {
@@ -796,11 +802,11 @@ export async function decryptFallbackMessage(
     await crypto.subtle.decrypt(
       {
         name: "AES-GCM",
-        iv,
-        additionalData: aad
+        iv: iv.buffer as ArrayBuffer,
+        additionalData: aad.buffer as ArrayBuffer
       },
       key,
-      ciphertext
+      ciphertext.buffer as ArrayBuffer
     )
   );
   return bytesToUtf8(plaintext);
@@ -876,7 +882,7 @@ export async function decryptMessage(
     const ad = wasmCrypto.conversationAd(wire.sender, wire.recipient);
     const key = wasmCrypto.hkdfSha256(utf8ToBytes(passphrase), salt, ad, 32);
     // Reconstruct nonce || ciphertext for WASM decrypt
-    const combined = concatBytes(nonce, ciphertext);
+    const combined = concatBytes([nonce, ciphertext]);
     const pt = wasmCrypto.decrypt(key, combined, ad);
     return bytesToUtf8(pt);
   }
@@ -939,7 +945,7 @@ async function deriveAesGcmKey(passphrase: string, salt: Uint8Array): Promise<Cr
   }
   const keyMaterial = await crypto.subtle.importKey(
     "raw",
-    utf8ToBytes(passphrase),
+    utf8ToBytes(passphrase).buffer as ArrayBuffer,
     "PBKDF2",
     false,
     ["deriveKey"]
@@ -947,7 +953,7 @@ async function deriveAesGcmKey(passphrase: string, salt: Uint8Array): Promise<Cr
   return crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
-      salt,
+      salt: salt.buffer as ArrayBuffer,
       iterations: PBKDF2_ITERATIONS,
       hash: "SHA-256"
     },
