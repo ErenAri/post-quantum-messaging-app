@@ -158,6 +158,8 @@ class ConversationsActivity : AppCompatActivity() {
             }.onSuccess { outcome ->
                 renderHome()
                 statusText.text = when {
+                    outcome.discoveredGroups > 0 ->
+                        "Synced ${outcome.discoveredGroups} group(s)."
                     outcome.pendingRequests > 0 ->
                         "${outcome.pendingRequests} message request(s) need review."
                     outcome.deliveredMessages > 0 ->

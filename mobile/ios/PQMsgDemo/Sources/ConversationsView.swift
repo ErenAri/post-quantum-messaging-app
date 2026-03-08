@@ -36,7 +36,7 @@ struct ConversationsView: View {
 
                 HStack {
                     Button("Refresh") {
-                        appState.refreshConversations()
+                        Task { await appState.syncGroups() }
                     }
                     .buttonStyle(.bordered)
 
@@ -130,6 +130,9 @@ struct ConversationsView: View {
                 }
             }
             .navigationTitle("Conversations")
+            .task {
+                await appState.syncGroups()
+            }
             .sheet(isPresented: $showingChat) {
                 ChatView(peerUserId: appState.selectedPeer)
                     .environmentObject(appState)

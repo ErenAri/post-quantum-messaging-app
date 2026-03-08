@@ -1,5 +1,8 @@
 /target
 /target-android-*/
+/target-test
+/t
+/.demo-state
 **/*.rs.bk
 .idea
 .vscode

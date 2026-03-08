@@ -199,6 +199,19 @@ struct CreateGroupResponse: Codable {
     let created_at: String
 }
 
+struct GroupMembershipRecord: Codable {
+    let group_id: String
+    let owner_user_id: String
+    let joined_at: String
+    let updated_at: String
+    let member_count: Int
+}
+
+struct UserGroupsResponse: Codable {
+    let user_id: String
+    let groups: [GroupMembershipRecord]
+}
+
 struct GroupMemberRecord: Codable, Hashable, Identifiable {
     let user_id: String
     let role: String?

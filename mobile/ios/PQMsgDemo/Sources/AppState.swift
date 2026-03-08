@@ -26,6 +26,7 @@ final class AppState: ObservableObject {
     @Published var peerIsTyping: Bool
     @Published var sealedSenderEnabled: Bool
     @Published var ephemeralTtlSeconds: Int
+    @Published var pendingAttachment: PendingAttachmentSelection?
 
     // MARK: - Call State
     @Published var activeCallId: String?
@@ -39,9 +40,11 @@ final class AppState: ObservableObject {
 
     private var callPollingTask: Task<Void, Never>?
     private var callTimerTask: Task<Void, Never>?
+    private let maxAttachmentBytes = 128 * 1024
 
     private let store: LocalStateStore
     private var latestBundleByPeer: [String: BundleResponse]
+    private var pendingAttachmentDraft: PendingAttachmentDraft?
 
     init(store: LocalStateStore = .shared) {
         self.store = store
@@ -69,6 +72,7 @@ final class AppState: ObservableObject {
         self.peerIsTyping = false
         self.sealedSenderEnabled = false
         self.ephemeralTtlSeconds = 0
+        self.pendingAttachment = nil
         self.activeCallId = nil
         self.activeCallPeer = nil
         self.activeCallType = nil
@@ -77,12 +81,15 @@ final class AppState: ObservableObject {
         self.showCallView = false
         self.isIncomingCall = false
         self.incomingCallSdpBase64 = nil
+        self.pendingAttachmentDraft = nil
         refreshSecuritySnapshot()
     }
 
     func applyPreset(userId: String, peerId: String) {
         setup.userId = userId
         setup.peerUserId = peerId
+        draftMessage = ""
+        clearPendingAttachment()
         if setup.deviceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             setup.deviceId = "\(userId)-ios-1"
         }
@@ -107,6 +114,8 @@ final class AppState: ObservableObject {
 
     func setUserId(_ value: String) {
         setup.userId = value
+        draftMessage = ""
+        clearPendingAttachment()
         progress = store.loadProgress(userId: value)
         managedDeviceId = Self.defaultManagedDeviceId(for: value)
         linkedDevices = []
@@ -246,6 +255,10 @@ final class AppState: ObservableObject {
             errorLine = "peer user id is empty"
             return
         }
+        if selectedPeer != peer {
+            draftMessage = ""
+            clearPendingAttachment()
+        }
         selectedPeer = peer
         setup.peerUserId = peer
         persistSetup()
@@ -278,9 +291,7 @@ final class AppState: ObservableObject {
             let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
             let peer = peerUserId.trimmingCharacters(in: .whitespacesAndNewlines)
             let text = draftMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else {
-                throw RustBridgeError.missingKeys("message is empty")
-            }
+            let outbound = try composeOutboundPayload(text: text)
             let keys = try requireKeys(user)
             let api = try ApiClient(serverURL: setup.serverURL)
             let profile = try loadUserProfile(keysJson: keys)
@@ -292,7 +303,7 @@ final class AppState: ObservableObject {
                     sessionJson: session,
                     senderUserId: user,
                     peerUserId: peer,
-                    plaintextUtf8: text
+                    plaintextUtf8: outbound.plaintext
                 )
             } else {
                 let bundle = try await loadBundleForPeer(api: api, peer: peer)
@@ -302,7 +313,7 @@ final class AppState: ObservableObject {
                     fromUserId: user,
                     peerUserId: peer,
                     peerBundle: bundle.toRustBundle(),
-                    plaintextUtf8: text,
+                    plaintextUtf8: outbound.plaintext,
                     suiteOverride: nil
                 )
             }
@@ -323,16 +334,17 @@ final class AppState: ObservableObject {
                     message_bytes_base64: sendResult.messageBytesBase64
                 )
             )
-            appendChatLog("me->\(peer): \(text) [message_id=\(relayResponse.message_id)]")
+            appendChatLog("me->\(peer): \(outbound.preview) [message_id=\(relayResponse.message_id)]")
             store.upsertConversation(
                 userId: user,
                 peerUserId: peer,
-                lastPreview: "You: \(text)",
+                lastPreview: "You: \(outbound.preview)",
                 incrementUnread: false
             )
             store.markConversationRead(userId: user, peerUserId: peer)
             refreshConversations()
             draftMessage = ""
+            clearPendingAttachment()
             statusLine = "Encrypted message sent"
         }
     }
@@ -340,6 +352,7 @@ final class AppState: ObservableObject {
     func pollInbox() async {
         await runChatAction("Poll inbox") {
             let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let discoveredGroups = try await fetchAndPersistGroups(userId: user)
             let keys = try requireKeys(user)
             let api = try ApiClient(serverURL: setup.serverURL)
             var cursor = store.readCursor(userId: user)
@@ -347,7 +360,7 @@ final class AppState: ObservableObject {
             let inbox = try await api.inbox(userId: user, since: cursor, headers: inboxHeaders)
             if inbox.messages.isEmpty {
                 appendChatLog("inbox empty")
-                statusLine = "Inbox empty"
+                statusLine = discoveredGroups > 0 ? "Synced \(discoveredGroups) group(s)" : "Inbox empty"
                 return
             }
             for message in inbox.messages {
@@ -365,11 +378,12 @@ final class AppState: ObservableObject {
                         peerUserId: message.sender_user_id,
                         sessionJson: result.sessionJson
                     )
-                    appendChatLog("\(message.sender_user_id): \(result.plaintextUtf8)")
+                    let preview = renderInboundPreview(result.plaintextUtf8)
+                    appendChatLog("\(message.sender_user_id): \(preview)")
                     store.upsertConversation(
                         userId: user,
                         peerUserId: message.sender_user_id,
-                        lastPreview: "\(message.sender_user_id): \(result.plaintextUtf8)",
+                        lastPreview: "\(message.sender_user_id): \(preview)",
                         incrementUnread: message.sender_user_id != selectedPeer
                     )
                 } catch {
@@ -383,10 +397,50 @@ final class AppState: ObservableObject {
         }
     }
 
+    func syncGroups() async {
+        let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !user.isEmpty else {
+            return
+        }
+        do {
+            let discoveredGroups = try await fetchAndPersistGroups(userId: user)
+            if discoveredGroups > 0 {
+                statusLine = "Synced \(discoveredGroups) group(s)"
+            }
+        } catch {
+            // Best-effort hydration for invited groups.
+        }
+    }
+
     func refreshConversations() {
         conversations = store.listConversations(userId: setup.userId)
         pinnedIdentities = store.listIdentityPins(userId: setup.userId)
         groups = store.listGroups(userId: setup.userId)
+    }
+
+    private func fetchAndPersistGroups(userId: String) async throws -> Int {
+        let keys = try requireKeys(userId)
+        let api = try ApiClient(serverURL: setup.serverURL)
+        let headers = try buildInboxAuthHeaders(keysJson: keys, userId: userId, since: 0).toHeaderMap()
+        let response = try await api.listUserGroups(userId: userId, headers: headers)
+        let existingGroupIds = Set(store.listGroups(userId: userId).map(\.groupId))
+        var discoveredGroups = 0
+        for group in response.groups where !existingGroupIds.contains(group.group_id) {
+            let summary = GroupSummary(
+                groupId: group.group_id,
+                displayName: group.group_id,
+                memberCount: group.member_count,
+                lastPreview: group.owner_user_id == userId ? "Group created" : "You were added to a group",
+                updatedAtMillis: Int64(Date().timeIntervalSince1970 * 1000),
+                unreadCount: 0
+            )
+            store.upsertGroupConversation(userId: userId, group: summary)
+            discoveredGroups += 1
+        }
+        if discoveredGroups > 0 {
+            refreshConversations()
+        }
+        return discoveredGroups
     }
 
     func refreshSecuritySnapshot() {
@@ -675,6 +729,7 @@ final class AppState: ObservableObject {
             selectedPeer = setup.peerUserId
             chatLog = []
             draftMessage = ""
+            clearPendingAttachment()
             serverCapabilitiesSummary = capabilitySummary(context.capabilities)
             refreshSecuritySnapshot()
             statusLine = "Rotated identity to \(target) (version \(rotateConfirmResponse.identity_key_version)) and published new prekeys"
@@ -1024,9 +1079,7 @@ final class AppState: ObservableObject {
             let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
             let peer = peerUserId.trimmingCharacters(in: .whitespacesAndNewlines)
             let text = draftMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else {
-                throw RustBridgeError.missingKeys("message is empty")
-            }
+            let outbound = try composeOutboundPayload(text: text)
             let keys = try requireKeys(user)
             let api = try ApiClient(serverURL: setup.serverURL)
             let profile = try loadUserProfile(keysJson: keys)
@@ -1038,7 +1091,7 @@ final class AppState: ObservableObject {
                     sessionJson: session,
                     senderUserId: user,
                     peerUserId: peer,
-                    plaintextUtf8: text
+                    plaintextUtf8: outbound.plaintext
                 )
             } else {
                 let bundle = try await loadBundleForPeer(api: api, peer: peer)
@@ -1048,7 +1101,7 @@ final class AppState: ObservableObject {
                     fromUserId: user,
                     peerUserId: peer,
                     peerBundle: bundle.toRustBundle(),
-                    plaintextUtf8: text,
+                    plaintextUtf8: outbound.plaintext,
                     suiteOverride: nil
                 )
             }
@@ -1068,11 +1121,12 @@ final class AppState: ObservableObject {
                     message_bytes_base64: sendResult.messageBytesBase64
                 )
             )
-            appendChatLog("me->\(peer) [sealed]: \(text)")
-            store.upsertConversation(userId: user, peerUserId: peer, lastPreview: "You [sealed]: \(text)", incrementUnread: false)
+            appendChatLog("me->\(peer) [sealed]: \(outbound.preview)")
+            store.upsertConversation(userId: user, peerUserId: peer, lastPreview: "You [sealed]: \(outbound.preview)", incrementUnread: false)
             store.markConversationRead(userId: user, peerUserId: peer)
             refreshConversations()
             draftMessage = ""
+            clearPendingAttachment()
             statusLine = "Sealed message sent"
         }
     }
@@ -1089,9 +1143,7 @@ final class AppState: ObservableObject {
             let user = setup.userId.trimmingCharacters(in: .whitespacesAndNewlines)
             let peer = peerUserId.trimmingCharacters(in: .whitespacesAndNewlines)
             let text = draftMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else {
-                throw RustBridgeError.missingKeys("message is empty")
-            }
+            let outbound = try composeOutboundPayload(text: text)
             let keys = try requireKeys(user)
             let api = try ApiClient(serverURL: setup.serverURL)
             let profile = try loadUserProfile(keysJson: keys)
@@ -1103,7 +1155,7 @@ final class AppState: ObservableObject {
                     sessionJson: session,
                     senderUserId: user,
                     peerUserId: peer,
-                    plaintextUtf8: text
+                    plaintextUtf8: outbound.plaintext
                 )
             } else {
                 let bundle = try await loadBundleForPeer(api: api, peer: peer)
@@ -1113,7 +1165,7 @@ final class AppState: ObservableObject {
                     fromUserId: user,
                     peerUserId: peer,
                     peerBundle: bundle.toRustBundle(),
-                    plaintextUtf8: text,
+                    plaintextUtf8: outbound.plaintext,
                     suiteOverride: nil
                 )
             }
@@ -1134,11 +1186,12 @@ final class AppState: ObservableObject {
                     ttl_seconds: ephemeralTtlSeconds
                 )
             )
-            appendChatLog("me->\(peer) [ephemeral \(ephemeralTtlSeconds)s]: \(text)")
-            store.upsertConversation(userId: user, peerUserId: peer, lastPreview: "You [ephemeral]: \(text)", incrementUnread: false)
+            appendChatLog("me->\(peer) [ephemeral \(ephemeralTtlSeconds)s]: \(outbound.preview)")
+            store.upsertConversation(userId: user, peerUserId: peer, lastPreview: "You [ephemeral]: \(outbound.preview)", incrementUnread: false)
             store.markConversationRead(userId: user, peerUserId: peer)
             refreshConversations()
             draftMessage = ""
+            clearPendingAttachment()
             statusLine = "Ephemeral message sent (TTL: \(ephemeralTtlSeconds)s)"
         }
     }
@@ -1181,6 +1234,7 @@ final class AppState: ObservableObject {
             selectedPeer = setup.peerUserId
             chatLog = []
             draftMessage = ""
+            clearPendingAttachment()
             latestBundleByPeer = [:]
             serverCapabilitiesSummary = "Not checked"
             linkedDevices = []
@@ -1300,6 +1354,67 @@ final class AppState: ObservableObject {
 
     private func appendChatLog(_ line: String) {
         chatLog.append(line)
+    }
+
+    func stageAttachment(fileName: String, mimeType: String, data: Data) throws {
+        let trimmedName = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedName = trimmedName.isEmpty ? "attachment.bin" : trimmedName
+        guard data.count <= maxAttachmentBytes else {
+            throw NSError(
+                domain: "PQMsgAttachment",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "attachment exceeds \(maxAttachmentBytes) bytes"]
+            )
+        }
+        let selection = PendingAttachmentSelection(
+            fileName: normalizedName,
+            mimeType: mimeType.isEmpty ? "application/octet-stream" : mimeType,
+            byteLength: data.count
+        )
+        pendingAttachmentDraft = PendingAttachmentDraft(
+            selection: selection,
+            dataBase64: data.base64EncodedString()
+        )
+        pendingAttachment = selection
+        statusLine = "Attachment ready"
+        clearError()
+    }
+
+    func clearPendingAttachment() {
+        pendingAttachmentDraft = nil
+        pendingAttachment = nil
+    }
+
+    private func composeOutboundPayload(text: String) throws -> OutboundPayload {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let attachment = pendingAttachmentDraft {
+            let plaintext = MessageEnvelopeCodec.encodeMediaEnvelope(
+                fileName: attachment.selection.fileName,
+                mimeType: attachment.selection.mimeType,
+                noteText: trimmedText,
+                dataBase64: attachment.dataBase64
+            )
+            return OutboundPayload(
+                plaintext: plaintext,
+                preview: MessageEnvelopeCodec.renderPreview(
+                    fileName: attachment.selection.fileName,
+                    mimeType: attachment.selection.mimeType,
+                    byteLength: attachment.selection.byteLength,
+                    noteText: trimmedText
+                )
+            )
+        }
+        guard !trimmedText.isEmpty else {
+            throw RustBridgeError.missingKeys("message is empty")
+        }
+        return OutboundPayload(plaintext: trimmedText, preview: trimmedText)
+    }
+
+    private func renderInboundPreview(_ plaintext: String) -> String {
+        guard let envelope = MessageEnvelopeCodec.decodeMediaEnvelope(plaintext) else {
+            return plaintext
+        }
+        return MessageEnvelopeCodec.renderPreview(for: envelope)
     }
 
     private func deviceManagementContext() async throws -> (
@@ -1559,4 +1674,14 @@ final class AppState: ObservableObject {
             }
         }
     }
+}
+
+private struct PendingAttachmentDraft {
+    let selection: PendingAttachmentSelection
+    let dataBase64: String
+}
+
+private struct OutboundPayload {
+    let plaintext: String
+    let preview: String
 }

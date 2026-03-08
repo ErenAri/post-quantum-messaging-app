@@ -319,11 +319,14 @@ export function buildRetireDeviceAuthHeaders(keys: GeneratedKeys): RequestAuthHe
 
 // --- Phase 2: Profile auth ---
 
-export function buildProfileGetAuthHeaders(keys: GeneratedKeys): RequestAuthHeaders {
+export function buildProfileGetAuthHeaders(
+  keys: GeneratedKeys,
+  targetUserId: string
+): RequestAuthHeaders {
   const timestamp = unixTimestampSeconds();
   const nonce = bytesToBase64(randomBytes(16));
   const records = authCommonRecords("profile-get", keys.userId, keys.deviceId, timestamp, nonce);
-  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(targetUserId) });
   return signAuthHeaders(keys, timestamp, nonce, records);
 }
 
@@ -483,6 +486,17 @@ export function buildGroupCreateAuthHeaders(
   const records = authCommonRecords("groups-create", keys.userId, keys.deviceId, timestamp, nonce);
   records.push({ ty: AUTH_TAG_GROUP_ID, value: utf8ToBytes(groupId) });
   records.push({ ty: AUTH_TAG_GROUP_MEMBERS_HASH, value: hashStringListSha256(memberUserIds) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildUserGroupsListAuthHeaders(
+  keys: GeneratedKeys,
+  userId: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("groups-list", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(userId) });
   return signAuthHeaders(keys, timestamp, nonce, records);
 }
 

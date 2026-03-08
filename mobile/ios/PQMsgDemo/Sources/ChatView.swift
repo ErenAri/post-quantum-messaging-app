@@ -1,4 +1,7 @@
+import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
+import UIKit
 
 struct ChatView: View {
     @EnvironmentObject private var appState: AppState
@@ -7,6 +10,12 @@ struct ChatView: View {
     @State private var typingDebounceTask: Task<Void, Never>?
     @State private var pollingTask: Task<Void, Never>?
     @State private var showEphemeralPicker = false
+    @State private var showAttachmentSheet = false
+    @State private var showMediaPicker = false
+    @State private var showAudioImporter = false
+    @State private var showDocumentImporter = false
+    @State private var showCameraCapture = false
+    @State private var selectedMediaItem: PhotosPickerItem?
 
     private let ephemeralOptions: [(String, Int)] = [
         ("Off", 0),
@@ -18,6 +27,91 @@ struct ChatView: View {
 
     init(peerUserId: String) {
         _peer = State(initialValue: peerUserId)
+    }
+
+    private var canSend: Bool {
+        !appState.draftMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || appState.pendingAttachment != nil
+    }
+
+    @ViewBuilder
+    private var attachmentSheet: some View {
+        ZStack(alignment: .bottom) {
+            Color.black.opacity(0.24)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    showAttachmentSheet = false
+                }
+
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Share something")
+                        .font(.headline)
+                    Text("Choose what to send in this chat.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                    AttachmentActionButton(
+                        title: "Camera",
+                        subtitle: "Capture a photo",
+                        systemImage: "camera.fill",
+                        tint: .green
+                    ) {
+                        openAttachmentFlow {
+                            guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+                                presentAttachmentError("Open camera", message: "Camera is not available on this device.")
+                                return
+                            }
+                            showCameraCapture = true
+                        }
+                    }
+                    AttachmentActionButton(
+                        title: "Photos & Videos",
+                        subtitle: "Pick from your library",
+                        systemImage: "photo.on.rectangle.angled",
+                        tint: .blue
+                    ) {
+                        openAttachmentFlow {
+                            showMediaPicker = true
+                        }
+                    }
+                    AttachmentActionButton(
+                        title: "Audio",
+                        subtitle: "Share a sound file",
+                        systemImage: "waveform",
+                        tint: .orange
+                    ) {
+                        openAttachmentFlow {
+                            showAudioImporter = true
+                        }
+                    }
+                    AttachmentActionButton(
+                        title: "Document",
+                        subtitle: "Browse files and folders",
+                        systemImage: "doc.fill",
+                        tint: .purple
+                    ) {
+                        openAttachmentFlow {
+                            showDocumentImporter = true
+                        }
+                    }
+                }
+
+                Button("Cancel", role: .cancel) {
+                    showAttachmentSheet = false
+                }
+                .buttonStyle(.bordered)
+                .frame(maxWidth: .infinity, alignment: .center)
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .padding(.horizontal, 14)
+            .padding(.bottom, 12)
+        }
+        .transition(.opacity)
     }
 
     var body: some View {
@@ -108,18 +202,62 @@ struct ChatView: View {
                     .tint(appState.ephemeralTtlSeconds > 0 ? .orange : .gray)
                 }
 
-                HStack {
-                    TextField("Message", text: $appState.draftMessage, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                        .lineLimit(1...4)
-                        .onChange(of: appState.draftMessage) { _, _ in
-                            onDraftChanged()
+                VStack(spacing: 10) {
+                    HStack(alignment: .bottom, spacing: 12) {
+                        Button {
+                            showAttachmentSheet = true
+                        } label: {
+                            Image(systemName: "paperclip.circle.fill")
+                                .font(.system(size: 28))
+                                .foregroundStyle(.blue)
                         }
-                    Button("Send") {
-                        appState.openConversation(peerUserId: peer)
-                        Task { await sendMessage() }
+                        .accessibilityLabel("Open attachment options")
+
+                        TextField("Message", text: $appState.draftMessage, axis: .vertical)
+                            .textFieldStyle(.roundedBorder)
+                            .lineLimit(1...4)
+                            .onChange(of: appState.draftMessage) { _, _ in
+                                onDraftChanged()
+                            }
+
+                        Button("Send") {
+                            appState.openConversation(peerUserId: peer)
+                            Task { await sendMessage() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canSend)
                     }
-                    .buttonStyle(.borderedProminent)
+
+                    if let attachment = appState.pendingAttachment {
+                        HStack(spacing: 10) {
+                            Image(systemName: attachmentIconName(for: attachment.mimeType))
+                                .foregroundStyle(.blue)
+                                .font(.headline)
+                                .frame(width: 28)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(attachment.fileName)
+                                    .font(.subheadline.weight(.semibold))
+                                    .lineLimit(1)
+                                Text("\(attachment.mimeType) - \(attachment.byteLength) bytes")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Button {
+                                appState.clearPendingAttachment()
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                                    .font(.title3)
+                            }
+                            .accessibilityLabel("Clear attachment")
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(Color.blue.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
                 }
                 .padding(.horizontal)
 
@@ -176,6 +314,35 @@ struct ChatView: View {
                 CallView()
                     .environmentObject(appState)
             }
+            .photosPicker(
+                isPresented: $showMediaPicker,
+                selection: $selectedMediaItem,
+                matching: .any(of: [.images, .videos])
+            )
+            .fileImporter(
+                isPresented: $showAudioImporter,
+                allowedContentTypes: [.audio]
+            ) { result in
+                handleImportedFile(result, action: "Select audio")
+            }
+            .fileImporter(
+                isPresented: $showDocumentImporter,
+                allowedContentTypes: [.item]
+            ) { result in
+                handleImportedFile(result, action: "Select document")
+            }
+            .fullScreenCover(isPresented: $showCameraCapture) {
+                CameraCaptureView(
+                    onCapture: { image in
+                        handleCapturedImage(image)
+                        showCameraCapture = false
+                    },
+                    onCancel: {
+                        showCameraCapture = false
+                    }
+                )
+                .ignoresSafeArea()
+            }
             .onAppear {
                 appState.openConversation(peerUserId: peer)
                 startPolling()
@@ -194,6 +361,17 @@ struct ChatView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             }
+            .overlay {
+                if showAttachmentSheet {
+                    attachmentSheet
+                }
+            }
+            .onChange(of: selectedMediaItem) { _, item in
+                guard let item else { return }
+                Task {
+                    await handleSelectedMedia(item)
+                }
+            }
         }
     }
 
@@ -205,6 +383,100 @@ struct ChatView: View {
         } else {
             await appState.sendMessage(peerUserId: peer)
         }
+    }
+
+    private func openAttachmentFlow(_ action: @escaping () -> Void) {
+        showAttachmentSheet = false
+        DispatchQueue.main.async {
+            action()
+        }
+    }
+
+    private func handleImportedFile(_ result: Result<URL, Error>, action: String) {
+        switch result {
+        case .success(let url):
+            Task {
+                await stageImportedFile(url, action: action)
+            }
+        case .failure(let error):
+            presentAttachmentError(action, message: error.localizedDescription)
+        }
+    }
+
+    private func stageImportedFile(_ url: URL, action: String) async {
+        let didStartAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStartAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        do {
+            let data = try Data(contentsOf: url)
+            let fileName = url.lastPathComponent.isEmpty ? "attachment.bin" : url.lastPathComponent
+            let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+            try appState.stageAttachment(fileName: fileName, mimeType: mimeType, data: data)
+        } catch {
+            presentAttachmentError(action, message: error.localizedDescription)
+        }
+    }
+
+    private func handleCapturedImage(_ image: UIImage) {
+        guard let data = image.jpegData(compressionQuality: 0.72) else {
+            presentAttachmentError("Capture photo", message: "Unable to encode captured photo.")
+            return
+        }
+        do {
+            try appState.stageAttachment(
+                fileName: "camera-\(Int(Date().timeIntervalSince1970)).jpg",
+                mimeType: "image/jpeg",
+                data: data
+            )
+        } catch {
+            presentAttachmentError("Capture photo", message: error.localizedDescription)
+        }
+    }
+
+    private func handleSelectedMedia(_ item: PhotosPickerItem) async {
+        defer {
+            selectedMediaItem = nil
+        }
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self) else {
+                presentAttachmentError("Select media", message: "Unable to read the selected media.")
+                return
+            }
+            let contentType = item.supportedContentTypes.first ?? .data
+            let fileName = suggestedFileName(for: contentType)
+            let mimeType = contentType.preferredMIMEType ?? "application/octet-stream"
+            try appState.stageAttachment(fileName: fileName, mimeType: mimeType, data: data)
+        } catch {
+            presentAttachmentError("Select media", message: error.localizedDescription)
+        }
+    }
+
+    private func suggestedFileName(for contentType: UTType) -> String {
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let ext = contentType.preferredFilenameExtension ?? "bin"
+        let baseName = contentType.conforms(to: .movie) ? "video" : "photo"
+        return "\(baseName)-\(timestamp).\(ext)"
+    }
+
+    private func attachmentIconName(for mimeType: String) -> String {
+        if mimeType.hasPrefix("image/") {
+            return "photo"
+        }
+        if mimeType.hasPrefix("video/") {
+            return "video"
+        }
+        if mimeType.hasPrefix("audio/") {
+            return "waveform"
+        }
+        return "doc"
+    }
+
+    private func presentAttachmentError(_ action: String, message: String) {
+        appState.errorLine = "\(action) failed: \(message)"
+        appState.statusLine = "\(action) failed"
     }
 
     private func onDraftChanged() {
@@ -231,5 +503,82 @@ struct ChatView: View {
         pollingTask = nil
         typingDebounceTask?.cancel()
         typingDebounceTask = nil
+    }
+}
+
+private struct AttachmentActionButton: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let tint: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 44, height: 44)
+                    .background(tint.opacity(0.14))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+            }
+            .frame(maxWidth: .infinity, minHeight: 128, alignment: .topLeading)
+            .padding(14)
+            .background(Color.primary.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct CameraCaptureView: UIViewControllerRepresentable {
+    let onCapture: (UIImage) -> Void
+    let onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onCapture: onCapture, onCancel: onCancel)
+    }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.allowsEditing = false
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        private let onCapture: (UIImage) -> Void
+        private let onCancel: () -> Void
+
+        init(onCapture: @escaping (UIImage) -> Void, onCancel: @escaping () -> Void) {
+            self.onCapture = onCapture
+            self.onCancel = onCancel
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            onCancel()
+        }
+
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+        ) {
+            if let image = info[.originalImage] as? UIImage {
+                onCapture(image)
+            } else {
+                onCancel()
+            }
+        }
     }
 }

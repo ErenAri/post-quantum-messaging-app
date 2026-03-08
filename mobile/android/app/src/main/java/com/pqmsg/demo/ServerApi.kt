@@ -218,6 +218,19 @@ data class CreateGroupResponse(
     val created_at: String,
 )
 
+data class GroupMembershipRecord(
+    val group_id: String,
+    val owner_user_id: String,
+    val joined_at: String,
+    val updated_at: String,
+    val member_count: Int,
+)
+
+data class UserGroupsResponse(
+    val user_id: String,
+    val groups: List<GroupMembershipRecord>,
+)
+
 data class AddGroupMemberRequest(
     val member_user_id: String,
 )
@@ -662,6 +675,12 @@ interface PqmsgApi {
         @HeaderMap headers: Map<String, String>,
         @Body request: CreateGroupRequest,
     ): CreateGroupResponse
+
+    @GET("/v1/users/{user_id}/groups")
+    suspend fun listUserGroups(
+        @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
+    ): UserGroupsResponse
 
     @GET("/v1/groups/{group_id}/members")
     suspend fun listGroupMembers(

@@ -1,6 +1,7 @@
 package com.pqmsg.demo
 
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -14,6 +15,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.NestedScrollView
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -61,16 +63,31 @@ class ChatActivity : AppCompatActivity() {
     private var ephemeralTtlSeconds: Long? = null
 
     private val pickAttachmentLauncher =
-        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            if (uri == null) {
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            handlePickedUri(uri, "Read attachment")
+        }
+
+    private val pickAudioAttachmentLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            handlePickedUri(uri, "Read audio")
+        }
+
+    private val pickDocumentAttachmentLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            handlePickedUri(uri, "Read document")
+        }
+
+    private val takePhotoAttachmentLauncher =
+        registerForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
+            if (bitmap == null) {
                 return@registerForActivityResult
             }
             runCatching {
-                pendingAttachment = readAttachment(uri)
+                pendingAttachment = readCameraAttachment(bitmap)
                 renderAttachmentInfo()
                 renderError(null)
             }.onFailure {
-                renderError(UiErrorMapper.fromThrowable(it, "Read attachment"))
+                renderError(UiErrorMapper.fromThrowable(it, "Capture photo"))
             }
             syncActionAvailability()
         }
@@ -181,13 +198,53 @@ class ChatActivity : AppCompatActivity() {
 
     private fun configureAttachmentButtons() {
         attachMediaButton.setOnClickListener {
-            pickAttachmentLauncher.launch("*/*")
+            showAttachmentSheet()
         }
         clearAttachmentButton.setOnClickListener {
             pendingAttachment = null
             renderAttachmentInfo()
             syncActionAvailability()
         }
+    }
+
+    private fun showAttachmentSheet() {
+        val dialog = BottomSheetDialog(this)
+        val content = layoutInflater.inflate(R.layout.view_attachment_sheet, null)
+        dialog.setContentView(content)
+        content.findViewById<Button>(R.id.buttonAttachmentCamera).setOnClickListener {
+            dialog.dismiss()
+            takePhotoAttachmentLauncher.launch(null)
+        }
+        content.findViewById<Button>(R.id.buttonAttachmentMedia).setOnClickListener {
+            dialog.dismiss()
+            pickAttachmentLauncher.launch(arrayOf("image/*", "video/*"))
+        }
+        content.findViewById<Button>(R.id.buttonAttachmentAudio).setOnClickListener {
+            dialog.dismiss()
+            pickAudioAttachmentLauncher.launch(arrayOf("audio/*"))
+        }
+        content.findViewById<Button>(R.id.buttonAttachmentDocument).setOnClickListener {
+            dialog.dismiss()
+            pickDocumentAttachmentLauncher.launch(arrayOf("*/*"))
+        }
+        content.findViewById<Button>(R.id.buttonAttachmentCancel).setOnClickListener {
+            dialog.dismiss()
+        }
+        dialog.show()
+    }
+
+    private fun handlePickedUri(uri: Uri?, action: String) {
+        if (uri == null) {
+            return
+        }
+        runCatching {
+            pendingAttachment = readAttachment(uri)
+            renderAttachmentInfo()
+            renderError(null)
+        }.onFailure {
+            renderError(UiErrorMapper.fromThrowable(it, action))
+        }
+        syncActionAvailability()
     }
 
     private suspend fun runAction(action: String, block: suspend () -> Unit) {
@@ -542,6 +599,23 @@ class ChatActivity : AppCompatActivity() {
         }
         attachmentInfo.text =
             "Attachment: ${attachment.fileName} (${attachment.mimeType}, ${attachment.byteLength} bytes)"
+    }
+
+    private fun readCameraAttachment(bitmap: Bitmap): PendingAttachment {
+        val output = ByteArrayOutputStream()
+        check(bitmap.compress(Bitmap.CompressFormat.JPEG, 85, output)) {
+            "unable to encode camera photo"
+        }
+        val bytes = output.toByteArray()
+        require(bytes.size <= maxAttachmentBytes) {
+            "attachment exceeds ${maxAttachmentBytes} bytes"
+        }
+        return PendingAttachment(
+            fileName = "camera-${System.currentTimeMillis()}.jpg",
+            mimeType = "image/jpeg",
+            dataBase64 = Base64.getEncoder().encodeToString(bytes),
+            byteLength = bytes.size,
+        )
     }
 
     private fun readAttachment(uri: Uri): PendingAttachment {

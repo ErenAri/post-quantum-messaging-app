@@ -13,6 +13,56 @@ use crate::types::*;
 use crate::validation::*;
 use crate::{AppState, MAX_GROUP_MEMBERS, MAX_MESSAGE_BYTES};
 
+pub(crate) async fn list_user_groups(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<UserGroupsResponse>, AppError> {
+    check_rate_limit(&state, &format!("groups-list:{user_id}"))?;
+    validate_id("user_id", &user_id)?;
+
+    let auth = parse_request_auth(&headers)?;
+    if auth.user_id != user_id {
+        return Err(AppError::bad_request("auth user_id mismatch"));
+    }
+    let groups_list_auth_message = user_groups_list_auth_message(&auth, &user_id)?;
+    let inbox_compat_auth_message = inbox_auth_message(&auth, &user_id, 0)?;
+    verify_request_auth_any(
+        &state,
+        &auth,
+        &[&groups_list_auth_message, &inbox_compat_auth_message],
+    )
+    .await?;
+    ensure_user_exists(state.pool(), &user_id).await?;
+
+    let rows = sqlx::query(
+        "SELECT g.group_id, g.owner_user_id, gm.joined_at, g.updated_at,
+                (SELECT COUNT(*) FROM group_members gm2
+                 WHERE gm2.group_id = g.group_id AND gm2.removed_at IS NULL) AS member_count
+         FROM group_members gm
+         INNER JOIN groups g ON g.group_id = gm.group_id
+         WHERE gm.user_id = $1 AND gm.removed_at IS NULL
+         ORDER BY g.updated_at DESC, g.group_id ASC",
+    )
+    .bind(&user_id)
+    .fetch_all(state.pool())
+    .await?;
+
+    let mut groups = Vec::with_capacity(rows.len());
+    for row in rows {
+        let member_count: i64 = row.try_get("member_count")?;
+        groups.push(GroupMembershipRecord {
+            group_id: row.try_get("group_id")?,
+            owner_user_id: row.try_get("owner_user_id")?,
+            joined_at: row.try_get("joined_at")?,
+            updated_at: row.try_get("updated_at")?,
+            member_count: member_count.max(0) as usize,
+        });
+    }
+
+    Ok(Json(UserGroupsResponse { user_id, groups }))
+}
+
 pub(crate) async fn create_group(
     State(state): State<AppState>,
     headers: HeaderMap,

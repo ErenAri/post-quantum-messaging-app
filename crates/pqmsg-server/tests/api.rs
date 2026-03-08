@@ -1113,6 +1113,32 @@ fn groups_create_auth_headers(
     ]
 }
 
+fn groups_list_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "groups-list-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("groups-list", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("groups-list auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
 fn groups_members_list_auth_headers(
     signing_key: &SigningKey,
     user_id: &str,
@@ -3584,6 +3610,22 @@ async fn group_membership_and_relay_flow() {
     );
     assert_eq!(create_group_payload["member_count"].as_u64(), Some(2));
 
+    let list_bob_groups_headers = groups_list_auth_headers(&bob_sig, "bob", "bob-dev-1");
+    let (status_bob_groups, bob_groups_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/bob/groups",
+        json!({}),
+        &list_bob_groups_headers,
+    )
+    .await;
+    assert_eq!(status_bob_groups, StatusCode::OK);
+    let bob_groups = bob_groups_payload["groups"].as_array().expect("bob groups");
+    assert_eq!(bob_groups.len(), 1);
+    assert_eq!(bob_groups[0]["group_id"].as_str(), Some("alpha"));
+    assert_eq!(bob_groups[0]["owner_user_id"].as_str(), Some("alice"));
+    assert_eq!(bob_groups[0]["member_count"].as_u64(), Some(2));
+
     let list_members_headers =
         groups_members_list_auth_headers(&bob_sig, "bob", "bob-dev-1", "alpha");
     let (status_list_members, list_members_payload) = json_request_with_headers(
@@ -3619,6 +3661,22 @@ async fn group_membership_and_relay_flow() {
     .await;
     assert_eq!(status_add_member, StatusCode::OK);
     assert_eq!(add_member_payload["changed"].as_bool(), Some(true));
+
+    let list_carol_groups_headers = groups_list_auth_headers(&carol_sig, "carol", "carol-dev-1");
+    let (status_carol_groups, carol_groups_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/carol/groups",
+        json!({}),
+        &list_carol_groups_headers,
+    )
+    .await;
+    assert_eq!(status_carol_groups, StatusCode::OK);
+    let carol_groups = carol_groups_payload["groups"].as_array().expect("carol groups");
+    assert_eq!(carol_groups.len(), 1);
+    assert_eq!(carol_groups[0]["group_id"].as_str(), Some("alpha"));
+    assert_eq!(carol_groups[0]["owner_user_id"].as_str(), Some("alice"));
+    assert_eq!(carol_groups[0]["member_count"].as_u64(), Some(3));
 
     let group_message_1 = b"group-message-1".to_vec();
     let group_message_1_b64 = B64.encode(&group_message_1);

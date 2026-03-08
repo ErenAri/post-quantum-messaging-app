@@ -205,6 +205,19 @@ export type CreateGroupResponse = {
   created_at: string;
 };
 
+export type GroupMembershipRecord = {
+  group_id: string;
+  owner_user_id: string;
+  joined_at: string;
+  updated_at: string;
+  member_count: number;
+};
+
+export type UserGroupsResponse = {
+  user_id: string;
+  groups: GroupMembershipRecord[];
+};
+
 export type GroupMemberRecord = {
   user_id: string;
   joined_at: string;
@@ -810,6 +823,18 @@ export class PqmsgApi {
       "POST",
       "/v1/groups",
       payload,
+      headers
+    );
+  }
+
+  async listUserGroups(
+    userId: string,
+    headers: RequestAuthHeaders
+  ): Promise<UserGroupsResponse> {
+    return this.request<UserGroupsResponse>(
+      "GET",
+      `/v1/users/${encodeURIComponent(userId)}/groups`,
+      undefined,
       headers
     );
   }

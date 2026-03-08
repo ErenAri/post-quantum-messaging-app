@@ -39,5 +39,9 @@
         <key>NSAllowsArbitraryLoadsInLocalNetworking</key>
         <true/>
     </dict>
+    <key>NSCameraUsageDescription</key>
+    <string>PQMsg needs camera access so you can capture a photo to share in chat.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>PQMsg needs photo library access so you can choose photos and videos to share in chat.</string>
 </dict>
 </plist>

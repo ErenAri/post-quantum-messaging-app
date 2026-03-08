@@ -154,6 +154,21 @@ pub(crate) struct CreateGroupResponse {
     pub(crate) created_at: String,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct GroupMembershipRecord {
+    pub(crate) group_id: String,
+    pub(crate) owner_user_id: String,
+    pub(crate) joined_at: String,
+    pub(crate) updated_at: String,
+    pub(crate) member_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct UserGroupsResponse {
+    pub(crate) user_id: String,
+    pub(crate) groups: Vec<GroupMembershipRecord>,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct AddGroupMemberRequest {
     pub(crate) member_user_id: String,

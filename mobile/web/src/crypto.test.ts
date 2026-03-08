@@ -162,7 +162,7 @@ describe("auth header builders", () => {
   });
 
   it("buildProfileGetAuthHeaders", () => {
-    assertAuthHeaders(buildProfileGetAuthHeaders(keys), "alice", "device1");
+    assertAuthHeaders(buildProfileGetAuthHeaders(keys, "bob"), "alice", "device1");
   });
 
   it("buildProfileUpsertAuthHeaders", () => {

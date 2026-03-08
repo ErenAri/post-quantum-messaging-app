@@ -24,6 +24,7 @@ data class ReadyMessagingContext(
 data class SyncOutcome(
     val deliveredMessages: Int,
     val pendingRequests: Int,
+    val discoveredGroups: Int,
 )
 
 data class ComposeTarget(
@@ -171,6 +172,7 @@ object MessagingCoordinator {
             userId = userId,
             suiteLabel = suiteLabel,
         )
+        val discoveredGroups = syncUserGroups(store, context)
         val activePeerId = activePeer?.trim().orEmpty()
         val knownPeers = store.listConversations(context.profile.userId)
             .mapTo(mutableSetOf()) { it.peerUserId }
@@ -186,7 +188,11 @@ object MessagingCoordinator {
         )
 
         if (inbox.messages.isEmpty()) {
-            return SyncOutcome(deliveredMessages = 0, pendingRequests = 0)
+            return SyncOutcome(
+                deliveredMessages = 0,
+                pendingRequests = 0,
+                discoveredGroups = discoveredGroups,
+            )
         }
 
         var deliveredMessages = 0
@@ -275,7 +281,48 @@ object MessagingCoordinator {
         }
 
         store.writeCursor(context.profile.userId, cursor)
-        return SyncOutcome(deliveredMessages = deliveredMessages, pendingRequests = pendingRequests)
+        return SyncOutcome(
+            deliveredMessages = deliveredMessages,
+            pendingRequests = pendingRequests,
+            discoveredGroups = discoveredGroups,
+        )
+    }
+
+    private suspend fun syncUserGroups(
+        store: LocalStateStore,
+        context: ReadyMessagingContext,
+    ): Int {
+        val response = context.api.listUserGroups(
+            context.profile.userId,
+            buildInboxAuthHeaders(
+                keysJson = context.keysJson,
+                userId = context.profile.userId,
+                since = 0,
+            ).toHeaderMap(),
+        )
+        val existing = store.listGroups(context.profile.userId)
+            .associateBy { it.groupId }
+        var discoveredGroups = 0
+        for (group in response.groups) {
+            if (existing.containsKey(group.group_id)) {
+                continue
+            }
+            store.upsertGroupConversation(
+                userId = context.profile.userId,
+                groupId = group.group_id,
+                displayName = group.group_id,
+                memberCount = group.member_count,
+                lastPreview =
+                    if (group.owner_user_id == context.profile.userId) {
+                        "Group created"
+                    } else {
+                        "You were added to a group"
+                    },
+                incrementUnread = false,
+            )
+            discoveredGroups += 1
+        }
+        return discoveredGroups
     }
 
     suspend fun ensurePrekeysReplenished(

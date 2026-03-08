@@ -25,6 +25,26 @@ export type GroupConversationSummary = {
   updatedAt: number;
 };
 
+export type ConversationKind = "dm" | "group";
+
+export type ConversationRequestState = "accepted" | "pending" | "dismissed";
+
+export type ConversationMeta = {
+  kind: ConversationKind;
+  threadId: string;
+  requestState: ConversationRequestState;
+  pinnedAt: number | null;
+  archivedAt: number | null;
+  sealedSenderDefault: boolean;
+  ephemeralTtlDefault: number;
+};
+
+export type ProfileDisplayName = {
+  targetUserId: string;
+  displayName: string;
+  updatedAt: number;
+};
+
 export type IdentityPin = {
   fingerprintSha256: string;
   identityKeyVersion: number;
@@ -35,6 +55,8 @@ export type IdentityPin = {
 const SETUP_KEY = "pqmsg.web.setup.v1";
 const CONVERSATIONS_KEY = "pqmsg.web.conversations.v1";
 const GROUP_CONVOS_KEY = "pqmsg.web.groupconvos.v1";
+const CONVERSATION_META_KEY = "pqmsg.web.conversationmeta.v1";
+const PROFILE_CACHE_KEY = "pqmsg.web.profilecache.v1";
 const PINS_KEY = "pqmsg.web.pins.v1";
 const CURSORS_KEY = "pqmsg.web.cursors.v1";
 const KEYS_PREFIX = "pqmsg.web.keys.v1.";
@@ -103,6 +125,8 @@ export function hasLocalKeys(userId: string): boolean {
 }
 
 type ConversationRow = ConversationSummary & { userId: string };
+type ConversationMetaRow = ConversationMeta & { userId: string };
+type ProfileDisplayNameRow = ProfileDisplayName & { userId: string };
 
 export function loadConversations(userId: string): ConversationSummary[] {
   const all = parseRecord<ConversationRow[]>(CONVERSATIONS_KEY, []);
@@ -153,6 +177,133 @@ export function markConversationRead(userId: string, peerUserId: string): void {
     all[idx].unreadCount = 0;
     localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(all));
   }
+}
+
+export function loadConversationMeta(
+  userId: string,
+  kind: ConversationKind,
+  threadId: string
+): ConversationMeta {
+  const all = parseRecord<ConversationMetaRow[]>(CONVERSATION_META_KEY, []);
+  const found = all.find(
+    (item) => item.userId === userId && item.kind === kind && item.threadId === threadId
+  );
+  return found
+    ? {
+        kind: found.kind,
+        threadId: found.threadId,
+        requestState: found.requestState,
+        pinnedAt: found.pinnedAt,
+        archivedAt: found.archivedAt,
+        sealedSenderDefault: found.sealedSenderDefault,
+        ephemeralTtlDefault: found.ephemeralTtlDefault,
+      }
+    : defaultConversationMeta(kind, threadId);
+}
+
+export function loadConversationMetas(userId: string): ConversationMeta[] {
+  return parseRecord<ConversationMetaRow[]>(CONVERSATION_META_KEY, [])
+    .filter((item) => item.userId === userId)
+    .map((item) => ({
+      kind: item.kind,
+      threadId: item.threadId,
+      requestState: item.requestState,
+      pinnedAt: item.pinnedAt,
+      archivedAt: item.archivedAt,
+      sealedSenderDefault: item.sealedSenderDefault,
+      ephemeralTtlDefault: item.ephemeralTtlDefault,
+    }))
+    .sort((lhs, rhs) => {
+      const lhsPinned = lhs.pinnedAt ?? 0;
+      const rhsPinned = rhs.pinnedAt ?? 0;
+      if (lhsPinned !== rhsPinned) {
+        return rhsPinned - lhsPinned;
+      }
+      return lhs.threadId.localeCompare(rhs.threadId);
+    });
+}
+
+export function updateConversationMeta(
+  userId: string,
+  kind: ConversationKind,
+  threadId: string,
+  patch: Partial<Omit<ConversationMeta, "kind" | "threadId">>
+): ConversationMeta {
+  const all = parseRecord<ConversationMetaRow[]>(CONVERSATION_META_KEY, []);
+  const idx = all.findIndex(
+    (item) => item.userId === userId && item.kind === kind && item.threadId === threadId
+  );
+  const current = idx >= 0
+    ? all[idx]
+    : { userId, ...defaultConversationMeta(kind, threadId) };
+  const next: ConversationMetaRow = {
+    ...current,
+    ...patch,
+    userId,
+    kind,
+    threadId,
+  };
+  if (idx >= 0) {
+    all[idx] = next;
+  } else {
+    all.push(next);
+  }
+  writeRecord(CONVERSATION_META_KEY, all);
+  return {
+    kind: next.kind,
+    threadId: next.threadId,
+    requestState: next.requestState,
+    pinnedAt: next.pinnedAt,
+    archivedAt: next.archivedAt,
+    sealedSenderDefault: next.sealedSenderDefault,
+    ephemeralTtlDefault: next.ephemeralTtlDefault,
+  };
+}
+
+export function readProfileDisplayName(userId: string, targetUserId: string): string | null {
+  const all = parseRecord<ProfileDisplayNameRow[]>(PROFILE_CACHE_KEY, []);
+  const found = all.find((item) => item.userId === userId && item.targetUserId === targetUserId);
+  return found?.displayName ?? null;
+}
+
+export function writeProfileDisplayName(
+  userId: string,
+  targetUserId: string,
+  displayName: string
+): void {
+  const all = parseRecord<ProfileDisplayNameRow[]>(PROFILE_CACHE_KEY, []);
+  const idx = all.findIndex((item) => item.userId === userId && item.targetUserId === targetUserId);
+  const normalizedDisplayName = displayName.trim();
+  if (!normalizedDisplayName) {
+    if (idx >= 0) {
+      all.splice(idx, 1);
+      writeRecord(PROFILE_CACHE_KEY, all);
+    }
+    return;
+  }
+  const row: ProfileDisplayNameRow = {
+    userId,
+    targetUserId,
+    displayName: normalizedDisplayName,
+    updatedAt: Date.now(),
+  };
+  if (idx >= 0) {
+    all[idx] = row;
+  } else {
+    all.push(row);
+  }
+  writeRecord(PROFILE_CACHE_KEY, all);
+}
+
+export function loadProfileDisplayNames(userId: string): ProfileDisplayName[] {
+  return parseRecord<ProfileDisplayNameRow[]>(PROFILE_CACHE_KEY, [])
+    .filter((item) => item.userId === userId)
+    .map((item) => ({
+      targetUserId: item.targetUserId,
+      displayName: item.displayName,
+      updatedAt: item.updatedAt,
+    }))
+    .sort((lhs, rhs) => lhs.targetUserId.localeCompare(rhs.targetUserId));
 }
 
 export function readCursor(userId: string, deviceId?: string): number {
@@ -278,6 +429,16 @@ export function wipeLocalState(userId: string): void {
   );
   writeRecord(GROUP_CONVOS_KEY, groupConvos);
 
+  const conversationMeta = parseRecord<ConversationMetaRow[]>(CONVERSATION_META_KEY, []).filter(
+    (item) => item.userId !== normalizedUser
+  );
+  writeRecord(CONVERSATION_META_KEY, conversationMeta);
+
+  const profileCache = parseRecord<ProfileDisplayNameRow[]>(PROFILE_CACHE_KEY, []).filter(
+    (item) => item.userId !== normalizedUser
+  );
+  writeRecord(PROFILE_CACHE_KEY, profileCache);
+
   const pins = parseRecord<PinRow[]>(PINS_KEY, []).filter((item) => item.userId !== normalizedUser);
   writeRecord(PINS_KEY, pins);
 
@@ -312,4 +473,16 @@ function writeRecord<T>(key: string, value: T): void {
     return;
   }
   localStorage.setItem(key, JSON.stringify(value));
+}
+
+function defaultConversationMeta(kind: ConversationKind, threadId: string): ConversationMeta {
+  return {
+    kind,
+    threadId,
+    requestState: "accepted",
+    pinnedAt: null,
+    archivedAt: null,
+    sealedSenderDefault: false,
+    ephemeralTtlDefault: 0,
+  };
 }

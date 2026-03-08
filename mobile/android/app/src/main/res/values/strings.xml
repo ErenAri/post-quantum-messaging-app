@@ -31,6 +31,7 @@
     <string name="button_fetch_bundle">Fetch Peer Bundle</string>
     <string name="button_attach_media">Attach Media</string>
     <string name="button_clear_attachment">Clear Attachment</string>
+    <string name="button_cancel">Cancel</string>
     <string name="button_send">Send</string>
     <string name="button_poll">Poll Inbox</string>
     <string name="button_back_setup">Back To Setup</string>
@@ -57,6 +58,12 @@
     <string name="button_show_error_details">Show technical details</string>
     <string name="button_hide_error_details">Hide technical details</string>
     <string name="compose_dialog_title">Start a secure chat</string>
+    <string name="attachment_sheet_title">Share something</string>
+    <string name="attachment_sheet_subtitle">Choose what to send in this chat.</string>
+    <string name="attachment_option_camera">Camera</string>
+    <string name="attachment_option_media">Photos &amp; Videos</string>
+    <string name="attachment_option_audio">Audio</string>
+    <string name="attachment_option_document">Document</string>
     <string name="message_requests_title">Message requests</string>
     <string name="share_invite_chooser_title">Share your invite</string>
     <string name="security_warning_title">Verify identity change</string>

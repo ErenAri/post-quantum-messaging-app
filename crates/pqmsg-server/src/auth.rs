@@ -87,6 +87,14 @@ pub(crate) async fn verify_request_auth(
     auth: &RequestAuth,
     message: &[u8],
 ) -> Result<(), AppError> {
+    verify_request_auth_any(state, auth, &[message]).await
+}
+
+pub(crate) async fn verify_request_auth_any(
+    state: &AppState,
+    auth: &RequestAuth,
+    messages: &[&[u8]],
+) -> Result<(), AppError> {
     let now = Utc::now().timestamp();
     if (now - auth.timestamp).abs() > AUTH_MAX_CLOCK_SKEW_SECONDS {
         record_security_event(
@@ -155,13 +163,16 @@ pub(crate) async fn verify_request_auth(
         ));
     }
     let identity_sig_pub: Vec<u8> = user_row.try_get("identity_sig_pub")?;
-    let verification = verify_ed25519_signature(
-        &identity_sig_pub,
-        &auth.signature,
-        message,
-        AUTH_HEADER_SIGNATURE,
-    );
-    if verification.is_err() {
+    let verification = messages.iter().find_map(|message| {
+        verify_ed25519_signature(
+            &identity_sig_pub,
+            &auth.signature,
+            message,
+            AUTH_HEADER_SIGNATURE,
+        )
+        .ok()
+    });
+    if verification.is_none() {
         record_security_event(
             state,
             "auth_signature_invalid",
@@ -171,8 +182,11 @@ pub(crate) async fn verify_request_auth(
             Some(&auth.device_id),
             Some("x-pqmsg-auth-signature verification failed".to_string()),
         );
+        return Err(AppError::bad_request(
+            "x-pqmsg-auth-signature verification failed",
+        ));
     }
-    verification
+    Ok(())
 }
 
 pub(crate) fn auth_common_records(auth: &RequestAuth, endpoint: &'static str) -> Vec<TlvRecord> {
@@ -489,6 +503,19 @@ pub(crate) fn group_create_auth_message(
     });
     encode(&records)
         .map_err(|_| AppError::internal("failed to encode groups-create auth transcript"))
+}
+
+pub(crate) fn user_groups_list_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+) -> Result<Vec<u8>, AppError> {
+    let mut records = auth_common_records(auth, "groups-list");
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    encode(&records)
+        .map_err(|_| AppError::internal("failed to encode groups-list auth transcript"))
 }
 
 pub(crate) fn group_members_list_auth_message(

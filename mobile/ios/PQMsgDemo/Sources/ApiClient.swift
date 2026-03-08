@@ -129,6 +129,15 @@ final class ApiClient {
         try await request(path: "v1/groups", method: "POST", headers: headers, body: requestBody)
     }
 
+    func listUserGroups(userId: String, headers: [String: String]) async throws -> UserGroupsResponse {
+        try await request(
+            path: "v1/users/\(userId)/groups",
+            method: "GET",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
     func listGroupMembers(groupId: String, headers: [String: String]) async throws -> GroupMembersResponse {
         try await request(
             path: "v1/groups/\(groupId)/members",

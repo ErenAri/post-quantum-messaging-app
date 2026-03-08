@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="20dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/attachment_sheet_title"
+        android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="@string/attachment_sheet_subtitle"
+        android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
+
+    <GridLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="18dp"
+        android:alignmentMode="alignMargins"
+        android:columnCount="2"
+        android:rowCount="2"
+        android:useDefaultMargins="true">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonAttachmentCamera"
+            style="@style/Widget.PQMsg.Button.Secondary"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_columnWeight="1"
+            android:minHeight="88dp"
+            android:text="@string/attachment_option_camera"
+            app:icon="@android:drawable/ic_menu_camera"
+            app:iconGravity="textTop"
+            app:iconPadding="10dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonAttachmentMedia"
+            style="@style/Widget.PQMsg.Button.Secondary"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_columnWeight="1"
+            android:minHeight="88dp"
+            android:text="@string/attachment_option_media"
+            app:icon="@android:drawable/ic_menu_gallery"
+            app:iconGravity="textTop"
+            app:iconPadding="10dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonAttachmentAudio"
+            style="@style/Widget.PQMsg.Button.Secondary"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_columnWeight="1"
+            android:minHeight="88dp"
+            android:text="@string/attachment_option_audio"
+            app:icon="@android:drawable/ic_btn_speak_now"
+            app:iconGravity="textTop"
+            app:iconPadding="10dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonAttachmentDocument"
+            style="@style/Widget.PQMsg.Button.Secondary"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_columnWeight="1"
+            android:minHeight="88dp"
+            android:text="@string/attachment_option_document"
+            app:icon="@android:drawable/ic_menu_save"
+            app:iconGravity="textTop"
+            app:iconPadding="10dp" />
+    </GridLayout>
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/buttonAttachmentCancel"
+        style="@style/Widget.PQMsg.Button.Secondary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="18dp"
+        android:text="@string/button_cancel" />
+</LinearLayout>

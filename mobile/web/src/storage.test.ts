@@ -11,6 +11,12 @@ import {
   readIdentityPin,
   writeIdentityPin,
   listIdentityPins,
+  loadConversationMeta,
+  loadConversationMetas,
+  updateConversationMeta,
+  readProfileDisplayName,
+  writeProfileDisplayName,
+  loadProfileDisplayNames,
   hasLocalKeys,
   loadGroupConversations,
   upsertGroupConversation,
@@ -156,6 +162,70 @@ describe("cursors", () => {
     expect(readCursor("alice", "d1")).toBe(10);
     expect(readCursor("alice", "d2")).toBe(20);
     expect(readCursor("alice")).toBe(0); // no device-less cursor
+  });
+});
+
+describe("conversation meta", () => {
+  it("returns defaults when no meta exists", () => {
+    expect(loadConversationMeta("alice", "dm", "bob")).toEqual({
+      kind: "dm",
+      threadId: "bob",
+      requestState: "accepted",
+      pinnedAt: null,
+      archivedAt: null,
+      sealedSenderDefault: false,
+      ephemeralTtlDefault: 0,
+    });
+  });
+
+  it("updateConversationMeta persists patches", () => {
+    updateConversationMeta("alice", "dm", "bob", {
+      requestState: "pending",
+      pinnedAt: 123,
+      sealedSenderDefault: true,
+      ephemeralTtlDefault: 300,
+    });
+    expect(loadConversationMeta("alice", "dm", "bob")).toEqual({
+      kind: "dm",
+      threadId: "bob",
+      requestState: "pending",
+      pinnedAt: 123,
+      archivedAt: null,
+      sealedSenderDefault: true,
+      ephemeralTtlDefault: 300,
+    });
+  });
+
+  it("scopes meta rows by user and thread", () => {
+    updateConversationMeta("alice", "dm", "bob", { requestState: "pending" });
+    updateConversationMeta("alice", "group", "g1", { pinnedAt: 10 });
+    updateConversationMeta("eve", "dm", "bob", { archivedAt: 99 });
+    const rows = loadConversationMetas("alice");
+    expect(rows).toHaveLength(2);
+    expect(rows.some((row) => row.threadId === "bob" && row.requestState === "pending")).toBe(true);
+    expect(rows.some((row) => row.threadId === "g1" && row.pinnedAt === 10)).toBe(true);
+    expect(loadConversationMetas("eve")).toHaveLength(1);
+  });
+});
+
+describe("profile display names", () => {
+  it("stores and reads cached profile display names", () => {
+    writeProfileDisplayName("alice", "bob", "Bob Builder");
+    expect(readProfileDisplayName("alice", "bob")).toBe("Bob Builder");
+  });
+
+  it("removes blank display names", () => {
+    writeProfileDisplayName("alice", "bob", "Bob");
+    writeProfileDisplayName("alice", "bob", "   ");
+    expect(readProfileDisplayName("alice", "bob")).toBeNull();
+  });
+
+  it("lists cached display names scoped by user", () => {
+    writeProfileDisplayName("alice", "charlie", "Charlie");
+    writeProfileDisplayName("alice", "bob", "Bob");
+    writeProfileDisplayName("eve", "bob", "Mallory");
+    const rows = loadProfileDisplayNames("alice");
+    expect(rows.map((row) => row.targetUserId)).toEqual(["bob", "charlie"]);
   });
 });
 
@@ -309,5 +379,17 @@ describe("wipeLocalState", () => {
     wipeLocalState("");
     wipeLocalState("  ");
     expect(loadConversations("alice")).toHaveLength(1);
+  });
+
+  it("removes conversation meta and profile caches for the user", () => {
+    updateConversationMeta("alice", "dm", "bob", { pinnedAt: 1 });
+    updateConversationMeta("eve", "dm", "bob", { pinnedAt: 2 });
+    writeProfileDisplayName("alice", "bob", "Bob");
+    writeProfileDisplayName("eve", "bob", "Bob");
+    wipeLocalState("alice");
+    expect(loadConversationMetas("alice")).toHaveLength(0);
+    expect(loadConversationMetas("eve")).toHaveLength(1);
+    expect(loadProfileDisplayNames("alice")).toHaveLength(0);
+    expect(loadProfileDisplayNames("eve")).toHaveLength(1);
   });
 });

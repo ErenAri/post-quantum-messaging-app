@@ -1569,6 +1569,7 @@ pub fn build_router(state: AppState) -> Router {
             get(list_contacts).post(upsert_contact),
         )
         .route("/v1/users/:user_id/contacts/remove", post(remove_contact))
+        .route("/v1/users/:user_id/groups", get(list_user_groups))
         .route("/v1/groups", post(create_group))
         .route("/v1/groups/:group_id/members", get(list_group_members))
         .route("/v1/groups/:group_id/members/add", post(add_group_member))

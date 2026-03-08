@@ -17,6 +17,7 @@ import {
   buildContactsUpsertAuthHeaders,
   buildContactsRemoveAuthHeaders,
   buildGroupCreateAuthHeaders,
+  buildUserGroupsListAuthHeaders,
   buildGroupMembersListAuthHeaders,
   buildGroupMembersAddAuthHeaders,
   buildGroupMembersRemoveAuthHeaders,
@@ -49,6 +50,7 @@ import { ed25519 } from "@noble/curves/ed25519";
 import {
   PqmsgApi,
   type ContactEntry,
+  type GroupMembershipRecord,
   type GroupMemberRecord,
   type IdentityLogItem,
   type DiscoveryMatchItem,
@@ -56,22 +58,31 @@ import {
 } from "./server";
 import {
   DEFAULT_SETUP,
+  loadConversationMeta,
+  loadConversationMetas,
   hasLocalKeys,
   loadConversations,
   loadGroupConversations,
+  loadProfileDisplayNames,
+  readProfileDisplayName,
   readIdentityPin,
   loadKeys,
   loadSetup,
   markConversationRead,
   markGroupConversationRead,
+  updateConversationMeta,
   readCursor,
   saveKeys,
   saveSetup,
   upsertConversation,
   upsertGroupConversation,
   wipeLocalState,
+  writeProfileDisplayName,
   writeCursor,
   writeIdentityPin,
+  type ConversationKind,
+  type ConversationMeta,
+  type ConversationRequestState,
   type ConversationSummary,
   type GroupConversationSummary,
 } from "./storage";
@@ -120,11 +131,14 @@ let typingPollTimer: ReturnType<typeof setInterval> | null = null;
 let receiptPollTimer: ReturnType<typeof setInterval> | null = null;
 let receiptCursor = 0;
 let cachedContacts: ContactEntry[] = [];
+let cachedProfileNames: Record<string, string> = {};
 let peerPresenceCache: Record<string, { status: string; updated: number }> = {};
+let activeInboxFilter: InboxFilter = "all";
 
 // Phase 3 state
 let activeGroupId: string | null = null;
 let cachedGroupMembers: Record<string, GroupMemberRecord[]> = {};
+let groupSyncTimer: ReturnType<typeof setInterval> | null = null;
 
 // Phase 4 state
 let sealedSenderEnabled = false;
@@ -134,6 +148,23 @@ let sealedInboxPollTimer: ReturnType<typeof setInterval> | null = null;
 // Call state
 let callManager: CallManager | null = null;
 let currentCallInfo: CallInfo | null = null;
+
+type InboxFilter = "all" | "unread" | "groups" | "requests" | "archived";
+
+type UnifiedConversationRow = {
+  kind: ConversationKind;
+  threadId: string;
+  updatedAt: number;
+  unreadCount: number;
+  lastPreview: string;
+  meta: ConversationMeta;
+  primaryLabel: string;
+  secondaryLabel: string;
+  avatarText: string;
+  presenceStatus: string | null;
+  isVerified: boolean;
+  ownerUserId?: string;
+};
 
 const ONBOARDING_LOGO = `
   <div class="onboarding-icon">
@@ -239,6 +270,230 @@ function render(view: AppView): void {
     const heading = app.querySelector("h1, h2, h3, .topbar .chat-header-name, .search-input");
     if (heading instanceof HTMLElement) heading.focus({ preventScroll: true });
   });
+}
+
+function conversationMetaKey(kind: ConversationKind, threadId: string): string {
+  return `${kind}:${threadId}`;
+}
+
+function buildConversationMetaLookup(): Map<string, ConversationMeta> {
+  return new Map(
+    loadConversationMetas(setup.userId).map((meta) => [conversationMetaKey(meta.kind, meta.threadId), meta])
+  );
+}
+
+function getConversationMetaCached(
+  lookup: Map<string, ConversationMeta>,
+  kind: ConversationKind,
+  threadId: string
+): ConversationMeta {
+  return lookup.get(conversationMetaKey(kind, threadId)) ?? loadConversationMeta(setup.userId, kind, threadId);
+}
+
+function resolvePeerIdentity(peerId: string): {
+  primaryLabel: string;
+  secondaryLabel: string;
+  avatarText: string;
+  isVerified: boolean;
+} {
+  const contact = cachedContacts.find((item) => item.contact_user_id === peerId);
+  const cachedName = cachedProfileNames[peerId]?.trim() || readProfileDisplayName(setup.userId, peerId)?.trim() || "";
+  const primaryLabel = contact?.alias?.trim() || cachedName || peerId;
+  const secondaryLabel = primaryLabel === peerId ? "" : `@${peerId}`;
+  const avatarText = primaryLabel.slice(0, 2).toUpperCase() || peerId.slice(0, 2).toUpperCase();
+  const isVerified = Boolean(contact?.verified_by_qr || readIdentityPin(setup.userId, peerId));
+  return { primaryLabel, secondaryLabel, avatarText, isVerified };
+}
+
+function resolveGroupIdentity(groupId: string, ownerUserId: string): {
+  primaryLabel: string;
+  secondaryLabel: string;
+  avatarText: string;
+} {
+  return {
+    primaryLabel: groupId,
+    secondaryLabel: ownerUserId === setup.userId ? "You created this group" : `Owner @${ownerUserId}`,
+    avatarText: groupId.slice(0, 2).toUpperCase(),
+  };
+}
+
+function setConversationRequestState(
+  kind: ConversationKind,
+  threadId: string,
+  requestState: ConversationRequestState
+): ConversationMeta {
+  return updateConversationMeta(setup.userId, kind, threadId, { requestState });
+}
+
+function setConversationArchived(kind: ConversationKind, threadId: string, archived: boolean): ConversationMeta {
+  return updateConversationMeta(setup.userId, kind, threadId, {
+    archivedAt: archived ? Date.now() : null,
+  });
+}
+
+function toggleConversationPinned(kind: ConversationKind, threadId: string): ConversationMeta {
+  const meta = loadConversationMeta(setup.userId, kind, threadId);
+  return updateConversationMeta(setup.userId, kind, threadId, {
+    pinnedAt: meta.pinnedAt ? null : Date.now(),
+  });
+}
+
+function setConversationSendDefaults(
+  threadId: string,
+  defaults: Partial<Pick<ConversationMeta, "sealedSenderDefault" | "ephemeralTtlDefault">>
+): ConversationMeta {
+  return updateConversationMeta(setup.userId, "dm", threadId, defaults);
+}
+
+function isKnownPeer(peerId: string): boolean {
+  if (cachedContacts.some((item) => item.contact_user_id === peerId)) {
+    return true;
+  }
+  return loadConversationMeta(setup.userId, "dm", peerId).requestState === "accepted";
+}
+
+function markConversationAccepted(peerId: string): void {
+  setConversationRequestState("dm", peerId, "accepted");
+  setConversationArchived("dm", peerId, false);
+}
+
+function markConversationDismissed(peerId: string): void {
+  updateConversationMeta(setup.userId, "dm", peerId, {
+    requestState: "dismissed",
+    archivedAt: Date.now(),
+  });
+}
+
+function noteIncomingConversation(peerId: string, preview: string, incrementUnread: boolean): void {
+  if (!isKnownPeer(peerId)) {
+    setConversationRequestState("dm", peerId, "pending");
+  } else {
+    markConversationAccepted(peerId);
+  }
+  upsertConversation(setup.userId, peerId, preview, incrementUnread);
+}
+
+function ensureAcceptedContactsMeta(): void {
+  for (const contact of cachedContacts) {
+    updateConversationMeta(setup.userId, "dm", contact.contact_user_id, {
+      requestState: "accepted",
+    });
+  }
+}
+
+async function loadProfileNameBackground(targetUserId: string): Promise<void> {
+  if (!targetUserId) {
+    return;
+  }
+  try {
+    const k = await ensureKeys();
+    const api = new PqmsgApi(setup.serverUrl);
+    const headers = buildProfileGetAuthHeaders(k, targetUserId);
+    const profile = await api.getProfile(targetUserId, headers);
+    const displayName = profile.display_name?.trim() || "";
+    if (!displayName) {
+      return;
+    }
+    cachedProfileNames[targetUserId] = displayName;
+    writeProfileDisplayName(k.userId, targetUserId, displayName);
+    if (targetUserId === k.userId && setup.displayName !== displayName) {
+      setup.displayName = displayName;
+      saveSetup(setup);
+    }
+  } catch {
+    // Best-effort
+  }
+}
+
+async function loadProfileNamesBackground(targetUserIds: string[]): Promise<void> {
+  const uniqueTargets = [...new Set(targetUserIds)]
+    .map((value) => value.trim())
+    .filter((value) => value && !cachedProfileNames[value]);
+  if (uniqueTargets.length === 0) {
+    return;
+  }
+  const knownBefore = JSON.stringify(cachedProfileNames);
+  await Promise.allSettled(uniqueTargets.map((targetUserId) => loadProfileNameBackground(targetUserId)));
+  if (JSON.stringify(cachedProfileNames) !== knownBefore) {
+    refreshConversationsIfVisible();
+  }
+}
+
+async function bootstrapIdentityData(): Promise<void> {
+  cachedProfileNames = Object.fromEntries(
+    loadProfileDisplayNames(setup.userId).map((item) => [item.targetUserId, item.displayName])
+  );
+  await Promise.allSettled([
+    loadContactsBackground(),
+    syncGroupsBackground(),
+    loadProfileNameBackground(setup.userId),
+  ]);
+}
+
+function noteIncomingGroupConversation(
+  groupId: string,
+  senderUserId: string,
+  preview: string,
+  incrementUnread: boolean
+): void {
+  const existing = loadGroupConversations(setup.userId).find((item) => item.groupId === groupId);
+  const senderLabel = resolvePeerIdentity(senderUserId).primaryLabel;
+  upsertGroupConversation(
+    setup.userId,
+    groupId,
+    existing?.ownerUserId || senderUserId,
+    `${senderLabel}: ${preview}`,
+    incrementUnread
+  );
+}
+
+async function syncGroupsBackground(): Promise<void> {
+  if (!setup.userId) {
+    return;
+  }
+  try {
+    const k = await ensureKeys();
+    const api = new PqmsgApi(setup.serverUrl);
+    const headers = buildUserGroupsListAuthHeaders(k, k.userId);
+    const res = await api.listUserGroups(k.userId, headers);
+    const existing = new Map(loadGroupConversations(k.userId).map((item) => [item.groupId, item]));
+    let changed = false;
+    for (const group of res.groups) {
+      if (existing.has(group.group_id)) {
+        continue;
+      }
+      upsertGroupConversation(
+        k.userId,
+        group.group_id,
+        group.owner_user_id,
+        group.owner_user_id === k.userId ? "Group created" : "You were added to a group",
+        false
+      );
+      changed = true;
+    }
+    if (changed) {
+      refreshConversationsIfVisible();
+    }
+  } catch {
+    // Best-effort - use cached groups
+  }
+}
+
+function parseChatTarget(rawValue: string): string {
+  const trimmed = rawValue.trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const invite = parsed.searchParams.get("invite")?.trim();
+    if (invite) {
+      return invite;
+    }
+  } catch {
+    // Not a URL, treat as a direct user ID.
+  }
+  return trimmed;
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +638,13 @@ function renderCreateAccount(): void {
       const headers = buildPrekeysAuthHeaders(genKeys, payload);
       await api.publishPrekeys(genKeys.userId, payload, headers);
 
+      try {
+        const profileHeaders = buildProfileUpsertAuthHeaders(genKeys, name, "", "");
+        await api.upsertProfile(genKeys.userId, { display_name: name }, profileHeaders);
+      } catch {
+        notify("Account created, but profile name could not be synced yet", "info");
+      }
+
       setup = {
         serverUrl: setup.serverUrl,
         userId: userId,
@@ -393,11 +655,14 @@ function renderCreateAccount(): void {
         passphrase: "",
       };
       saveSetup(setup);
+      sessionStorage.setItem("pqmsg.passphrase", pass);
       keys = genKeys;
+      cachedProfileNames[userId] = name;
+      writeProfileDisplayName(userId, userId, name);
 
       setProgress(progress, 100);
       status.textContent = "Ready!";
-      notify(`Your User ID: ${userId} — share it with contacts`, "info");
+      notify(`Your username is @${userId} — share it with contacts`, "info");
       setTimeout(() => navigateTo({ screen: "conversations" }), 600);
     } catch (e) {
       status.textContent = `Error: ${errorMsg(e)}`;
@@ -464,8 +729,11 @@ function renderSignIn(): void {
         passphrase: "",
       };
       saveSetup(setup);
+      sessionStorage.setItem("pqmsg.passphrase", pass);
       keys = loadedKeys;
 
+      status.textContent = "Loading your chats…";
+      await bootstrapIdentityData();
       status.textContent = "Signed in!";
       setTimeout(() => navigateTo({ screen: "conversations" }), 400);
     } catch (e) {
@@ -481,24 +749,28 @@ function renderSignIn(): void {
 // ---------------------------------------------------------------------------
 
 function renderConversations(): void {
+  cachedProfileNames = {
+    ...Object.fromEntries(loadProfileDisplayNames(setup.userId).map((item) => [item.targetUserId, item.displayName])),
+    ...cachedProfileNames,
+  };
   const convos = setup.userId ? loadConversations(setup.userId) : [];
   const groupConvos = setup.userId ? loadGroupConversations(setup.userId) : [];
 
-  // Merge 1:1 and group conversations into a unified sorted list
-  type UnifiedConvo = { type: "dm"; data: ConversationSummary } | { type: "group"; data: GroupConversationSummary };
-  const unified: UnifiedConvo[] = [
-    ...convos.map(c => ({ type: "dm" as const, data: c })),
-    ...groupConvos.map(g => ({ type: "group" as const, data: g })),
-  ].sort((a, b) => b.data.updatedAt - a.data.updatedAt);
-
-  const listHtml = unified.length === 0
-    ? renderEmptyState()
-    : unified.map(u => u.type === "dm" ? renderConvoRow(u.data) : renderGroupConvoRow(u.data)).join("");
+  const metaLookup = buildConversationMetaLookup();
+  const rows = buildUnifiedConversationRows(convos, groupConvos, metaLookup);
+  const visibleRows = filterConversationRows(rows, activeInboxFilter);
+  const counts = computeInboxCounts(rows);
+  const listHtml = visibleRows.length === 0
+    ? renderEmptyState(activeInboxFilter)
+    : visibleRows.map((row) => renderConversationRow(row)).join("");
 
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
-        <h1 class="topbar-title">PQMsg</h1>
+        <div class="topbar-copy">
+          <h1 class="topbar-title">Chats</h1>
+          <p class="topbar-sub">${escHtml(setup.displayName || setup.userId)} <span class="mono">@${escHtml(setup.userId)}</span></p>
+        </div>
         <div class="topbar-actions">
           <button id="conv-search" class="icon-btn" title="Search messages" aria-label="Search messages">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -516,6 +788,13 @@ function renderConversations(): void {
         <span class="shield-icon">🛡️</span>
         <span>Post-quantum encrypted — protected against future quantum computers</span>
         <button id="dismiss-banner" class="dismiss-btn" aria-label="Dismiss banner">×</button>
+      </div>
+      <div class="filter-chip-bar" role="tablist" aria-label="Inbox filters">
+        ${renderInboxFilter("all", "All", counts.all)}
+        ${renderInboxFilter("unread", "Unread", counts.unread)}
+        ${renderInboxFilter("groups", "Groups", counts.groups)}
+        ${renderInboxFilter("requests", "Requests", counts.requests)}
+        ${renderInboxFilter("archived", "Archived", counts.archived)}
       </div>
       <div class="conversation-list" id="conv-list" role="list">
         ${listHtml}
@@ -561,38 +840,177 @@ function renderConversations(): void {
   });
   q("#conv-search").addEventListener("click", () => navigateTo({ screen: "search" }));
   q("#conv-settings").addEventListener("click", () => navigateTo({ screen: "settings" }));
+  for (const chip of document.querySelectorAll<HTMLButtonElement>("[data-inbox-filter]")) {
+    chip.addEventListener("click", () => {
+      const nextFilter = (chip.dataset.inboxFilter as InboxFilter) || "all";
+      if (nextFilter !== activeInboxFilter) {
+        activeInboxFilter = nextFilter;
+        renderConversations();
+      }
+    });
+  }
 
   // Bind conversation row clicks
-  for (const row of document.querySelectorAll("[data-peer]")) {
+  for (const row of document.querySelectorAll<HTMLElement>("[data-peer]")) {
     row.addEventListener("click", () => {
-      const peerId = (row as HTMLElement).dataset.peer!;
+      const peerId = row.dataset.peer!;
       markConversationRead(setup.userId, peerId);
       navigateTo({ screen: "chat", peerId });
+    });
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        row.click();
+      }
     });
   }
 
   // Bind group conversation row clicks
-  for (const row of document.querySelectorAll("[data-group]")) {
+  for (const row of document.querySelectorAll<HTMLElement>("[data-group]")) {
     row.addEventListener("click", () => {
-      const groupId = (row as HTMLElement).dataset.group!;
+      const groupId = row.dataset.group!;
       markGroupConversationRead(setup.userId, groupId);
       navigateTo({ screen: "group-chat", groupId });
+    });
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        row.click();
+      }
+    });
+  }
+
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-thread-menu]")) {
+    button.addEventListener("click", (e) => {
+      e.stopPropagation();
+      showConversationActionMenu(
+        button,
+        (button.dataset.threadKind as ConversationKind) || "dm",
+        button.dataset.threadId || ""
+      );
     });
   }
 
   // Start realtime connection & presence heartbeat
-  connectRealtime();
-  startPresenceHeartbeat();
-  loadContactsBackground();
+  void connectRealtime();
+  void startPresenceHeartbeat();
+  void loadContactsBackground();
+  void syncGroupsBackground();
+  void loadProfileNamesBackground(rows.filter((row) => row.kind === "dm").map((row) => row.threadId));
 
   // Start sealed inbox polling (Phase 4)
   if (!sealedInboxPollTimer) {
     void pollSealedInbox();
     sealedInboxPollTimer = setInterval(() => void pollSealedInbox(), 10000);
   }
+  if (!groupSyncTimer) {
+    groupSyncTimer = setInterval(() => void syncGroupsBackground(), 10000);
+  }
 }
 
-function renderEmptyState(): string {
+function buildUnifiedConversationRows(
+  convos: ConversationSummary[],
+  groupConvos: GroupConversationSummary[],
+  metaLookup: Map<string, ConversationMeta>
+): UnifiedConversationRow[] {
+  const dmRows = convos.map((summary) => {
+    const meta = getConversationMetaCached(metaLookup, "dm", summary.peerUserId);
+    const label = resolvePeerIdentity(summary.peerUserId);
+    const presence = peerPresenceCache[summary.peerUserId];
+    return {
+      kind: "dm" as const,
+      threadId: summary.peerUserId,
+      updatedAt: summary.updatedAt,
+      unreadCount: summary.unreadCount,
+      lastPreview: summary.lastPreview,
+      meta,
+      primaryLabel: label.primaryLabel,
+      secondaryLabel: label.secondaryLabel,
+      avatarText: label.avatarText,
+      presenceStatus: presence?.status ?? null,
+      isVerified: label.isVerified,
+    };
+  });
+  const groupRows = groupConvos.map((summary) => {
+    const meta = getConversationMetaCached(metaLookup, "group", summary.groupId);
+    const label = resolveGroupIdentity(summary.groupId, summary.ownerUserId);
+    return {
+      kind: "group" as const,
+      threadId: summary.groupId,
+      updatedAt: summary.updatedAt,
+      unreadCount: summary.unreadCount,
+      lastPreview: summary.lastPreview,
+      meta,
+      primaryLabel: label.primaryLabel,
+      secondaryLabel: label.secondaryLabel,
+      avatarText: label.avatarText,
+      presenceStatus: null,
+      isVerified: false,
+      ownerUserId: summary.ownerUserId,
+    };
+  });
+  return [...dmRows, ...groupRows]
+    .filter((row) => row.kind === "group" || row.meta.requestState !== "dismissed")
+    .sort((lhs, rhs) => {
+      const lhsPinned = lhs.meta.pinnedAt ?? 0;
+      const rhsPinned = rhs.meta.pinnedAt ?? 0;
+      if (lhsPinned !== rhsPinned) {
+        return rhsPinned - lhsPinned;
+      }
+      return rhs.updatedAt - lhs.updatedAt;
+    });
+}
+
+function filterConversationRows(rows: UnifiedConversationRow[], filter: InboxFilter): UnifiedConversationRow[] {
+  return rows.filter((row) => {
+    const isArchived = Boolean(row.meta.archivedAt);
+    const isPending = row.kind === "dm" && row.meta.requestState === "pending";
+    switch (filter) {
+      case "all":
+        return !isArchived && !isPending;
+      case "unread":
+        return !isArchived && !isPending && row.unreadCount > 0;
+      case "groups":
+        return row.kind === "group" && !isArchived;
+      case "requests":
+        return row.kind === "dm" && isPending;
+      case "archived":
+        return isArchived;
+      default:
+        return true;
+    }
+  });
+}
+
+function computeInboxCounts(rows: UnifiedConversationRow[]): Record<InboxFilter, number> {
+  return {
+    all: filterConversationRows(rows, "all").length,
+    unread: filterConversationRows(rows, "unread").length,
+    groups: filterConversationRows(rows, "groups").length,
+    requests: filterConversationRows(rows, "requests").length,
+    archived: filterConversationRows(rows, "archived").length,
+  };
+}
+
+function renderInboxFilter(filter: InboxFilter, label: string, count: number): string {
+  const activeClass = activeInboxFilter === filter ? " active" : "";
+  const badge = count > 0 ? `<span class="filter-chip-count">${count}</span>` : "";
+  return `
+    <button type="button" class="filter-chip${activeClass}" data-inbox-filter="${filter}" role="tab" aria-selected="${activeInboxFilter === filter}">
+      <span>${label}</span>
+      ${badge}
+    </button>
+  `;
+}
+
+function renderEmptyState(filter: InboxFilter): string {
+  const copy = filter === "requests"
+    ? { title: "No message requests", body: "New chats from unknown people appear here until you accept them." }
+    : filter === "archived"
+      ? { title: "Archive is empty", body: "Archived chats stay out of the way until you need them." }
+      : filter === "groups"
+        ? { title: "No groups yet", body: "Create a group from the new chat button when you are ready." }
+        : { title: "No conversations yet", body: "Start a new chat to begin a secure conversation." };
   return `
     <div class="empty-state">
       <svg width="80" height="80" viewBox="0 0 80 80" fill="none">
@@ -602,64 +1020,143 @@ function renderEmptyState(): string {
         <rect x="45" y="36" width="16" height="3" rx="1.5" fill="#4a9eff" opacity="0.7"/>
         <rect x="45" y="42" width="12" height="3" rx="1.5" fill="#4a9eff" opacity="0.4"/>
       </svg>
-      <h2>No conversations yet</h2>
-      <p>Tap the button below to start a new chat</p>
+      <h2>${copy.title}</h2>
+      <p>${copy.body}</p>
     </div>
   `;
 }
 
-function renderConvoRow(c: ConversationSummary): string {
-  const contact = cachedContacts.find(ct => ct.contact_user_id === c.peerUserId);
-  const displayName = contact?.alias || c.peerUserId;
-  const initials = displayName.slice(0, 2).toUpperCase();
-  const unread = c.unreadCount > 0 ? `<span class="badge">${c.unreadCount > 99 ? "99+" : c.unreadCount}</span>` : "";
-  const boldClass = c.unreadCount > 0 ? " unread" : "";
-  const time = relativeTime(c.updatedAt);
-  const presence = peerPresenceCache[c.peerUserId];
-  const presenceDot = presence && presence.status !== "offline"
-    ? `<span class="presence-dot presence-${escHtml(presence.status)}"></span>` : "";
+function renderConversationRow(row: UnifiedConversationRow): string {
+  const unread = row.unreadCount > 0 ? `<span class="badge">${row.unreadCount > 99 ? "99+" : row.unreadCount}</span>` : "";
+  const stateClass = [
+    row.unreadCount > 0 ? " unread" : "",
+    row.meta.pinnedAt ? " pinned" : "",
+    row.kind === "dm" && row.meta.requestState === "pending" ? " pending-request" : "",
+  ].join("");
+  const time = relativeTime(row.updatedAt);
+  const presenceDot = row.kind === "dm" && row.presenceStatus && row.presenceStatus !== "offline"
+    ? `<span class="presence-dot presence-${escHtml(row.presenceStatus)}"></span>`
+    : "";
+  const handle = row.secondaryLabel ? `<span class="conv-handle">${escHtml(row.secondaryLabel)}</span>` : "";
+  const verified = row.isVerified ? `<span class="verified-badge" title="Trusted identity">✓</span>` : "";
+  const requestBadge = row.kind === "dm" && row.meta.requestState === "pending"
+    ? `<span class="conv-state-badge">Request</span>`
+    : "";
+  const pinBadge = row.meta.pinnedAt ? `<span class="conv-state-badge subtle">Pinned</span>` : "";
+  const kindBadge = row.kind === "group" ? `<span class="conv-state-badge subtle">Group</span>` : "";
+  const targetAttrs = row.kind === "dm"
+    ? `data-peer="${escHtml(row.threadId)}"`
+    : `data-group="${escHtml(row.threadId)}"`;
   return `
-    <div class="conv-row${boldClass}" data-peer="${escHtml(c.peerUserId)}">
+    <div class="conv-row${stateClass}" role="button" tabindex="0" ${targetAttrs}>
       <div class="avatar-wrap">
-        <div class="avatar">${initials}</div>
+        <div class="avatar${row.kind === "group" ? " avatar-group" : ""}">${escHtml(row.avatarText)}</div>
         ${presenceDot}
       </div>
       <div class="conv-info">
         <div class="conv-top">
-          <span class="conv-name">${escHtml(displayName)}</span>
+          <div class="conv-heading">
+            <span class="conv-name">${escHtml(row.primaryLabel)}</span>
+            ${verified}
+            ${requestBadge}
+            ${pinBadge}
+            ${kindBadge}
+          </div>
           <span class="conv-time">${time}</span>
         </div>
         <div class="conv-bottom">
-          <span class="conv-preview">${escHtml(c.lastPreview)}</span>
-          ${unread}
+          <span class="conv-preview">${escHtml(row.lastPreview)}</span>
+          ${handle}
         </div>
+      </div>
+      <div class="conv-row-side">
+        ${unread}
+        <button
+          type="button"
+          class="icon-btn conv-row-menu"
+          data-thread-menu="1"
+          data-thread-kind="${row.kind}"
+          data-thread-id="${escHtml(row.threadId)}"
+          aria-label="Conversation actions"
+          title="Conversation actions"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+            <circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/>
+          </svg>
+        </button>
       </div>
     </div>
   `;
 }
 
-function renderGroupConvoRow(g: GroupConversationSummary): string {
-  const initials = g.groupId.slice(0, 2).toUpperCase();
-  const unread = g.unreadCount > 0 ? `<span class="badge">${g.unreadCount > 99 ? "99+" : g.unreadCount}</span>` : "";
-  const boldClass = g.unreadCount > 0 ? " unread" : "";
-  const time = relativeTime(g.updatedAt);
-  return `
-    <div class="conv-row${boldClass}" data-group="${escHtml(g.groupId)}">
-      <div class="avatar-wrap">
-        <div class="avatar avatar-group">${initials}</div>
-      </div>
-      <div class="conv-info">
-        <div class="conv-top">
-          <span class="conv-name">${escHtml(g.groupId)}</span>
-          <span class="conv-time">${time}</span>
-        </div>
-        <div class="conv-bottom">
-          <span class="conv-preview">${escHtml(g.lastPreview)}</span>
-          ${unread}
-        </div>
-      </div>
-    </div>
-  `;
+function showConversationActionMenu(anchor: HTMLElement, kind: ConversationKind, threadId: string): void {
+  document.querySelector(".ctx-menu")?.remove();
+  const meta = loadConversationMeta(setup.userId, kind, threadId);
+  const items: Array<{ label: string; className?: string; action: () => void }> = [
+    {
+      label: meta.pinnedAt ? "Unpin" : "Pin",
+      action: () => {
+        toggleConversationPinned(kind, threadId);
+        refreshConversationsIfVisible();
+      },
+    },
+    {
+      label: meta.archivedAt ? "Unarchive" : "Archive",
+      action: () => {
+        setConversationArchived(kind, threadId, !meta.archivedAt);
+        refreshConversationsIfVisible();
+      },
+    },
+  ];
+  if (kind === "dm" && meta.requestState === "pending") {
+    items.unshift(
+      {
+        label: "Accept",
+        action: () => {
+          markConversationAccepted(threadId);
+          refreshConversationsIfVisible();
+        },
+      },
+      {
+        label: "Dismiss",
+        className: "ctx-danger",
+        action: () => {
+          markConversationDismissed(threadId);
+          refreshConversationsIfVisible();
+        },
+      }
+    );
+  }
+
+  const menu = document.createElement("div");
+  menu.className = "ctx-menu";
+  menu.innerHTML = items
+    .map(
+      (item, index) =>
+        `<div class="ctx-item ${item.className ?? ""}" data-conv-action="${index}">${escHtml(item.label)}</div>`
+    )
+    .join("");
+  document.body.appendChild(menu);
+  const rect = anchor.getBoundingClientRect();
+  menu.style.top = `${Math.min(window.innerHeight - menu.offsetHeight - 12, rect.bottom + 4)}px`;
+  menu.style.left = `${Math.max(12, rect.right - 180)}px`;
+
+  for (const item of menu.querySelectorAll<HTMLElement>("[data-conv-action]")) {
+    item.addEventListener("click", () => {
+      const idx = Number(item.dataset.convAction);
+      menu.remove();
+      items[idx]?.action();
+    });
+  }
+
+  setTimeout(() => {
+    document.addEventListener("click", function closeMenu(event) {
+      if (!(event.target as HTMLElement).closest(".ctx-menu")) {
+        menu.remove();
+        document.removeEventListener("click", closeMenu);
+      }
+    });
+  }, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -667,11 +1164,29 @@ function renderGroupConvoRow(g: GroupConversationSummary): string {
 // ---------------------------------------------------------------------------
 
 async function renderChat(peerId: string): Promise<void> {
-  const contact = cachedContacts.find(ct => ct.contact_user_id === peerId);
-  const displayName = contact?.alias || peerId;
+  const identity = resolvePeerIdentity(peerId);
+  const displayName = identity.primaryLabel;
+  const meta = loadConversationMeta(setup.userId, "dm", peerId);
+  const identityPin = readIdentityPin(setup.userId, peerId);
   const presence = peerPresenceCache[peerId];
   const presenceText = presence?.status === "online" ? "online" : presence?.status === "away" ? "away" : "encrypted";
   const presenceClass = presence?.status === "online" ? "presence-online" : presence?.status === "away" ? "presence-away" : "";
+  const fingerprintSummary = identityPin?.fingerprintSha256 || "Not pinned yet";
+  const trustSummary = identityPin ? "Trusted on this device" : "Unverified";
+  const requestBanner = meta.requestState === "pending"
+    ? `
+      <div class="request-banner">
+        <div>
+          <strong>Message request</strong>
+          <p>${escHtml(displayName)} is not in your trusted chats yet.</p>
+        </div>
+        <div class="request-banner-actions">
+          <button id="request-dismiss" class="btn-secondary">Dismiss</button>
+          <button id="request-accept" class="btn-sm">Accept</button>
+        </div>
+      </div>
+    `
+    : "";
 
   app.innerHTML = `
     <div class="chat-shell">
@@ -682,14 +1197,18 @@ async function renderChat(peerId: string): Promise<void> {
           </svg>
         </button>
         <div class="avatar-wrap">
-          <div class="avatar avatar-sm">${displayName.slice(0, 2).toUpperCase()}</div>
+          <div class="avatar avatar-sm">${identity.avatarText}</div>
           ${presenceClass ? `<span class="presence-dot ${presenceClass}"></span>` : ""}
         </div>
         <div class="chat-header-info">
           <span class="chat-header-name">${escHtml(displayName)}</span>
-          <span class="chat-header-status ${presenceClass}" id="chat-status">${presenceText}</span>
+          <span class="chat-header-status ${presenceClass}" id="chat-status">${presenceText}${identity.secondaryLabel ? ` · ${escHtml(identity.secondaryLabel)}` : ""}</span>
         </div>
-        <div class="chat-header-shield" title="Post-quantum encrypted">🛡️</div>
+        <button id="chat-details-toggle" class="icon-btn" title="Chat details" aria-label="Chat details">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>
+          </svg>
+        </button>
         <button id="call-audio" class="icon-btn" title="Voice call" aria-label="Voice call">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/>
@@ -702,14 +1221,51 @@ async function renderChat(peerId: string): Promise<void> {
           </svg>
         </button>
       </header>
+      ${requestBanner}
       <div id="typing-indicator" class="typing-indicator hidden">
         <span class="typing-dots"><span></span><span></span><span></span></span>
         <span class="typing-text">${escHtml(displayName)} is typing</span>
       </div>
+      <div id="chat-details-sheet" class="chat-details-sheet hidden">
+        <div class="chat-details-card">
+          <div class="chat-details-head">
+            <div>
+              <h3>${escHtml(displayName)}</h3>
+              <p>${identity.secondaryLabel ? escHtml(identity.secondaryLabel) : "Direct message"}</p>
+            </div>
+            <button id="chat-details-close" class="icon-btn" aria-label="Close details">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 6 6 18M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
+          <div class="chat-details-row"><span>Trust</span><strong>${escHtml(trustSummary)}</strong></div>
+          <div class="chat-details-row column"><span>Identity fingerprint</span><span class="mono fingerprint">${escHtml(fingerprintSummary)}</span></div>
+          <div class="chat-details-row">
+            <span>Sealed sender by default</span>
+            <label class="switch-inline"><input id="detail-sealed" type="checkbox" ${meta.sealedSenderDefault ? "checked" : ""} /><span>${meta.sealedSenderDefault ? "On" : "Off"}</span></label>
+          </div>
+          <div class="chat-details-row">
+            <span>Disappearing messages</span>
+            <select id="detail-ttl" class="ephem-select">
+              <option value="0">Off</option>
+              <option value="30" ${meta.ephemeralTtlDefault === 30 ? "selected" : ""}>30s</option>
+              <option value="300" ${meta.ephemeralTtlDefault === 300 ? "selected" : ""}>5m</option>
+              <option value="3600" ${meta.ephemeralTtlDefault === 3600 ? "selected" : ""}>1h</option>
+              <option value="86400" ${meta.ephemeralTtlDefault === 86400 ? "selected" : ""}>24h</option>
+              <option value="604800" ${meta.ephemeralTtlDefault === 604800 ? "selected" : ""}>7d</option>
+            </select>
+          </div>
+          <div class="chat-details-actions">
+            <button id="detail-pin" class="btn-secondary">${meta.pinnedAt ? "Unpin Chat" : "Pin Chat"}</button>
+            <button id="detail-archive" class="btn-secondary">${meta.archivedAt ? "Unarchive" : "Archive"}</button>
+          </div>
+        </div>
+      </div>
       <div class="messages-container" id="messages-container">
         <div class="messages" id="messages-list" role="log" aria-live="polite"></div>
       </div>
-      <div class="chat-options-bar">
+      <div class="chat-options-bar hidden" aria-hidden="true">
         <label class="chat-option" title="Sealed sender hides your identity from the server">
           <input type="checkbox" id="opt-sealed" />
           <span class="chat-option-label">🕶️ Sealed</span>
@@ -739,6 +1295,77 @@ async function renderChat(peerId: string): Promise<void> {
         </button>
         <input id="file-input" type="file" class="hidden" />
       </div>
+      <div id="attachment-sheet" class="attachment-sheet hidden" aria-hidden="true">
+        <div class="attachment-sheet-card" role="dialog" aria-modal="true" aria-labelledby="attachment-sheet-title">
+          <div class="attachment-sheet-head">
+            <div>
+              <h3 id="attachment-sheet-title">Share something</h3>
+              <p>Choose what to send in this chat.</p>
+            </div>
+            <button id="attachment-sheet-close" class="icon-btn" aria-label="Close attachment options">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                <path d="M18 6L6 18M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
+          <div class="attachment-sheet-grid">
+            <button class="attachment-option" data-attach-kind="camera">
+              <span class="attachment-option-icon camera">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 7h4l2-2h4l2 2h4a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z"/>
+                  <circle cx="12" cy="13" r="4"/>
+                </svg>
+              </span>
+              <span class="attachment-option-copy">
+                <strong>Camera</strong>
+                <span>Capture a photo or video</span>
+              </span>
+            </button>
+            <button class="attachment-option" data-attach-kind="media">
+              <span class="attachment-option-icon media">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="4" width="18" height="16" rx="3"/>
+                  <circle cx="9" cy="10" r="2"/>
+                  <path d="M21 16l-4.5-4.5L7 21"/>
+                </svg>
+              </span>
+              <span class="attachment-option-copy">
+                <strong>Photos & Videos</strong>
+                <span>Pick from your library</span>
+              </span>
+            </button>
+            <button class="attachment-option" data-attach-kind="audio">
+              <span class="attachment-option-icon audio">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 4a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V7a3 3 0 0 1 3-3z"/>
+                  <path d="M19 11a7 7 0 0 1-14 0"/>
+                  <path d="M12 18v3"/>
+                </svg>
+              </span>
+              <span class="attachment-option-copy">
+                <strong>Audio</strong>
+                <span>Share a sound file</span>
+              </span>
+            </button>
+            <button class="attachment-option" data-attach-kind="document">
+              <span class="attachment-option-icon document">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z"/>
+                  <path d="M14 2v5h5"/>
+                  <path d="M9 13h6M9 17h6"/>
+                </svg>
+              </span>
+              <span class="attachment-option-copy">
+                <strong>Document</strong>
+                <span>Browse files and folders</span>
+              </span>
+            </button>
+          </div>
+          <div class="attachment-sheet-actions">
+            <button id="attachment-sheet-cancel" class="btn-secondary">Cancel</button>
+          </div>
+        </div>
+      </div>
     </div>
   `;
 
@@ -746,6 +1373,13 @@ async function renderChat(peerId: string): Promise<void> {
   const container = q("#messages-container");
   const input = q<HTMLInputElement>("#chat-input");
   const sendBtn = q<HTMLButtonElement>("#chat-send");
+  const attachBtn = q<HTMLButtonElement>("#chat-attach");
+  const fileInput = q<HTMLInputElement>("#file-input");
+  const detailsSheet = q("#chat-details-sheet");
+  const attachmentSheet = q("#attachment-sheet");
+  let sendInFlight = false;
+  let useSealed = meta.sealedSenderDefault;
+  let ephTtl = meta.ephemeralTtlDefault;
 
   q("#chat-back").addEventListener("click", () => {
     activeChatPeer = null;
@@ -760,6 +1394,50 @@ async function renderChat(peerId: string): Promise<void> {
   q("#call-video").addEventListener("click", () => {
     navigateTo({ screen: "call", peerId, callType: "video" });
   });
+  q("#chat-details-toggle").addEventListener("click", () => {
+    detailsSheet.classList.remove("hidden");
+  });
+  q("#chat-details-close").addEventListener("click", () => {
+    detailsSheet.classList.add("hidden");
+  });
+  detailsSheet.addEventListener("click", (e) => {
+    if (e.target === detailsSheet) {
+      detailsSheet.classList.add("hidden");
+    }
+  });
+  q<HTMLInputElement>("#detail-sealed").addEventListener("change", (e) => {
+    useSealed = (e.currentTarget as HTMLInputElement).checked;
+    setConversationSendDefaults(peerId, { sealedSenderDefault: useSealed });
+  });
+  q<HTMLSelectElement>("#detail-ttl").addEventListener("change", (e) => {
+    ephTtl = Number((e.currentTarget as HTMLSelectElement).value || 0);
+    setConversationSendDefaults(peerId, { ephemeralTtlDefault: ephTtl });
+  });
+  q("#detail-pin").addEventListener("click", () => {
+    const next = toggleConversationPinned("dm", peerId);
+    notify(next.pinnedAt ? "Chat pinned" : "Chat unpinned", "success");
+    refreshConversationsIfVisible();
+    void renderChat(peerId);
+  });
+  q("#detail-archive").addEventListener("click", () => {
+    const archived = !meta.archivedAt;
+    setConversationArchived("dm", peerId, archived);
+    notify(archived ? "Chat archived" : "Chat restored", "success");
+    navigateTo({ screen: "conversations" });
+  });
+  const requestAcceptBtn = document.getElementById("request-accept");
+  requestAcceptBtn?.addEventListener("click", () => {
+    markConversationAccepted(peerId);
+    notify("Message request accepted", "success");
+    void renderChat(peerId);
+    refreshConversationsIfVisible();
+  });
+  const requestDismissBtn = document.getElementById("request-dismiss");
+  requestDismissBtn?.addEventListener("click", () => {
+    markConversationDismissed(peerId);
+    notify("Message request dismissed", "info");
+    navigateTo({ screen: "conversations" });
+  });
 
   // Enable send when input has content
   input.addEventListener("input", () => {
@@ -768,7 +1446,8 @@ async function renderChat(peerId: string): Promise<void> {
   });
 
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !sendBtn.disabled) {
+    if (e.key === "Enter" && !e.repeat && !sendBtn.disabled && !sendInFlight) {
+      e.preventDefault();
       sendBtn.click();
     }
   });
@@ -776,9 +1455,11 @@ async function renderChat(peerId: string): Promise<void> {
   // Send message with optimistic UI
   sendBtn.addEventListener("click", async () => {
     const text = input.value.trim();
-    if (!text) return;
+    if (!text || sendInFlight) return;
+    sendInFlight = true;
     input.value = "";
     sendBtn.disabled = true;
+    try {
 
     // Handle edit mode
     if (editContext) {
@@ -801,9 +1482,6 @@ async function renderChat(peerId: string): Promise<void> {
       return;
     }
 
-    const useSealed = (document.getElementById("opt-sealed") as HTMLInputElement)?.checked ?? false;
-    const ephTtl = Number((document.getElementById("opt-ephemeral") as HTMLSelectElement)?.value ?? 0);
-
     const tempId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const labelPrefix = useSealed ? "🕶️ " : ephTtl > 0 ? "⏱️ " : "";
     const msg: StoredMessage = {
@@ -825,8 +1503,13 @@ async function renderChat(peerId: string): Promise<void> {
       document.querySelector(".reply-compose-bar")?.remove();
     }
 
+    markConversationAccepted(peerId);
+    setConversationArchived("dm", peerId, false);
+
     // Optimistic: show immediately
     await saveMessage(msg);
+    upsertConversation(setup.userId, peerId, `You: ${text}`, false);
+    markConversationRead(setup.userId, peerId);
     appendBubble(msgList, msg, container);
 
     // Async send
@@ -868,22 +1551,72 @@ async function renderChat(peerId: string): Promise<void> {
       }
       upsertConversation(setup.userId, peerId, `You: ${text}`, false);
       markConversationRead(setup.userId, peerId);
+      refreshConversationsIfVisible();
       updateBubbleStatus(tempId, "sent");
     } catch (e) {
       await updateMessageStatus(tempId, "failed");
       updateBubbleStatus(tempId, "failed");
       notify(`Send failed: ${errorMsg(e)}`, "error");
     }
+    } finally {
+      sendInFlight = false;
+      sendBtn.disabled = !input.value.trim();
+    }
   });
 
+  const openAttachmentSheet = () => {
+    attachmentSheet.classList.remove("hidden");
+    attachmentSheet.setAttribute("aria-hidden", "false");
+    q<HTMLButtonElement>("[data-attach-kind='camera']").focus();
+  };
+  const closeAttachmentSheet = () => {
+    attachmentSheet.classList.add("hidden");
+    attachmentSheet.setAttribute("aria-hidden", "true");
+    attachBtn.focus();
+  };
+  const attachmentPickerOptions: Record<string, { accept?: string; capture?: string }> = {
+    camera: { accept: "image/*,video/*", capture: "environment" },
+    media: { accept: "image/*,video/*" },
+    audio: { accept: "audio/*" },
+    document: {},
+  };
+  const openAttachmentPicker = (kind: string) => {
+    const option = attachmentPickerOptions[kind] ?? attachmentPickerOptions.document;
+    if (option.accept) {
+      fileInput.setAttribute("accept", option.accept);
+    } else if (groupId) {
+      fileInput.removeAttribute("accept");
+    }
+    if (option.capture) {
+      fileInput.setAttribute("capture", option.capture);
+    } else {
+      fileInput.removeAttribute("capture");
+    }
+    attachmentSheet.classList.add("hidden");
+    attachmentSheet.setAttribute("aria-hidden", "true");
+    fileInput.click();
+  };
+
+  attachBtn.addEventListener("click", openAttachmentSheet);
+  q("#attachment-sheet-close").addEventListener("click", closeAttachmentSheet);
+  q("#attachment-sheet-cancel").addEventListener("click", closeAttachmentSheet);
+  attachmentSheet.addEventListener("click", (e) => {
+    if (e.target === attachmentSheet) {
+      closeAttachmentSheet();
+    }
+  });
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-attach-kind]")) {
+    button.addEventListener("click", () => openAttachmentPicker(button.dataset.attachKind || "document"));
+  }
+
   // File attachment handler
-  const fileInput = q<HTMLInputElement>("#file-input");
-  q("#chat-attach").addEventListener("click", () => fileInput.click());
   fileInput.addEventListener("change", async () => {
     const file = fileInput.files?.[0];
     if (!file) return;
     if (file.size > 1_000_000) {
       notify("File too large (max 1 MB)", "error");
+      fileInput.removeAttribute("accept");
+      fileInput.removeAttribute("capture");
       fileInput.value = "";
       return;
     }
@@ -916,12 +1649,19 @@ async function renderChat(peerId: string): Promise<void> {
       };
       await saveMessage(msg);
       appendBubble(msgList, msg, container);
+      markConversationAccepted(peerId);
+      setConversationArchived("dm", peerId, false);
       upsertConversation(setup.userId, peerId, `You: ${file.name}`, false);
+      markConversationRead(setup.userId, peerId);
+      refreshConversationsIfVisible();
       notify("File uploaded", "success");
     } catch (e) {
       notify(`Upload failed: ${errorMsg(e)}`, "error");
+    } finally {
+      fileInput.removeAttribute("accept");
+      fileInput.removeAttribute("capture");
+      fileInput.value = "";
     }
-    fileInput.value = "";
   });
 
   // Message context menu (right-click / long-press) — Reply, React, Edit, Delete
@@ -1105,7 +1845,7 @@ function statusSvg(status: StoredMessage["status"]): string {
 
 function renderNewChat(): void {
   const contactRows = cachedContacts.map(c => {
-    const name = c.alias || c.contact_user_id;
+    const name = c.alias || cachedProfileNames[c.contact_user_id] || c.contact_user_id;
     const initials = name.slice(0, 2).toUpperCase();
     const verified = c.verified_by_qr ? `<span class="verified-badge" title="Verified">✓</span>` : "";
     return `
@@ -1127,7 +1867,10 @@ function renderNewChat(): void {
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
         </button>
-        <h1 class="topbar-title">New Chat</h1>
+        <div class="topbar-copy">
+          <h1 class="topbar-title">Start Chat</h1>
+          <p class="topbar-sub">Choose a contact or enter a username.</p>
+        </div>
       </header>
       <div class="new-chat-body">
         ${cachedContacts.length > 0 ? `
@@ -1135,11 +1878,11 @@ function renderNewChat(): void {
             <h3 class="section-label">Contacts</h3>
             <div class="contacts-list">${contactRows}</div>
           </div>
-          <div class="divider-or"><span>or enter user ID</span></div>
+          <div class="divider-or"><span>or enter a username</span></div>
         ` : ""}
         <label class="field">
-          <span>User ID</span>
-          <input id="nc-peer" type="text" placeholder="Enter user ID to chat with" autocomplete="off" />
+          <span>Username or invite link</span>
+          <input id="nc-peer" type="text" placeholder="@username or invite link" autocomplete="off" />
         </label>
         <button id="nc-start" class="btn-primary">Start Chat</button>
         <div class="invite-section">
@@ -1153,16 +1896,18 @@ function renderNewChat(): void {
   const peerInput = q<HTMLInputElement>("#nc-peer");
 
   const startChat = (peer: string) => {
-    if (!peer) { peerInput.focus(); return; }
-    if (peer === setup.userId) {
+    const resolvedPeer = parseChatTarget(peer).replace(/^@/, "");
+    if (!resolvedPeer) { peerInput.focus(); return; }
+    if (resolvedPeer === setup.userId) {
       notify("You can't chat with yourself", "error");
       return;
     }
-    // Auto-add as contact if not in list
-    void addContactSilent(peer);
-    upsertConversation(setup.userId, peer, "New conversation", false);
-    markConversationRead(setup.userId, peer);
-    navigateTo({ screen: "chat", peerId: peer });
+    void addContactSilent(resolvedPeer);
+    markConversationAccepted(resolvedPeer);
+    setConversationArchived("dm", resolvedPeer, false);
+    upsertConversation(setup.userId, resolvedPeer, "New conversation", false);
+    markConversationRead(setup.userId, resolvedPeer);
+    navigateTo({ screen: "chat", peerId: resolvedPeer });
   };
 
   q("#nc-start").addEventListener("click", () => startChat(peerInput.value.trim()));
@@ -1239,6 +1984,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
   const container = q("#messages-container");
   const input = q<HTMLInputElement>("#gc-input");
   const sendBtn = q<HTMLButtonElement>("#gc-send");
+  let sendInFlight = false;
 
   q("#gc-back").addEventListener("click", () => {
     activeGroupId = null;
@@ -1247,13 +1993,20 @@ async function renderGroupChat(groupId: string): Promise<void> {
   q("#gc-info").addEventListener("click", () => navigateTo({ screen: "group-info", groupId }));
 
   input.addEventListener("input", () => { sendBtn.disabled = !input.value.trim(); });
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !sendBtn.disabled) sendBtn.click(); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.repeat && !sendBtn.disabled && !sendInFlight) {
+      e.preventDefault();
+      sendBtn.click();
+    }
+  });
 
   sendBtn.addEventListener("click", async () => {
     const text = input.value.trim();
-    if (!text) return;
+    if (!text || sendInFlight) return;
+    sendInFlight = true;
     input.value = "";
     sendBtn.disabled = true;
+    try {
 
     // Handle edit mode
     if (editContext) {
@@ -1320,6 +2073,10 @@ async function renderGroupChat(groupId: string): Promise<void> {
       await updateMessageStatus(tempId, "failed");
       updateBubbleStatus(tempId, "failed");
       notify(`Send failed: ${errorMsg(e)}`, "error");
+    }
+    } finally {
+      sendInFlight = false;
+      sendBtn.disabled = !input.value.trim();
     }
   });
 
@@ -1565,7 +2322,7 @@ function renderSettings(): void {
       </header>
       <div class="settings-body">
         <div class="settings-section">
-          <h3>Profile</h3>
+          <h3>Account</h3>
           <div class="profile-edit-row">
             <label class="field">
               <span>Display Name</span>
@@ -1577,7 +2334,7 @@ function renderSettings(): void {
           <div class="settings-row"><span>Device</span><span class="mono">${escHtml(setup.deviceId)}</span></div>
         </div>
         <div class="settings-section">
-          <h3>Contacts</h3>
+          <h3>People</h3>
           <div id="contacts-manage">
             ${cachedContacts.length === 0 ? '<p class="text-secondary">No contacts yet</p>' :
               cachedContacts.map(c => `
@@ -1596,7 +2353,7 @@ function renderSettings(): void {
           </div>
         </div>
         <div class="settings-section">
-          <h3>Security</h3>
+          <h3>Privacy & Trust</h3>
           <div class="settings-row"><span>Encryption</span><span>Post-quantum (ML-KEM-768)</span></div>
           <div class="settings-row"><span>Mode</span><span>WebCrypto fallback</span></div>
           <div class="settings-row column"><span>Identity Fingerprint</span><span class="mono fingerprint">${escHtml(fingerprint)}</span></div>
@@ -1608,18 +2365,18 @@ function renderSettings(): void {
           <div id="rotate-status"></div>
         </div>
         <div class="settings-section">
-          <h3>Prekey Health</h3>
+          <h3>Key Health</h3>
           <div id="prekey-status"><p class="text-secondary">Loading…</p></div>
         </div>
         <div class="settings-section">
-          <h3>Discovery</h3>
+          <h3>Advanced Discovery</h3>
           <p class="text-secondary settings-desc">Let contacts find you by phone or email hash.</p>
           <div class="settings-row">
             <button id="set-discovery" class="btn-sm">🔍 Contact Discovery</button>
           </div>
         </div>
         <div class="settings-section">
-          <h3>Push Notifications</h3>
+          <h3>Advanced Push</h3>
           <div class="push-token-row">
             <input id="set-push-token" type="text" placeholder="FCM / APNs token" class="input-sm push-input" />
             <select id="set-push-provider" class="ephem-select">
@@ -1638,10 +2395,14 @@ function renderSettings(): void {
           </div>
         </div>
         <div class="settings-section">
-          <h3>Server</h3>
+          <h3>Advanced Server</h3>
           <div class="settings-row">
             <button id="set-server-info" class="btn-sm">📊 Server Info</button>
           </div>
+        </div>
+        <div class="settings-section">
+          <h3>Session</h3>
+          <button id="set-logout" class="btn-secondary">Log Out</button>
         </div>
         <div class="settings-section">
           <button id="set-reset" class="btn-danger">Delete Account & Data</button>
@@ -1664,6 +2425,9 @@ function renderSettings(): void {
       await api.upsertProfile(k.userId, { display_name: newName }, headers);
       setup.displayName = newName;
       saveSetup(setup);
+      cachedProfileNames[k.userId] = newName;
+      writeProfileDisplayName(k.userId, k.userId, newName);
+      refreshConversationsIfVisible();
       notify("Profile updated", "success");
     } catch (e) {
       notify(`Profile update failed: ${errorMsg(e)}`, "error");
@@ -1682,6 +2446,7 @@ function renderSettings(): void {
       await api.upsertContact(k.userId, { contact_user_id: contactId, alias: alias || undefined }, headers);
       notify("Contact added", "success");
       void loadContactsBackground();
+      void loadProfileNameBackground(contactId);
       // Re-render to show updated list
       renderSettings();
     } catch (e) {
@@ -1719,6 +2484,9 @@ function renderSettings(): void {
   // Server info navigation
   q("#set-server-info").addEventListener("click", () => navigateTo({ screen: "server-info" }));
   q("#set-devices").addEventListener("click", () => navigateTo({ screen: "devices" }));
+  q("#set-logout").addEventListener("click", async () => {
+    await logoutCurrentSession();
+  });
 
   // Push token registration
   q("#set-push-register").addEventListener("click", async () => {
@@ -2008,7 +2776,11 @@ async function renderCall(peerId: string, callType: "audio" | "video"): Promise<
           case "ended":
             statusEl.textContent = "Call ended";
             if (callTimerInterval) { clearInterval(callTimerInterval); callTimerInterval = null; }
-            setTimeout(() => navigateTo({ screen: "chat", peerId }), 1500);
+            setTimeout(() => {
+              if (setup.userId) {
+                navigateTo({ screen: "chat", peerId });
+              }
+            }, 1500);
             break;
         }
       }
@@ -2109,7 +2881,11 @@ async function renderIncomingCall(
       callManager.onStateChange((info: CallInfo) => {
         currentCallInfo = info;
         if (info.state === "ended") {
-          setTimeout(() => navigateTo({ screen: "conversations" }), 1500);
+          setTimeout(() => {
+            if (setup.userId) {
+              navigateTo({ screen: "conversations" });
+            }
+          }, 1500);
         }
       });
 
@@ -2143,53 +2919,74 @@ async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
   try {
     const k = await ensureKeys();
     const envelope = decodeWireEnvelopeBase64(wsMsg.message_bytes_base64);
-    if (envelope.recipient !== k.userId) return;
-
     const passphrase = getPassphrase();
     const plaintext = await decryptFallbackMessage(passphrase, envelope);
-
-    const cid = convId(k.userId, wsMsg.sender_user_id);
+    const isDirectMessage = envelope.recipient === k.userId;
+    const groupId = isDirectMessage ? null : envelope.recipient;
+    const conversationId = isDirectMessage
+      ? convId(k.userId, wsMsg.sender_user_id)
+      : `group:${groupId}`;
     const msg: StoredMessage = {
       id: `srv-${wsMsg.message_id}`,
-      conversationId: cid,
+      conversationId,
       sender: wsMsg.sender_user_id,
-      recipient: k.userId,
-      text: plaintext,
+      recipient: isDirectMessage ? k.userId : envelope.recipient,
+      text: isDirectMessage
+        ? plaintext
+        : `${resolvePeerIdentity(wsMsg.sender_user_id).primaryLabel}: ${plaintext}`,
       timestamp: new Date(wsMsg.received_at).getTime() || Date.now(),
       status: "delivered",
       serverMessageId: wsMsg.message_id,
     };
     await saveMessage(msg);
 
-    // Send delivered receipt
-    void sendDeliveredReceipt(wsMsg.message_id);
+    if (isDirectMessage) {
+      void sendDeliveredReceipt(wsMsg.message_id);
+    }
 
-    const isActivePeer = activeChatPeer === wsMsg.sender_user_id;
-    upsertConversation(k.userId, wsMsg.sender_user_id, `${wsMsg.sender_user_id}: ${plaintext}`, !isActivePeer);
-
-    // Update cursor
     const cursor = readCursor(k.userId);
     if (wsMsg.message_id > cursor) {
       writeCursor(k.userId, wsMsg.message_id);
     }
 
-    // If in chat with this sender, append bubble live
-    if (isActivePeer) {
-      markConversationRead(k.userId, wsMsg.sender_user_id);
-      const msgList = document.getElementById("messages-list");
-      const container = document.getElementById("messages-container");
-      if (msgList && container) {
-        appendBubble(msgList, msg, container);
+    if (isDirectMessage) {
+      const isActivePeer = activeChatPeer === wsMsg.sender_user_id;
+      noteIncomingConversation(wsMsg.sender_user_id, plaintext, !isActivePeer);
+      if (isActivePeer) {
+        markConversationRead(k.userId, wsMsg.sender_user_id);
+        const msgList = document.getElementById("messages-list");
+        const container = document.getElementById("messages-container");
+        if (msgList && container) {
+          appendBubble(msgList, msg, container);
+        }
+      } else {
+        notify(`${resolvePeerIdentity(wsMsg.sender_user_id).primaryLabel}: ${plaintext.slice(0, 50)}`, "info");
       }
-    } else {
-      // Not in this chat — show notification
-      notify(`${wsMsg.sender_user_id}: ${plaintext.slice(0, 50)}`, "info");
+    } else if (groupId) {
+      const isActiveGroup = activeGroupId === groupId;
+      noteIncomingGroupConversation(groupId, wsMsg.sender_user_id, plaintext, !isActiveGroup);
+      void loadProfileNameBackground(wsMsg.sender_user_id);
+      if (isActiveGroup) {
+        markGroupConversationRead(k.userId, groupId);
+        const msgList = document.getElementById("messages-list");
+        const container = document.getElementById("messages-container");
+        if (msgList && container) {
+          appendBubble(msgList, msg, container);
+        }
+      } else {
+        const ownerUserId =
+          loadGroupConversations(k.userId).find((item) => item.groupId === groupId)?.ownerUserId ||
+          wsMsg.sender_user_id;
+        const groupLabel = resolveGroupIdentity(groupId, ownerUserId).primaryLabel;
+        notify(`${groupLabel} · ${resolvePeerIdentity(wsMsg.sender_user_id).primaryLabel}: ${plaintext.slice(0, 50)}`, "info");
+      }
     }
+
+    refreshConversationsIfVisible();
   } catch (e) {
     console.warn("realtime message handling failed", e);
   }
 }
-
 // ---------------------------------------------------------------------------
 // Inbox polling (fallback / catch-up)
 // ---------------------------------------------------------------------------
@@ -2205,51 +3002,72 @@ async function pollInboxSilent(): Promise<void> {
 
     let cursor = since;
     const passphrase = getPassphrase();
+    let conversationListChanged = false;
     for (const message of inbox.messages) {
       cursor = Math.max(cursor, message.message_id);
       try {
         const envelope = decodeWireEnvelopeBase64(message.message_bytes_base64);
-        if (envelope.recipient !== k.userId) continue;
         const plaintext = await decryptFallbackMessage(passphrase, envelope);
-
-        const cid = convId(k.userId, message.sender_user_id);
-        const existing = await getMessages(cid);
-        const alreadyStored = existing.some(m => m.serverMessageId === message.message_id);
+        const isDirectMessage = envelope.recipient === k.userId;
+        const groupId = isDirectMessage ? null : envelope.recipient;
+        const conversationId = isDirectMessage
+          ? convId(k.userId, message.sender_user_id)
+          : `group:${groupId}`;
+        const existing = await getMessages(conversationId);
+        const alreadyStored = existing.some((m) => m.serverMessageId === message.message_id);
         if (alreadyStored) continue;
 
         const msg: StoredMessage = {
           id: `srv-${message.message_id}`,
-          conversationId: cid,
+          conversationId,
           sender: message.sender_user_id,
-          recipient: k.userId,
-          text: plaintext,
+          recipient: isDirectMessage ? k.userId : envelope.recipient,
+          text: isDirectMessage
+            ? plaintext
+            : `${resolvePeerIdentity(message.sender_user_id).primaryLabel}: ${plaintext}`,
           timestamp: new Date(message.received_at).getTime() || Date.now(),
           status: "delivered",
           serverMessageId: message.message_id,
         };
         await saveMessage(msg);
 
-        const isActivePeer = activeChatPeer === message.sender_user_id;
-        upsertConversation(k.userId, message.sender_user_id, `${message.sender_user_id}: ${plaintext}`, !isActivePeer);
-
-        if (isActivePeer) {
-          markConversationRead(k.userId, message.sender_user_id);
-          const msgList = document.getElementById("messages-list");
-          const container = document.getElementById("messages-container");
-          if (msgList && container) {
-            appendBubble(msgList, msg, container);
+        if (isDirectMessage) {
+          const isActivePeer = activeChatPeer === message.sender_user_id;
+          noteIncomingConversation(message.sender_user_id, plaintext, !isActivePeer);
+          if (isActivePeer) {
+            markConversationRead(k.userId, message.sender_user_id);
+            const msgList = document.getElementById("messages-list");
+            const container = document.getElementById("messages-container");
+            if (msgList && container) {
+              appendBubble(msgList, msg, container);
+            }
+          }
+        } else if (groupId) {
+          const isActiveGroup = activeGroupId === groupId;
+          noteIncomingGroupConversation(groupId, message.sender_user_id, plaintext, !isActiveGroup);
+          void loadProfileNameBackground(message.sender_user_id);
+          if (isActiveGroup) {
+            markGroupConversationRead(k.userId, groupId);
+            const msgList = document.getElementById("messages-list");
+            const container = document.getElementById("messages-container");
+            if (msgList && container) {
+              appendBubble(msgList, msg, container);
+            }
           }
         }
+        conversationListChanged = true;
       } catch {
         // Skip un-decryptable messages
       }
     }
     writeCursor(k.userId, cursor);
+    if (conversationListChanged) {
+      refreshConversationsIfVisible();
+    }
   } catch {
     // Silent failure for background polling
   }
 }
-
 // ---------------------------------------------------------------------------
 // Rich interaction helpers (Reply, React, Edit)
 // ---------------------------------------------------------------------------
@@ -2749,7 +3567,12 @@ async function loadContactsBackground(): Promise<void> {
     const api = new PqmsgApi(setup.serverUrl);
     const headers = buildContactsListAuthHeaders(k);
     const res = await api.listContacts(k.userId, headers);
+    const changed = JSON.stringify(cachedContacts) !== JSON.stringify(res.contacts);
     cachedContacts = res.contacts;
+    ensureAcceptedContactsMeta();
+    if (changed) {
+      refreshConversationsIfVisible();
+    }
   } catch {
     // Best-effort — use cached
   }
@@ -2824,6 +3647,7 @@ async function pollSealedInbox(): Promise<void> {
     const headers = buildSealedInboxAuthHeaders(k, sealedInboxCursor);
     const res = await api.sealedInbox(k.userId, sealedInboxCursor, headers);
     const passphrase = getPassphrase();
+    let conversationListChanged = false;
     for (const item of res.messages) {
       try {
         const envelope = decodeWireEnvelopeBase64(item.message_bytes_base64);
@@ -2840,11 +3664,15 @@ async function pollSealedInbox(): Promise<void> {
           status: "delivered",
         };
         await saveMessage(msg);
-        upsertConversation(k.userId, senderId, plaintext, true);
+        noteIncomingConversation(senderId, plaintext, true);
+        conversationListChanged = true;
         sealedInboxCursor = Math.max(sealedInboxCursor, Number(msgId) || sealedInboxCursor + 1);
       } catch {
         // Skip malformed sealed messages
       }
+    }
+    if (conversationListChanged) {
+      refreshConversationsIfVisible();
     }
   } catch {
     // Best-effort polling
@@ -2858,7 +3686,9 @@ async function addContactSilent(contactUserId: string): Promise<void> {
     const api = new PqmsgApi(setup.serverUrl);
     const headers = buildContactsUpsertAuthHeaders(k, contactUserId, contactUserId, false, "");
     await api.upsertContact(k.userId, { contact_user_id: contactUserId }, headers);
+    markConversationAccepted(contactUserId);
     void loadContactsBackground();
+    void loadProfileNameBackground(contactUserId);
   } catch {
     // Best-effort
   }
@@ -3075,6 +3905,48 @@ function stopAllTimers(): void {
   stopChatTimers();
   if (presenceHeartbeatTimer) { clearInterval(presenceHeartbeatTimer); presenceHeartbeatTimer = null; }
   if (sealedInboxPollTimer) { clearInterval(sealedInboxPollTimer); sealedInboxPollTimer = null; }
+  if (groupSyncTimer) { clearInterval(groupSyncTimer); groupSyncTimer = null; }
+}
+
+function refreshConversationsIfVisible(): void {
+  if (getCurrentView().screen === "conversations") {
+    renderConversations();
+  }
+}
+
+async function logoutCurrentSession(): Promise<void> {
+  try {
+    await callManager?.hangup("sign-out");
+  } catch {
+    // Best-effort call cleanup
+  }
+
+  if (realtimeInbox) {
+    realtimeInbox.disconnect();
+    realtimeInbox = null;
+  }
+
+  stopAllTimers();
+  keys = null;
+  callManager = null;
+  currentCallInfo = null;
+  activeChatPeer = null;
+  activeGroupId = null;
+  cachedContacts = [];
+  cachedProfileNames = {};
+  cachedGroupMembers = {};
+  peerPresenceCache = {};
+  receiptCursor = 0;
+  sealedInboxCursor = 0;
+  sessionStorage.removeItem("pqmsg.passphrase");
+  setup = {
+    ...DEFAULT_SETUP,
+    serverUrl: setup.serverUrl,
+    suiteLabel: setup.suiteLabel,
+  };
+  saveSetup(setup);
+  navigateTo({ screen: "sign-in" });
+  notify("Logged out", "info");
 }
 
 // ---------------------------------------------------------------------------
