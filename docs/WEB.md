@@ -2,18 +2,18 @@
 
 ## 1. Objective
 
-This document specifies the Web client demonstration path for the PQ messaging prototype.
+This document specifies the Web client demonstration and beta-holdback path for the PQ messaging prototype.
 
 The web client supports two crypto modes:
 
 - **WASM PQ mode**: real ML-KEM-768 key encapsulation and ML-DSA-65 signatures via compiled Rust WASM bindings,
 - **WebCrypto fallback mode**: browser-native Ed25519 request authentication, `PBKDF2 + AES-256-GCM` local storage, and `AES-256-GCM` message payloads.
 
-The web client also includes WebRTC voice and video calling with post-quantum end-to-end media encryption.
+The current release train does not treat the web client as a supported beta messaging client, and web calling is out of scope.
 
 ## 2. Security Position
 
-When WASM bindings are available, the web client achieves full PQ interoperability with native clients:
+WASM bindings and call prototypes still exist as research paths in the repo, but they are not the supported beta path:
 
 ```mermaid
 flowchart LR
@@ -29,7 +29,12 @@ flowchart LR
     CALL --> SRV
 ```
 
-When WASM is unavailable, the client falls back to WebCrypto mode for web-to-web demo usage.
+For the current beta:
+
+- Android is the supported messaging beta client.
+- Web remains demo-only.
+- Outbound web messaging is blocked whenever the server reports `web_client_policy = demo_only`.
+- Calling is unavailable from the web UI.
 
 ## 3. Prerequisites
 
@@ -66,7 +71,7 @@ npm run preview
    - register user,
    - publish prekeys.
 2. Fetch peer bundle before first send.
-3. Send encrypted message.
+3. Review the server capability policy before treating web messaging as available.
 4. Poll inbox to decrypt.
 5. Review pinned identities and fallback profile in Security Snapshot.
 
@@ -84,7 +89,7 @@ Web fallback envelopes are intentionally explicit in wire mode:
 
 Clients receiving unknown envelope modes should reject decode and continue polling.
 
-When WASM PQ crypto is available, the web client uses real ML-KEM-768 prekey bundles and is fully interoperable with Android and iOS native clients.
+Do not treat the web client as part of the supported beta even when WASM PQ crypto is available. The Android messaging path remains the release baseline.
 
 ## 9. WASM PQ Crypto
 
@@ -99,9 +104,15 @@ The WASM build exports:
 
 Wrapper functions in `crypto-wasm.ts` provide TypeScript-friendly interfaces.
 
-## 10. Voice and Video Calling
+## 10. Calling Status
 
-The web client includes WebRTC calling with post-quantum encrypted media:
+Calling code paths are still present for research work, but web calling is not part of the supported beta:
+
+- chat surfaces no longer expose web calling as a supported action,
+- incoming and outgoing call routes are held back in the UI,
+- tester guidance should keep web calling out of scope until a supported media path is validated.
+
+For reference, the repository still contains a WebRTC calling prototype with post-quantum media-encryption work:
 
 1. **Call initiation**: `startCall(peerId, video)` creates an `RTCPeerConnection` and sends an SDP offer via the signaling REST API.
 2. **PQ key exchange**: Before SDP exchange, the client performs a PQXDH handshake (via WASM when available) to derive a `media_key`.

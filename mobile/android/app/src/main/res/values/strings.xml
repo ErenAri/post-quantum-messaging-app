@@ -73,7 +73,12 @@
     <string name="setup_step_publish_pending">3) Publish prekeys: pending</string>
     <string name="setup_step_verify_pending">4) Verify server: pending</string>
     <string name="chat_meta_default">Loading conversation...</string>
-    <string name="chat_attachment_none">No attachment selected</string>
+    <string name="chat_beta_scope_notice">Android private beta is messaging-only. Calling remains out of scope for this release.</string>
+    <string name="chat_compose_title">Compose</string>
+    <string name="chat_attachment_preview_title">Attachment preview</string>
+    <string name="chat_attachment_none_title">No attachment selected</string>
+    <string name="chat_attachment_none">Choose a photo, video, audio file, or document to preview it before sending.</string>
+    <string name="chat_attachment_ready_title">Ready to send</string>
     <string name="conversations_status_default">Recent chats and requests appear here.</string>
     <string name="conversations_empty">No chats yet. Use Compose to start the first one.</string>
     <string name="security_profile_default">Active Crypto Profile&#10;Unavailable</string>

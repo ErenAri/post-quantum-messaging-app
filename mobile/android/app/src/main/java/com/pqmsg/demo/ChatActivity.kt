@@ -45,6 +45,8 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var chatLogScroll: NestedScrollView
     private lateinit var chatLog: TextView
     private lateinit var chatMeta: TextView
+    private lateinit var attachmentPreviewCard: View
+    private lateinit var attachmentTitle: TextView
     private lateinit var attachmentInfo: TextView
     private lateinit var errorSummaryText: TextView
     private lateinit var errorDetailsText: TextView
@@ -116,7 +118,9 @@ class ChatActivity : AppCompatActivity() {
         chatLogScroll = findViewById(R.id.scrollChatLog)
         chatLog = findViewById(R.id.textChatLog)
         chatMeta = findViewById(R.id.textChatMeta)
-        attachmentInfo = findViewById(R.id.textAttachmentInfo)
+        attachmentPreviewCard = findViewById(R.id.cardAttachmentPreview)
+        attachmentTitle = findViewById(R.id.textAttachmentPreviewTitle)
+        attachmentInfo = findViewById(R.id.textAttachmentPreviewMeta)
         errorSummaryText = findViewById(R.id.textErrorSummaryChat)
         errorDetailsText = findViewById(R.id.textErrorDetailsChat)
         errorToggleButton = findViewById(R.id.buttonToggleErrorDetailsChat)
@@ -145,19 +149,6 @@ class ChatActivity : AppCompatActivity() {
             finish()
         }
 
-        findViewById<Button>(R.id.buttonCallAudio).setOnClickListener {
-            startActivity(Intent(this, CallActivity::class.java).apply {
-                putExtra("peer", activePeerUserId)
-                putExtra("call_type", "audio")
-            })
-        }
-
-        findViewById<Button>(R.id.buttonCallVideo).setOnClickListener {
-            startActivity(Intent(this, CallActivity::class.java).apply {
-                putExtra("peer", activePeerUserId)
-                putExtra("call_type", "video")
-            })
-        }
     }
 
     override fun onResume() {
@@ -536,13 +527,24 @@ class ChatActivity : AppCompatActivity() {
         } else {
             "Peer bundle cached at $bundleFetched"
         }
-        val syncLabel = if (syncInFlight) "Syncing..." else "Ready"
-        val presenceLabel = if (peerPresenceOnline) "online" else "offline"
-        val typingLabel = if (peerIsTyping) " • typing…" else ""
-        val sealedLabel = if (sealedSenderEnabled) " | Sealed" else ""
-        val ephemeralLabel = ephemeralTtlSeconds?.let { " | ${it}s TTL" } ?: ""
-        chatMeta.text =
-            "Chatting with $activePeerUserId ($presenceLabel$typingLabel)\nSigned in as ${setup.userId}\n$bundleLine\nStatus: $syncLabel | Cursor: $cursor$sealedLabel$ephemeralLabel"
+        val syncSummary = if (syncInFlight) "Refreshing…" else "Ready"
+        val presenceSummary = if (peerPresenceOnline) "online" else "offline"
+        val typingSummary = if (peerIsTyping) " • typing…" else ""
+        val protectionSummary = buildList {
+            if (sealedSenderEnabled) add("Sealed sender")
+            ephemeralTtlSeconds?.let { add("${it}s auto-delete") }
+        }.joinToString(" • ")
+        val statusSummary = buildString {
+            append("Status: ")
+            append(syncSummary)
+            append(" • Cursor ")
+            append(cursor)
+            if (protectionSummary.isNotBlank()) {
+                append(" • ")
+                append(protectionSummary)
+            }
+        }
+        chatMeta.text = "$activePeerUserId • $presenceSummary$typingSummary\n$bundleLine\n$statusSummary"
     }
 
     private fun renderThreadHistory() {
@@ -594,11 +596,28 @@ class ChatActivity : AppCompatActivity() {
     private fun renderAttachmentInfo() {
         val attachment = pendingAttachment
         if (attachment == null) {
+            attachmentPreviewCard.visibility = View.GONE
+            attachmentTitle.text = getString(R.string.chat_attachment_none_title)
             attachmentInfo.text = getString(R.string.chat_attachment_none)
+            messageInput.hint = getString(R.string.hint_message)
             return
         }
-        attachmentInfo.text =
-            "Attachment: ${attachment.fileName} (${attachment.mimeType}, ${attachment.byteLength} bytes)"
+        attachmentPreviewCard.visibility = View.VISIBLE
+        val attachmentType = when {
+            attachment.mimeType.startsWith("image/") -> "Photo"
+            attachment.mimeType.startsWith("video/") -> "Video"
+            attachment.mimeType.startsWith("audio/") -> "Audio"
+            attachment.mimeType.startsWith("text/") -> "Document"
+            else -> "File"
+        }
+        val attachmentSize = when {
+            attachment.byteLength >= 1024 * 1024 -> String.format("%.1f MB", attachment.byteLength / (1024f * 1024f))
+            attachment.byteLength >= 1024 -> String.format("%.1f KB", attachment.byteLength / 1024f)
+            else -> "${attachment.byteLength} B"
+        }
+        attachmentTitle.text = getString(R.string.chat_attachment_ready_title)
+        attachmentInfo.text = "${attachment.fileName}\n$attachmentType • $attachmentSize"
+        messageInput.hint = "Add a caption"
     }
 
     private fun readCameraAttachment(bitmap: Bitmap): PendingAttachment {

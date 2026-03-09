@@ -6,6 +6,8 @@ Guided demo client that uses:
 - Rust `libpqmsg_android.so` for cryptography via UniFFI
 - Two screens: Setup and Chat
 
+Current beta scope is Android messaging only. Calling remains out of scope for this release.
+
 ## Flows
 
 - Setup wizard with ordered steps: generate keys, register, publish prekeys, verify server

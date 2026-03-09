@@ -7,6 +7,14 @@ The design composes X25519-based classical Diffie-Hellman with ML-KEM-family enc
 
 The implementation objective is not product completeness; it is security-measurable protocol engineering with reproducible tests, strict parsers, and explicit failure modes.
 
+## Current Beta Scope
+
+As of March 9, 2026, the supported beta path is **Android private beta for messaging only**.
+
+- Web remains a demo surface and is not part of the supported beta.
+- Outbound web messaging stays blocked whenever the server advertises `web_client_policy = demo_only`.
+- Calling remains out of scope for the beta on every client.
+
 ## Research Positioning
 
 The project is best interpreted as a:
@@ -21,7 +29,7 @@ The strongest contributions are:
 - hybrid handshake and ratchet state model suitable for further formalization,
 - DH4 one-time prekey consumption preventing replay of captured `InitialMessage` payloads,
 - hybrid dual-signature authentication (Ed25519 + ML-DSA-65) for quantum-resistant identity and prekey verification,
-- post-quantum encrypted voice and video calling via WebRTC with PQ key exchange,
+- experimental call-signaling and media-encryption prototypes that remain out of beta scope,
 - five-platform reach: CLI, Android, iOS, Web PWA, and Desktop (Tauri),
 - stories (24h ephemeral broadcasts) and channels (admin-only broadcast groups).
 
@@ -71,7 +79,7 @@ flowchart TD
 
 - DH4 one-time prekey (OTPK) consumption in handshake key schedule prevents replay of captured `InitialMessage` payloads; consumed OTPKs are marked used in the server database.
 - Hybrid dual-signature authentication (Ed25519 + ML-DSA-65) on prekey bundles; verifiers check BOTH signatures (security holds if EITHER scheme is secure).
-- Post-quantum encrypted voice and video calling: PQ key exchange (via WASM or UniFFI) derives `media_key` before WebRTC SDP exchange; Insertable Streams encrypt/decrypt RTP payloads with ChaCha20-Poly1305.
+- Experimental calling research path: PQ key exchange and media-encryption prototypes exist in the repo, but calling is not included in the current beta scope.
 - FIPS feature gate (`--features fips`) restricts algorithm suite to ML-KEM-768 only; compile-time conflict with `classical-only-INSECURE`.
 - PKCS#11 HSM signing abstraction in `pqmsg-core::hsm` supports software and hardware-backed key handles; real PKCS#11 implementation via `cryptoki` crate gated behind `hsm-pkcs11` feature.
 - All secret key material is zeroized on drop via explicit `Drop` implementations (`DhKeyPair`, `SessionState`, `SessionSnapshot`, `RootStepOutput`, `PqStepOutput`, `SkippedMessageKeys`).
@@ -152,7 +160,7 @@ CI/CD quality gates additionally enforce:
 - `high_assurance`: requires PQ backend and HTTPS transport in clients,
 - `nss_aligned`: stricter suite allowlist plus high-assurance requirements.
 
-CLI default profile is `high-assurance`.  
+CLI default profile is `research`.  
 For local demo-only runs over HTTP, pass `--security-profile research`.
 
 For non-research profiles, local CLI key/session files should be accessed with:
@@ -402,7 +410,7 @@ cargo run -p pqmsg-server --bin migrate_sqlite_to_postgres -- --sqlite-url "sqli
 | [PENETRATION_TESTING](docs/PENETRATION_TESTING.md) | Penetration test methodology |
 | [ANDROID](docs/ANDROID.md) | Android build and integration guide |
 | [IOS](docs/IOS.md) | iOS build and integration guide |
-| [WEB](docs/WEB.md) | Web client with WASM PQ crypto and WebRTC calling |
+| [WEB](docs/WEB.md) | Web demo client with beta holdbacks and server-policy gating |
 | [TLS_ROTATION](docs/TLS_ROTATION.md) | TLS certificate rotation procedures |
 | [AUDIT_READINESS](docs/AUDIT_READINESS.md) | Comprehensive audit readiness package |
 | [SECURITY](SECURITY.md) | Vulnerability disclosure policy |

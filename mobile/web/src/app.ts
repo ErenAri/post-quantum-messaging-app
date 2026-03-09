@@ -114,6 +114,7 @@ import {
   type AppView,
   type AppNotification,
 } from "./router";
+import { getWebBetaHoldback, WEB_BETA_SCOPE_SUMMARY } from "./betaScope";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -172,14 +173,13 @@ async function loadServerCapabilitiesCached(): Promise<ServerCapabilitiesRespons
 }
 
 async function ensureWebMessagingAllowed(kind: "direct" | "group"): Promise<boolean> {
-  const caps = await loadServerCapabilitiesCached();
-  if (caps && caps.web_client_policy !== "demo_only") {
+  const holdback = getWebBetaHoldback(await loadServerCapabilitiesCached());
+  if (holdback.messagingAllowed) {
     return true;
   }
   const label = kind === "group" ? "group messaging" : "messaging";
-  const detail = caps ? "server policy is demo_only" : "server capabilities could not be verified";
   notify(
-    `Web ${label} is disabled because ${detail}. Use Android, iOS, or CLI for interoperable chat.`,
+    `Web ${label} is disabled. ${holdback.detail}`,
     "error"
   );
   return false;
@@ -551,7 +551,11 @@ function renderOnboarding(): void {
           </label>
           <button id="onb-save-server" class="btn-sm">Save</button>
         </details>
-        <p class="onboarding-note">🔒 Your keys are generated locally and never leave this device.</p>
+        <div class="beta-banner beta-banner-warning">
+          <strong>Current beta scope</strong>
+          <p>${escHtml(WEB_BETA_SCOPE_SUMMARY)}</p>
+        </div>
+        <p class="onboarding-note">Your keys are generated locally and never leave this device.</p>
       </div>
     </div>
   `;
@@ -818,10 +822,9 @@ function renderConversations(): void {
           </button>
         </div>
       </header>
-      <div class="shield-banner" id="shield-banner">
-        <span class="shield-icon">🛡️</span>
-        <span>Post-quantum encrypted — protected against future quantum computers</span>
-        <button id="dismiss-banner" class="dismiss-btn" aria-label="Dismiss banner">×</button>
+      <div class="inbox-summary" role="status" aria-live="polite">
+        <span class="inbox-pill">${counts.unread > 0 ? `${counts.unread} unread` : "Protected"}</span>
+        <span class="inbox-caption">Post-quantum chats stay centered here while requests, groups, and archived threads stay one tap away.</span>
       </div>
       <div class="filter-chip-bar" role="tablist" aria-label="Inbox filters">
         ${renderInboxFilter("all", "All", counts.all)}
@@ -840,16 +843,6 @@ function renderConversations(): void {
       </button>
     </div>
   `;
-
-  // Check if banner was previously dismissed
-  if (localStorage.getItem("pqmsg.banner.dismissed") === "1") {
-    q("#shield-banner").classList.add("hidden");
-  }
-
-  q("#dismiss-banner").addEventListener("click", () => {
-    q("#shield-banner").classList.add("hidden");
-    localStorage.setItem("pqmsg.banner.dismissed", "1");
-  });
 
   q("#fab-new").addEventListener("click", () => {
     // Show a simple menu: New Chat or New Group
@@ -1202,6 +1195,7 @@ async function renderChat(peerId: string): Promise<void> {
   const displayName = identity.primaryLabel;
   const meta = loadConversationMeta(setup.userId, "dm", peerId);
   const identityPin = readIdentityPin(setup.userId, peerId);
+  const webHoldback = getWebBetaHoldback(await loadServerCapabilitiesCached());
   const presence = peerPresenceCache[peerId];
   const presenceText = presence?.status === "online" ? "online" : presence?.status === "away" ? "away" : "encrypted";
   const presenceClass = presence?.status === "online" ? "presence-online" : presence?.status === "away" ? "presence-away" : "";
@@ -1243,19 +1237,19 @@ async function renderChat(peerId: string): Promise<void> {
             <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>
           </svg>
         </button>
-        <button id="call-audio" class="icon-btn" title="Voice call" aria-label="Voice call">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/>
-          </svg>
-        </button>
-        <button id="call-video" class="icon-btn" title="Video call" aria-label="Video call">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polygon points="23 7 16 12 23 17 23 7"/>
-            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
-          </svg>
-        </button>
       </header>
       ${requestBanner}
+      <div class="chat-context-strip" role="status" aria-live="polite">
+        <span class="context-pill context-pill-secure">${escHtml(trustSummary)}</span>
+        <span class="context-pill">${escHtml(presenceText)}</span>
+        <button id="chat-open-details-inline" type="button" class="context-pill context-pill-link">Privacy & send defaults</button>
+      </div>
+      ${webHoldback.messagingAllowed ? "" : `
+        <div class="beta-banner beta-banner-${webHoldback.tone} chat-holdback-banner">
+          <strong>${escHtml(webHoldback.title)}</strong>
+          <p>${escHtml(webHoldback.detail)}</p>
+        </div>
+      `}
       <div id="typing-indicator" class="typing-indicator hidden">
         <span class="typing-dots"><span></span><span></span><span></span></span>
         <span class="typing-text">${escHtml(displayName)} is typing</span>
@@ -1299,29 +1293,22 @@ async function renderChat(peerId: string): Promise<void> {
       <div class="messages-container" id="messages-container">
         <div class="messages" id="messages-list" role="log" aria-live="polite"></div>
       </div>
-      <div class="chat-options-bar hidden" aria-hidden="true">
-        <label class="chat-option" title="Sealed sender hides your identity from the server">
-          <input type="checkbox" id="opt-sealed" />
-          <span class="chat-option-label">🕶️ Sealed</span>
-        </label>
-        <label class="chat-option" title="Message auto-deletes after TTL">
-          <select id="opt-ephemeral" class="ephem-select">
-            <option value="0">💬 Normal</option>
-            <option value="30">⏱️ 30s</option>
-            <option value="300">⏱️ 5m</option>
-            <option value="3600">⏱️ 1h</option>
-            <option value="86400">⏱️ 24h</option>
-            <option value="604800">⏱️ 7d</option>
-          </select>
-        </label>
-      </div>
+      <div id="attachment-preview" class="attachment-preview hidden" aria-live="polite"></div>
+      <div id="chat-emoji-tray" class="emoji-tray hidden" aria-label="Quick emoji"></div>
       <div class="chat-input-bar">
+        <button id="chat-emoji" class="icon-btn attach-btn" title="Insert emoji" aria-label="Insert emoji">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9"/>
+            <path d="M8.5 15a5 5 0 0 0 7 0"/>
+            <path d="M9 10h.01M15 10h.01"/>
+          </svg>
+        </button>
         <button id="chat-attach" class="icon-btn attach-btn" title="Attach file" aria-label="Attach file">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
           </svg>
         </button>
-        <input id="chat-input" type="text" placeholder="Message" autocomplete="off" aria-label="Message" />
+        <input id="chat-input" type="text" placeholder="Write a message" autocomplete="off" aria-label="Message" />
         <button id="chat-send" class="send-btn" disabled aria-label="Send message">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
@@ -1407,28 +1394,108 @@ async function renderChat(peerId: string): Promise<void> {
   const container = q("#messages-container");
   const input = q<HTMLInputElement>("#chat-input");
   const sendBtn = q<HTMLButtonElement>("#chat-send");
+  const emojiBtn = q<HTMLButtonElement>("#chat-emoji");
   const attachBtn = q<HTMLButtonElement>("#chat-attach");
   const fileInput = q<HTMLInputElement>("#file-input");
   const detailsSheet = q("#chat-details-sheet");
+  const inlineDetailsBtn = q<HTMLButtonElement>("#chat-open-details-inline");
   const attachmentSheet = q("#attachment-sheet");
+  const attachmentPreview = q("#attachment-preview");
+  const emojiTray = q("#chat-emoji-tray");
   let sendInFlight = false;
   let useSealed = meta.sealedSenderDefault;
   let ephTtl = meta.ephemeralTtlDefault;
+  let pendingAttachmentFile: File | null = null;
+  let pendingAttachmentPreviewUrl: string | null = null;
+  const messagingAllowed = webHoldback.messagingAllowed;
+  const syncSendAvailability = (): void => {
+    const busy = sendInFlight;
+    sendBtn.disabled = !messagingAllowed || (!input.value.trim() && !pendingAttachmentFile) || busy;
+    attachBtn.disabled = busy;
+    emojiBtn.disabled = busy;
+  };
+  const updateInputPlaceholder = (): void => {
+    input.placeholder = pendingAttachmentFile ? "Add a caption" : "Write a message";
+  };
+  const clearPendingAttachment = (): void => {
+    if (pendingAttachmentPreviewUrl) {
+      URL.revokeObjectURL(pendingAttachmentPreviewUrl);
+      pendingAttachmentPreviewUrl = null;
+    }
+    pendingAttachmentFile = null;
+    attachmentPreview.classList.add("hidden");
+    attachmentPreview.innerHTML = "";
+    updateInputPlaceholder();
+    syncSendAvailability();
+  };
+  const renderAttachmentPreview = (): void => {
+    if (!pendingAttachmentFile) {
+      attachmentPreview.classList.add("hidden");
+      attachmentPreview.innerHTML = "";
+      updateInputPlaceholder();
+      syncSendAvailability();
+      return;
+    }
+    if (pendingAttachmentPreviewUrl) {
+      URL.revokeObjectURL(pendingAttachmentPreviewUrl);
+      pendingAttachmentPreviewUrl = null;
+    }
+    const file = pendingAttachmentFile;
+    const mime = file.type || "application/octet-stream";
+    const kindLabel = describeAttachmentKind(mime);
+    if (mime.startsWith("image/") || mime.startsWith("video/") || mime.startsWith("audio/")) {
+      pendingAttachmentPreviewUrl = URL.createObjectURL(file);
+    }
+    const mediaPreview = mime.startsWith("image/") && pendingAttachmentPreviewUrl
+      ? `<img src="${pendingAttachmentPreviewUrl}" alt="${escHtml(file.name)}" class="attachment-preview-thumb" />`
+      : mime.startsWith("video/") && pendingAttachmentPreviewUrl
+        ? `<video class="attachment-preview-thumb" src="${pendingAttachmentPreviewUrl}" muted playsinline></video>`
+        : mime.startsWith("audio/") && pendingAttachmentPreviewUrl
+          ? `<audio class="attachment-preview-audio" controls src="${pendingAttachmentPreviewUrl}"></audio>`
+          : `<div class="attachment-preview-icon">${escHtml(kindLabel.slice(0, 1))}</div>`;
+    attachmentPreview.classList.remove("hidden");
+    attachmentPreview.innerHTML = `
+      <div class="attachment-preview-card">
+        ${mediaPreview}
+        <div class="attachment-preview-copy">
+          <strong>${escHtml(file.name)}</strong>
+          <span>${escHtml(kindLabel)} - ${formatFileSize(file.size)}</span>
+        </div>
+        <button id="attachment-preview-clear" class="icon-btn" type="button" aria-label="Remove attachment">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+            <path d="M18 6L6 18M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+    `;
+    q("#attachment-preview-clear").addEventListener("click", clearPendingAttachment);
+    updateInputPlaceholder();
+    syncSendAvailability();
+  };
+  const insertQuickEmoji = (emoji: string): void => {
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? start;
+    input.value = `${input.value.slice(0, start)}${emoji}${input.value.slice(end)}`;
+    const nextPos = start + emoji.length;
+    input.focus();
+    input.setSelectionRange(nextPos, nextPos);
+    syncSendAvailability();
+  };
+  emojiTray.innerHTML = ["😀", "❤️", "👍", "🎉", "🔥", "😮", "😭", "🙏"]
+    .map((emoji) => `<button type="button" class="emoji-chip" data-emoji="${emoji}" aria-label="Insert ${emoji}">${emoji}</button>`)
+    .join("");
 
   q("#chat-back").addEventListener("click", () => {
+    clearPendingAttachment();
     activeChatPeer = null;
     stopChatTimers();
     navigateTo({ screen: "conversations" });
   });
 
-  // Call buttons
-  q("#call-audio").addEventListener("click", () => {
-    navigateTo({ screen: "call", peerId, callType: "audio" });
-  });
-  q("#call-video").addEventListener("click", () => {
-    navigateTo({ screen: "call", peerId, callType: "video" });
-  });
   q("#chat-details-toggle").addEventListener("click", () => {
+    detailsSheet.classList.remove("hidden");
+  });
+  inlineDetailsBtn.addEventListener("click", () => {
     detailsSheet.classList.remove("hidden");
   });
   q("#chat-details-close").addEventListener("click", () => {
@@ -1473,10 +1540,20 @@ async function renderChat(peerId: string): Promise<void> {
     navigateTo({ screen: "conversations" });
   });
 
+  emojiBtn.addEventListener("click", () => {
+    emojiTray.classList.toggle("hidden");
+  });
+  for (const button of emojiTray.querySelectorAll<HTMLButtonElement>("[data-emoji]")) {
+    button.addEventListener("click", () => insertQuickEmoji(button.dataset.emoji || ""));
+  }
+
   // Enable send when input has content
   input.addEventListener("input", () => {
-    sendBtn.disabled = !input.value.trim();
+    syncSendAvailability();
     sendTypingIndicator(peerId, true);
+  });
+  input.addEventListener("focus", () => {
+    emojiTray.classList.add("hidden");
   });
 
   input.addEventListener("keydown", (e) => {
@@ -1486,116 +1563,164 @@ async function renderChat(peerId: string): Promise<void> {
     }
   });
 
+  syncSendAvailability();
+  updateInputPlaceholder();
+
   // Send message with optimistic UI
   sendBtn.addEventListener("click", async () => {
     const text = input.value.trim();
-    if (!text || sendInFlight) return;
+    const attachment = pendingAttachmentFile;
+    if ((!text && !attachment) || sendInFlight) return;
     if (!(await ensureWebMessagingAllowed("direct"))) return;
-    sendInFlight = true;
-    input.value = "";
-    sendBtn.disabled = true;
-    try {
-
-    // Handle edit mode
-    if (editContext) {
-      const { msgId } = editContext;
-      editContext = null;
-      sendBtn.textContent = "";
-      sendBtn.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>`;
-      const updated = await editStoredMessage(msgId, text);
-      if (updated) {
-        const bubble = document.getElementById(`msg-${msgId}`);
-        if (bubble) {
-          const btEl = bubble.querySelector(".bubble-text");
-          if (btEl) btEl.textContent = text;
-          const timeEl = bubble.querySelector(".bubble-time");
-          if (timeEl && !timeEl.querySelector(".edit-indicator")) {
-            timeEl.insertAdjacentHTML("beforeend", ' <span class="edit-indicator">(edited)</span>');
-          }
-        }
-      }
+    if (editContext && attachment) {
+      notify("Finish editing before adding media", "info");
       return;
     }
-
-    const tempId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const labelPrefix = useSealed ? "🕶️ " : ephTtl > 0 ? "⏱️ " : "";
-    const msg: StoredMessage = {
-      id: tempId,
-      conversationId: convId(setup.userId, peerId),
-      sender: setup.userId,
-      recipient: peerId,
-      text: labelPrefix + text,
-      timestamp: Date.now(),
-      status: "sending",
-      replyToId: replyContext?.msgId,
-      replyPreview: replyContext?.preview,
-      contentType: replyContext ? "reply" : "text",
-    };
-
-    // Clear reply bar
-    if (replyContext) {
-      replyContext = null;
-      document.querySelector(".reply-compose-bar")?.remove();
-    }
-
-    markConversationAccepted(peerId);
-    setConversationArchived("dm", peerId, false);
-
-    // Optimistic: show immediately
-    await saveMessage(msg);
-    upsertConversation(setup.userId, peerId, `You: ${text}`, false);
-    markConversationRead(setup.userId, peerId);
-    appendBubble(msgList, msg, container);
-
-    // Async send
+    sendInFlight = true;
+    syncSendAvailability();
     try {
-      const k = await ensureKeys();
-      const api = new PqmsgApi(setup.serverUrl);
-      const passphrase = getPassphrase();
-      const envelope = await encryptFallbackMessage(passphrase, k.userId, peerId, text);
-      const messageBytesBase64 = encodeWireEnvelopeBase64(envelope);
-
-      if (useSealed) {
-        // Sealed sender: unauthenticated relay, hides sender from server
-        await api.sealedRelay(peerId, { message_bytes_base64: messageBytesBase64 });
-      } else if (ephTtl > 0) {
-        // Ephemeral: message auto-deletes on server after TTL
-        const headers = buildEphemeralRelayAuthHeaders(k, peerId, ephTtl);
-        await api.relayEphemeral(peerId, {
-          sender_user_id: k.userId,
-          device_id: k.deviceId,
-          message_bytes_base64: messageBytesBase64,
-          ttl_seconds: ephTtl,
-        }, headers);
-      } else {
-        // Normal relay
-        const bundle = await api.getBundle(peerId);
-        const fingerprint = bundle.identity_fingerprint_sha256 || identityFingerprint(bundle.identity_x25519_pub);
-        enforceIdentityPin(peerId, bundle.identity_sig_pub, fingerprint, bundle.identity_key_version, bundle.bundle_generated_at);
-        const headers = buildRelayAuthHeaders(k, peerId, messageBytesBase64);
-        const relay = await api.relay(peerId, {
-          sender_user_id: k.userId,
-          device_id: k.deviceId,
-          message_bytes_base64: messageBytesBase64,
-        }, headers);
-        await updateMessageStatus(tempId, "sent", relay.message_id);
+      // Handle edit mode
+      if (editContext) {
+        const { msgId } = editContext;
+        editContext = null;
+        sendBtn.textContent = "";
+        sendBtn.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>`;
+        const updated = await editStoredMessage(msgId, text);
+        if (updated) {
+          const bubble = document.getElementById(`msg-${msgId}`);
+          if (bubble) {
+            const btEl = bubble.querySelector(".bubble-text");
+            if (btEl) btEl.textContent = text;
+            const timeEl = bubble.querySelector(".bubble-time");
+            if (timeEl && !timeEl.querySelector(".edit-indicator")) {
+              timeEl.insertAdjacentHTML("beforeend", ' <span class="edit-indicator">(edited)</span>');
+            }
+          }
+        }
+        input.value = "";
+        return;
       }
 
-      if (useSealed || ephTtl > 0) {
-        await updateMessageStatus(tempId, "sent");
+      const replyMeta = replyContext ? { ...replyContext } : null;
+      if (replyContext) {
+        replyContext = null;
+        document.querySelector(".reply-compose-bar")?.remove();
       }
+
+      markConversationAccepted(peerId);
+      setConversationArchived("dm", peerId, false);
+
+      if (attachment) {
+        try {
+          const k = await ensureKeys();
+          const api = new PqmsgApi(setup.serverUrl);
+          const buf = await attachment.arrayBuffer();
+          const base64 = arrayBufferToBase64(buf);
+          const mimeType = attachment.type || "application/octet-stream";
+          const headers = buildFileUploadAuthHeaders(k, peerId, mimeType, base64);
+          const res = await api.uploadFile({
+            recipient_user_id: peerId,
+            device_id: k.deviceId,
+            mime_type: mimeType,
+            file_bytes_base64: base64,
+          }, headers);
+          const tempId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          const msg: StoredMessage = {
+            id: tempId,
+            conversationId: convId(setup.userId, peerId),
+            sender: setup.userId,
+            recipient: peerId,
+            text,
+            timestamp: Date.now(),
+            status: "sent",
+            fileId: res.file_id,
+            mimeType,
+            fileName: attachment.name,
+            replyToId: replyMeta?.msgId,
+            replyPreview: replyMeta?.preview,
+            contentType: replyMeta ? "reply" : "text",
+          };
+          await saveMessage(msg);
+          appendBubble(msgList, msg, container);
+          const conversationPreview = text
+            ? `You: ${text}`
+            : `You: Sent ${describeAttachmentKind(mimeType).toLowerCase()}`;
+          upsertConversation(setup.userId, peerId, conversationPreview, false);
+          markConversationRead(setup.userId, peerId);
+          refreshConversationsIfVisible();
+          input.value = "";
+          clearPendingAttachment();
+        } catch (e) {
+          notify(`Upload failed: ${errorMsg(e)}`, "error");
+        }
+        return;
+      }
+
+      const tempId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const msg: StoredMessage = {
+        id: tempId,
+        conversationId: convId(setup.userId, peerId),
+        sender: setup.userId,
+        recipient: peerId,
+        text,
+        timestamp: Date.now(),
+        status: "sending",
+        replyToId: replyMeta?.msgId,
+        replyPreview: replyMeta?.preview,
+        contentType: replyMeta ? "reply" : "text",
+      };
+
+      input.value = "";
+      await saveMessage(msg);
       upsertConversation(setup.userId, peerId, `You: ${text}`, false);
       markConversationRead(setup.userId, peerId);
-      refreshConversationsIfVisible();
-      updateBubbleStatus(tempId, "sent");
-    } catch (e) {
-      await updateMessageStatus(tempId, "failed");
-      updateBubbleStatus(tempId, "failed");
-      notify(`Send failed: ${errorMsg(e)}`, "error");
-    }
+      appendBubble(msgList, msg, container);
+
+      try {
+        const k = await ensureKeys();
+        const api = new PqmsgApi(setup.serverUrl);
+        const passphrase = getPassphrase();
+        const envelope = await encryptFallbackMessage(passphrase, k.userId, peerId, text);
+        const messageBytesBase64 = encodeWireEnvelopeBase64(envelope);
+
+        if (useSealed) {
+          await api.sealedRelay(peerId, { message_bytes_base64: messageBytesBase64 });
+        } else if (ephTtl > 0) {
+          const headers = buildEphemeralRelayAuthHeaders(k, peerId, ephTtl);
+          await api.relayEphemeral(peerId, {
+            sender_user_id: k.userId,
+            device_id: k.deviceId,
+            message_bytes_base64: messageBytesBase64,
+            ttl_seconds: ephTtl,
+          }, headers);
+        } else {
+          const bundle = await api.getBundle(peerId);
+          const fingerprint = bundle.identity_fingerprint_sha256 || identityFingerprint(bundle.identity_x25519_pub);
+          enforceIdentityPin(peerId, bundle.identity_sig_pub, fingerprint, bundle.identity_key_version, bundle.bundle_generated_at);
+          const headers = buildRelayAuthHeaders(k, peerId, messageBytesBase64);
+          const relay = await api.relay(peerId, {
+            sender_user_id: k.userId,
+            device_id: k.deviceId,
+            message_bytes_base64: messageBytesBase64,
+          }, headers);
+          await updateMessageStatus(tempId, "sent", relay.message_id);
+        }
+
+        if (useSealed || ephTtl > 0) {
+          await updateMessageStatus(tempId, "sent");
+        }
+        upsertConversation(setup.userId, peerId, `You: ${text}`, false);
+        markConversationRead(setup.userId, peerId);
+        refreshConversationsIfVisible();
+        updateBubbleStatus(tempId, "sent");
+      } catch (e) {
+        await updateMessageStatus(tempId, "failed");
+        updateBubbleStatus(tempId, "failed");
+        notify(`Send failed: ${errorMsg(e)}`, "error");
+      }
     } finally {
       sendInFlight = false;
-      sendBtn.disabled = !input.value.trim();
+      syncSendAvailability();
     }
   });
 
@@ -1619,7 +1744,7 @@ async function renderChat(peerId: string): Promise<void> {
     const option = attachmentPickerOptions[kind] ?? attachmentPickerOptions.document;
     if (option.accept) {
       fileInput.setAttribute("accept", option.accept);
-    } else if (groupId) {
+    } else {
       fileInput.removeAttribute("accept");
     }
     if (option.capture) {
@@ -1632,7 +1757,10 @@ async function renderChat(peerId: string): Promise<void> {
     fileInput.click();
   };
 
-  attachBtn.addEventListener("click", openAttachmentSheet);
+  attachBtn.addEventListener("click", () => {
+    emojiTray.classList.add("hidden");
+    openAttachmentSheet();
+  });
   q("#attachment-sheet-close").addEventListener("click", closeAttachmentSheet);
   q("#attachment-sheet-cancel").addEventListener("click", closeAttachmentSheet);
   attachmentSheet.addEventListener("click", (e) => {
@@ -1645,7 +1773,7 @@ async function renderChat(peerId: string): Promise<void> {
   }
 
   // File attachment handler
-  fileInput.addEventListener("change", async () => {
+  fileInput.addEventListener("change", () => {
     const file = fileInput.files?.[0];
     if (!file) return;
     if (file.size > 1_000_000) {
@@ -1655,48 +1783,13 @@ async function renderChat(peerId: string): Promise<void> {
       fileInput.value = "";
       return;
     }
-    try {
-      const k = await ensureKeys();
-      const api = new PqmsgApi(setup.serverUrl);
-      const buf = await file.arrayBuffer();
-      const base64 = arrayBufferToBase64(buf);
-      const headers = buildFileUploadAuthHeaders(k, peerId, file.type || "application/octet-stream", base64);
-      const res = await api.uploadFile({
-        recipient_user_id: peerId,
-        device_id: k.deviceId,
-        mime_type: file.type || "application/octet-stream",
-        file_bytes_base64: base64,
-      }, headers);
-      // Send a message referencing the file
-      const fileText = `📎 File: ${escHtml(file.name)} (${res.file_id})`;
-      const tempId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const msg: StoredMessage = {
-        id: tempId,
-        conversationId: convId(setup.userId, peerId),
-        sender: setup.userId,
-        recipient: peerId,
-        text: fileText,
-        timestamp: Date.now(),
-        status: "sent",
-        fileId: res.file_id,
-        mimeType: file.type || "application/octet-stream",
-        fileName: file.name,
-      };
-      await saveMessage(msg);
-      appendBubble(msgList, msg, container);
-      markConversationAccepted(peerId);
-      setConversationArchived("dm", peerId, false);
-      upsertConversation(setup.userId, peerId, `You: ${file.name}`, false);
-      markConversationRead(setup.userId, peerId);
-      refreshConversationsIfVisible();
-      notify("File uploaded", "success");
-    } catch (e) {
-      notify(`Upload failed: ${errorMsg(e)}`, "error");
-    } finally {
-      fileInput.removeAttribute("accept");
-      fileInput.removeAttribute("capture");
-      fileInput.value = "";
-    }
+    pendingAttachmentFile = file;
+    renderAttachmentPreview();
+    syncSendAvailability();
+    fileInput.removeAttribute("accept");
+    fileInput.removeAttribute("capture");
+    fileInput.value = "";
+    input.focus();
   });
 
   // Message context menu (right-click / long-press) — Reply, React, Edit, Delete
@@ -1784,6 +1877,16 @@ function renderMediaContent(msg: StoredMessage): string {
   return `<a class="media-file-link" href="#" data-file-id="${escHtml(msg.fileId)}">📎 ${escHtml(name)}</a>`;
 }
 
+function renderBubbleBody(msg: StoredMessage): string {
+  if (!msg.fileId) {
+    return `<div class="bubble-text">${escHtml(msg.text)}</div>`;
+  }
+  const caption = msg.text
+    ? `<div class="bubble-text bubble-media-caption">${escHtml(msg.text)}</div>`
+    : "";
+  return `${renderMediaContent(msg)}${caption}`;
+}
+
 function renderReplyQuote(msg: StoredMessage): string {
   if (!msg.replyToId || !msg.replyPreview) return "";
   return `<div class="reply-quote">${escHtml(msg.replyPreview)}</div>`;
@@ -1819,7 +1922,7 @@ function appendBubbleElement(container: HTMLElement, msg: StoredMessage): void {
 
   bubble.innerHTML = `
     ${renderReplyQuote(msg)}
-    ${msg.fileId ? renderMediaContent(msg) : `<div class="bubble-text">${escHtml(msg.text)}</div>`}
+    ${renderBubbleBody(msg)}
     <div class="bubble-meta">
       <span class="bubble-time">${time}${editedTag}</span>
       ${statusIcon}
@@ -1979,6 +2082,7 @@ function renderNewChat(): void {
 // ---------------------------------------------------------------------------
 
 async function renderGroupChat(groupId: string): Promise<void> {
+  const webHoldback = getWebBetaHoldback(await loadServerCapabilitiesCached());
   app.innerHTML = `
     <div class="chat-shell">
       <header class="chat-header">
@@ -2001,6 +2105,10 @@ async function renderGroupChat(groupId: string): Promise<void> {
         </button>
         <div class="chat-header-shield" title="Post-quantum encrypted">🛡️</div>
       </header>
+      <div class="chat-context-strip">
+        <strong>${escHtml(webHoldback.title)}</strong>
+        <p>${escHtml(webHoldback.detail)}</p>
+      </div>
       <div class="messages-container" id="messages-container">
         <div class="messages" id="messages-list" role="log" aria-live="polite"></div>
       </div>
@@ -2020,6 +2128,9 @@ async function renderGroupChat(groupId: string): Promise<void> {
   const input = q<HTMLInputElement>("#gc-input");
   const sendBtn = q<HTMLButtonElement>("#gc-send");
   let sendInFlight = false;
+  const syncSendAvailability = (): void => {
+    sendBtn.disabled = !webHoldback.messagingAllowed || !input.value.trim() || sendInFlight;
+  };
 
   q("#gc-back").addEventListener("click", () => {
     activeGroupId = null;
@@ -2027,7 +2138,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
   });
   q("#gc-info").addEventListener("click", () => navigateTo({ screen: "group-info", groupId }));
 
-  input.addEventListener("input", () => { sendBtn.disabled = !input.value.trim(); });
+  input.addEventListener("input", () => { syncSendAvailability(); });
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.repeat && !sendBtn.disabled && !sendInFlight) {
       e.preventDefault();
@@ -2035,13 +2146,15 @@ async function renderGroupChat(groupId: string): Promise<void> {
     }
   });
 
+  syncSendAvailability();
+
   sendBtn.addEventListener("click", async () => {
     const text = input.value.trim();
     if (!text || sendInFlight) return;
     if (!(await ensureWebMessagingAllowed("group"))) return;
     sendInFlight = true;
     input.value = "";
-    sendBtn.disabled = true;
+    syncSendAvailability();
     try {
 
     // Handle edit mode
@@ -2112,7 +2225,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
     }
     } finally {
       sendInFlight = false;
-      sendBtn.disabled = !input.value.trim();
+      syncSendAvailability();
     }
   });
 
@@ -2344,8 +2457,9 @@ function showDeleteConfirm(bubble: HTMLElement, serverMessageId: number): void {
 // 5. Settings screen
 // ---------------------------------------------------------------------------
 
-function renderSettings(): void {
+async function renderSettings(): Promise<void> {
   const fingerprint = keys ? identityFingerprint(keys.identityX25519Pub) : "not available";
+  const webHoldback = getWebBetaHoldback(await loadServerCapabilitiesCached());
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
@@ -2357,6 +2471,21 @@ function renderSettings(): void {
         <h1 class="topbar-title">Settings</h1>
       </header>
       <div class="settings-body">
+        <div class="settings-hero">
+          <div>
+            <span class="settings-eyebrow">Your account</span>
+            <h2>${escHtml(setup.displayName || setup.userId)}</h2>
+            <p class="settings-hero-copy">Messaging from <span class="mono">@${escHtml(setup.userId)}</span> on <span class="mono">${escHtml(setup.deviceId)}</span></p>
+          </div>
+          <button data-open-devices="1" class="btn-secondary">Manage Devices</button>
+        </div>
+        <div class="settings-section">
+          <h3>Beta Scope</h3>
+          <div class="beta-banner beta-banner-${webHoldback.tone}">
+            <strong>${escHtml(webHoldback.title)}</strong>
+            <p>${escHtml(webHoldback.detail)}</p>
+          </div>
+        </div>
         <div class="settings-section">
           <h3>Account</h3>
           <div class="profile-edit-row">
@@ -2395,11 +2524,14 @@ function renderSettings(): void {
           <div class="settings-row column"><span>Identity Fingerprint</span><span class="mono fingerprint">${escHtml(fingerprint)}</span></div>
           <div class="settings-row"><span>Server</span><span class="mono">${escHtml(setup.serverUrl)}</span></div>
           <div class="settings-row">
-            <button id="set-rotate-key" class="btn-sm">🔄 Rotate Identity Key</button>
-            <button id="set-identity-log" class="btn-sm">📋 Identity Log</button>
+            <button id="set-rotate-key" class="btn-sm">Rotate Identity Key</button>
+            <button id="set-identity-log" class="btn-sm">Identity Log</button>
           </div>
           <div id="rotate-status"></div>
         </div>
+        <details class="settings-foldout">
+          <summary>Privacy, devices, and advanced</summary>
+          <div class="settings-foldout-body">
         <div class="settings-section">
           <h3>Key Health</h3>
           <div id="prekey-status"><p class="text-secondary">Loading…</p></div>
@@ -2408,7 +2540,7 @@ function renderSettings(): void {
           <h3>Advanced Discovery</h3>
           <p class="text-secondary settings-desc">Let contacts find you by phone or email hash.</p>
           <div class="settings-row">
-            <button id="set-discovery" class="btn-sm">🔍 Contact Discovery</button>
+            <button id="set-discovery" class="btn-sm">Contact Discovery</button>
           </div>
         </div>
         <div class="settings-section">
@@ -2427,20 +2559,23 @@ function renderSettings(): void {
           <h3>Devices</h3>
           <p class="text-secondary settings-desc">Manage linked devices for your account.</p>
           <div class="settings-row">
-            <button id="set-devices" class="btn-sm">📱 Manage Devices</button>
+            <button id="set-devices" class="btn-sm">Manage Devices</button>
           </div>
         </div>
         <div class="settings-section">
           <h3>Advanced Server</h3>
           <div class="settings-row">
-            <button id="set-server-info" class="btn-sm">📊 Server Info</button>
+            <button id="set-server-info" class="btn-sm">Server Info</button>
           </div>
         </div>
         <div class="settings-section">
           <h3>Session</h3>
           <button id="set-logout" class="btn-secondary">Log Out</button>
         </div>
+          </div>
+        </details>
         <div class="settings-section">
+          <h3>Danger Zone</h3>
           <button id="set-reset" class="btn-danger">Delete Account & Data</button>
         </div>
       </div>
@@ -2519,7 +2654,9 @@ function renderSettings(): void {
 
   // Server info navigation
   q("#set-server-info").addEventListener("click", () => navigateTo({ screen: "server-info" }));
-  q("#set-devices").addEventListener("click", () => navigateTo({ screen: "devices" }));
+  for (const button of document.querySelectorAll<HTMLElement>("[data-open-devices], #set-devices")) {
+    button.addEventListener("click", () => navigateTo({ screen: "devices" }));
+  }
   q("#set-logout").addEventListener("click", async () => {
     await logoutCurrentSession();
   });
@@ -2735,6 +2872,30 @@ function renderLinkDevice(): void {
 async function renderCall(peerId: string, callType: "audio" | "video"): Promise<void> {
   const contact = cachedContacts.find(ct => ct.contact_user_id === peerId);
   const displayName = contact?.alias || peerId;
+  void callType;
+
+  app.innerHTML = `
+    <div class="call-shell">
+      <div class="call-overlay">
+        <div class="call-avatar">
+          <div class="avatar avatar-lg">${displayName.slice(0, 2).toUpperCase()}</div>
+        </div>
+        <h2 class="call-name">${escHtml(displayName)}</h2>
+        <div class="beta-banner beta-banner-warning">
+          <strong>Calling is not in this beta</strong>
+          <p>Use Android messaging for the supported beta path. Web calling stays disabled in this release.</p>
+        </div>
+        <div class="call-controls">
+          <button id="call-back-chat" class="btn-secondary">Back to chat</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  q("#call-back-chat").addEventListener("click", () => {
+    navigateTo({ screen: "chat", peerId });
+  });
+  return;
 
   app.innerHTML = `
     <div class="call-shell">
@@ -2879,6 +3040,32 @@ async function renderIncomingCall(
 ): Promise<void> {
   const contact = cachedContacts.find(ct => ct.contact_user_id === peerId);
   const displayName = contact?.alias || peerId;
+  void callId;
+  void callType;
+  void sdpOfferBase64;
+
+  app.innerHTML = `
+    <div class="call-shell">
+      <div class="call-overlay">
+        <div class="call-avatar">
+          <div class="avatar avatar-lg">${displayName.slice(0, 2).toUpperCase()}</div>
+        </div>
+        <h2 class="call-name">${escHtml(displayName)}</h2>
+        <div class="beta-banner beta-banner-warning">
+          <strong>Incoming web calls are disabled</strong>
+          <p>Calling is out of scope for this beta. Return to conversations and continue on the messaging path.</p>
+        </div>
+        <div class="call-controls">
+          <button id="call-back-conversations" class="btn-secondary">Back to conversations</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  q("#call-back-conversations").addEventListener("click", () => {
+    navigateTo({ screen: "conversations" });
+  });
+  return;
 
   app.innerHTML = `
     <div class="call-shell">
@@ -4103,6 +4290,20 @@ function friendlyDate(ts: number): string {
   if (d === today) return "Today";
   if (d === yesterday) return "Yesterday";
   return new Date(ts).toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function describeAttachmentKind(mimeType: string): string {
+  if (mimeType.startsWith("image/")) return "Photo";
+  if (mimeType.startsWith("video/")) return "Video";
+  if (mimeType.startsWith("audio/")) return "Audio";
+  if (mimeType === "application/pdf") return "PDF";
+  return "Document";
 }
 
 function q<T extends HTMLElement>(selector: string): T {
