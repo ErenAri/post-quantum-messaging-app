@@ -211,6 +211,7 @@ pub(crate) async fn relay_message(
     }
 
     let now = Utc::now().to_rfc3339();
+    let encoded_blob = B64.encode(&blob);
     let mut tx = state.pool.begin().await?;
     let mut deliveries = Vec::with_capacity(recipient_devices.len());
     for recipient_device_id in &recipient_devices {
@@ -238,7 +239,7 @@ pub(crate) async fn relay_message(
             InboxItem {
                 message_id,
                 sender_user_id: request.sender_user_id.clone(),
-                message_bytes_base64: B64.encode(&blob),
+                message_bytes_base64: encoded_blob.clone(),
                 received_at: now.clone(),
             },
         ));
@@ -258,13 +259,19 @@ pub(crate) async fn relay_message(
     } else {
         String::new()
     };
-    tokio::spawn(async move {
-        if let Err(error) =
-            dispatch_push_wake_signals(&push_state, &push_recipient, &push_excluded_device).await
-        {
-            tracing::warn!("push wake dispatch failed reason={}", error);
-        }
-    });
+    if let Ok(permit) = state.push_spawn_semaphore().clone().try_acquire_owned() {
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(error) =
+                dispatch_push_wake_signals(&push_state, &push_recipient, &push_excluded_device)
+                    .await
+            {
+                tracing::warn!("push wake dispatch failed reason={}", error);
+            }
+        });
+    } else {
+        tracing::warn!("push dispatch skipped: spawn semaphore full");
+    }
 
     Ok(Json(RelayResponse {
         message_id: deliveries
@@ -343,11 +350,18 @@ pub(crate) async fn relay_sealed_message(
 
     let push_state = state.clone();
     let push_recipient = recipient_user_id.clone();
-    tokio::spawn(async move {
-        if let Err(error) = dispatch_push_wake_signals(&push_state, &push_recipient, "").await {
-            tracing::warn!("sealed push wake dispatch failed reason={}", error);
-        }
-    });
+    if let Ok(permit) = state.push_spawn_semaphore().clone().try_acquire_owned() {
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(error) =
+                dispatch_push_wake_signals(&push_state, &push_recipient, "").await
+            {
+                tracing::warn!("sealed push wake dispatch failed reason={}", error);
+            }
+        });
+    } else {
+        tracing::warn!("sealed push dispatch skipped: spawn semaphore full");
+    }
 
     Ok(Json(SealedRelayResponse {
         delivered_device_count: recipient_devices.len(),

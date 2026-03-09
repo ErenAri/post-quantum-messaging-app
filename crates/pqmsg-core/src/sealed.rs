@@ -1,7 +1,7 @@
 use crate::aead::{decrypt, encrypt_with_rng, CiphertextEnvelope};
 use crate::dh::{diffie_hellman, DhPublicKey, DhSecretKey};
 use crate::kdf::hkdf_sha256_32;
-use crate::tlv::{critical_type, decode_strict, encode, require, TlvRecord};
+use crate::tlv::{critical_type, decode_strict, encode, build_record_map, require_from_map, TlvRecord};
 use crate::CoreError;
 use rand_core::OsRng;
 use zeroize::Zeroize;
@@ -72,17 +72,18 @@ impl SealedEnvelope {
             OUTER_TAG_CIPHERTEXT,
         ];
         let records = decode_strict(input, &known_types)?;
-        let version = decode_u16(require(&records, OUTER_TAG_VERSION, "sealed.version")?)?;
-        let suite_id = decode_u16(require(&records, OUTER_TAG_SUITE_ID, "sealed.suite_id")?)?;
+        let map = build_record_map(&records);
+        let version = decode_u16(require_from_map(&map, OUTER_TAG_VERSION, "sealed.version")?)?;
+        let suite_id = decode_u16(require_from_map(&map, OUTER_TAG_SUITE_ID, "sealed.suite_id")?)?;
         let recipient_user_id = decode_id(
-            require(
-                &records,
+            require_from_map(
+                &map,
                 OUTER_TAG_RECIPIENT_USER_ID,
                 "sealed.recipient_user_id",
             )?,
             "sealed.recipient_user_id",
         )?;
-        let nonce_bytes = require(&records, OUTER_TAG_AEAD_NONCE, "sealed.aead_nonce")?;
+        let nonce_bytes = require_from_map(&map, OUTER_TAG_AEAD_NONCE, "sealed.aead_nonce")?;
         let aead_nonce: [u8; 12] =
             nonce_bytes
                 .try_into()
@@ -91,7 +92,7 @@ impl SealedEnvelope {
                     expected: 12,
                     actual: nonce_bytes.len(),
                 })?;
-        let ciphertext = require(&records, OUTER_TAG_CIPHERTEXT, "sealed.ciphertext")?.to_vec();
+        let ciphertext = require_from_map(&map, OUTER_TAG_CIPHERTEXT, "sealed.ciphertext")?.to_vec();
         if ciphertext.is_empty() {
             return Err(CoreError::InvalidLength {
                 field: "sealed.ciphertext",
@@ -216,19 +217,20 @@ pub fn open_message(
         INNER_TAG_PAYLOAD,
     ];
     let records = decode_strict(&inner, &known_types)?;
+    let map = build_record_map(&records);
     let sender_user_id = decode_id(
-        require(&records, INNER_TAG_SENDER_USER_ID, "sealed.sender_user_id")?,
+        require_from_map(&map, INNER_TAG_SENDER_USER_ID, "sealed.sender_user_id")?,
         "sealed.sender_user_id",
     )?;
     let sender_device_id = decode_id(
-        require(
-            &records,
+        require_from_map(
+            &map,
             INNER_TAG_SENDER_DEVICE_ID,
             "sealed.sender_device_id",
         )?,
         "sealed.sender_device_id",
     )?;
-    let payload = require(&records, INNER_TAG_PAYLOAD, "sealed.payload")?.to_vec();
+    let payload = require_from_map(&map, INNER_TAG_PAYLOAD, "sealed.payload")?.to_vec();
     if payload.is_empty() {
         return Err(CoreError::InvalidLength {
             field: "sealed.payload",

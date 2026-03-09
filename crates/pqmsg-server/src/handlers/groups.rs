@@ -37,11 +37,13 @@ pub(crate) async fn list_user_groups(
 
     let rows = sqlx::query(
         "SELECT g.group_id, g.owner_user_id, gm.joined_at, g.updated_at,
-                (SELECT COUNT(*) FROM group_members gm2
-                 WHERE gm2.group_id = g.group_id AND gm2.removed_at IS NULL) AS member_count
+                COUNT(gm2.user_id) AS member_count
          FROM group_members gm
          INNER JOIN groups g ON g.group_id = gm.group_id
+         LEFT JOIN group_members gm2
+                ON gm2.group_id = g.group_id AND gm2.removed_at IS NULL
          WHERE gm.user_id = $1 AND gm.removed_at IS NULL
+         GROUP BY g.group_id, g.owner_user_id, gm.joined_at, g.updated_at
          ORDER BY g.updated_at DESC, g.group_id ASC",
     )
     .bind(&user_id)

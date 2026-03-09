@@ -1,5 +1,5 @@
 use crate::alg::{AlgorithmSuite, SecurityProfile};
-use crate::tlv::{critical_type, decode_strict, encode, require, TlvRecord};
+use crate::tlv::{critical_type, decode_strict, encode, build_record_map, require_from_map, TlvRecord};
 use crate::CoreError;
 
 pub const WIRE_VERSION: u16 = 1;
@@ -137,35 +137,33 @@ impl WireMessage {
             TAG_CIPHERTEXT,
         ];
         let records = decode_strict(input, &known_types)?;
+        let map = build_record_map(&records);
         let version = parse_u16(
-            require(&records, TAG_VERSION, "wire.version")?,
+            require_from_map(&map, TAG_VERSION, "wire.version")?,
             "wire.version",
         )?;
         let suite_id = parse_u16(
-            require(&records, TAG_SUITE_ID, "wire.suite_id")?,
+            require_from_map(&map, TAG_SUITE_ID, "wire.suite_id")?,
             "wire.suite_id",
         )?;
         let sender_dh_pub = parse_32(
-            require(&records, TAG_SENDER_DH_PUB, "wire.sender_dh_pub")?,
+            require_from_map(&map, TAG_SENDER_DH_PUB, "wire.sender_dh_pub")?,
             "wire.sender_dh_pub",
         )?;
         let msg_num = parse_u32(
-            require(&records, TAG_MSG_NUM, "wire.msg_num")?,
+            require_from_map(&map, TAG_MSG_NUM, "wire.msg_num")?,
             "wire.msg_num",
         )?;
         let prev_chain_len = parse_u32(
-            require(&records, TAG_PREV_CHAIN_LEN, "wire.prev_chain_len")?,
+            require_from_map(&map, TAG_PREV_CHAIN_LEN, "wire.prev_chain_len")?,
             "wire.prev_chain_len",
         )?;
-        let pq_step_ct = records
-            .iter()
-            .find(|record| record.ty == TAG_PQ_STEP_CT)
-            .map(|record| record.value.clone());
+        let pq_step_ct = map.get(&TAG_PQ_STEP_CT).map(|v| v.to_vec());
         let aead_nonce = parse_12(
-            require(&records, TAG_AEAD_NONCE, "wire.aead_nonce")?,
+            require_from_map(&map, TAG_AEAD_NONCE, "wire.aead_nonce")?,
             "wire.aead_nonce",
         )?;
-        let ciphertext = require(&records, TAG_CIPHERTEXT, "wire.ciphertext")?.to_vec();
+        let ciphertext = require_from_map(&map, TAG_CIPHERTEXT, "wire.ciphertext")?.to_vec();
 
         Ok(Self {
             version,

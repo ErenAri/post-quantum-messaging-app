@@ -201,10 +201,12 @@ pub(crate) async fn observe_relay_dedup(
     let now_unix = now.timestamp();
     let now_rfc3339 = now.to_rfc3339();
     let expires_at_unix = now_unix + RELAY_DEDUP_TTL_SECONDS;
-    sqlx::query("DELETE FROM relay_dedup WHERE expires_at_unix <= $1")
-        .bind(now_unix)
-        .execute(state.pool())
-        .await?;
+    if rand::random::<u8>() < 5 {
+        sqlx::query("DELETE FROM relay_dedup WHERE expires_at_unix <= $1")
+            .bind(now_unix)
+            .execute(state.pool())
+            .await?;
+    }
     let result = sqlx::query(
         "INSERT INTO relay_dedup (dedup_key, expires_at_unix, updated_at)
          VALUES ($1, $2, $3)
@@ -238,7 +240,8 @@ pub(crate) async fn dispatch_push_wake_signals(
           AND ud.device_id = pt.device_id
          WHERE pt.user_id = $1
            AND ud.active = 1
-           AND pt.device_id <> $2",
+           AND pt.device_id <> $2
+         LIMIT 100",
     )
     .bind(recipient_user_id)
     .bind(excluded_device_id)

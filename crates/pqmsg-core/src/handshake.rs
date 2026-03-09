@@ -4,7 +4,7 @@ use crate::dh::{diffie_hellman, generate_keypair, DhPublicKey};
 use crate::kdf::hkdf_sha256_32;
 use crate::kem::KemProvider;
 use crate::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle};
-use crate::tlv::{critical_type, decode_strict, encode, require, TlvRecord};
+use crate::tlv::{critical_type, decode_strict, encode, build_record_map, require_from_map, TlvRecord};
 use crate::CoreError;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -136,29 +136,29 @@ impl InitialMessage {
             MSG_TAG_OTPK_ID,
         ];
         let records = decode_strict(input, &known_types)?;
+        let map = build_record_map(&records);
 
         let version = parse_u16_be(
-            require(&records, MSG_TAG_PROTOCOL_VERSION, "protocol_version")?,
+            require_from_map(&map, MSG_TAG_PROTOCOL_VERSION, "protocol_version")?,
             "protocol_version",
         )?;
-        let suite_id = parse_u16_be(require(&records, MSG_TAG_SUITE_ID, "suite_id")?, "suite_id")?;
+        let suite_id = parse_u16_be(require_from_map(&map, MSG_TAG_SUITE_ID, "suite_id")?, "suite_id")?;
         let sender_id = parse_utf8(
-            require(&records, MSG_TAG_SENDER_ID, "sender_id")?,
+            require_from_map(&map, MSG_TAG_SENDER_ID, "sender_id")?,
             "sender_id",
         )?;
         let recipient_id = parse_utf8(
-            require(&records, MSG_TAG_RECIPIENT_ID, "recipient_id")?,
+            require_from_map(&map, MSG_TAG_RECIPIENT_ID, "recipient_id")?,
             "recipient_id",
         )?;
-        let ik_a_pub = parse_32(require(&records, MSG_TAG_IK_A_PUB, "ik_a_pub")?, "ik_a_pub")?;
-        let ek_a_pub = parse_32(require(&records, MSG_TAG_EK_A_PUB, "ek_a_pub")?, "ek_a_pub")?;
-        let pq_ct = require(&records, MSG_TAG_PQ_CT, "pq_ct")?.to_vec();
-        let nonce = parse_12(require(&records, MSG_TAG_NONCE, "nonce")?, "nonce")?;
-        let ciphertext = require(&records, MSG_TAG_CIPHERTEXT, "ciphertext")?.to_vec();
-        let otpk_id = records
-            .iter()
-            .find(|r| r.ty == MSG_TAG_OTPK_ID)
-            .map(|r| parse_utf8(&r.value, "otpk_id"))
+        let ik_a_pub = parse_32(require_from_map(&map, MSG_TAG_IK_A_PUB, "ik_a_pub")?, "ik_a_pub")?;
+        let ek_a_pub = parse_32(require_from_map(&map, MSG_TAG_EK_A_PUB, "ek_a_pub")?, "ek_a_pub")?;
+        let pq_ct = require_from_map(&map, MSG_TAG_PQ_CT, "pq_ct")?.to_vec();
+        let nonce = parse_12(require_from_map(&map, MSG_TAG_NONCE, "nonce")?, "nonce")?;
+        let ciphertext = require_from_map(&map, MSG_TAG_CIPHERTEXT, "ciphertext")?.to_vec();
+        let otpk_id = map
+            .get(&MSG_TAG_OTPK_ID)
+            .map(|v| parse_utf8(v, "otpk_id"))
             .transpose()?;
 
         Ok(Self {

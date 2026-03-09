@@ -1,6 +1,6 @@
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{HashMap, HashSet};
 
 pub const CRITICAL_BIT: u16 = 0x8000;
 
@@ -61,7 +61,7 @@ pub fn decode_with_policy(
 ) -> Result<Vec<TlvRecord>, CoreError> {
     let mut cursor = 0usize;
     let mut records = Vec::new();
-    let mut seen = BTreeSet::new();
+    let mut seen = HashSet::new();
     while cursor < input.len() {
         if input.len() - cursor < 4 {
             return Err(CoreError::InvalidTlv("truncated header"));
@@ -96,6 +96,24 @@ pub fn require<'a>(
         .iter()
         .find(|record| record.ty == ty)
         .map(|record| record.value.as_slice())
+        .ok_or(CoreError::MissingField(field))
+}
+
+/// Build a lookup map from decoded records for efficient field extraction.
+pub fn build_record_map(records: &[TlvRecord]) -> HashMap<u16, &[u8]> {
+    records
+        .iter()
+        .map(|r| (r.ty, r.value.as_slice()))
+        .collect()
+}
+
+pub fn require_from_map<'a>(
+    map: &'a HashMap<u16, &'a [u8]>,
+    ty: u16,
+    field: &'static str,
+) -> Result<&'a [u8], CoreError> {
+    map.get(&ty)
+        .copied()
         .ok_or(CoreError::MissingField(field))
 }
 

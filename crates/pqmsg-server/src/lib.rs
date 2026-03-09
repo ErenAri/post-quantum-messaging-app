@@ -19,7 +19,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tracing::Instrument;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -290,6 +290,7 @@ pub struct AppState {
     audit_logger: Arc<AuditLogger>,
     cors_allowed_origins: Vec<String>,
     trusted_proxies: Arc<Vec<std::net::IpAddr>>,
+    push_spawn_semaphore: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -315,6 +316,7 @@ impl AppState {
             audit_logger: Arc::new(AuditLogger::disabled()),
             cors_allowed_origins: Vec::new(),
             trusted_proxies: Arc::new(Vec::new()),
+            push_spawn_semaphore: Arc::new(Semaphore::new(64)),
         }
     }
 
@@ -344,6 +346,7 @@ impl AppState {
             audit_logger: Arc::new(AuditLogger::disabled()),
             cors_allowed_origins: Vec::new(),
             trusted_proxies: Arc::new(Vec::new()),
+            push_spawn_semaphore: Arc::new(Semaphore::new(64)),
         }
     }
 
@@ -467,6 +470,10 @@ impl AppState {
 
     pub fn trusted_proxies(&self) -> &[std::net::IpAddr] {
         &self.trusted_proxies
+    }
+
+    pub fn push_spawn_semaphore(&self) -> &Arc<Semaphore> {
+        &self.push_spawn_semaphore
     }
 
     pub fn with_realtime_hub(mut self, hub: RealtimeHub) -> Self {
