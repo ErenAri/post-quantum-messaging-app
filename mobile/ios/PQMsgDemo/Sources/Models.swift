@@ -152,6 +152,16 @@ struct PublishPrekeysResponse: Codable {
     let updated_at: String
 }
 
+struct PrekeysStatusResponse: Codable {
+    let user_id: String
+    let device_id: String
+    let remaining_one_time_prekeys_x25519: Int
+    let remaining_one_time_prekeys_mlkem768: Int
+    let low_one_time_prekeys: Bool
+    let minimum_recommended_one_time_prekeys: Int
+    let checked_at: String
+}
+
 struct BundleResponse: Codable {
     let user_id: String
     let device_id: String

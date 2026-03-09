@@ -25,10 +25,11 @@ flowchart LR
 - protocol operations are executed in Rust (`pqmsg-ios` -> `pqmsg-core`),
 - first-seen identity keys are pinned and key changes are blocked by default,
 - relay and inbox requests use Ed25519 request-auth headers from Rust,
+- iOS client automatically checks prekey inventory via `/v1/users/{user_id}/prekeys/status` after each inbox poll and replenishes one-time prekeys when the server signals low inventory,
 - the Security tab can list linked devices, link a new device id, and revoke non-current linked devices through authenticated server requests,
 - the Security tab can rotate the current device identity to fresh keys and a new device id via `/rotate/init` + `/rotate/confirm`, automatically republish prekeys for the new identity, and inspect `/identity-log` rotation history,
-- the Security tab can prepare a portable linked-device onboarding package by first linking the target device id on the server and then sealing regenerated device prekeys with the existing identity keys using the `WrappedSecret` Argon2id + AES-256-GCM storage format,
-- the Setup tab can import that sealed onboarding package on the secondary device, persist the adopted keys, publish fresh prekeys automatically, and leave the final local step as `Verify server`,
+- the Security tab can prepare a portable linked-device onboarding package by first linking the target device id on the server and then sealing regenerated device prekeys with the existing identity keys using a versioned internal payload format (`SecondaryDeviceOnboardingPayload` with version, server URL, keys, and export timestamp) wrapped via `SecretString` passphrase protection and `WrappedSecret` Argon2id + AES-256-GCM storage format,
+- the Setup tab can import that sealed onboarding package on the secondary device, automatically apply the embedded server URL, persist the adopted keys, publish fresh prekeys automatically, and leave the final local step as `Verify server`,
 - APNs token registration is integrated and exposed through setup/security screens,
 - the Security tab exposes a destructive reset action that first retires the authenticated current device on the server when keys are still present, then removes per-user keys, sessions, pins, cursors, conversation metadata, and the stored APNs token,
 - HTTP transport is accepted only for local debug hosts; production builds require HTTPS.

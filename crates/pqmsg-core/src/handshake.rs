@@ -959,7 +959,7 @@ mod tests {
         let verifier = TestSignatureVerifier;
         let mut rng = ChaCha20Rng::from_seed([55u8; 32]);
         let alice_identity = IdentityKeyPair::generate("alice-ik", &mut rng);
-        let (_, _, bob_pq_spk, bundle_no_otpk, _) = setup_bundle();
+        let (_, _, _bob_pq_spk, bundle_no_otpk, _) = setup_bundle();
 
         // Handshake without OTPK
         let without = alice_initiate(

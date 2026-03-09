@@ -24,11 +24,13 @@ use pqmsg_core::tlv::{critical_type, encode, TlvRecord};
 use pqmsg_core::CoreError;
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_ONE_TIME_PREKEYS: u32 = 256;
+const SECONDARY_DEVICE_PACKAGE_VERSION: u16 = 1;
 const AUTH_TAG_ENDPOINT: u16 = critical_type(0x3201);
 const AUTH_TAG_USER_ID: u16 = critical_type(0x3202);
 const AUTH_TAG_DEVICE_ID: u16 = critical_type(0x3203);
@@ -170,6 +172,14 @@ pub struct DecryptResult {
     pub used_handshake: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SecondaryDeviceOnboardingPayload {
+    version: u16,
+    server_url: String,
+    keys_json: String,
+    exported_at_unix: i64,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PreparedOnboardingPackage {
     pub user_id: String,
@@ -180,6 +190,7 @@ pub struct PreparedOnboardingPackage {
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct OpenedOnboardingPackage {
+    pub server_url: String,
     pub user_id: String,
     pub device_id: String,
     pub suite: Suite,
@@ -363,6 +374,15 @@ fn prepare_linked_device_keys(
             "new_device_id must differ from the authenticated device_id",
         ));
     }
+    let signing_key = decode_signing_key_b64(
+        "identity_sig_secret_b64",
+        &source_keys.identity_sig_secret_b64,
+    )?;
+    if B64.encode(signing_key.verifying_key().to_bytes()) != source_keys.identity_sig_pub_b64 {
+        return Err(invalid_input(
+            "identity_sig_pub_b64 does not match identity_sig_secret_b64",
+        ));
+    }
 
     let mut prepared = source_keys.clone();
     prepared.device_id = target_device_id.to_string();
@@ -380,7 +400,7 @@ fn require_storage_passphrase(passphrase: &str) -> Result<(), PqmsgIosError> {
 
 fn wrap_onboarding_package(passphrase: &str, plaintext: &[u8]) -> Result<String, PqmsgIosError> {
     require_storage_passphrase(passphrase)?;
-    let wrapped = wrap_wrapped_bytes(&passphrase.into(), plaintext)?;
+    let wrapped = wrap_wrapped_bytes(&SecretString::new(passphrase.into()), plaintext)?;
     serde_json::to_string_pretty(&wrapped).map_err(Into::into)
 }
 
@@ -390,7 +410,7 @@ fn unwrap_onboarding_package(
 ) -> Result<Vec<u8>, PqmsgIosError> {
     require_storage_passphrase(passphrase)?;
     let wrapped: WrappedSecret = serde_json::from_str(package_json)?;
-    unwrap_wrapped_bytes(&passphrase.into(), &wrapped).map_err(Into::into)
+    unwrap_wrapped_bytes(&SecretString::new(passphrase.into()), &wrapped).map_err(Into::into)
 }
 
 fn auth_timestamp() -> Result<i64, PqmsgIosError> {
@@ -651,12 +671,24 @@ pub fn replenish_one_time_prekeys(
 pub fn prepare_secondary_device_onboarding_package(
     keys_json: String,
     new_device_id: String,
+    server_url: String,
     passphrase: String,
     one_time_count: u32,
 ) -> Result<PreparedOnboardingPackage, PqmsgIosError> {
+    let normalized_server_url = server_url.trim();
+    if normalized_server_url.is_empty() {
+        return Err(invalid_input("server_url must not be empty"));
+    }
     let source_keys = read_keys_file(&keys_json)?;
     let prepared_keys = prepare_linked_device_keys(&source_keys, &new_device_id, one_time_count)?;
-    let plaintext = serde_json::to_vec_pretty(&prepared_keys)
+    let rebound_keys_json = serde_json::to_string_pretty(&prepared_keys)?;
+    let payload = SecondaryDeviceOnboardingPayload {
+        version: SECONDARY_DEVICE_PACKAGE_VERSION,
+        server_url: normalized_server_url.to_string(),
+        keys_json: rebound_keys_json,
+        exported_at_unix: auth_timestamp()?,
+    };
+    let plaintext = serde_json::to_vec_pretty(&payload)
         .map_err(|_| operation_failed("failed to encode onboarding package"))?;
     let package_json = wrap_onboarding_package(&passphrase, &plaintext)?;
 
@@ -674,9 +706,20 @@ pub fn open_secondary_device_onboarding_package(
     passphrase: String,
 ) -> Result<OpenedOnboardingPackage, PqmsgIosError> {
     let plaintext = unwrap_onboarding_package(&package_json, &passphrase)?;
-    let plaintext_json = String::from_utf8(plaintext)
-        .map_err(|_| invalid_input("onboarding package did not contain UTF-8 JSON"))?;
-    let keys = read_keys_file(&plaintext_json)?;
+    let payload: SecondaryDeviceOnboardingPayload = serde_json::from_slice(&plaintext)?;
+    if payload.version != SECONDARY_DEVICE_PACKAGE_VERSION {
+        return Err(invalid_input(format!(
+            "unsupported onboarding package version '{}'",
+            payload.version
+        )));
+    }
+    let normalized_server_url = payload.server_url.trim();
+    if normalized_server_url.is_empty() {
+        return Err(invalid_input(
+            "onboarding package server_url must not be empty",
+        ));
+    }
+    let keys = read_keys_file(&payload.keys_json)?;
     let signing_key =
         decode_signing_key_b64("identity_sig_secret_b64", &keys.identity_sig_secret_b64)?;
     if B64.encode(signing_key.verifying_key().to_bytes()) != keys.identity_sig_pub_b64 {
@@ -686,10 +729,11 @@ pub fn open_secondary_device_onboarding_package(
     }
 
     Ok(OpenedOnboardingPackage {
+        server_url: normalized_server_url.to_string(),
         user_id: keys.user_id.clone(),
         device_id: keys.device_id.clone(),
         suite: keys.suite,
-        keys_json: serde_json::to_string_pretty(&keys)?,
+        keys_json: payload.keys_json,
     })
 }
 
@@ -1655,6 +1699,7 @@ mod tests {
         let prepared = prepare_secondary_device_onboarding_package(
             source_json,
             "alice-ios-2".to_string(),
+            "https://relay.example.com".to_string(),
             "passphrase".to_string(),
             8,
         )
@@ -1669,6 +1714,7 @@ mod tests {
         assert_eq!(prepared.user_id, source.user_id);
         assert_eq!(prepared.device_id, "alice-ios-2");
         assert_eq!(prepared.suite, source.suite);
+        assert_eq!(opened.server_url, "https://relay.example.com");
         assert_eq!(opened.user_id, source.user_id);
         assert_eq!(opened.device_id, "alice-ios-2");
         assert_eq!(opened.suite, source.suite);

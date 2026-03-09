@@ -28,6 +28,7 @@ cargo test -p pqmsg-server --lib proptests
 
 # Run benchmarks
 cargo bench -p pqmsg-core --bench crypto_benchmarks
+cargo bench -p pqmsg-server --bench server_load
 ```
 
 ### Optional: Android Build
@@ -91,6 +92,7 @@ Server source is organized into modules under `crates/pqmsg-server/src/`:
 ### Tests
 
 - Integration tests live in `crates/pqmsg-server/tests/api.rs`.
+- End-to-end tests live in `crates/pqmsg-server/tests/e2e.rs` (call signaling, ephemeral messages, receipts, multi-device fan-out).
 - Property tests (proptest) live in `#[cfg(test)] mod proptests` inside source modules.
 - Each test should use unique user/device IDs to avoid cross-test interference.
 - Signing key seeds: check existing allocations before choosing new ones (existing: 1–251).
@@ -107,13 +109,19 @@ Every push and PR runs:
 | Job | What it checks |
 |---|---|
 | `rust-checks` | `cargo fmt`, `clippy`, `cargo test` |
+| `fips-build-gate` | `pqmsg-core` compiles and passes tests with `--features fips` |
+| `classical-only-build-gate` | `pqmsg-core` compiles with `--features classical-only-INSECURE` |
+| `hsm-pkcs11-build-gate` | `pqmsg-core` compiles with `--features hsm-pkcs11` (SoftHSM2) |
+| `postgres-integration` | Server tests against PostgreSQL 16 service container |
 | `dependency-policy` | `cargo audit` + `cargo deny` (advisories, licenses, bans, sources) |
 | `coverage` | `cargo llvm-cov` with minimum 50% line coverage |
-| `benchmarks` | Criterion benchmarks (results uploaded as artifacts) |
+| `benchmarks` | Criterion benchmarks for crypto primitives and server load (results uploaded as artifacts) |
 | `sbom` | CycloneDX SBOM generation |
 | `android-build` | Full Android APK assembly |
+| `web-tests` | Web client npm test suite |
+| `proverif-gate` | ProVerif symbolic protocol verification (all queries must pass) |
 
-Nightly/manual jobs: `fuzz-smoke`, `formal-verification-smoke`, `pentest-smoke`, `alertmanager-config-smoke`.
+Nightly/manual jobs: `fuzz-smoke`, `pentest-smoke`, `alertmanager-config-smoke`.
 
 ## Pull Request Checklist
 

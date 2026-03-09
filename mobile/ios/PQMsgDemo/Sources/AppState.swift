@@ -393,6 +393,7 @@ final class AppState: ObservableObject {
             }
             store.writeCursor(userId: user, cursor: cursor)
             refreshConversations()
+            await replenishPrekeysIfNeeded(userId: user, keysJson: keys)
             statusLine = "Inbox polling completed"
         }
     }
@@ -441,6 +442,34 @@ final class AppState: ObservableObject {
             refreshConversations()
         }
         return discoveredGroups
+    }
+
+    private func replenishPrekeysIfNeeded(userId: String, keysJson: String) async {
+        do {
+            let api = try ApiClient(serverURL: setup.serverURL)
+            let statusHeaders = try buildPrekeysStatusAuthHeaders(keysJson: keysJson, userId: userId).toHeaderMap()
+            let status = try await api.prekeysStatus(userId: userId, headers: statusHeaders)
+            guard status.low_one_time_prekeys else { return }
+            let target = max(status.minimum_recommended_one_time_prekeys, 16)
+            let refreshedKeysJson = try replenishOneTimePrekeys(keysJson: keysJson, oneTimeCount: UInt32(target))
+            let payload = try buildPublishPrekeysPayload(keysJson: refreshedKeysJson)
+            let headers = try buildPrekeysAuthHeaders(keysJson: refreshedKeysJson, userId: userId).toHeaderMap()
+            _ = try await api.publishPrekeys(
+                userId: userId,
+                requestBody: PublishPrekeysRequest(
+                    signed_prekey_x25519_pub: payload.signedPrekeyX25519Pub,
+                    sig_over_spk: payload.sigOverSpk,
+                    pq_signed_prekey_pub_mlkem768: payload.pqSignedPrekeyPubMlkem768,
+                    sig_over_pqspk: payload.sigOverPqspk,
+                    one_time_prekeys_x25519: payload.oneTimePrekeysX25519,
+                    one_time_prekeys_mlkem768: payload.oneTimePrekeysMlkem768
+                ),
+                headers: headers
+            )
+            try store.writeKeys(userId: userId, keysJson: refreshedKeysJson)
+        } catch {
+            // Best-effort: prekey replenishment failure is non-fatal
+        }
     }
 
     func refreshSecuritySnapshot() {
@@ -526,6 +555,7 @@ final class AppState: ObservableObject {
             let prepared = try prepareSecondaryDeviceOnboardingPackage(
                 keysJson: context.keysJson,
                 newDeviceId: target,
+                serverUrl: setup.serverURL,
                 passphrase: passphrase,
                 oneTimeCount: 16
             )
@@ -753,6 +783,7 @@ final class AppState: ObservableObject {
             )
             let user = opened.userId.trimmingCharacters(in: .whitespacesAndNewlines)
             let device = opened.deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let packageServerUrl = opened.serverUrl.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !user.isEmpty else {
                 throw RustBridgeError.missingKeys("onboarding package user id is empty")
             }
@@ -760,6 +791,9 @@ final class AppState: ObservableObject {
                 throw RustBridgeError.missingKeys("onboarding package device id is empty")
             }
 
+            if !packageServerUrl.isEmpty {
+                setup.serverURL = packageServerUrl
+            }
             let api = try ApiClient(serverURL: setup.serverURL)
             let capabilities = try await api.getCapabilities()
             try validateServerCapabilities(capabilities)

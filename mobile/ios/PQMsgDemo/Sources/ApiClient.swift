@@ -31,6 +31,15 @@ final class ApiClient {
         try await request(path: "v1/users/\(userId)/prekeys", method: "POST", headers: headers, body: requestBody)
     }
 
+    func prekeysStatus(userId: String, headers: [String: String]) async throws -> PrekeysStatusResponse {
+        try await request(
+            path: "v1/users/\(userId)/prekeys/status",
+            method: "GET",
+            headers: headers,
+            body: Optional<String>.none
+        )
+    }
+
     func getBundle(userId: String) async throws -> BundleResponse {
         try await request(path: "v1/users/\(userId)/bundle", method: "GET", headers: [:], body: Optional<String>.none)
     }
