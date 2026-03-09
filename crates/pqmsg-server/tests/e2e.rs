@@ -1211,12 +1211,8 @@ async fn e2e_call_full_flow() {
     bob.register(&app).await;
 
     // 1. Alice sends an offer to Bob
-    let offer_auth = call_offer_auth_headers(
-        &alice.signing_key,
-        "call-alice",
-        "alice-d1",
-        "call-bob",
-    );
+    let offer_auth =
+        call_offer_auth_headers(&alice.signing_key, "call-alice", "alice-d1", "call-bob");
     let (status, offer_body) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -1236,12 +1232,7 @@ async fn e2e_call_full_flow() {
     assert!(offer_body["created_at"].as_str().is_some());
 
     // 2. Bob polls for signals and sees the offer
-    let poll_auth = call_signals_auth_headers(
-        &bob.signing_key,
-        "call-bob",
-        "bob-d1",
-        &call_id,
-    );
+    let poll_auth = call_signals_auth_headers(&bob.signing_key, "call-bob", "bob-d1", &call_id);
     let (status, signals_body) = json_request_with_headers(
         app.clone(),
         Method::GET,
@@ -1253,16 +1244,12 @@ async fn e2e_call_full_flow() {
     assert_eq!(status, StatusCode::OK, "poll signals: {signals_body}");
     let signals = signals_body["signals"].as_array().expect("signals array");
     assert_eq!(signals.len(), 1);
+    assert!(signals[0]["signal_id"].as_i64().is_some());
     assert_eq!(signals[0]["signal_type"].as_str(), Some("offer"));
     assert_eq!(signals[0]["from_user_id"].as_str(), Some("call-alice"));
 
     // 3. Bob answers the call
-    let answer_auth = call_answer_auth_headers(
-        &bob.signing_key,
-        "call-bob",
-        "bob-d1",
-        &call_id,
-    );
+    let answer_auth = call_answer_auth_headers(&bob.signing_key, "call-bob", "bob-d1", &call_id);
     let (status, answer_body) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -1280,12 +1267,8 @@ async fn e2e_call_full_flow() {
     assert!(answer_body["answered_at"].as_str().is_some());
 
     // 4. Alice polls and sees the answer
-    let poll_auth_alice = call_signals_auth_headers(
-        &alice.signing_key,
-        "call-alice",
-        "alice-d1",
-        &call_id,
-    );
+    let poll_auth_alice =
+        call_signals_auth_headers(&alice.signing_key, "call-alice", "alice-d1", &call_id);
     let (status, signals_body) = json_request_with_headers(
         app.clone(),
         Method::GET,
@@ -1296,17 +1279,18 @@ async fn e2e_call_full_flow() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let signals = signals_body["signals"].as_array().unwrap();
-    assert_eq!(signals.len(), 1, "Alice should see Bob's answer (not her own offer)");
+    assert_eq!(
+        signals.len(),
+        1,
+        "Alice should see Bob's answer (not her own offer)"
+    );
+    assert!(signals[0]["signal_id"].as_i64().is_some());
     assert_eq!(signals[0]["signal_type"].as_str(), Some("answer"));
     assert_eq!(signals[0]["from_user_id"].as_str(), Some("call-bob"));
 
     // 5. Both exchange ICE candidates
-    let ice_auth_alice = call_ice_auth_headers(
-        &alice.signing_key,
-        "call-alice",
-        "alice-d1",
-        &call_id,
-    );
+    let ice_auth_alice =
+        call_ice_auth_headers(&alice.signing_key, "call-alice", "alice-d1", &call_id);
     let (status, ice_body) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -1321,12 +1305,7 @@ async fn e2e_call_full_flow() {
     .await;
     assert_eq!(status, StatusCode::OK, "alice ice: {ice_body}");
 
-    let ice_auth_bob = call_ice_auth_headers(
-        &bob.signing_key,
-        "call-bob",
-        "bob-d1",
-        &call_id,
-    );
+    let ice_auth_bob = call_ice_auth_headers(&bob.signing_key, "call-bob", "bob-d1", &call_id);
     let (status, _) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -1342,12 +1321,8 @@ async fn e2e_call_full_flow() {
     assert_eq!(status, StatusCode::OK);
 
     // 6. Bob polls and sees Alice's ICE candidate
-    let poll_auth_bob2 = call_signals_auth_headers(
-        &bob.signing_key,
-        "call-bob",
-        "bob-d1",
-        &call_id,
-    );
+    let poll_auth_bob2 =
+        call_signals_auth_headers(&bob.signing_key, "call-bob", "bob-d1", &call_id);
     let (status, signals_body) = json_request_with_headers(
         app.clone(),
         Method::GET,
@@ -1371,12 +1346,8 @@ async fn e2e_call_full_flow() {
     );
 
     // 7. Alice hangs up
-    let hangup_auth = call_hangup_auth_headers(
-        &alice.signing_key,
-        "call-alice",
-        "alice-d1",
-        &call_id,
-    );
+    let hangup_auth =
+        call_hangup_auth_headers(&alice.signing_key, "call-alice", "alice-d1", &call_id);
     let (status, hangup_body) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -1402,12 +1373,7 @@ async fn e2e_call_answer_nonexistent() {
     bob.register(&app).await;
 
     let fake_call_id = "00000000-0000-0000-0000-000000000000";
-    let auth = call_answer_auth_headers(
-        &bob.signing_key,
-        "cne-bob",
-        "bob-d1",
-        fake_call_id,
-    );
+    let auth = call_answer_auth_headers(&bob.signing_key, "cne-bob", "bob-d1", fake_call_id);
     let (status, _) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -1433,12 +1399,7 @@ async fn e2e_call_offer_rejects_invalid_type() {
     alice.register(&app).await;
     bob.register(&app).await;
 
-    let auth = call_offer_auth_headers(
-        &alice.signing_key,
-        "cit-alice",
-        "alice-d1",
-        "cit-bob",
-    );
+    let auth = call_offer_auth_headers(&alice.signing_key, "cit-alice", "alice-d1", "cit-bob");
     let (status, _) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -1466,12 +1427,8 @@ async fn e2e_call_hangup_after_ended() {
     bob.register(&app).await;
 
     // Create a call
-    let offer_auth = call_offer_auth_headers(
-        &alice.signing_key,
-        "che-alice",
-        "alice-d1",
-        "che-bob",
-    );
+    let offer_auth =
+        call_offer_auth_headers(&alice.signing_key, "che-alice", "alice-d1", "che-bob");
     let (status, offer_body) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -1489,12 +1446,8 @@ async fn e2e_call_hangup_after_ended() {
     let call_id = offer_body["call_id"].as_str().unwrap();
 
     // First hangup succeeds
-    let hangup_auth = call_hangup_auth_headers(
-        &alice.signing_key,
-        "che-alice",
-        "alice-d1",
-        call_id,
-    );
+    let hangup_auth =
+        call_hangup_auth_headers(&alice.signing_key, "che-alice", "alice-d1", call_id);
     let (status, _) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -1509,12 +1462,8 @@ async fn e2e_call_hangup_after_ended() {
     assert_eq!(status, StatusCode::OK);
 
     // Second hangup should fail (call already ended)
-    let hangup_auth2 = call_hangup_auth_headers(
-        &alice.signing_key,
-        "che-alice",
-        "alice-d1",
-        call_id,
-    );
+    let hangup_auth2 =
+        call_hangup_auth_headers(&alice.signing_key, "che-alice", "alice-d1", call_id);
     let (status, _) = json_request_with_headers(
         app.clone(),
         Method::POST,
@@ -1538,12 +1487,7 @@ async fn e2e_call_ice_nonexistent() {
     alice.register(&app).await;
 
     let fake_call_id = "00000000-0000-0000-0000-111111111111";
-    let auth = call_ice_auth_headers(
-        &alice.signing_key,
-        "icene-alice",
-        "alice-d1",
-        fake_call_id,
-    );
+    let auth = call_ice_auth_headers(&alice.signing_key, "icene-alice", "alice-d1", fake_call_id);
     let (status, _) = json_request_with_headers(
         app.clone(),
         Method::POST,

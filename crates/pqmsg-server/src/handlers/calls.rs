@@ -25,7 +25,9 @@ pub(crate) async fn call_offer(
     validate_id("device_id", &request.device_id)?;
 
     if !["audio", "video"].contains(&request.call_type.as_str()) {
-        return Err(AppError::bad_request("call_type must be 'audio' or 'video'"));
+        return Err(AppError::bad_request(
+            "call_type must be 'audio' or 'video'",
+        ));
     }
     decode_base64_range("sdp_offer_base64", &request.sdp_offer_base64, 1, 64 * 1024)?;
 
@@ -88,7 +90,12 @@ pub(crate) async fn call_answer(
     check_rate_limit(&state, &format!("call-answer:{call_id}"))?;
     validate_id("callee_user_id", &request.callee_user_id)?;
     validate_id("device_id", &request.device_id)?;
-    decode_base64_range("sdp_answer_base64", &request.sdp_answer_base64, 1, 64 * 1024)?;
+    decode_base64_range(
+        "sdp_answer_base64",
+        &request.sdp_answer_base64,
+        1,
+        64 * 1024,
+    )?;
 
     let auth = parse_request_auth(&headers)?;
     if auth.user_id != request.callee_user_id {
@@ -166,10 +173,7 @@ pub(crate) async fn call_ice_candidate(
             "auth user_id must match sender_user_id",
         ));
     }
-    let auth_message = format!(
-        "call-ice:{}:{}:{}",
-        auth.user_id, auth.device_id, call_id
-    );
+    let auth_message = format!("call-ice:{}:{}:{}", auth.user_id, auth.device_id, call_id);
     verify_request_auth(&state, &auth, auth_message.as_bytes()).await?;
 
     // Verify the call exists
@@ -181,7 +185,9 @@ pub(crate) async fn call_ice_candidate(
     .await?;
 
     if exists.is_none() {
-        return Err(AppError::not_found("call session not found or already ended"));
+        return Err(AppError::not_found(
+            "call session not found or already ended",
+        ));
     }
 
     let now_str = Utc::now().to_rfc3339();
@@ -217,7 +223,9 @@ pub(crate) async fn call_hangup(
 
     let auth = parse_request_auth(&headers)?;
     if auth.user_id != request.user_id {
-        return Err(AppError::bad_request("auth user_id must match request user_id"));
+        return Err(AppError::bad_request(
+            "auth user_id must match request user_id",
+        ));
     }
     let auth_message = format!(
         "call-hangup:{}:{}:{}",
@@ -302,8 +310,8 @@ pub(crate) async fn poll_call_signals(
     }
 
     let since = query.since.unwrap_or(0);
-    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
-        "SELECT signal_type, from_user_id, payload_base64, created_at
+    let rows: Vec<(i64, String, String, String, String)> = sqlx::query_as(
+        "SELECT signal_id, signal_type, from_user_id, payload_base64, created_at
          FROM call_signals
          WHERE call_id = $1 AND signal_id > $2 AND from_user_id != $3
          ORDER BY signal_id ASC
@@ -317,12 +325,15 @@ pub(crate) async fn poll_call_signals(
 
     let signals = rows
         .into_iter()
-        .map(|(signal_type, from_user_id, payload_base64, created_at)| CallSignal {
-            signal_type,
-            from_user_id,
-            payload_base64,
-            created_at,
-        })
+        .map(
+            |(signal_id, signal_type, from_user_id, payload_base64, created_at)| CallSignal {
+                signal_id,
+                signal_type,
+                from_user_id,
+                payload_base64,
+                created_at,
+            },
+        )
         .collect();
 
     Ok(Json(PollCallSignalsResponse {

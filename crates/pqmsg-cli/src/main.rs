@@ -137,7 +137,7 @@ struct Cli {
     server: String,
     #[arg(long, global = true, default_value = DEFAULT_STATE_DIR)]
     state_dir: PathBuf,
-    #[arg(long, global = true, value_enum, default_value = "high-assurance")]
+    #[arg(long, global = true, value_enum, default_value = "research")]
     security_profile: SecurityProfileFlag,
     #[arg(long, global = true)]
     state_passphrase: Option<String>,
@@ -4732,6 +4732,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_defaults_to_research_profile_for_localhost() {
+        let cli = Cli::try_parse_from([
+            "pqmsg-cli",
+            "keygen",
+            "--user",
+            "alice",
+            "--out",
+            "./devkeys/alice.json",
+        ])
+        .expect("parse");
+        assert_eq!(cli.server, "http://localhost:3000");
+        assert_eq!(cli.security_profile, SecurityProfileFlag::Research);
+    }
+
+    #[test]
     fn parse_delete_messages_args() {
         let cli = Cli::try_parse_from([
             "pqmsg-cli",
@@ -5170,8 +5185,8 @@ mod tests {
         let bob_identity = to_identity_keypair(&bob_keys).expect("bob identity");
         let bob_spk = to_signed_prekey(&bob_keys).expect("bob spk");
         let bob_pq = to_pq_signed_prekey(&bob_keys).expect("bob pq");
-        let first_plain =
-            bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq, None, &decoded).expect("bob receive");
+        let first_plain = bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq, None, &decoded)
+            .expect("bob receive");
         assert_eq!(first_plain.plaintext, b"hello");
 
         let mut alice_session = SessionState::from_handshake(

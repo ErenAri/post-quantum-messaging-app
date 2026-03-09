@@ -18,7 +18,7 @@ use crate::{
     AUTH_TAG_DISCOVERY_PHONE_HASHES_HASH, AUTH_TAG_DISCOVERY_QUERY_HASHES_HASH, AUTH_TAG_ENDPOINT,
     AUTH_TAG_FILE_BLOB_HASH, AUTH_TAG_FILE_ID, AUTH_TAG_FILE_MIME_HASH, AUTH_TAG_FILE_RECIPIENT_ID,
     AUTH_TAG_GROUP_ID, AUTH_TAG_GROUP_MEMBERS_HASH, AUTH_TAG_GROUP_MEMBER_USER_ID,
-    AUTH_TAG_GROUP_MESSAGE_BLOB_HASH, AUTH_TAG_GROUP_SENDER_USER_ID, AUTH_TAG_LINK_DEVICE_ID,
+    AUTH_TAG_GROUP_RECIPIENTS_HASH, AUTH_TAG_GROUP_SENDER_USER_ID, AUTH_TAG_LINK_DEVICE_ID,
     AUTH_TAG_MESSAGE_BLOB, AUTH_TAG_NONCE, AUTH_TAG_PREKEY_PQSPK_HASH, AUTH_TAG_PREKEY_SPK_HASH,
     AUTH_TAG_PRESENCE_STATUS, AUTH_TAG_PROFILE_AVATAR_HASH, AUTH_TAG_PROFILE_AVATAR_MIME_HASH,
     AUTH_TAG_PROFILE_DISPLAY_NAME_HASH, AUTH_TAG_PUSH_DEVICE_ID, AUTH_TAG_PUSH_TOKEN_HASH,
@@ -514,8 +514,7 @@ pub(crate) fn user_groups_list_auth_message(
         ty: AUTH_TAG_RECIPIENT_ID,
         value: user_id.as_bytes().to_vec(),
     });
-    encode(&records)
-        .map_err(|_| AppError::internal("failed to encode groups-list auth transcript"))
+    encode(&records).map_err(|_| AppError::internal("failed to encode groups-list auth transcript"))
 }
 
 pub(crate) fn group_members_list_auth_message(
@@ -571,7 +570,7 @@ pub(crate) fn group_relay_auth_message(
     auth: &RequestAuth,
     group_id: &str,
     sender_user_id: &str,
-    message_blob: &[u8],
+    recipients: &[(&str, &[u8])],
 ) -> Result<Vec<u8>, AppError> {
     let mut records = auth_common_records(auth, "groups-relay");
     records.push(TlvRecord {
@@ -582,14 +581,33 @@ pub(crate) fn group_relay_auth_message(
         ty: AUTH_TAG_GROUP_SENDER_USER_ID,
         value: sender_user_id.as_bytes().to_vec(),
     });
-    let mut hasher = Sha256::new();
-    hasher.update(message_blob);
     records.push(TlvRecord {
-        ty: AUTH_TAG_GROUP_MESSAGE_BLOB_HASH,
-        value: hasher.finalize().to_vec(),
+        ty: AUTH_TAG_GROUP_RECIPIENTS_HASH,
+        value: hash_group_recipients_sha256(recipients),
     });
     encode(&records)
         .map_err(|_| AppError::internal("failed to encode groups-relay auth transcript"))
+}
+
+fn hash_group_recipients_sha256(recipients: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut normalized: Vec<(&str, Vec<u8>)> = recipients
+        .iter()
+        .map(|(recipient_user_id, message_blob)| {
+            let mut blob_hasher = Sha256::new();
+            blob_hasher.update(message_blob);
+            (*recipient_user_id, blob_hasher.finalize().to_vec())
+        })
+        .collect();
+    normalized.sort_by(|left, right| left.0.cmp(right.0));
+
+    let mut hasher = Sha256::new();
+    for (recipient_user_id, message_hash) in normalized {
+        hasher.update(recipient_user_id.as_bytes());
+        hasher.update([0x00]);
+        hasher.update(&message_hash);
+        hasher.update([0x01]);
+    }
+    hasher.finalize().to_vec()
 }
 
 pub(crate) fn identity_log_auth_message(

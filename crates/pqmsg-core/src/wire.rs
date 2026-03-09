@@ -1,5 +1,7 @@
 use crate::alg::{AlgorithmSuite, SecurityProfile};
-use crate::tlv::{critical_type, decode_strict, encode, build_record_map, require_from_map, TlvRecord};
+use crate::tlv::{
+    build_record_map, critical_type, decode_strict, encode, require_from_map, TlvRecord,
+};
 use crate::CoreError;
 
 pub const WIRE_VERSION: u16 = 1;

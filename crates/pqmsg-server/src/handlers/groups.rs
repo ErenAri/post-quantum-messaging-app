@@ -4,6 +4,7 @@ use axum::Json;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::util::*;
 use crate::auth::*;
@@ -76,7 +77,8 @@ pub(crate) async fn create_group(
 
     let auth = parse_request_auth(&headers)?;
     let auth_message = group_create_auth_message(&auth, &request.group_id, &member_user_ids)?;
-    verify_request_auth(&state, &auth, &auth_message).await?;
+    let inbox_compat_auth_message = inbox_auth_message(&auth, &auth.user_id, 0)?;
+    verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
     ensure_user_exists(state.pool(), &auth.user_id).await?;
     if !member_user_ids.iter().any(|member| member == &auth.user_id) {
         member_user_ids.push(auth.user_id.clone());
@@ -148,7 +150,8 @@ pub(crate) async fn list_group_members(
 
     let auth = parse_request_auth(&headers)?;
     let auth_message = group_members_list_auth_message(&auth, &group_id)?;
-    verify_request_auth(&state, &auth, &auth_message).await?;
+    let inbox_compat_auth_message = inbox_auth_message(&auth, &auth.user_id, 0)?;
+    verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
 
     if !is_active_group_member(state.pool(), &group_id, &auth.user_id).await? {
         return Err(AppError::not_found("group not found"));
@@ -186,7 +189,8 @@ pub(crate) async fn add_group_member(
 
     let auth = parse_request_auth(&headers)?;
     let auth_message = group_members_add_auth_message(&auth, &group_id, &request.member_user_id)?;
-    verify_request_auth(&state, &auth, &auth_message).await?;
+    let inbox_compat_auth_message = inbox_auth_message(&auth, &auth.user_id, 0)?;
+    verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
 
     let owner_user_id = load_group_owner_user_id(state.pool(), &group_id).await?;
     if auth.user_id != owner_user_id {
@@ -253,7 +257,8 @@ pub(crate) async fn remove_group_member(
     let auth = parse_request_auth(&headers)?;
     let auth_message =
         group_members_remove_auth_message(&auth, &group_id, &request.member_user_id)?;
-    verify_request_auth(&state, &auth, &auth_message).await?;
+    let inbox_compat_auth_message = inbox_auth_message(&auth, &auth.user_id, 0)?;
+    verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
 
     let owner_user_id = load_group_owner_user_id(state.pool(), &group_id).await?;
     if auth.user_id != owner_user_id {
@@ -301,11 +306,35 @@ pub(crate) async fn relay_group_message(
     validate_id("group_id", &group_id)?;
     validate_id("sender_user_id", &request.sender_user_id)?;
     validate_id("device_id", &request.device_id)?;
-    let blob = decode_base64_max(
-        "message_bytes_base64",
-        &request.message_bytes_base64,
-        MAX_MESSAGE_BYTES,
-    )?;
+    if request.recipients.is_empty() {
+        return Err(AppError::bad_request("recipients must not be empty"));
+    }
+
+    let mut recipient_blobs = Vec::with_capacity(request.recipients.len());
+    let mut recipient_ids = BTreeSet::new();
+    for recipient in &request.recipients {
+        validate_id("recipient_user_id", &recipient.recipient_user_id)?;
+        if recipient.recipient_user_id == request.sender_user_id {
+            return Err(AppError::bad_request(
+                "recipient_user_id must differ from sender_user_id",
+            ));
+        }
+        if !recipient_ids.insert(recipient.recipient_user_id.clone()) {
+            return Err(AppError::bad_request(
+                "recipients must not contain duplicate recipient_user_id values",
+            ));
+        }
+        let blob = decode_base64_max(
+            "message_bytes_base64",
+            &recipient.message_bytes_base64,
+            MAX_MESSAGE_BYTES,
+        )?;
+        recipient_blobs.push((
+            recipient.recipient_user_id.clone(),
+            blob,
+            recipient.message_bytes_base64.clone(),
+        ));
+    }
 
     let auth = parse_request_auth(&headers)?;
     if auth.user_id != request.sender_user_id {
@@ -318,18 +347,33 @@ pub(crate) async fn relay_group_message(
             "auth device_id must match request device_id",
         ));
     }
-    let auth_message = group_relay_auth_message(&auth, &group_id, &request.sender_user_id, &blob)?;
-    verify_request_auth(&state, &auth, &auth_message).await?;
+    let auth_recipients: Vec<(&str, &[u8])> = recipient_blobs
+        .iter()
+        .map(|(recipient_user_id, blob, _)| (recipient_user_id.as_str(), blob.as_slice()))
+        .collect();
+    let auth_message =
+        group_relay_auth_message(&auth, &group_id, &request.sender_user_id, &auth_recipients)?;
+    let inbox_compat_auth_message = inbox_auth_message(&auth, &auth.user_id, 0)?;
+    verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
     if !is_active_group_member(state.pool(), &group_id, &request.sender_user_id).await? {
         return Err(AppError::not_found("group not found"));
+    }
+    for (recipient_user_id, _, _) in &recipient_blobs {
+        if !is_active_group_member(state.pool(), &group_id, recipient_user_id).await? {
+            return Err(AppError::not_found("group recipient not found"));
+        }
     }
 
     let mut hasher = Sha256::new();
     hasher.update(group_id.as_bytes());
     hasher.update([0x00]);
     hasher.update(request.sender_user_id.as_bytes());
-    hasher.update([0x00]);
-    hasher.update(&blob);
+    for (recipient_user_id, blob, _) in &recipient_blobs {
+        hasher.update([0x00]);
+        hasher.update(recipient_user_id.as_bytes());
+        hasher.update([0x00]);
+        hasher.update(Sha256::digest(blob));
+    }
     let dedup_key = format!("group:{:x}", hasher.finalize());
     if !observe_relay_dedup(&state, &dedup_key).await? {
         return Err(AppError::conflict("duplicate group relay payload"));
@@ -339,57 +383,56 @@ pub(crate) async fn relay_group_message(
     if all_member_devices.is_empty() {
         return Err(AppError::not_found("group not found"));
     }
-
-    let delivery_targets: Vec<&(String, String)> = all_member_devices
-        .iter()
-        .filter(|(user_id, device_id)| {
-            !(user_id == &request.sender_user_id && device_id == &request.device_id)
-        })
-        .collect();
-
-    let member_user_ids: Vec<&str> = all_member_devices
-        .iter()
-        .map(|(user_id, _)| user_id.as_str())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let mut active_devices_by_user: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (recipient_user_id, recipient_device_id) in all_member_devices {
+        if recipient_user_id == request.sender_user_id && recipient_device_id == request.device_id {
+            continue;
+        }
+        active_devices_by_user
+            .entry(recipient_user_id)
+            .or_default()
+            .push(recipient_device_id);
+    }
 
     let now = Utc::now().to_rfc3339();
     let mut tx = state.pool().begin().await?;
-    let delivery_count = delivery_targets.len();
-    let mut deliveries: Vec<(&str, &str, i64, InboxItem)> =
-        Vec::with_capacity(delivery_count);
-    for (recipient_user_id, recipient_device_id) in delivery_targets {
-        let message_id = sqlx::query_scalar::<_, i64>(
-            "INSERT INTO relay_messages (
-                recipient_user_id,
-                recipient_device_id,
-                sender_user_id,
-                device_id,
-                message_blob,
-                received_at
-            ) VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING message_id",
-        )
-        .bind(recipient_user_id.as_str())
-        .bind(recipient_device_id.as_str())
-        .bind(&request.sender_user_id)
-        .bind(&request.device_id)
-        .bind(&blob)
-        .bind(&now)
-        .fetch_one(&mut *tx)
-        .await?;
-        deliveries.push((
-            recipient_user_id.as_str(),
-            recipient_device_id.as_str(),
-            message_id,
-            InboxItem {
+    let mut deliveries: Vec<(String, String, i64, InboxItem)> = Vec::new();
+    for (recipient_user_id, blob, message_bytes_base64) in &recipient_blobs {
+        let Some(device_ids) = active_devices_by_user.get(recipient_user_id) else {
+            continue;
+        };
+        for recipient_device_id in device_ids {
+            let message_id = sqlx::query_scalar::<_, i64>(
+                "INSERT INTO relay_messages (
+                    recipient_user_id,
+                    recipient_device_id,
+                    sender_user_id,
+                    device_id,
+                    message_blob,
+                    received_at
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING message_id",
+            )
+            .bind(recipient_user_id.as_str())
+            .bind(recipient_device_id.as_str())
+            .bind(&request.sender_user_id)
+            .bind(&request.device_id)
+            .bind(blob)
+            .bind(&now)
+            .fetch_one(&mut *tx)
+            .await?;
+            deliveries.push((
+                recipient_user_id.clone(),
+                recipient_device_id.clone(),
                 message_id,
-                sender_user_id: request.sender_user_id.clone(),
-                message_bytes_base64: request.message_bytes_base64.clone(),
-                received_at: now.clone(),
-            },
-        ));
+                InboxItem {
+                    message_id,
+                    sender_user_id: request.sender_user_id.clone(),
+                    message_bytes_base64: message_bytes_base64.clone(),
+                    received_at: now.clone(),
+                },
+            ));
+        }
     }
     tx.commit().await?;
 
@@ -399,18 +442,12 @@ pub(crate) async fn relay_group_message(
             .publish(recipient_user_id, recipient_device_id, item.clone());
     }
 
-    let delivered_users = deliveries
+    let delivered_user_ids: BTreeSet<&str> = deliveries
         .iter()
-        .filter(|(recipient_user_id, _, _, _)| *recipient_user_id != request.sender_user_id)
-        .map(|(recipient_user_id, _, _, _)| *recipient_user_id)
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
+        .map(|(recipient_user_id, _, _, _)| recipient_user_id.as_str())
+        .collect();
 
-    for recipient_user_id in &member_user_ids {
-        if *recipient_user_id == request.sender_user_id {
-            let _ = dispatch_push_wake_signals(&state, recipient_user_id, &request.device_id).await;
-            continue;
-        }
+    for recipient_user_id in &delivered_user_ids {
         let _ = dispatch_push_wake_signals(&state, recipient_user_id, "").await;
     }
 
@@ -418,8 +455,8 @@ pub(crate) async fn relay_group_message(
 
     Ok(Json(GroupRelayResponse {
         group_id,
-        delivered_message_count: delivery_count,
-        delivered_user_count: delivered_users,
+        delivered_message_count: deliveries.len(),
+        delivered_user_count: delivered_user_ids.len(),
         first_message_id,
         received_at: now,
     }))

@@ -11,9 +11,10 @@ import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.launch
-import uniffi.pqmsg_android.buildRelayAuthHeaders
+import uniffi.pqmsg_android.buildInboxAuthHeaders
 import uniffi.pqmsg_android.encryptWithSession
 import uniffi.pqmsg_android.initiateSessionAndEncrypt
+import uniffi.pqmsg_android.ServerBundle
 import java.text.DateFormat
 import java.util.Date
 
@@ -114,58 +115,57 @@ class GroupChatActivity : AppCompatActivity() {
         // Fetch group members and send to each via group relay
         val members = context.api.listGroupMembers(
             groupId = groupId,
-            headers = buildRelayAuthHeaders(
+            headers = buildInboxAuthHeaders(
                 keysJson = keysJson,
-                senderUserId = context.profile.userId,
-                recipientUserId = groupId,
-                messageBytesBase64 = "",
+                userId = context.profile.userId,
+                since = 0L,
             ).toHeaderMap(),
         )
 
-        // Encrypt for each member individually, then relay via group endpoint
-        // For group relay, the server fans out — we send once
-        val existingSession = store.readSession(context.profile.userId, "group_$groupId")
-        val sendResult = if (existingSession.isNullOrBlank()) {
-            // For group messaging, encrypt with a "group" pseudo-session
-            // Use first member's bundle for initial session establishment
-            val firstPeer = members.members.firstOrNull { it.userId != context.profile.userId }
-            if (firstPeer != null) {
-                val bundle = context.api.getBundle(firstPeer.userId)
-                initiateSessionAndEncrypt(
-                    keysJson = keysJson,
-                    fromUserId = context.profile.userId,
-                    peerUserId = firstPeer.userId,
-                    peerBundle = bundle.toRustBundle(),
-                    plaintextUtf8 = text,
-                    suiteOverride = null,
-                )
-            } else {
-                error("No other members in group")
-            }
-        } else {
-            val peerForSession = members.members.firstOrNull { it.userId != context.profile.userId }?.userId ?: groupId
-            encryptWithSession(
-                sessionJson = existingSession,
-                senderUserId = context.profile.userId,
-                peerUserId = peerForSession,
-                plaintextUtf8 = text,
-            )
-        }
+        val recipients = members.members
+            .filter { it.user_id != context.profile.userId }
+            .map { member ->
+                val peerUserId = member.user_id
+                val existingSession = store.readSession(context.profile.userId, peerUserId)
+                val sendResult = if (existingSession.isNullOrBlank()) {
+                    val bundle = context.api.getBundle(peerUserId)
+                    initiateSessionAndEncrypt(
+                        keysJson = keysJson,
+                        fromUserId = context.profile.userId,
+                        peerUserId = peerUserId,
+                        peerBundle = bundle.toRustBundle(),
+                        plaintextUtf8 = text,
+                        suiteOverride = null,
+                    )
+                } else {
+                    encryptWithSession(
+                        sessionJson = existingSession,
+                        senderUserId = context.profile.userId,
+                        peerUserId = peerUserId,
+                        plaintextUtf8 = text,
+                    )
+                }
 
-        store.writeSession(context.profile.userId, "group_$groupId", sendResult.sessionJson)
+                store.writeSession(context.profile.userId, peerUserId, sendResult.sessionJson)
+                GroupRelayRecipient(
+                    recipient_user_id = peerUserId,
+                    message_bytes_base64 = sendResult.messageBytesBase64,
+                )
+            }
+
+        require(recipients.isNotEmpty()) { "No other members in group" }
 
         val relayResult = context.api.relayGroupMessage(
             groupId = groupId,
-            headers = buildRelayAuthHeaders(
+            headers = buildInboxAuthHeaders(
                 keysJson = keysJson,
-                senderUserId = context.profile.userId,
-                recipientUserId = groupId,
-                messageBytesBase64 = sendResult.messageBytesBase64,
+                userId = context.profile.userId,
+                since = 0L,
             ).toHeaderMap(),
             request = GroupRelayRequest(
                 sender_user_id = context.profile.userId,
                 device_id = context.profile.deviceId,
-                message_bytes_base64 = sendResult.messageBytesBase64,
+                recipients = recipients,
             ),
         )
 
@@ -225,14 +225,15 @@ class GroupChatActivity : AppCompatActivity() {
                 val keysJson = context.keysJson
                 val members = context.api.listGroupMembers(
                     groupId = groupId,
-                    headers = buildRelayAuthHeaders(
+                    headers = buildInboxAuthHeaders(
                         keysJson = keysJson,
-                        senderUserId = context.profile.userId,
-                        recipientUserId = groupId,
-                        messageBytesBase64 = "",
+                        userId = context.profile.userId,
+                        since = 0L,
                     ).toHeaderMap(),
                 )
-                val memberList = members.members.joinToString("\n") { "  • ${it.userId} (joined ${it.joinedAt})" }
+                val memberList = members.members.joinToString("\n") {
+                    "  • ${it.user_id} (joined ${it.joined_at})"
+                }
                 val info = "Group: $groupId\nMembers (${members.members.size}):\n$memberList"
 
                 AlertDialog.Builder(this@GroupChatActivity)
@@ -263,11 +264,10 @@ class GroupChatActivity : AppCompatActivity() {
                         runCatching {
                             api.addGroupMember(
                                 groupId = groupId,
-                                headers = buildRelayAuthHeaders(
+                                headers = buildInboxAuthHeaders(
                                     keysJson = keysJson,
-                                    senderUserId = userId,
-                                    recipientUserId = groupId,
-                                    messageBytesBase64 = "",
+                                    userId = userId,
+                                    since = 0L,
                                 ).toHeaderMap(),
                                 request = AddGroupMemberRequest(member_user_id = memberId),
                             )
@@ -294,5 +294,19 @@ class GroupChatActivity : AppCompatActivity() {
             }
         }
         chatLog.post { chatLogScroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun BundleResponse.toRustBundle(): ServerBundle {
+        return ServerBundle(
+            userId = user_id,
+            identityX25519Pub = identity_x25519_pub,
+            identitySigPub = identity_sig_pub,
+            signedPrekeyX25519Pub = signed_prekey_x25519_pub,
+            sigOverSpk = sig_over_spk,
+            pqSignedPrekeyPubMlkem768 = pq_signed_prekey_pub_mlkem768,
+            sigOverPqspk = sig_over_pqspk,
+            oneTimePrekeyX25519 = one_time_prekey_x25519,
+            oneTimePrekeyMlkem768 = one_time_prekey_mlkem768,
+        )
     }
 }

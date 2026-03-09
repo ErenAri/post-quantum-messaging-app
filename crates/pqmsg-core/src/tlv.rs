@@ -101,10 +101,7 @@ pub fn require<'a>(
 
 /// Build a lookup map from decoded records for efficient field extraction.
 pub fn build_record_map(records: &[TlvRecord]) -> HashMap<u16, &[u8]> {
-    records
-        .iter()
-        .map(|r| (r.ty, r.value.as_slice()))
-        .collect()
+    records.iter().map(|r| (r.ty, r.value.as_slice())).collect()
 }
 
 pub fn require_from_map<'a>(
@@ -112,9 +109,7 @@ pub fn require_from_map<'a>(
     ty: u16,
     field: &'static str,
 ) -> Result<&'a [u8], CoreError> {
-    map.get(&ty)
-        .copied()
-        .ok_or(CoreError::MissingField(field))
+    map.get(&ty).copied().ok_or(CoreError::MissingField(field))
 }
 
 #[cfg(test)]

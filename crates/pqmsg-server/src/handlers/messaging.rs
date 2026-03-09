@@ -353,9 +353,7 @@ pub(crate) async fn relay_sealed_message(
     if let Ok(permit) = state.push_spawn_semaphore().clone().try_acquire_owned() {
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(error) =
-                dispatch_push_wake_signals(&push_state, &push_recipient, "").await
-            {
+            if let Err(error) = dispatch_push_wake_signals(&push_state, &push_recipient, "").await {
                 tracing::warn!("sealed push wake dispatch failed reason={}", error);
             }
         });

@@ -31,6 +31,7 @@ const OUTBOX_STORE = "outbox";
 
 export type OutboxMessage = {
   id: string;
+  userId: string;
   peerId: string;
   groupId?: string;
   text: string;
@@ -178,12 +179,15 @@ export async function queueOutboxMessage(msg: OutboxMessage): Promise<void> {
   });
 }
 
-export async function getOutboxMessages(): Promise<OutboxMessage[]> {
+export async function getOutboxMessages(userId?: string): Promise<OutboxMessage[]> {
   const db = await open();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(OUTBOX_STORE, "readonly");
     const request = tx.objectStore(OUTBOX_STORE).getAll();
-    request.onsuccess = () => resolve(request.result as OutboxMessage[]);
+    request.onsuccess = () => {
+      const messages = request.result as OutboxMessage[];
+      resolve(userId ? messages.filter((message) => message.userId === userId) : messages);
+    };
     request.onerror = () => reject(request.error);
   });
 }
@@ -193,6 +197,32 @@ export async function removeOutboxMessage(id: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(OUTBOX_STORE, "readwrite");
     tx.objectStore(OUTBOX_STORE).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function clearOutboxMessages(userId?: string): Promise<void> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OUTBOX_STORE, "readwrite");
+    const store = tx.objectStore(OUTBOX_STORE);
+    if (!userId) {
+      store.clear();
+    } else {
+      const request = store.openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (cursor) {
+          const message = cursor.value as OutboxMessage;
+          if (message.userId === userId) {
+            cursor.delete();
+          }
+          cursor.continue();
+        }
+      };
+      request.onerror = () => reject(request.error);
+    }
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });

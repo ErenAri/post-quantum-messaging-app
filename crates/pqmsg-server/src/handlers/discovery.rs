@@ -143,7 +143,8 @@ pub(crate) async fn list_contacts(
         return Err(AppError::bad_request("auth user_id mismatch"));
     }
     let auth_message = contacts_list_auth_message(&auth, &user_id)?;
-    verify_request_auth(&state, &auth, &auth_message).await?;
+    let inbox_compat_auth_message = inbox_auth_message(&auth, &user_id, 0)?;
+    verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
     ensure_user_exists(state.pool(), &user_id).await?;
 
     let rows = sqlx::query(
@@ -205,7 +206,8 @@ pub(crate) async fn upsert_contact(
         verified_by_qr,
         verified_fingerprint_sha256.as_deref(),
     )?;
-    verify_request_auth(&state, &auth, &auth_message).await?;
+    let inbox_compat_auth_message = inbox_auth_message(&auth, &user_id, 0)?;
+    verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
     ensure_user_exists(state.pool(), &user_id).await?;
     ensure_user_exists(state.pool(), &request.contact_user_id).await?;
 
@@ -260,7 +262,8 @@ pub(crate) async fn remove_contact(
         return Err(AppError::bad_request("auth user_id mismatch"));
     }
     let auth_message = contacts_remove_auth_message(&auth, &user_id, &request.contact_user_id)?;
-    verify_request_auth(&state, &auth, &auth_message).await?;
+    let inbox_compat_auth_message = inbox_auth_message(&auth, &user_id, 0)?;
+    verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
     ensure_user_exists(state.pool(), &user_id).await?;
 
     let removed_at = Utc::now().to_rfc3339();

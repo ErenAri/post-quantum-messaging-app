@@ -1463,7 +1463,14 @@ pub fn decrypt_message(
         let identity = to_identity_keypair(&keys)?;
         let signed_prekey = to_signed_prekey(&keys)?;
         let pq_signed_prekey = to_pq_signed_prekey(&keys)?;
-        let responder = bob_receive(&kem, &identity, &signed_prekey, &pq_signed_prekey, None, &initial)?;
+        let responder = bob_receive(
+            &kem,
+            &identity,
+            &signed_prekey,
+            &pq_signed_prekey,
+            None,
+            &initial,
+        )?;
         let local_dh = DhKeyPair {
             public: signed_prekey.public_key,
             secret: signed_prekey.require_secret_key()?,

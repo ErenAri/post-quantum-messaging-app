@@ -204,6 +204,12 @@ pub(crate) struct GroupMemberMutationResponse {
 pub(crate) struct GroupRelayRequest {
     pub(crate) sender_user_id: String,
     pub(crate) device_id: String,
+    pub(crate) recipients: Vec<GroupRelayRecipient>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GroupRelayRecipient {
+    pub(crate) recipient_user_id: String,
     pub(crate) message_bytes_base64: String,
 }
 
@@ -662,6 +668,7 @@ pub(crate) struct CallHangupResponse {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct CallSignal {
+    pub(crate) signal_id: i64,
     pub(crate) signal_type: String,
     pub(crate) from_user_id: String,
     pub(crate) payload_base64: String,

@@ -102,7 +102,11 @@ pub fn wasm_encrypt(key: &[u8], plaintext: &[u8], ad: &[u8]) -> Result<Vec<u8>, 
 
 /// AEAD decrypt a ciphertext.
 #[wasm_bindgen]
-pub fn wasm_decrypt(key: &[u8], ciphertext_with_nonce: &[u8], ad: &[u8]) -> Result<Vec<u8>, JsValue> {
+pub fn wasm_decrypt(
+    key: &[u8],
+    ciphertext_with_nonce: &[u8],
+    ad: &[u8],
+) -> Result<Vec<u8>, JsValue> {
     if key.len() != 32 {
         return Err(JsValue::from_str("key must be 32 bytes"));
     }
@@ -113,13 +117,22 @@ pub fn wasm_decrypt(key: &[u8], ciphertext_with_nonce: &[u8], ad: &[u8]) -> Resu
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&ciphertext_with_nonce[..12]);
     let ciphertext = ciphertext_with_nonce[12..].to_vec();
-    let envelope = aead::CiphertextEnvelope { nonce, ciphertext, aad: ad.to_vec() };
+    let envelope = aead::CiphertextEnvelope {
+        nonce,
+        ciphertext,
+        aad: ad.to_vec(),
+    };
     aead::decrypt(&key_arr, &envelope).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Derive a key using HKDF-SHA256.
 #[wasm_bindgen]
-pub fn wasm_hkdf_sha256(ikm: &[u8], salt: &[u8], info: &[u8], out_len: usize) -> Result<Vec<u8>, JsValue> {
+pub fn wasm_hkdf_sha256(
+    ikm: &[u8],
+    salt: &[u8],
+    info: &[u8],
+    out_len: usize,
+) -> Result<Vec<u8>, JsValue> {
     let salt_opt = if salt.is_empty() { None } else { Some(salt) };
     kdf::hkdf_sha256(ikm, salt_opt, info, out_len).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -151,8 +164,8 @@ pub fn wasm_x25519_keypair() -> Result<Vec<u8>, JsValue> {
 #[wasm_bindgen]
 pub fn wasm_wrap_secret(passphrase: &str, plaintext: &[u8]) -> Result<Vec<u8>, JsValue> {
     let secret = SecretString::from(passphrase.to_string());
-    let wrapped = storage::wrap_bytes(&secret, plaintext)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let wrapped =
+        storage::wrap_bytes(&secret, plaintext).map_err(|e| JsValue::from_str(&e.to_string()))?;
     serde_json::to_vec(&wrapped).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
@@ -162,15 +175,13 @@ pub fn wasm_unwrap_secret(passphrase: &str, wrapped_json: &[u8]) -> Result<Vec<u
     let secret = SecretString::from(passphrase.to_string());
     let wrapped: storage::WrappedSecret =
         serde_json::from_slice(wrapped_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    storage::unwrap_bytes(&secret, &wrapped)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    storage::unwrap_bytes(&secret, &wrapped).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Build conversation associated data for AEAD binding.
 #[wasm_bindgen]
 pub fn wasm_conversation_ad(sender: &str, recipient: &str) -> Result<Vec<u8>, JsValue> {
-    conversation_associated_data(sender, recipient)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    conversation_associated_data(sender, recipient).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -181,12 +192,14 @@ pub fn wasm_conversation_ad(sender: &str, recipient: &str) -> Result<Vec<u8>, Js
 #[wasm_bindgen]
 #[cfg(feature = "pq-oqs")]
 pub fn wasm_kem_keypair() -> Result<JsValue, JsValue> {
-    use crate::kem::MlKem768;
     use crate::alg::KemAlgorithm;
+    use crate::kem::MlKem768;
 
-    let kem = MlKem768::new(KemAlgorithm::MlKem768)
+    let kem =
+        MlKem768::new(KemAlgorithm::MlKem768).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let kp = kem
+        .keypair()
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let kp = kem.keypair().map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     #[derive(Serialize)]
     struct KemKeyPairResult {
@@ -206,12 +219,13 @@ pub fn wasm_kem_keypair() -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 #[cfg(feature = "pq-oqs")]
 pub fn wasm_kem_encapsulate(recipient_public_key: &[u8]) -> Result<JsValue, JsValue> {
-    use crate::kem::{KemProvider, MlKem768};
     use crate::alg::KemAlgorithm;
+    use crate::kem::{KemProvider, MlKem768};
 
-    let kem = MlKem768::new(KemAlgorithm::MlKem768)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let enc = kem.encapsulate(recipient_public_key)
+    let kem =
+        MlKem768::new(KemAlgorithm::MlKem768).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let enc = kem
+        .encapsulate(recipient_public_key)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     #[derive(Serialize)]
@@ -232,12 +246,13 @@ pub fn wasm_kem_encapsulate(recipient_public_key: &[u8]) -> Result<JsValue, JsVa
 #[wasm_bindgen]
 #[cfg(feature = "pq-oqs")]
 pub fn wasm_kem_decapsulate(secret_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, JsValue> {
-    use crate::kem::{KemProvider, MlKem768};
     use crate::alg::KemAlgorithm;
+    use crate::kem::{KemProvider, MlKem768};
 
-    let kem = MlKem768::new(KemAlgorithm::MlKem768)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let shared_secret = kem.decapsulate(secret_key, ciphertext)
+    let kem =
+        MlKem768::new(KemAlgorithm::MlKem768).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let shared_secret = kem
+        .decapsulate(secret_key, ciphertext)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(shared_secret.to_vec())
 }
@@ -253,7 +268,9 @@ pub fn wasm_ml_dsa_keypair() -> Result<JsValue, JsValue> {
     use crate::pq_sig::{MlDsa65, PqSignatureProvider};
 
     let provider = MlDsa65::new().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let kp = provider.keypair().map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let kp = provider
+        .keypair()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     #[derive(Serialize)]
     struct PqSigKeyPairResult {
@@ -275,17 +292,23 @@ pub fn wasm_ml_dsa_sign(secret_key: &[u8], message: &[u8]) -> Result<Vec<u8>, Js
     use crate::pq_sig::{MlDsa65, PqSignatureProvider};
 
     let provider = MlDsa65::new().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    provider.sign(secret_key, message)
+    provider
+        .sign(secret_key, message)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Verify an ML-DSA-65 signature.
 #[wasm_bindgen]
 #[cfg(feature = "pq-oqs")]
-pub fn wasm_ml_dsa_verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), JsValue> {
+pub fn wasm_ml_dsa_verify(
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), JsValue> {
     use crate::pq_sig::{MlDsa65, PqSignatureProvider};
 
     let provider = MlDsa65::new().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    provider.verify(public_key, message, signature)
+    provider
+        .verify(public_key, message, signature)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }

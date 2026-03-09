@@ -31,8 +31,7 @@ pub trait PqSignatureProvider {
     fn sign(&self, secret_key: &[u8], message: &[u8]) -> Result<Vec<u8>, CoreError>;
 
     /// Verify `signature` over `message` with `public_key`.
-    fn verify(&self, public_key: &[u8], message: &[u8], signature: &[u8])
-        -> Result<(), CoreError>;
+    fn verify(&self, public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), CoreError>;
 }
 
 // ── OQS-backed ML-DSA-65 ──────────────────────────────────────────
@@ -91,12 +90,7 @@ impl PqSignatureProvider for MlDsa65 {
         Ok(sig.into_vec())
     }
 
-    fn verify(
-        &self,
-        public_key: &[u8],
-        message: &[u8],
-        signature: &[u8],
-    ) -> Result<(), CoreError> {
+    fn verify(&self, public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), CoreError> {
         let Some(pk_ref) = self.sig.public_key_from_bytes(public_key) else {
             return Err(CoreError::InvalidLength {
                 field: "pq_sig.public_key",
@@ -209,8 +203,12 @@ mod tests {
         let provider = MlDsa65::new().expect("init");
         let kp = provider.keypair().expect("keypair");
         let message = b"post-quantum authentication test";
-        let sig = provider.sign(kp.secret_key.as_slice(), message).expect("sign");
-        provider.verify(&kp.public_key, message, &sig).expect("verify");
+        let sig = provider
+            .sign(kp.secret_key.as_slice(), message)
+            .expect("sign");
+        provider
+            .verify(&kp.public_key, message, &sig)
+            .expect("verify");
     }
 
     #[test]
@@ -218,7 +216,9 @@ mod tests {
     fn ml_dsa_65_verify_rejects_tampered_message() {
         let provider = MlDsa65::new().expect("init");
         let kp = provider.keypair().expect("keypair");
-        let sig = provider.sign(kp.secret_key.as_slice(), b"original").expect("sign");
+        let sig = provider
+            .sign(kp.secret_key.as_slice(), b"original")
+            .expect("sign");
         let result = provider.verify(&kp.public_key, b"tampered", &sig);
         assert!(result.is_err());
     }
@@ -229,7 +229,9 @@ mod tests {
         let provider = MlDsa65::new().expect("init");
         let kp1 = provider.keypair().expect("keypair1");
         let kp2 = provider.keypair().expect("keypair2");
-        let sig = provider.sign(kp1.secret_key.as_slice(), b"msg").expect("sign");
+        let sig = provider
+            .sign(kp1.secret_key.as_slice(), b"msg")
+            .expect("sign");
         let result = provider.verify(&kp2.public_key, b"msg", &sig);
         assert!(result.is_err());
     }

@@ -865,19 +865,20 @@ final class AppState: ObservableObject {
             let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
             let response = try await api.createGroup(
                 headers: headers,
-                requestBody: CreateGroupRequest(group_name: name, member_user_ids: memberIds)
+                requestBody: CreateGroupRequest(group_id: name, member_user_ids: memberIds)
             )
+            let allMembers = Set(memberIds).union([user])
             let summary = GroupSummary(
                 groupId: response.group_id,
-                displayName: response.group_name,
-                memberCount: memberIds.count + 1,
+                displayName: response.group_id,
+                memberCount: response.member_count,
                 lastPreview: "Group created",
                 updatedAtMillis: Int64(Date().timeIntervalSince1970 * 1000),
                 unreadCount: 0
             )
             store.upsertGroupConversation(userId: user, group: summary)
             refreshConversations()
-            statusLine = "Created group '\(name)'"
+            statusLine = "Created group '\(response.group_id)' for \(allMembers.count) member(s)"
         }
     }
 
@@ -1045,7 +1046,7 @@ final class AppState: ObservableObject {
             let api = try ApiClient(serverURL: setup.serverURL)
             let headers = try buildInboxAuthHeaders(keysJson: keys, userId: user, since: 0).toHeaderMap()
             let response = try await api.getTyping(userId: user, headers: headers)
-            peerIsTyping = response.indicators.contains { $0.from_user_id == selectedPeer && $0.is_typing }
+            peerIsTyping = response.typing.contains { $0.sender_user_id == selectedPeer && $0.is_typing }
         } catch {
             // Non-fatal
         }

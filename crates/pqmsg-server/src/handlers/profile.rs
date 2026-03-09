@@ -324,7 +324,8 @@ pub(crate) async fn update_presence(
         return Err(AppError::bad_request("auth user_id mismatch"));
     }
     let auth_message = presence_update_auth_message(&auth, &user_id, &status)?;
-    verify_request_auth(&state, &auth, &auth_message).await?;
+    let inbox_compat_auth_message = inbox_auth_message(&auth, &user_id, 0)?;
+    verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
     ensure_user_exists(state.pool(), &user_id).await?;
 
     let now = Utc::now().to_rfc3339();
@@ -374,7 +375,8 @@ pub(crate) async fn get_presence(
 
     let auth = parse_request_auth(&headers)?;
     let auth_message = presence_get_auth_message(&auth, &user_id)?;
-    verify_request_auth(&state, &auth, &auth_message).await?;
+    let inbox_compat_auth_message = inbox_auth_message(&auth, &auth.user_id, 0)?;
+    verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
     ensure_user_exists(state.pool(), &auth.user_id).await?;
     ensure_user_exists(state.pool(), &user_id).await?;
 
@@ -433,7 +435,8 @@ pub(crate) async fn update_typing(
         ));
     }
     let auth_message = typing_update_auth_message(&auth, &peer_user_id, request.is_typing)?;
-    verify_request_auth(&state, &auth, &auth_message).await?;
+    let inbox_compat_auth_message = inbox_auth_message(&auth, &auth.user_id, 0)?;
+    verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
     ensure_user_exists(state.pool(), &auth.user_id).await?;
     ensure_user_exists(state.pool(), &peer_user_id).await?;
 
@@ -504,7 +507,8 @@ pub(crate) async fn get_typing(
         return Err(AppError::bad_request("auth user_id mismatch"));
     }
     let auth_message = typing_get_auth_message(&auth, &user_id)?;
-    verify_request_auth(&state, &auth, &auth_message).await?;
+    let inbox_compat_auth_message = inbox_auth_message(&auth, &user_id, 0)?;
+    verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
     ensure_user_exists(state.pool(), &user_id).await?;
 
     let now = Utc::now().to_rfc3339();

@@ -72,7 +72,7 @@ const AUTH_TAG_GROUP_ID: u16 = critical_type(0x321D);
 const AUTH_TAG_GROUP_MEMBER_USER_ID: u16 = critical_type(0x321E);
 const AUTH_TAG_GROUP_MEMBERS_HASH: u16 = critical_type(0x321F);
 const AUTH_TAG_GROUP_SENDER_USER_ID: u16 = critical_type(0x3220);
-const AUTH_TAG_GROUP_MESSAGE_BLOB_HASH: u16 = critical_type(0x3221);
+const AUTH_TAG_GROUP_RECIPIENTS_HASH: u16 = critical_type(0x322C);
 const AUTH_TAG_FILE_ID: u16 = critical_type(0x3222);
 const AUTH_TAG_FILE_RECIPIENT_ID: u16 = critical_type(0x3223);
 const AUTH_TAG_FILE_BLOB_HASH: u16 = critical_type(0x3224);
@@ -1244,9 +1244,8 @@ fn groups_relay_auth_headers(
     device_id: &str,
     group_id: &str,
     sender_user_id: &str,
-    message_blob: &[u8],
+    recipients: &[(&str, &[u8])],
 ) -> Vec<(&'static str, String)> {
-    use sha2::{Digest, Sha256};
     let timestamp = Utc::now().timestamp();
     let nonce = format!(
         "groups-relay-{}",
@@ -1261,11 +1260,9 @@ fn groups_relay_auth_headers(
         ty: AUTH_TAG_GROUP_SENDER_USER_ID,
         value: sender_user_id.as_bytes().to_vec(),
     });
-    let mut hasher = Sha256::new();
-    hasher.update(message_blob);
     records.push(TlvRecord {
-        ty: AUTH_TAG_GROUP_MESSAGE_BLOB_HASH,
-        value: hasher.finalize().to_vec(),
+        ty: AUTH_TAG_GROUP_RECIPIENTS_HASH,
+        value: hash_group_recipients(recipients),
     });
     let message = encode(&records).expect("groups-relay auth transcript");
     let signature = signing_key.sign(&message).to_bytes();
@@ -1276,6 +1273,29 @@ fn groups_relay_auth_headers(
         (AUTH_HEADER_NONCE, nonce),
         (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
     ]
+}
+
+fn hash_group_recipients(recipients: &[(&str, &[u8])]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+
+    let mut normalized: Vec<(&str, Vec<u8>)> = recipients
+        .iter()
+        .map(|(recipient_user_id, message_blob)| {
+            let mut blob_hasher = Sha256::new();
+            blob_hasher.update(message_blob);
+            (*recipient_user_id, blob_hasher.finalize().to_vec())
+        })
+        .collect();
+    normalized.sort_by(|left, right| left.0.cmp(right.0));
+
+    let mut hasher = Sha256::new();
+    for (recipient_user_id, message_hash) in normalized {
+        hasher.update(recipient_user_id.as_bytes());
+        hasher.update([0x00]);
+        hasher.update(&message_hash);
+        hasher.update([0x01]);
+    }
+    hasher.finalize().to_vec()
 }
 
 fn prekeys_auth_headers(
@@ -3672,7 +3692,9 @@ async fn group_membership_and_relay_flow() {
     )
     .await;
     assert_eq!(status_carol_groups, StatusCode::OK);
-    let carol_groups = carol_groups_payload["groups"].as_array().expect("carol groups");
+    let carol_groups = carol_groups_payload["groups"]
+        .as_array()
+        .expect("carol groups");
     assert_eq!(carol_groups.len(), 1);
     assert_eq!(carol_groups[0]["group_id"].as_str(), Some("alpha"));
     assert_eq!(carol_groups[0]["owner_user_id"].as_str(), Some("alice"));
@@ -3680,10 +3702,21 @@ async fn group_membership_and_relay_flow() {
 
     let group_message_1 = b"group-message-1".to_vec();
     let group_message_1_b64 = B64.encode(&group_message_1);
+    let group_message_1_carol = b"group-message-1-carol".to_vec();
+    let group_message_1_carol_b64 = B64.encode(&group_message_1_carol);
     let relay_group_body_1 = json!({
         "sender_user_id": "alice",
         "device_id": "alice-dev-1",
-        "message_bytes_base64": group_message_1_b64.clone()
+        "recipients": [
+            {
+                "recipient_user_id": "bob",
+                "message_bytes_base64": group_message_1_b64.clone()
+            },
+            {
+                "recipient_user_id": "carol",
+                "message_bytes_base64": group_message_1_carol_b64.clone()
+            }
+        ]
     });
     let relay_group_headers_1 = groups_relay_auth_headers(
         &alice_sig,
@@ -3691,7 +3724,10 @@ async fn group_membership_and_relay_flow() {
         "alice-dev-1",
         "alpha",
         "alice",
-        &group_message_1,
+        &[
+            ("bob", group_message_1.as_slice()),
+            ("carol", group_message_1_carol.as_slice()),
+        ],
     );
     let (status_group_relay_1, group_relay_payload_1) = json_request_with_headers(
         app.clone(),
@@ -3747,6 +3783,10 @@ async fn group_membership_and_relay_flow() {
         .as_array()
         .expect("carol messages");
     assert_eq!(carol_messages.len(), 1);
+    assert_eq!(
+        carol_messages[0]["message_bytes_base64"].as_str(),
+        Some(group_message_1_carol_b64.as_str())
+    );
     let carol_first_message_id = carol_messages[0]["message_id"]
         .as_i64()
         .expect("carol message id");
@@ -3772,7 +3812,12 @@ async fn group_membership_and_relay_flow() {
     let relay_group_body_2 = json!({
         "sender_user_id": "alice",
         "device_id": "alice-dev-1",
-        "message_bytes_base64": group_message_2_b64.clone()
+        "recipients": [
+            {
+                "recipient_user_id": "carol",
+                "message_bytes_base64": group_message_2_b64.clone()
+            }
+        ]
     });
     let relay_group_headers_2 = groups_relay_auth_headers(
         &alice_sig,
@@ -3780,7 +3825,7 @@ async fn group_membership_and_relay_flow() {
         "alice-dev-1",
         "alpha",
         "alice",
-        &group_message_2,
+        &[("carol", group_message_2.as_slice())],
     );
     let (status_group_relay_2, group_relay_payload_2) = json_request_with_headers(
         app.clone(),
@@ -3839,6 +3884,117 @@ async fn group_membership_and_relay_flow() {
     assert_eq!(
         carol_after_payload["messages"][0]["message_bytes_base64"].as_str(),
         Some(group_message_2_b64.as_str())
+    );
+}
+
+#[tokio::test]
+async fn inbox_auth_compatibility_accepts_mobile_secondary_flows() {
+    let app = test_app().await;
+    let alice_sig = signing_key(181);
+    let bob_sig = signing_key(182);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", [41u8; 32], &alice_sig);
+    let (status_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_alice, StatusCode::OK);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [42u8; 32], &bob_sig);
+    let (status_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_bob, StatusCode::OK);
+
+    let (status_create_group, create_group_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/groups",
+        json!({
+            "group_id": "compat-alpha",
+            "member_user_ids": ["bob"]
+        }),
+        &inbox_auth_headers(&alice_sig, "alice", "alice-dev-1", 0),
+    )
+    .await;
+    assert_eq!(status_create_group, StatusCode::OK);
+    assert_eq!(
+        create_group_payload["group_id"].as_str(),
+        Some("compat-alpha")
+    );
+
+    let (status_contacts_upsert, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/contacts",
+        json!({
+            "contact_user_id": "bob",
+            "alias": "B",
+            "verified_by_qr": false
+        }),
+        &inbox_auth_headers(&alice_sig, "alice", "alice-dev-1", 0),
+    )
+    .await;
+    assert_eq!(status_contacts_upsert, StatusCode::OK);
+
+    let (status_contacts_list, contacts_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/alice/contacts",
+        json!({}),
+        &inbox_auth_headers(&alice_sig, "alice", "alice-dev-1", 0),
+    )
+    .await;
+    assert_eq!(status_contacts_list, StatusCode::OK);
+    assert_eq!(
+        contacts_payload["contacts"]
+            .as_array()
+            .map(|contacts| contacts.len()),
+        Some(1)
+    );
+
+    let (status_presence_update, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/presence",
+        json!({ "status": "online" }),
+        &inbox_auth_headers(&alice_sig, "alice", "alice-dev-1", 0),
+    )
+    .await;
+    assert_eq!(status_presence_update, StatusCode::OK);
+
+    let (status_presence_get, presence_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/alice/presence",
+        json!({}),
+        &inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0),
+    )
+    .await;
+    assert_eq!(status_presence_get, StatusCode::OK);
+    assert_eq!(presence_payload["status"].as_str(), Some("online"));
+
+    let (status_typing_update, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/typing/bob",
+        json!({ "is_typing": true }),
+        &inbox_auth_headers(&alice_sig, "alice", "alice-dev-1", 0),
+    )
+    .await;
+    assert_eq!(status_typing_update, StatusCode::OK);
+
+    let (status_typing_get, typing_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/typing/bob",
+        json!({}),
+        &inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0),
+    )
+    .await;
+    assert_eq!(status_typing_get, StatusCode::OK);
+    assert_eq!(
+        typing_payload["typing"]
+            .as_array()
+            .map(|typing| typing.len()),
+        Some(1)
     );
 }
 

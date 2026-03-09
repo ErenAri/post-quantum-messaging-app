@@ -197,15 +197,14 @@ struct RelayResponse: Codable {
 // MARK: - Group Models
 
 struct CreateGroupRequest: Codable {
-    let group_name: String
+    let group_id: String
     let member_user_ids: [String]
 }
 
 struct CreateGroupResponse: Codable {
     let group_id: String
-    let group_name: String?
-    let owner_user_id: String?
-    let member_count: Int?
+    let owner_user_id: String
+    let member_count: Int
     let created_at: String
 }
 
@@ -258,7 +257,10 @@ struct GroupRelayRecipient: Codable {
 
 struct GroupRelayResponse: Codable {
     let group_id: String
-    let relayed_count: Int
+    let delivered_message_count: Int
+    let delivered_user_count: Int
+    let first_message_id: Int64?
+    let received_at: String
 }
 
 // MARK: - Sealed Sender Models
@@ -396,18 +398,26 @@ struct TypingUpdateRequest: Codable {
 }
 
 struct TypingUpdateResponse: Codable {
-    let user_id: String
-    let peer_user_id: String
+    let recipient_user_id: String
+    let sender_user_id: String
+    let sender_device_id: String
+    let is_typing: Bool
+    let updated_at: String
+    let expires_at: String?
 }
 
 struct TypingIndicator: Codable {
-    let from_user_id: String
+    let sender_user_id: String
+    let sender_device_id: String
     let is_typing: Bool
     let updated_at: String
+    let expires_at: String
 }
 
 struct TypingInboxResponse: Codable {
-    let indicators: [TypingIndicator]
+    let user_id: String
+    let typing: [TypingIndicator]
+    let checked_at: String
 }
 
 // MARK: - Receipt Models

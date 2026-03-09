@@ -13,7 +13,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.launch
-import uniffi.pqmsg_android.buildRelayAuthHeaders
+import uniffi.pqmsg_android.buildInboxAuthHeaders
 
 class ContactDiscoveryActivity : AppCompatActivity() {
     private lateinit var store: LocalStateStore
@@ -71,11 +71,10 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 )
                 val response = context.api.listContacts(
                     userId = context.profile.userId,
-                    headers = buildRelayAuthHeaders(
+                    headers = buildInboxAuthHeaders(
                         keysJson = context.keysJson,
-                        senderUserId = context.profile.userId,
-                        recipientUserId = context.profile.userId,
-                        messageBytesBase64 = "",
+                        userId = context.profile.userId,
+                        since = 0L,
                     ).toHeaderMap(),
                 )
                 currentContacts = response.contacts
@@ -132,11 +131,10 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 )
                 context.api.upsertContact(
                     userId = context.profile.userId,
-                    headers = buildRelayAuthHeaders(
+                    headers = buildInboxAuthHeaders(
                         keysJson = context.keysJson,
-                        senderUserId = context.profile.userId,
-                        recipientUserId = context.profile.userId,
-                        messageBytesBase64 = "",
+                        userId = context.profile.userId,
+                        since = 0L,
                     ).toHeaderMap(),
                     request = UpsertContactRequest(
                         contact_user_id = userId,
@@ -187,11 +185,10 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 )
                 context.api.removeContact(
                     userId = context.profile.userId,
-                    headers = buildRelayAuthHeaders(
+                    headers = buildInboxAuthHeaders(
                         keysJson = context.keysJson,
-                        senderUserId = context.profile.userId,
-                        recipientUserId = context.profile.userId,
-                        messageBytesBase64 = "",
+                        userId = context.profile.userId,
+                        since = 0L,
                     ).toHeaderMap(),
                     request = RemoveContactRequest(contact_user_id = contactUserId),
                 )

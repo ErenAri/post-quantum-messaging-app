@@ -4,7 +4,9 @@ use crate::dh::{diffie_hellman, generate_keypair, DhPublicKey};
 use crate::kdf::hkdf_sha256_32;
 use crate::kem::KemProvider;
 use crate::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle};
-use crate::tlv::{critical_type, decode_strict, encode, build_record_map, require_from_map, TlvRecord};
+use crate::tlv::{
+    build_record_map, critical_type, decode_strict, encode, require_from_map, TlvRecord,
+};
 use crate::CoreError;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -142,7 +144,10 @@ impl InitialMessage {
             require_from_map(&map, MSG_TAG_PROTOCOL_VERSION, "protocol_version")?,
             "protocol_version",
         )?;
-        let suite_id = parse_u16_be(require_from_map(&map, MSG_TAG_SUITE_ID, "suite_id")?, "suite_id")?;
+        let suite_id = parse_u16_be(
+            require_from_map(&map, MSG_TAG_SUITE_ID, "suite_id")?,
+            "suite_id",
+        )?;
         let sender_id = parse_utf8(
             require_from_map(&map, MSG_TAG_SENDER_ID, "sender_id")?,
             "sender_id",
@@ -151,8 +156,14 @@ impl InitialMessage {
             require_from_map(&map, MSG_TAG_RECIPIENT_ID, "recipient_id")?,
             "recipient_id",
         )?;
-        let ik_a_pub = parse_32(require_from_map(&map, MSG_TAG_IK_A_PUB, "ik_a_pub")?, "ik_a_pub")?;
-        let ek_a_pub = parse_32(require_from_map(&map, MSG_TAG_EK_A_PUB, "ek_a_pub")?, "ek_a_pub")?;
+        let ik_a_pub = parse_32(
+            require_from_map(&map, MSG_TAG_IK_A_PUB, "ik_a_pub")?,
+            "ik_a_pub",
+        )?;
+        let ek_a_pub = parse_32(
+            require_from_map(&map, MSG_TAG_EK_A_PUB, "ek_a_pub")?,
+            "ek_a_pub",
+        )?;
         let pq_ct = require_from_map(&map, MSG_TAG_PQ_CT, "pq_ct")?.to_vec();
         let nonce = parse_12(require_from_map(&map, MSG_TAG_NONCE, "nonce")?, "nonce")?;
         let ciphertext = require_from_map(&map, MSG_TAG_CIPHERTEXT, "ciphertext")?.to_vec();
@@ -348,11 +359,10 @@ pub fn alice_initiate<R: RngCore + CryptoRng, V: SignatureVerifier, K: KemProvid
     let envelope = encrypt_with_rng(session_key.as_bytes(), payload, &ad, rng)?;
 
     // Record which OTPK was consumed so Bob can look it up
-    let otpk_id = bob_bundle.one_time_prekey.as_ref().map(|_| {
-        bob_bundle
-            .owner_id
-            .clone()
-    });
+    let otpk_id = bob_bundle
+        .one_time_prekey
+        .as_ref()
+        .map(|_| bob_bundle.owner_id.clone());
 
     let initial_message = InitialMessage {
         protocol_version: bob_bundle.protocol_version,
@@ -662,8 +672,8 @@ mod tests {
 
         let encoded = initiator.initial_message.encode().expect("encode");
         let decoded = InitialMessage::decode(&encoded).expect("decode");
-        let responder =
-            bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq_spk, None, &decoded).expect("bob receive");
+        let responder = bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq_spk, None, &decoded)
+            .expect("bob receive");
 
         assert_eq!(initiator.session_key, responder.session_key);
         assert_eq!(responder.plaintext, b"hello pqmsg".to_vec());
@@ -901,8 +911,8 @@ mod tests {
         assert_eq!(decoded.nonce, initiator.initial_message.nonce);
         assert_eq!(decoded.ciphertext, initiator.initial_message.ciphertext);
 
-        let responder =
-            bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq_spk, None, &decoded).expect("bob receive");
+        let responder = bob_receive(&kem, &bob_identity, &bob_spk, &bob_pq_spk, None, &decoded)
+            .expect("bob receive");
         assert_eq!(responder.plaintext, b"roundtrip-test");
         assert_eq!(initiator.session_key, responder.session_key);
     }

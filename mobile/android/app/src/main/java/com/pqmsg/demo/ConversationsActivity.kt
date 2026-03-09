@@ -318,11 +318,10 @@ class ConversationsActivity : AppCompatActivity() {
                 val groupId = "${setup.userId}-${groupName.lowercase().replace(" ", "-")}-${System.currentTimeMillis() % 10000}"
                 val allMembers = (members + setup.userId).distinct()
                 val response = context.api.createGroup(
-                    headers = uniffi.pqmsg_android.buildRelayAuthHeaders(
+                    headers = uniffi.pqmsg_android.buildInboxAuthHeaders(
                         keysJson = keysJson,
-                        senderUserId = context.profile.userId,
-                        recipientUserId = groupId,
-                        messageBytesBase64 = "",
+                        userId = context.profile.userId,
+                        since = 0L,
                     ).toHeaderMap(),
                     request = CreateGroupRequest(
                         group_id = groupId,

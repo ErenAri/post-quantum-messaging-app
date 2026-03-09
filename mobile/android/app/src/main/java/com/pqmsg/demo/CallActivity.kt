@@ -18,6 +18,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Base64
+import kotlin.math.max
 
 /**
  * Voice/video call screen using the server-side call signaling API.
@@ -359,11 +360,12 @@ class CallActivity : AppCompatActivity() {
                 delay(1000)
                 val cid = callId ?: continue
                 try {
-                    val authMessage = "call-poll:${setup.userId}:${setup.deviceId}:$cid"
+                    val authMessage = "call-signals:${setup.userId}:${setup.deviceId}:$cid"
                     val headers = buildFormatStringAuth(store, setup, authMessage)
                     val response = api.pollCallSignals(cid, headers, lastSignalId)
 
                     for (signal in response.signals) {
+                        lastSignalId = max(lastSignalId, signal.signal_id)
                         when (signal.signal_type) {
                             "answer" -> {
                                 onCallConnected()
@@ -392,7 +394,7 @@ class CallActivity : AppCompatActivity() {
         setup: SetupConfig,
         message: String,
     ): Map<String, String> {
-        val keysJson = store.readKeysJson(setup.userId)
+        val keysJson = store.readKeys(setup.userId)
             ?: throw IllegalStateException("No keys available")
         val headers = uniffi.pqmsg_android.buildFormatStringAuthHeaders(keysJson, message)
         return headers.toHeaderMap()

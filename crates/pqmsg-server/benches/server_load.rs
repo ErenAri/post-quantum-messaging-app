@@ -52,11 +52,26 @@ fn auth_common_records(
     nonce: &str,
 ) -> Vec<TlvRecord> {
     vec![
-        TlvRecord { ty: AUTH_TAG_ENDPOINT, value: endpoint.as_bytes().to_vec() },
-        TlvRecord { ty: AUTH_TAG_USER_ID, value: user_id.as_bytes().to_vec() },
-        TlvRecord { ty: AUTH_TAG_DEVICE_ID, value: device_id.as_bytes().to_vec() },
-        TlvRecord { ty: AUTH_TAG_TIMESTAMP, value: timestamp.to_be_bytes().to_vec() },
-        TlvRecord { ty: AUTH_TAG_NONCE, value: nonce.as_bytes().to_vec() },
+        TlvRecord {
+            ty: AUTH_TAG_ENDPOINT,
+            value: endpoint.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: AUTH_TAG_USER_ID,
+            value: user_id.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: AUTH_TAG_DEVICE_ID,
+            value: device_id.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: AUTH_TAG_TIMESTAMP,
+            value: timestamp.to_be_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: AUTH_TAG_NONCE,
+            value: nonce.as_bytes().to_vec(),
+        },
     ]
 }
 
@@ -68,10 +83,20 @@ fn relay_auth_headers(
     message_blob: &[u8],
 ) -> Vec<(&'static str, String)> {
     let timestamp = Utc::now().timestamp();
-    let nonce = format!("bench-relay-{}", NONCE_COUNTER.fetch_add(1, Ordering::Relaxed));
-    let mut records = auth_common_records("relay", sender_user_id, sender_device_id, timestamp, &nonce);
-    records.push(TlvRecord { ty: AUTH_TAG_RECIPIENT_ID, value: recipient_user_id.as_bytes().to_vec() });
-    records.push(TlvRecord { ty: AUTH_TAG_MESSAGE_BLOB, value: message_blob.to_vec() });
+    let nonce = format!(
+        "bench-relay-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records =
+        auth_common_records("relay", sender_user_id, sender_device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: recipient_user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_MESSAGE_BLOB,
+        value: message_blob.to_vec(),
+    });
     let message = encode(&records).expect("relay auth transcript");
     let signature = key.sign(&message).to_bytes();
     vec![
@@ -90,10 +115,19 @@ fn inbox_auth_headers(
     since: i64,
 ) -> Vec<(&'static str, String)> {
     let timestamp = Utc::now().timestamp();
-    let nonce = format!("bench-inbox-{}", NONCE_COUNTER.fetch_add(1, Ordering::Relaxed));
+    let nonce = format!(
+        "bench-inbox-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
     let mut records = auth_common_records("inbox", user_id, device_id, timestamp, &nonce);
-    records.push(TlvRecord { ty: AUTH_TAG_RECIPIENT_ID, value: user_id.as_bytes().to_vec() });
-    records.push(TlvRecord { ty: AUTH_TAG_SINCE, value: since.to_be_bytes().to_vec() });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_SINCE,
+        value: since.to_be_bytes().to_vec(),
+    });
     let message = encode(&records).expect("inbox auth transcript");
     let signature = key.sign(&message).to_bytes();
     vec![
@@ -119,7 +153,9 @@ async fn json_request(
     for (name, value) in headers {
         builder = builder.header(*name, value);
     }
-    let request = builder.body(Body::from(body.to_string())).expect("build request");
+    let request = builder
+        .body(Body::from(body.to_string()))
+        .expect("build request");
     let response = app.oneshot(request).await.expect("request");
     response.status()
 }
@@ -137,7 +173,12 @@ async fn setup_app() -> axum::Router {
     let state = AppState::new(
         pool,
         db_backend,
-        Arc::new(RateLimiter::new(1_000_000.0, 1_000_000.0, 10_000_000, Duration::from_secs(600))),
+        Arc::new(RateLimiter::new(
+            1_000_000.0,
+            1_000_000.0,
+            10_000_000,
+            Duration::from_secs(600),
+        )),
     );
     build_router(state)
 }
@@ -149,7 +190,14 @@ async fn register_user(app: &axum::Router, user_id: &str, device_id: &str, key: 
         "identity_sig_pub": B64.encode(key.verifying_key().to_bytes()),
         "device_id": device_id,
     });
-    let status = json_request(app.clone(), Method::POST, "/v1/users/register", payload, &[]).await;
+    let status = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/users/register",
+        payload,
+        &[],
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "register {user_id}");
 }
 
@@ -200,27 +248,17 @@ fn bench_relay(c: &mut Criterion) {
                     let seq = relay_counter.fetch_add(1, Ordering::Relaxed);
                     let mut ct = vec![0xAA; size];
                     ct[..8.min(size)].copy_from_slice(&seq.to_be_bytes()[..8.min(size)]);
-                    let auth = relay_auth_headers(
-                        &alice_key,
-                        "bench-alice",
-                        "alice-d1",
-                        "bench-bob",
-                        &ct,
-                    );
+                    let auth =
+                        relay_auth_headers(&alice_key, "bench-alice", "alice-d1", "bench-bob", &ct);
                     async move {
                         let payload = json!({
                             "sender_user_id": "bench-alice",
                             "device_id": "alice-d1",
                             "message_bytes_base64": B64.encode(&ct)
                         });
-                        let status = json_request(
-                            app,
-                            Method::POST,
-                            "/v1/relay/bench-bob",
-                            payload,
-                            &auth,
-                        )
-                        .await;
+                        let status =
+                            json_request(app, Method::POST, "/v1/relay/bench-bob", payload, &auth)
+                                .await;
                         assert_eq!(status, StatusCode::OK);
                     }
                 });
@@ -250,7 +288,14 @@ fn bench_inbox_poll(c: &mut Criterion) {
                 "device_id": "alice-d1",
                 "message_bytes_base64": B64.encode(&ct)
             });
-            let status = json_request(app.clone(), Method::POST, "/v1/relay/inbox-bob", payload, &auth).await;
+            let status = json_request(
+                app.clone(),
+                Method::POST,
+                "/v1/relay/inbox-bob",
+                payload,
+                &auth,
+            )
+            .await;
             assert_eq!(status, StatusCode::OK);
         }
     });
@@ -266,14 +311,7 @@ fn bench_inbox_poll(c: &mut Criterion) {
             let auth = inbox_auth_headers(&bob_key, "inbox-bob", "bob-d1", since);
             let uri = format!("/v1/inbox/inbox-bob?since={since}");
             async move {
-                let _status = json_request(
-                    app,
-                    Method::GET,
-                    &uri,
-                    json!({}),
-                    &auth,
-                )
-                .await;
+                let _status = json_request(app, Method::GET, &uri, json!({}), &auth).await;
             }
         })
     });
@@ -297,7 +335,8 @@ fn bench_registration(c: &mut Criterion) {
                     "identity_sig_pub": B64.encode(key.verifying_key().to_bytes()),
                     "device_id": "dev1",
                 });
-                let status = json_request(app, Method::POST, "/v1/users/register", payload, &[]).await;
+                let status =
+                    json_request(app, Method::POST, "/v1/users/register", payload, &[]).await;
                 assert_eq!(status, StatusCode::OK);
             }
         })

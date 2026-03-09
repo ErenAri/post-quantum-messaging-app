@@ -65,7 +65,7 @@ function buildCallHangupAuth(keys: GeneratedKeys, callId: string): RequestAuthHe
 }
 
 function buildCallPollAuth(keys: GeneratedKeys, callId: string): RequestAuthHeaders {
-  return formatStringAuth(keys, `call-poll:${keys.userId}:${keys.deviceId}:${callId}`);
+  return formatStringAuth(keys, `call-signals:${keys.userId}:${keys.deviceId}:${callId}`);
 }
 
 function formatStringAuth(keys: GeneratedKeys, message: string): RequestAuthHeaders {
@@ -530,6 +530,7 @@ export class CallManager {
       );
 
       for (const signal of resp.signals) {
+        this.lastSignalId = Math.max(this.lastSignalId, signal.signal_id);
         await this.handleSignal(signal);
       }
     } catch {

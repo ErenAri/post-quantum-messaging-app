@@ -430,6 +430,7 @@ export type CallHangupResponse = {
 };
 
 export type CallSignal = {
+  signal_id: number;
   signal_type: string;
   from_user_id: string;
   payload_base64: string;

@@ -260,6 +260,11 @@ data class GroupMemberMutationResponse(
 data class GroupRelayRequest(
     val sender_user_id: String,
     val device_id: String,
+    val recipients: List<GroupRelayRecipient>,
+)
+
+data class GroupRelayRecipient(
+    val recipient_user_id: String,
     val message_bytes_base64: String,
 )
 
@@ -557,6 +562,7 @@ data class CallHangupResponse(
 )
 
 data class CallSignal(
+    val signal_id: Long,
     val signal_type: String,
     val from_user_id: String,
     val payload_base64: String,

@@ -55,6 +55,7 @@ import {
   type IdentityLogItem,
   type DiscoveryMatchItem,
   type DeviceRecord,
+  type ServerCapabilitiesResponse,
 } from "./server";
 import {
   DEFAULT_SETUP,
@@ -91,6 +92,7 @@ import {
   updateMessageStatus,
   getMessages,
   clearAllMessages,
+  clearOutboxMessages,
   searchMessages,
   queueOutboxMessage,
   getOutboxMessages,
@@ -148,8 +150,40 @@ let sealedInboxPollTimer: ReturnType<typeof setInterval> | null = null;
 // Call state
 let callManager: CallManager | null = null;
 let currentCallInfo: CallInfo | null = null;
+let cachedCapabilities: ServerCapabilitiesResponse | null = null;
+let cachedCapabilitiesServerUrl: string | null = null;
 
 type InboxFilter = "all" | "unread" | "groups" | "requests" | "archived";
+
+async function loadServerCapabilitiesCached(): Promise<ServerCapabilitiesResponse | null> {
+  if (cachedCapabilities && cachedCapabilitiesServerUrl === setup.serverUrl) {
+    return cachedCapabilities;
+  }
+  try {
+    const caps = await new PqmsgApi(setup.serverUrl).getCapabilities();
+    cachedCapabilities = caps;
+    cachedCapabilitiesServerUrl = setup.serverUrl;
+    return caps;
+  } catch {
+    cachedCapabilities = null;
+    cachedCapabilitiesServerUrl = setup.serverUrl;
+    return null;
+  }
+}
+
+async function ensureWebMessagingAllowed(kind: "direct" | "group"): Promise<boolean> {
+  const caps = await loadServerCapabilitiesCached();
+  if (caps && caps.web_client_policy !== "demo_only") {
+    return true;
+  }
+  const label = kind === "group" ? "group messaging" : "messaging";
+  const detail = caps ? "server policy is demo_only" : "server capabilities could not be verified";
+  notify(
+    `Web ${label} is disabled because ${detail}. Use Android, iOS, or CLI for interoperable chat.`,
+    "error"
+  );
+  return false;
+}
 
 type UnifiedConversationRow = {
   kind: ConversationKind;
@@ -1456,6 +1490,7 @@ async function renderChat(peerId: string): Promise<void> {
   sendBtn.addEventListener("click", async () => {
     const text = input.value.trim();
     if (!text || sendInFlight) return;
+    if (!(await ensureWebMessagingAllowed("direct"))) return;
     sendInFlight = true;
     input.value = "";
     sendBtn.disabled = true;
@@ -2003,6 +2038,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
   sendBtn.addEventListener("click", async () => {
     const text = input.value.trim();
     if (!text || sendInFlight) return;
+    if (!(await ensureWebMessagingAllowed("group"))) return;
     sendInFlight = true;
     input.value = "";
     sendBtn.disabled = true;
@@ -2561,6 +2597,7 @@ function renderSettings(): void {
       // Best-effort server retirement
     }
     wipeLocalState(setup.userId);
+    await clearOutboxMessages(setup.userId);
     await clearAllMessages();
     keys = null;
     if (realtimeInbox) { realtimeInbox.disconnect(); realtimeInbox = null; }
@@ -3365,9 +3402,18 @@ function showOfflineBanner(offline: boolean): void {
 async function drainOutbox(): Promise<void> {
   try {
     const k = await ensureKeys();
+    if (!(await ensureWebMessagingAllowed("direct"))) {
+      const queued = await getOutboxMessages(k.userId);
+      for (const item of queued) {
+        await removeOutboxMessage(item.id);
+        await updateMessageStatus(item.id, "failed");
+        updateBubbleStatus(item.id, "failed");
+      }
+      return;
+    }
     const api = new PqmsgApi(setup.serverUrl);
     const passphrase = getPassphrase();
-    const queued = await getOutboxMessages();
+    const queued = await getOutboxMessages(k.userId);
     for (const item of queued) {
       try {
         if (item.groupId) {
