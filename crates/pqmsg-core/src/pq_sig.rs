@@ -45,7 +45,7 @@ pub struct MlDsa65 {
 impl MlDsa65 {
     pub fn new() -> Result<Self, CoreError> {
         oqs::init();
-        let sig = oqs::sig::Sig::new(oqs::sig::Algorithm::Dilithium3)
+        let sig = oqs::sig::Sig::new(oqs::sig::Algorithm::MlDsa65)
             .map_err(|_| CoreError::PqSigOperation("MlDsa65 init failed"))?;
         Ok(Self { sig })
     }

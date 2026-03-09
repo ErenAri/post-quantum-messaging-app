@@ -3,7 +3,10 @@
     "allow": [
       "Bash(cargo build:*)",
       "Bash(cargo test:*)",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "Bash(cargo doc:*)",
+      "Bash(grep:*)",
+      "Bash(cargo bench:*)"
     ]
   }
 }

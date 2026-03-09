@@ -94,8 +94,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: run criterion benchmarks (no regression gate)
+      - name: run crypto benchmarks
         run: cargo bench -p pqmsg-core --bench crypto_benchmarks -- --output-format bencher 2>/dev/null | tee bench-output.txt
+      - name: run server load benchmarks
+        run: cargo bench -p pqmsg-server --bench server_load -- --output-format bencher 2>/dev/null | tee -a bench-output.txt
       - name: upload benchmark results
         uses: actions/upload-artifact@v4
         with:

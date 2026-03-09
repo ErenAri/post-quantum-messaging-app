@@ -173,14 +173,14 @@ pub(crate) async fn call_ice_candidate(
     verify_request_auth(&state, &auth, auth_message.as_bytes()).await?;
 
     // Verify the call exists
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM call_sessions WHERE call_id = $1 AND status IN ('ringing', 'active'))",
+    let exists = sqlx::query(
+        "SELECT 1 FROM call_sessions WHERE call_id = $1 AND status IN ('ringing', 'active')",
     )
     .bind(&call_id)
-    .fetch_one(state.pool())
+    .fetch_optional(state.pool())
     .await?;
 
-    if !exists {
+    if exists.is_none() {
         return Err(AppError::not_found("call session not found or already ended"));
     }
 
@@ -226,15 +226,15 @@ pub(crate) async fn call_hangup(
     verify_request_auth(&state, &auth, auth_message.as_bytes()).await?;
 
     // Verify user is part of the call
-    let participant: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM call_sessions WHERE call_id = $1 AND (caller_user_id = $2 OR callee_user_id = $2) AND status IN ('ringing', 'active'))",
+    let participant = sqlx::query(
+        "SELECT 1 FROM call_sessions WHERE call_id = $1 AND (caller_user_id = $2 OR callee_user_id = $2) AND status IN ('ringing', 'active')",
     )
     .bind(&call_id)
     .bind(&request.user_id)
-    .fetch_one(state.pool())
+    .fetch_optional(state.pool())
     .await?;
 
-    if !participant {
+    if participant.is_none() {
         return Err(AppError::not_found(
             "call session not found or user is not a participant",
         ));
@@ -287,15 +287,15 @@ pub(crate) async fn poll_call_signals(
     verify_request_auth(&state, &auth, auth_message.as_bytes()).await?;
 
     // Verify user is part of the call
-    let participant: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM call_sessions WHERE call_id = $1 AND (caller_user_id = $2 OR callee_user_id = $2))",
+    let participant = sqlx::query(
+        "SELECT 1 FROM call_sessions WHERE call_id = $1 AND (caller_user_id = $2 OR callee_user_id = $2)",
     )
     .bind(&call_id)
     .bind(&auth.user_id)
-    .fetch_one(state.pool())
+    .fetch_optional(state.pool())
     .await?;
 
-    if !participant {
+    if participant.is_none() {
         return Err(AppError::not_found(
             "call session not found or user is not a participant",
         ));

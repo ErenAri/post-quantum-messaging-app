@@ -39,3 +39,8 @@ futures-util = "0.3"
 [dev-dependencies]
 tokio-tungstenite = "0.24"
 proptest = "1"
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+
+[[bench]]
+name = "server_load"
+harness = false

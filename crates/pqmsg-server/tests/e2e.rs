@@ -1113,3 +1113,448 @@ async fn e2e_receipt_idempotent_upsert() {
     let items = receipts["receipts"].as_array().unwrap();
     assert_eq!(items.len(), 1, "upsert should not create duplicate");
 }
+
+// ── Call signaling auth helpers ──────────────────────────────────
+
+fn call_offer_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    callee_user_id: &str,
+) -> Vec<(&'static str, String)> {
+    let auth_message = format!("call-offer:{user_id}:{device_id}:{callee_user_id}");
+    make_auth_headers(
+        signing_key,
+        user_id,
+        device_id,
+        auth_message.as_bytes(),
+        "e2e-call-offer",
+    )
+}
+
+fn call_answer_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    call_id: &str,
+) -> Vec<(&'static str, String)> {
+    let auth_message = format!("call-answer:{user_id}:{device_id}:{call_id}");
+    make_auth_headers(
+        signing_key,
+        user_id,
+        device_id,
+        auth_message.as_bytes(),
+        "e2e-call-answer",
+    )
+}
+
+fn call_ice_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    call_id: &str,
+) -> Vec<(&'static str, String)> {
+    let auth_message = format!("call-ice:{user_id}:{device_id}:{call_id}");
+    make_auth_headers(
+        signing_key,
+        user_id,
+        device_id,
+        auth_message.as_bytes(),
+        "e2e-call-ice",
+    )
+}
+
+fn call_hangup_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    call_id: &str,
+) -> Vec<(&'static str, String)> {
+    let auth_message = format!("call-hangup:{user_id}:{device_id}:{call_id}");
+    make_auth_headers(
+        signing_key,
+        user_id,
+        device_id,
+        auth_message.as_bytes(),
+        "e2e-call-hangup",
+    )
+}
+
+fn call_signals_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    call_id: &str,
+) -> Vec<(&'static str, String)> {
+    let auth_message = format!("call-signals:{user_id}:{device_id}:{call_id}");
+    make_auth_headers(
+        signing_key,
+        user_id,
+        device_id,
+        auth_message.as_bytes(),
+        "e2e-call-signals",
+    )
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Call signaling E2E tests
+// ══════════════════════════════════════════════════════════════════════
+
+/// Full call flow: offer → answer → ICE exchange → poll signals → hangup.
+#[tokio::test]
+async fn e2e_call_full_flow() {
+    let app = test_app().await;
+
+    let alice = Client::new("call-alice", "alice-d1", 170);
+    let bob = Client::new("call-bob", "bob-d1", 180);
+    alice.register(&app).await;
+    bob.register(&app).await;
+
+    // 1. Alice sends an offer to Bob
+    let offer_auth = call_offer_auth_headers(
+        &alice.signing_key,
+        "call-alice",
+        "alice-d1",
+        "call-bob",
+    );
+    let (status, offer_body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/calls/call-bob/offer",
+        json!({
+            "caller_user_id": "call-alice",
+            "device_id": "alice-d1",
+            "sdp_offer_base64": B64.encode(b"v=0\r\no=alice SDP offer"),
+            "call_type": "audio"
+        }),
+        &offer_auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "offer: {offer_body}");
+    let call_id = offer_body["call_id"].as_str().expect("call_id").to_string();
+    assert!(!call_id.is_empty());
+    assert!(offer_body["created_at"].as_str().is_some());
+
+    // 2. Bob polls for signals and sees the offer
+    let poll_auth = call_signals_auth_headers(
+        &bob.signing_key,
+        "call-bob",
+        "bob-d1",
+        &call_id,
+    );
+    let (status, signals_body) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/calls/{call_id}/signals?since=0"),
+        json!({}),
+        &poll_auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "poll signals: {signals_body}");
+    let signals = signals_body["signals"].as_array().expect("signals array");
+    assert_eq!(signals.len(), 1);
+    assert_eq!(signals[0]["signal_type"].as_str(), Some("offer"));
+    assert_eq!(signals[0]["from_user_id"].as_str(), Some("call-alice"));
+
+    // 3. Bob answers the call
+    let answer_auth = call_answer_auth_headers(
+        &bob.signing_key,
+        "call-bob",
+        "bob-d1",
+        &call_id,
+    );
+    let (status, answer_body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        &format!("/v1/calls/{call_id}/answer"),
+        json!({
+            "callee_user_id": "call-bob",
+            "device_id": "bob-d1",
+            "sdp_answer_base64": B64.encode(b"v=0\r\no=bob SDP answer")
+        }),
+        &answer_auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "answer: {answer_body}");
+    assert_eq!(answer_body["call_id"].as_str(), Some(call_id.as_str()));
+    assert!(answer_body["answered_at"].as_str().is_some());
+
+    // 4. Alice polls and sees the answer
+    let poll_auth_alice = call_signals_auth_headers(
+        &alice.signing_key,
+        "call-alice",
+        "alice-d1",
+        &call_id,
+    );
+    let (status, signals_body) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/calls/{call_id}/signals?since=0"),
+        json!({}),
+        &poll_auth_alice,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let signals = signals_body["signals"].as_array().unwrap();
+    assert_eq!(signals.len(), 1, "Alice should see Bob's answer (not her own offer)");
+    assert_eq!(signals[0]["signal_type"].as_str(), Some("answer"));
+    assert_eq!(signals[0]["from_user_id"].as_str(), Some("call-bob"));
+
+    // 5. Both exchange ICE candidates
+    let ice_auth_alice = call_ice_auth_headers(
+        &alice.signing_key,
+        "call-alice",
+        "alice-d1",
+        &call_id,
+    );
+    let (status, ice_body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        &format!("/v1/calls/{call_id}/ice"),
+        json!({
+            "sender_user_id": "call-alice",
+            "device_id": "alice-d1",
+            "candidate_base64": B64.encode(b"candidate:alice-ice-1")
+        }),
+        &ice_auth_alice,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "alice ice: {ice_body}");
+
+    let ice_auth_bob = call_ice_auth_headers(
+        &bob.signing_key,
+        "call-bob",
+        "bob-d1",
+        &call_id,
+    );
+    let (status, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        &format!("/v1/calls/{call_id}/ice"),
+        json!({
+            "sender_user_id": "call-bob",
+            "device_id": "bob-d1",
+            "candidate_base64": B64.encode(b"candidate:bob-ice-1")
+        }),
+        &ice_auth_bob,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 6. Bob polls and sees Alice's ICE candidate
+    let poll_auth_bob2 = call_signals_auth_headers(
+        &bob.signing_key,
+        "call-bob",
+        "bob-d1",
+        &call_id,
+    );
+    let (status, signals_body) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/calls/{call_id}/signals?since=0"),
+        json!({}),
+        &poll_auth_bob2,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let signals = signals_body["signals"].as_array().unwrap();
+    // Bob should see: offer (from Alice) + ice-candidate (from Alice) = 2 signals
+    // (answer from Bob and Bob's own ICE are excluded since from_user_id != auth.user_id)
+    let alice_signals: Vec<_> = signals
+        .iter()
+        .filter(|s| s["from_user_id"].as_str() == Some("call-alice"))
+        .collect();
+    assert!(
+        alice_signals.len() >= 2,
+        "Bob should see Alice's offer + ICE, got {} signals",
+        alice_signals.len()
+    );
+
+    // 7. Alice hangs up
+    let hangup_auth = call_hangup_auth_headers(
+        &alice.signing_key,
+        "call-alice",
+        "alice-d1",
+        &call_id,
+    );
+    let (status, hangup_body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        &format!("/v1/calls/{call_id}/hangup"),
+        json!({
+            "user_id": "call-alice",
+            "device_id": "alice-d1"
+        }),
+        &hangup_auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "hangup: {hangup_body}");
+    assert_eq!(hangup_body["call_id"].as_str(), Some(call_id.as_str()));
+    assert!(hangup_body["ended_at"].as_str().is_some());
+}
+
+/// Answering a non-existent call returns 404.
+#[tokio::test]
+async fn e2e_call_answer_nonexistent() {
+    let app = test_app().await;
+
+    let bob = Client::new("cne-bob", "bob-d1", 190);
+    bob.register(&app).await;
+
+    let fake_call_id = "00000000-0000-0000-0000-000000000000";
+    let auth = call_answer_auth_headers(
+        &bob.signing_key,
+        "cne-bob",
+        "bob-d1",
+        fake_call_id,
+    );
+    let (status, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        &format!("/v1/calls/{fake_call_id}/answer"),
+        json!({
+            "callee_user_id": "cne-bob",
+            "device_id": "bob-d1",
+            "sdp_answer_base64": B64.encode(b"fake-sdp")
+        }),
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Invalid call_type in offer is rejected.
+#[tokio::test]
+async fn e2e_call_offer_rejects_invalid_type() {
+    let app = test_app().await;
+
+    let alice = Client::new("cit-alice", "alice-d1", 200);
+    let bob = Client::new("cit-bob", "bob-d1", 210);
+    alice.register(&app).await;
+    bob.register(&app).await;
+
+    let auth = call_offer_auth_headers(
+        &alice.signing_key,
+        "cit-alice",
+        "alice-d1",
+        "cit-bob",
+    );
+    let (status, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/calls/cit-bob/offer",
+        json!({
+            "caller_user_id": "cit-alice",
+            "device_id": "alice-d1",
+            "sdp_offer_base64": B64.encode(b"some-sdp"),
+            "call_type": "screenshare"
+        }),
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// Hangup on an already-ended call returns 404.
+#[tokio::test]
+async fn e2e_call_hangup_after_ended() {
+    let app = test_app().await;
+
+    let alice = Client::new("che-alice", "alice-d1", 220);
+    let bob = Client::new("che-bob", "bob-d1", 230);
+    alice.register(&app).await;
+    bob.register(&app).await;
+
+    // Create a call
+    let offer_auth = call_offer_auth_headers(
+        &alice.signing_key,
+        "che-alice",
+        "alice-d1",
+        "che-bob",
+    );
+    let (status, offer_body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/calls/che-bob/offer",
+        json!({
+            "caller_user_id": "che-alice",
+            "device_id": "alice-d1",
+            "sdp_offer_base64": B64.encode(b"sdp-offer"),
+            "call_type": "video"
+        }),
+        &offer_auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let call_id = offer_body["call_id"].as_str().unwrap();
+
+    // First hangup succeeds
+    let hangup_auth = call_hangup_auth_headers(
+        &alice.signing_key,
+        "che-alice",
+        "alice-d1",
+        call_id,
+    );
+    let (status, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        &format!("/v1/calls/{call_id}/hangup"),
+        json!({
+            "user_id": "che-alice",
+            "device_id": "alice-d1"
+        }),
+        &hangup_auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Second hangup should fail (call already ended)
+    let hangup_auth2 = call_hangup_auth_headers(
+        &alice.signing_key,
+        "che-alice",
+        "alice-d1",
+        call_id,
+    );
+    let (status, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        &format!("/v1/calls/{call_id}/hangup"),
+        json!({
+            "user_id": "che-alice",
+            "device_id": "alice-d1"
+        }),
+        &hangup_auth2,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// ICE candidate on a non-existent call returns 404.
+#[tokio::test]
+async fn e2e_call_ice_nonexistent() {
+    let app = test_app().await;
+
+    let alice = Client::new("icene-alice", "alice-d1", 240);
+    alice.register(&app).await;
+
+    let fake_call_id = "00000000-0000-0000-0000-111111111111";
+    let auth = call_ice_auth_headers(
+        &alice.signing_key,
+        "icene-alice",
+        "alice-d1",
+        fake_call_id,
+    );
+    let (status, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        &format!("/v1/calls/{fake_call_id}/ice"),
+        json!({
+            "sender_user_id": "icene-alice",
+            "device_id": "alice-d1",
+            "candidate_base64": B64.encode(b"ice-candidate")
+        }),
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
