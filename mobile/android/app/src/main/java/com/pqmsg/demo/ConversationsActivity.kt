@@ -11,6 +11,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
+import uniffi.pqmsg_android.buildGroupCreateAuthHeaders
 
 class ConversationsActivity : AppCompatActivity() {
     private lateinit var store: LocalStateStore
@@ -187,21 +188,32 @@ class ConversationsActivity : AppCompatActivity() {
             .setView(input)
             .setNegativeButton(android.R.string.cancel, null)
             .setPositiveButton(R.string.button_open_peer_chat) { _, _ ->
-                runCatching {
-                    val target = MessagingCoordinator.parseComposeTarget(
-                        input.text.toString(),
-                        setup.serverUrl,
-                    )
-                    val updatedSetup = setup.copy(
-                        serverUrl = target.serverUrl,
-                        peerUserId = target.peerUserId,
-                    )
-                    store.saveSetup(updatedSetup)
-                    store.markPeerAccepted(updatedSetup.userId, target.peerUserId)
-                    openChat(target.peerUserId)
-                }.onFailure {
-                    val mapped = UiErrorMapper.fromThrowable(it, "Compose conversation")
-                    statusText.text = mapped.headline
+                statusText.text = "Checking peer..."
+                lifecycleScope.launch {
+                    runCatching {
+                        val target = MessagingCoordinator.parseComposeTarget(
+                            input.text.toString(),
+                            setup.serverUrl,
+                        )
+                        val context = MessagingCoordinator.ensureReady(
+                            store = store,
+                            serverUrl = target.serverUrl,
+                            userId = setup.userId,
+                            suiteLabel = setup.suiteLabel,
+                            deviceId = setup.deviceId,
+                        )
+                        context.api.getBundle(target.peerUserId)
+                        val updatedSetup = setup.copy(
+                            serverUrl = target.serverUrl,
+                            peerUserId = target.peerUserId,
+                        )
+                        store.saveSetup(updatedSetup)
+                        store.markPeerAccepted(updatedSetup.userId, target.peerUserId)
+                        openChat(target.peerUserId)
+                    }.onFailure {
+                        val mapped = UiErrorMapper.fromThrowable(it, "Compose conversation")
+                        statusText.text = mapped.headline
+                    }
                 }
             }
             .show()
@@ -318,10 +330,10 @@ class ConversationsActivity : AppCompatActivity() {
                 val groupId = "${setup.userId}-${groupName.lowercase().replace(" ", "-")}-${System.currentTimeMillis() % 10000}"
                 val allMembers = (members + setup.userId).distinct()
                 val response = context.api.createGroup(
-                    headers = uniffi.pqmsg_android.buildInboxAuthHeaders(
+                    headers = buildGroupCreateAuthHeaders(
                         keysJson = keysJson,
-                        userId = context.profile.userId,
-                        since = 0L,
+                        groupId = groupId,
+                        memberUserIds = allMembers,
                     ).toHeaderMap(),
                     request = CreateGroupRequest(
                         group_id = groupId,

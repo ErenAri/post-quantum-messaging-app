@@ -784,6 +784,7 @@ interface PqmsgApi {
     @GET("/v1/users/{user_id}/presence")
     suspend fun getPresence(
         @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
     ): PresenceResponse
 
     @POST("/v1/users/{user_id}/presence")
@@ -892,12 +893,14 @@ object ApiClientFactory {
             BuildConfig.ALLOW_CLEARTEXT_DEMO,
             BuildConfig.TLS_PIN_SHA256,
         )
-        val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BASIC
-        }
         val baseUrl = policy.baseUrl.toHttpUrl()
         val clientBuilder = OkHttpClient.Builder()
-            .addInterceptor(logging)
+        if (BuildConfig.DEBUG && isLocalDemoHost(baseUrl.host)) {
+            val logging = HttpLoggingInterceptor().apply {
+                level = HttpLoggingInterceptor.Level.BASIC
+            }
+            clientBuilder.addInterceptor(logging)
+        }
         val certificatePin = policy.certificatePin
         if (certificatePin != null) {
             clientBuilder.certificatePinner(

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:wasm": "wasm-pack build ../../crates/pqmsg-core --target web --no-default-features --features wasm --out-dir ../../mobile/web/pkg",
+    "build:wasm": "node ./scripts/build-wasm.mjs",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
@@ -16,6 +16,7 @@
     "@noble/hashes": "^1.6.0"
   },
   "devDependencies": {
+    "jsdom": "^28.1.0",
     "typescript": "^5.7.3",
     "vite": "^6.2.0",
     "vitest": "^4.0.18"

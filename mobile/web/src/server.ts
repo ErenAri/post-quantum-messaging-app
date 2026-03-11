@@ -1,5 +1,18 @@
 import { RequestAuthHeaders } from "./crypto";
 
+export class PqmsgApiError extends Error {
+  readonly status: number;
+  readonly detail: string;
+
+  constructor(status: number, detail: string) {
+    const normalizedDetail = normalizeApiErrorDetail(detail);
+    super(normalizedDetail ? `HTTP ${status}: ${normalizedDetail}` : `HTTP ${status}`);
+    this.name = "PqmsgApiError";
+    this.status = status;
+    this.detail = normalizedDetail;
+  }
+}
+
 export type RegisterUserRequest = {
   user_id: string;
   identity_x25519_pub: string;
@@ -1141,7 +1154,7 @@ export class PqmsgApi {
     const endpoint = `${this.baseUrl}/metrics`;
     const response = await fetch(endpoint);
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+      throw new PqmsgApiError(response.status, await response.text());
     }
     return response.text();
   }
@@ -1164,12 +1177,20 @@ export class PqmsgApi {
       body: body === undefined ? undefined : JSON.stringify(body)
     });
     if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`HTTP ${response.status}: ${text}`);
+      throw new PqmsgApiError(response.status, await response.text());
     }
     if (response.status === 204) {
       return undefined as T;
     }
     return (await response.json()) as T;
   }
+}
+
+function normalizeApiErrorDetail(detail: string): string {
+  return detail
+    .replace(/<[^>]*>/g, " ")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 280);
 }

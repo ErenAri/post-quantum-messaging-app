@@ -1,40 +1,32 @@
 //! Post-quantum digital signatures (ML-DSA-65 / Dilithium3).
 //!
-//! Provides a [`PqSignatureProvider`] trait and an OQS-backed implementation
-//! that uses ML-DSA-65 (FIPS 204, Level 3).  The hybrid scheme pairs ML-DSA-65
-//! with an external Ed25519 signature so that security holds if *either*
-//! algorithm remains unbroken.
+//! Provides a [`PqSignatureProvider`] trait with native liboqs and pure-Rust
+//! backends. The hybrid scheme pairs ML-DSA-65 with an external Ed25519
+//! signature so that security holds if either algorithm remains unbroken.
 
 use crate::keys::SecretBytes;
 use crate::CoreError;
 
-// ── Key sizes for ML-DSA-65 (Dilithium3) ──────────────────────────
-/// ML-DSA-65 public key length (bytes).
+#[cfg(all(feature = "pq-rust", not(feature = "pq-oqs")))]
+use fips204::traits::{KeyGen as _, SerDes as _, Signer as _, Verifier as _};
+#[cfg(all(feature = "pq-rust", not(feature = "pq-oqs")))]
+use rand_core::OsRng;
+
 pub const ML_DSA_65_PK_LEN: usize = 1952;
-/// ML-DSA-65 secret key length (bytes).
 pub const ML_DSA_65_SK_LEN: usize = 4032;
-/// ML-DSA-65 signature length (bytes).
 pub const ML_DSA_65_SIG_LEN: usize = 3309;
 
-/// Post-quantum signature keypair.
 pub struct PqSigKeyPair {
     pub public_key: Vec<u8>,
     pub secret_key: SecretBytes,
 }
 
-/// Trait for post-quantum signature operations.
 pub trait PqSignatureProvider {
-    /// Generate a fresh keypair.
     fn keypair(&self) -> Result<PqSigKeyPair, CoreError>;
-
-    /// Sign `message` with `secret_key`.
     fn sign(&self, secret_key: &[u8], message: &[u8]) -> Result<Vec<u8>, CoreError>;
-
-    /// Verify `signature` over `message` with `public_key`.
     fn verify(&self, public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), CoreError>;
 }
 
-// ── OQS-backed ML-DSA-65 ──────────────────────────────────────────
 #[cfg(feature = "pq-oqs")]
 pub struct MlDsa65 {
     sig: oqs::sig::Sig,
@@ -111,25 +103,89 @@ impl PqSignatureProvider for MlDsa65 {
     }
 }
 
-// ── Stub when pq-oqs is disabled ──────────────────────────────────
-#[cfg(not(feature = "pq-oqs"))]
+#[cfg(all(feature = "pq-rust", not(feature = "pq-oqs")))]
 pub struct MlDsa65;
 
-#[cfg(not(feature = "pq-oqs"))]
+#[cfg(all(feature = "pq-rust", not(feature = "pq-oqs")))]
 impl MlDsa65 {
     pub fn new() -> Result<Self, CoreError> {
-        Err(CoreError::UnsupportedAlgorithm("pq-oqs feature disabled"))
+        Ok(Self)
+    }
+
+    pub fn public_key_len(&self) -> usize {
+        fips204::ml_dsa_65::PK_LEN
+    }
+
+    pub fn secret_key_len(&self) -> usize {
+        fips204::ml_dsa_65::SK_LEN
+    }
+
+    pub fn signature_len(&self) -> usize {
+        fips204::ml_dsa_65::SIG_LEN
     }
 }
 
-#[cfg(not(feature = "pq-oqs"))]
+#[cfg(all(feature = "pq-rust", not(feature = "pq-oqs")))]
 impl PqSignatureProvider for MlDsa65 {
     fn keypair(&self) -> Result<PqSigKeyPair, CoreError> {
-        Err(CoreError::UnsupportedAlgorithm("pq-oqs feature disabled"))
+        let (public_key, secret_key) = fips204::ml_dsa_65::KG::try_keygen_with_rng(&mut OsRng)
+            .map_err(|_| CoreError::PqSigOperation("keypair generation failed"))?;
+        Ok(PqSigKeyPair {
+            public_key: public_key.into_bytes().to_vec(),
+            secret_key: SecretBytes::new(secret_key.into_bytes().to_vec()),
+        })
+    }
+
+    fn sign(&self, secret_key: &[u8], message: &[u8]) -> Result<Vec<u8>, CoreError> {
+        let secret_key =
+            to_fixed_array::<{ fips204::ml_dsa_65::SK_LEN }>("pq_sig.secret_key", secret_key)?;
+        let secret_key = fips204::ml_dsa_65::PrivateKey::try_from_bytes(secret_key)
+            .map_err(|_| CoreError::PqSigOperation("secret key deserialization failed"))?;
+        let signature = secret_key
+            .try_sign_with_rng(&mut OsRng, message, &[0])
+            .map_err(|_| CoreError::PqSigOperation("signing failed"))?;
+        Ok(signature.to_vec())
+    }
+
+    fn verify(&self, public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), CoreError> {
+        let public_key =
+            to_fixed_array::<{ fips204::ml_dsa_65::PK_LEN }>("pq_sig.public_key", public_key)?;
+        let signature =
+            to_fixed_array::<{ fips204::ml_dsa_65::SIG_LEN }>("pq_sig.signature", signature)?;
+        let public_key = fips204::ml_dsa_65::PublicKey::try_from_bytes(public_key)
+            .map_err(|_| CoreError::PqSigOperation("public key deserialization failed"))?;
+        if public_key.verify(message, &signature, &[0]) {
+            Ok(())
+        } else {
+            Err(CoreError::SignatureVerificationFailed)
+        }
+    }
+}
+
+#[cfg(all(not(feature = "pq-oqs"), not(feature = "pq-rust")))]
+pub struct MlDsa65;
+
+#[cfg(all(not(feature = "pq-oqs"), not(feature = "pq-rust")))]
+impl MlDsa65 {
+    pub fn new() -> Result<Self, CoreError> {
+        Err(CoreError::UnsupportedAlgorithm(
+            "PQ backend feature disabled",
+        ))
+    }
+}
+
+#[cfg(all(not(feature = "pq-oqs"), not(feature = "pq-rust")))]
+impl PqSignatureProvider for MlDsa65 {
+    fn keypair(&self) -> Result<PqSigKeyPair, CoreError> {
+        Err(CoreError::UnsupportedAlgorithm(
+            "PQ backend feature disabled",
+        ))
     }
 
     fn sign(&self, _secret_key: &[u8], _message: &[u8]) -> Result<Vec<u8>, CoreError> {
-        Err(CoreError::UnsupportedAlgorithm("pq-oqs feature disabled"))
+        Err(CoreError::UnsupportedAlgorithm(
+            "PQ backend feature disabled",
+        ))
     }
 
     fn verify(
@@ -138,27 +194,27 @@ impl PqSignatureProvider for MlDsa65 {
         _message: &[u8],
         _signature: &[u8],
     ) -> Result<(), CoreError> {
-        Err(CoreError::UnsupportedAlgorithm("pq-oqs feature disabled"))
+        Err(CoreError::UnsupportedAlgorithm(
+            "PQ backend feature disabled",
+        ))
     }
 }
 
-// ── Hybrid signature helper ───────────────────────────────────────
+#[cfg(all(feature = "pq-rust", not(feature = "pq-oqs")))]
+fn to_fixed_array<const N: usize>(field: &'static str, value: &[u8]) -> Result<[u8; N], CoreError> {
+    value.try_into().map_err(|_| CoreError::InvalidLength {
+        field,
+        expected: N,
+        actual: value.len(),
+    })
+}
 
-/// A dual Ed25519 + ML-DSA-65 signature (concatenated).
-///
-/// The hybrid is considered valid if **both** constituent signatures verify.
-/// Security holds even if one of the two algorithms becomes broken —
-/// the valid classical signature continues to provide authentication during
-/// the transition window.
 pub struct HybridSignature {
-    /// Ed25519 signature (64 bytes).
     pub ed25519_sig: Vec<u8>,
-    /// ML-DSA-65 signature.
     pub pq_sig: Vec<u8>,
 }
 
 impl HybridSignature {
-    /// Concatenate `ed25519_sig || pq_sig` for wire transport.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.ed25519_sig.len() + self.pq_sig.len());
         out.extend_from_slice(&self.ed25519_sig);
@@ -166,12 +222,11 @@ impl HybridSignature {
         out
     }
 
-    /// Decode from `ed25519_sig (64 bytes) || pq_sig (remaining)`.
     pub fn decode(bytes: &[u8]) -> Result<Self, CoreError> {
         if bytes.len() <= 64 {
             return Err(CoreError::InvalidLength {
                 field: "hybrid_signature",
-                expected: 65, // at least 64 + 1
+                expected: 65,
                 actual: bytes.len(),
             });
         }
@@ -187,7 +242,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(feature = "pq-oqs")]
+    #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
     fn ml_dsa_65_keypair_expected_lengths() {
         let provider = MlDsa65::new().expect("init");
         assert_eq!(provider.public_key_len(), ML_DSA_65_PK_LEN);
@@ -198,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "pq-oqs")]
+    #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
     fn ml_dsa_65_sign_verify_roundtrip() {
         let provider = MlDsa65::new().expect("init");
         let kp = provider.keypair().expect("keypair");
@@ -212,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "pq-oqs")]
+    #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
     fn ml_dsa_65_verify_rejects_tampered_message() {
         let provider = MlDsa65::new().expect("init");
         let kp = provider.keypair().expect("keypair");
@@ -224,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "pq-oqs")]
+    #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
     fn ml_dsa_65_verify_rejects_wrong_key() {
         let provider = MlDsa65::new().expect("init");
         let kp1 = provider.keypair().expect("keypair1");

@@ -2,12 +2,13 @@
  * WASM wrapper for pqmsg-core crypto operations.
  *
  * Dynamically loads the WASM module built from `crates/pqmsg-core`
- * with `wasm-pack build --features wasm --no-default-features --target web`.
+ * with `wasm-pack build --features wasm-pq --no-default-features --target web`.
  *
- * Provides the same interface shape as the WebCrypto fallback in crypto.ts.
+ * Provides both low-level primitives and the real hybrid PQ direct-message
+ * handshake/session exports used by the web client.
  */
 
-// These types match the Rust WasmIdentityKeys struct
+// These types match the Rust wasm-bindgen payloads.
 export interface WasmIdentityKeys {
   user_id: string;
   device_id: string;
@@ -25,7 +26,66 @@ export interface WasmOtpk {
   secret: Uint8Array;
 }
 
-// Lazy-loaded WASM module — typed as any since the pkg may not exist at build time
+export interface WasmSessionKeys {
+  userId: string;
+  deviceId: string;
+  suite: "ml-kem-768" | "kyber768";
+  identityX25519Pub: string;
+  identityX25519Secret: string;
+  identitySigPub: string;
+  identitySigSecret: string;
+  signedPrekeyX25519Pub: string;
+  signedPrekeyX25519Secret: string;
+  pqSignedPrekeyPubMlkem768: string;
+  pqSignedPrekeySecretMlkem768: string;
+  oneTimePrekeysX25519: string[];
+  oneTimePrekeysX25519Secret: string[];
+  oneTimePrekeysMlkem768: string[];
+  oneTimePrekeysMlkem768Secret: string[];
+}
+
+export interface WasmServerBundle {
+  user_id: string;
+  identity_x25519_pub: string;
+  identity_sig_pub: string;
+  signed_prekey_x25519_pub: string;
+  sig_over_spk: string;
+  pq_signed_prekey_pub_mlkem768: string;
+  sig_over_pqspk: string;
+  one_time_prekey_x25519: string | null;
+  one_time_prekey_mlkem768: string | null;
+}
+
+export interface WasmDirectSendResult {
+  message_bytes_base64: string;
+  session_json: string;
+  used_handshake: boolean;
+}
+
+export interface WasmDirectDecryptResult {
+  plaintext_utf8: string;
+  plaintext_base64: string;
+  session_json: string;
+  used_handshake: boolean;
+  updated_keys: WasmSessionKeys;
+}
+
+export interface KemKeyPair {
+  public_key: Uint8Array;
+  secret_key: Uint8Array;
+}
+
+export interface KemEncapsulateResult {
+  ciphertext: Uint8Array;
+  shared_secret: Uint8Array;
+}
+
+export interface PqSigKeyPair {
+  public_key: Uint8Array;
+  secret_key: Uint8Array;
+}
+
+// Lazy-loaded WASM module typed as any because the pkg may not exist at build time.
 let wasmModule: Record<string, (...args: unknown[]) => unknown> | null = null;
 let wasmLoadAttempted = false;
 
@@ -35,10 +95,9 @@ export async function initWasm(): Promise<boolean> {
   if (wasmLoadAttempted) return false;
   wasmLoadAttempted = true;
   try {
-    // Use variable to prevent Rollup from resolving at build time
-    const wasmPath = "../../pkg/pqmsg_core";
+    const wasmPath = "../pkg/pqmsg_core";
     const mod = await import(/* @vite-ignore */ wasmPath);
-    await mod.default(); // initialize WASM
+    await mod.default();
     wasmModule = mod;
     return true;
   } catch {
@@ -46,9 +105,17 @@ export async function initWasm(): Promise<boolean> {
   }
 }
 
-/** Check if WASM crypto is available (without loading). */
+/** Check if the WASM module has been loaded. */
 export function wasmAvailable(): boolean {
   return wasmModule !== null;
+}
+
+/** Check if real session-based PQ messaging exports are available. */
+export function sessionMessagingAvailable(): boolean {
+  return wasmModule !== null
+    && typeof wasmModule.wasm_initiate_session_and_encrypt === "function"
+    && typeof wasmModule.wasm_encrypt_with_session === "function"
+    && typeof wasmModule.wasm_decrypt_message === "function";
 }
 
 /** Generate identity keys (X25519) via WASM. */
@@ -111,20 +178,6 @@ export function conversationAd(sender: string, recipient: string): Uint8Array {
   return wasmModule.wasm_conversation_ad(sender, recipient) as unknown as Uint8Array;
 }
 
-// ---------------------------------------------------------------------------
-// KEM operations (ML-KEM-768) — available when WASM built with wasm-pq feature
-// ---------------------------------------------------------------------------
-
-export interface KemKeyPair {
-  public_key: Uint8Array;
-  secret_key: Uint8Array;
-}
-
-export interface KemEncapsulateResult {
-  ciphertext: Uint8Array;
-  shared_secret: Uint8Array;
-}
-
 /** Check if PQ KEM operations are available in WASM. */
 export function kemAvailable(): boolean {
   return wasmModule !== null && typeof wasmModule.wasm_kem_keypair === "function";
@@ -134,7 +187,7 @@ export function kemAvailable(): boolean {
 export function kemKeypair(): KemKeyPair {
   if (!wasmModule) throw new Error("WASM not initialized");
   if (typeof wasmModule.wasm_kem_keypair !== "function") {
-    throw new Error("KEM not available — WASM built without pq-oqs");
+    throw new Error("KEM not available - WASM built without pq-oqs");
   }
   return wasmModule.wasm_kem_keypair() as KemKeyPair;
 }
@@ -143,7 +196,7 @@ export function kemKeypair(): KemKeyPair {
 export function kemEncapsulate(recipientPublicKey: Uint8Array): KemEncapsulateResult {
   if (!wasmModule) throw new Error("WASM not initialized");
   if (typeof wasmModule.wasm_kem_encapsulate !== "function") {
-    throw new Error("KEM not available — WASM built without pq-oqs");
+    throw new Error("KEM not available - WASM built without pq-oqs");
   }
   return wasmModule.wasm_kem_encapsulate(recipientPublicKey) as KemEncapsulateResult;
 }
@@ -152,18 +205,9 @@ export function kemEncapsulate(recipientPublicKey: Uint8Array): KemEncapsulateRe
 export function kemDecapsulate(secretKey: Uint8Array, ciphertext: Uint8Array): Uint8Array {
   if (!wasmModule) throw new Error("WASM not initialized");
   if (typeof wasmModule.wasm_kem_decapsulate !== "function") {
-    throw new Error("KEM not available — WASM built without pq-oqs");
+    throw new Error("KEM not available - WASM built without pq-oqs");
   }
   return wasmModule.wasm_kem_decapsulate(secretKey, ciphertext) as unknown as Uint8Array;
-}
-
-// ---------------------------------------------------------------------------
-// PQ Signature operations (ML-DSA-65)
-// ---------------------------------------------------------------------------
-
-export interface PqSigKeyPair {
-  public_key: Uint8Array;
-  secret_key: Uint8Array;
 }
 
 /** Check if PQ signature operations are available in WASM. */
@@ -175,7 +219,7 @@ export function pqSigAvailable(): boolean {
 export function mlDsaKeypair(): PqSigKeyPair {
   if (!wasmModule) throw new Error("WASM not initialized");
   if (typeof wasmModule.wasm_ml_dsa_keypair !== "function") {
-    throw new Error("ML-DSA not available — WASM built without pq-oqs");
+    throw new Error("ML-DSA not available - WASM built without pq-oqs");
   }
   return wasmModule.wasm_ml_dsa_keypair() as PqSigKeyPair;
 }
@@ -184,7 +228,7 @@ export function mlDsaKeypair(): PqSigKeyPair {
 export function mlDsaSign(secretKey: Uint8Array, message: Uint8Array): Uint8Array {
   if (!wasmModule) throw new Error("WASM not initialized");
   if (typeof wasmModule.wasm_ml_dsa_sign !== "function") {
-    throw new Error("ML-DSA not available — WASM built without pq-oqs");
+    throw new Error("ML-DSA not available - WASM built without pq-oqs");
   }
   return wasmModule.wasm_ml_dsa_sign(secretKey, message) as unknown as Uint8Array;
 }
@@ -193,7 +237,65 @@ export function mlDsaSign(secretKey: Uint8Array, message: Uint8Array): Uint8Arra
 export function mlDsaVerify(publicKey: Uint8Array, message: Uint8Array, signature: Uint8Array): void {
   if (!wasmModule) throw new Error("WASM not initialized");
   if (typeof wasmModule.wasm_ml_dsa_verify !== "function") {
-    throw new Error("ML-DSA not available — WASM built without pq-oqs");
+    throw new Error("ML-DSA not available - WASM built without pq-oqs");
   }
   wasmModule.wasm_ml_dsa_verify(publicKey, message, signature);
+}
+
+/** Initiate a real PQ direct-message session and encrypt the first message. */
+export function initiateSessionAndEncrypt(
+  keys: WasmSessionKeys,
+  fromUserId: string,
+  peerUserId: string,
+  peerBundle: WasmServerBundle,
+  plaintextUtf8: string
+): WasmDirectSendResult {
+  if (!sessionMessagingAvailable()) {
+    throw new Error("WASM PQ session messaging is not available");
+  }
+  return wasmModule!.wasm_initiate_session_and_encrypt(
+    keys,
+    fromUserId,
+    peerUserId,
+    peerBundle,
+    plaintextUtf8
+  ) as WasmDirectSendResult;
+}
+
+/** Encrypt a follow-up direct message with an existing session snapshot. */
+export function encryptWithSession(
+  sessionJson: string,
+  senderUserId: string,
+  peerUserId: string,
+  plaintextUtf8: string
+): WasmDirectSendResult {
+  if (!sessionMessagingAvailable()) {
+    throw new Error("WASM PQ session messaging is not available");
+  }
+  return wasmModule!.wasm_encrypt_with_session(
+    sessionJson,
+    senderUserId,
+    peerUserId,
+    plaintextUtf8
+  ) as WasmDirectSendResult;
+}
+
+/** Decrypt either an initial handshake message or a follow-up session message. */
+export function decryptDirectMessage(
+  keys: WasmSessionKeys,
+  recipientUserId: string,
+  senderUserId: string,
+  messageBytesBase64: string,
+  existingSessionJson?: string | null
+): WasmDirectDecryptResult {
+  if (!sessionMessagingAvailable()) {
+    throw new Error("WASM PQ session messaging is not available");
+  }
+  return wasmModule!.wasm_decrypt_message(
+    keys,
+    recipientUserId,
+    senderUserId,
+    messageBytesBase64,
+    existingSessionJson ?? undefined
+  ) as WasmDirectDecryptResult;
 }

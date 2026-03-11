@@ -90,6 +90,7 @@ class LocalStateStore(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
     private val gson = Gson()
+    private val messageStore = LocalMessageDatabase(appContext, MasterKey.DEFAULT_MASTER_KEY_ALIAS)
 
     fun loadSetup(): SetupConfig {
         return SetupConfig(
@@ -476,12 +477,8 @@ class LocalStateStore(context: Context) {
         if (userId.isBlank() || peerUserId.isBlank()) {
             return emptyList()
         }
-        val path = File(rootDir, "threads/$userId/$peerUserId.json")
-        val raw = readProtectedFile(path) ?: return emptyList()
-        return runCatching {
-            val type = object : TypeToken<List<ThreadMessage>>() {}.type
-            gson.fromJson<List<ThreadMessage>>(raw, type) ?: emptyList()
-        }.getOrDefault(emptyList())
+        migrateLegacyDirectThread(userId, peerUserId)
+        return messageStore.listDirectMessages(userId, peerUserId)
     }
 
     fun appendThreadMessage(
@@ -496,14 +493,10 @@ class LocalStateStore(context: Context) {
             return
         }
         val normalizedBody = body.trim().ifBlank { "(empty)" }
-        val path = File(rootDir, "threads/$userId/$peerUserId.json")
-        val existing = listThreadMessages(userId, peerUserId).toMutableList()
-        if (transportMessageId != null &&
-            existing.any { it.transportMessageId == transportMessageId && it.direction == direction }
-        ) {
-            return
-        }
-        existing.add(
+        migrateLegacyDirectThread(userId, peerUserId)
+        messageStore.appendDirectMessage(
+            userId,
+            peerUserId,
             ThreadMessage(
                 direction = direction,
                 body = normalizedBody,
@@ -511,10 +504,6 @@ class LocalStateStore(context: Context) {
                 transportMessageId = transportMessageId,
             ),
         )
-        while (existing.size > 300) {
-            existing.removeAt(0)
-        }
-        writeProtectedFile(path, gson.toJson(existing))
     }
 
     fun countSessions(userId: String): Int {
@@ -592,12 +581,8 @@ class LocalStateStore(context: Context) {
 
     fun listGroupThreadMessages(userId: String, groupId: String): List<ThreadMessage> {
         if (userId.isBlank() || groupId.isBlank()) return emptyList()
-        val path = File(rootDir, "threads/$userId/group_$groupId.json")
-        val raw = readProtectedFile(path) ?: return emptyList()
-        return runCatching {
-            val type = object : TypeToken<List<ThreadMessage>>() {}.type
-            gson.fromJson<List<ThreadMessage>>(raw, type) ?: emptyList()
-        }.getOrDefault(emptyList())
+        migrateLegacyGroupThread(userId, groupId)
+        return messageStore.listGroupMessages(userId, groupId)
     }
 
     fun appendGroupThreadMessage(
@@ -609,14 +594,19 @@ class LocalStateStore(context: Context) {
         transportMessageId: Long? = null,
     ) {
         if (userId.isBlank() || groupId.isBlank()) return
-        val path = File(rootDir, "threads/$userId/group_$groupId.json")
-        val existing = listGroupThreadMessages(userId, groupId).toMutableList()
-        if (transportMessageId != null && existing.any { it.transportMessageId == transportMessageId }) return
         val direction = if (senderUserId == userId) "outbound" else "inbound"
         val label = if (direction == "outbound") "You" else senderUserId
-        existing.add(ThreadMessage(direction = direction, body = "$label: ${body.trim().ifBlank { "(empty)" }}", sentAtMillis = sentAtMillis, transportMessageId = transportMessageId))
-        while (existing.size > 300) existing.removeAt(0)
-        writeProtectedFile(path, gson.toJson(existing))
+        migrateLegacyGroupThread(userId, groupId)
+        messageStore.appendGroupMessage(
+            userId,
+            groupId,
+            ThreadMessage(
+                direction = direction,
+                body = "$label: ${body.trim().ifBlank { "(empty)" }}",
+                sentAtMillis = sentAtMillis,
+                transportMessageId = transportMessageId,
+            ),
+        )
     }
 
     private fun readGroupIds(userId: String): LinkedHashSet<String> {
@@ -635,33 +625,37 @@ class LocalStateStore(context: Context) {
         sealedSender: Boolean = false,
     ) {
         if (userId.isBlank() || peerUserId.isBlank()) return
-        val path = File(rootDir, "outbox/$userId.json")
-        val existing = listOutbox(userId).toMutableList()
+        migrateLegacyOutbox(userId)
+        val existing = messageStore.listOutbox(userId)
         val nextId = (existing.maxOfOrNull { it.id } ?: 0L) + 1
-        existing.add(OutboxItem(id = nextId, peerUserId = peerUserId, plaintext = plaintext, createdAtMillis = System.currentTimeMillis(), ephemeralTtlSeconds = ephemeralTtlSeconds, sealedSender = sealedSender))
-        writeProtectedFile(path, gson.toJson(existing))
+        messageStore.enqueueOutbox(
+            userId,
+            OutboxItem(
+                id = nextId,
+                peerUserId = peerUserId,
+                plaintext = plaintext,
+                createdAtMillis = System.currentTimeMillis(),
+                ephemeralTtlSeconds = ephemeralTtlSeconds,
+                sealedSender = sealedSender,
+            ),
+        )
     }
 
     fun listOutbox(userId: String): List<OutboxItem> {
         if (userId.isBlank()) return emptyList()
-        val path = File(rootDir, "outbox/$userId.json")
-        val raw = readProtectedFile(path) ?: return emptyList()
-        return runCatching {
-            val type = object : TypeToken<List<OutboxItem>>() {}.type
-            gson.fromJson<List<OutboxItem>>(raw, type) ?: emptyList()
-        }.getOrDefault(emptyList())
+        migrateLegacyOutbox(userId)
+        return messageStore.listOutbox(userId)
     }
 
     fun removeOutboxItem(userId: String, itemId: Long) {
         if (userId.isBlank()) return
-        val path = File(rootDir, "outbox/$userId.json")
-        val existing = listOutbox(userId).toMutableList()
-        existing.removeAll { it.id == itemId }
-        writeProtectedFile(path, gson.toJson(existing))
+        migrateLegacyOutbox(userId)
+        messageStore.removeOutboxItem(userId, itemId)
     }
 
     fun clearOutbox(userId: String) {
         if (userId.isBlank()) return
+        messageStore.clearOutbox(userId)
         deletePath(File(rootDir, "outbox/$userId.json"))
     }
 
@@ -669,17 +663,15 @@ class LocalStateStore(context: Context) {
 
     fun updateMessageReceipt(userId: String, peerUserId: String, transportMessageId: Long, receiptType: String) {
         if (userId.isBlank() || peerUserId.isBlank()) return
-        val messages = listThreadMessages(userId, peerUserId).toMutableList()
-        val idx = messages.indexOfFirst { it.transportMessageId == transportMessageId && it.direction == "outbound" }
-        if (idx < 0) return
-        val msg = messages[idx]
+        val messages = listThreadMessages(userId, peerUserId)
+        val msg = messages.firstOrNull {
+            it.transportMessageId == transportMessageId && it.direction == "outbound"
+        } ?: return
         val priority = mapOf("sent" to 0, "delivered" to 1, "read" to 2)
         val currentPriority = priority[msg.receiptStatus] ?: -1
         val newPriority = priority[receiptType] ?: -1
         if (newPriority <= currentPriority) return
-        messages[idx] = msg.copy(receiptStatus = receiptType)
-        val path = File(rootDir, "threads/$userId/$peerUserId.json")
-        writeProtectedFile(path, gson.toJson(messages))
+        messageStore.updateDirectMessageReceipt(userId, peerUserId, transportMessageId, receiptType)
     }
 
     fun wipeUserState(userId: String) {
@@ -689,6 +681,8 @@ class LocalStateStore(context: Context) {
         deletePath(File(rootDir, "keys/$userId.json"))
         deletePath(File(rootDir, "sessions/$userId"))
         deletePath(File(rootDir, "threads/$userId"))
+        deletePath(File(rootDir, "outbox/$userId.json"))
+        messageStore.clearUser(userId)
         removePrefsForUser(userId)
 
         val currentSetup = loadSetup()
@@ -701,6 +695,53 @@ class LocalStateStore(context: Context) {
                 ),
             )
         }
+    }
+
+    private fun migrateLegacyDirectThread(userId: String, peerUserId: String) {
+        if (messageStore.listDirectMessages(userId, peerUserId).isNotEmpty()) {
+            return
+        }
+        val path = File(rootDir, "threads/$userId/$peerUserId.json")
+        val legacy = readLegacyList<ThreadMessage>(path)
+        if (legacy.isEmpty()) {
+            return
+        }
+        messageStore.importDirectMessages(userId, peerUserId, legacy)
+        deletePath(path)
+    }
+
+    private fun migrateLegacyGroupThread(userId: String, groupId: String) {
+        if (messageStore.listGroupMessages(userId, groupId).isNotEmpty()) {
+            return
+        }
+        val path = File(rootDir, "threads/$userId/group_$groupId.json")
+        val legacy = readLegacyList<ThreadMessage>(path)
+        if (legacy.isEmpty()) {
+            return
+        }
+        messageStore.importGroupMessages(userId, groupId, legacy)
+        deletePath(path)
+    }
+
+    private fun migrateLegacyOutbox(userId: String) {
+        if (messageStore.listOutbox(userId).isNotEmpty()) {
+            return
+        }
+        val path = File(rootDir, "outbox/$userId.json")
+        val legacy = readLegacyList<OutboxItem>(path)
+        if (legacy.isEmpty()) {
+            return
+        }
+        messageStore.importOutboxItems(userId, legacy)
+        deletePath(path)
+    }
+
+    private inline fun <reified T> readLegacyList(path: File): List<T> {
+        val raw = readProtectedFile(path) ?: return emptyList()
+        return runCatching {
+            val type = object : TypeToken<List<T>>() {}.type
+            gson.fromJson<List<T>>(raw, type) ?: emptyList()
+        }.getOrDefault(emptyList())
     }
 
     private fun readConversationPeers(userId: String): LinkedHashSet<String> {

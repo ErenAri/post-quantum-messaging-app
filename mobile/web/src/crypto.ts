@@ -11,6 +11,7 @@ import {
 } from "./base64";
 import { criticalType, encodeTlv, i64ToBeBytes, u16ToBeBytes } from "./tlv";
 import * as wasmCrypto from "./crypto-wasm";
+import type { BundleResponse } from "./server";
 
 const AUTH_TAG_ENDPOINT = criticalType(0x3201);
 const AUTH_TAG_USER_ID = criticalType(0x3202);
@@ -113,6 +114,20 @@ type SealedPayload = {
   ct_b64: string;
 };
 
+export type DirectMessageSessionSendResult = {
+  messageBytesBase64: string;
+  sessionJson: string;
+  usedHandshake: boolean;
+};
+
+export type DirectMessageSessionDecryptResult = {
+  plaintextUtf8: string;
+  plaintextBase64: string;
+  sessionJson: string;
+  usedHandshake: boolean;
+  updatedKeys: GeneratedKeys;
+};
+
 export function generateIdentityKeys(
   userId: string,
   deviceId: string,
@@ -122,6 +137,9 @@ export function generateIdentityKeys(
   if (oneTimeCount < 1 || oneTimeCount > 64) {
     throw new Error("one-time prekey count must be in 1..64");
   }
+  if (suite === "ml-kem-768" && !wasmCrypto.kemAvailable()) {
+    throw new Error("Web post-quantum runtime unavailable in this build.");
+  }
   const identityXSecret = x25519.utils.randomPrivateKey();
   const identityXPub = x25519.getPublicKey(identityXSecret);
   const identitySigSecret = ed25519.utils.randomPrivateKey();
@@ -129,17 +147,7 @@ export function generateIdentityKeys(
   const signedPrekeySecret = x25519.utils.randomPrivateKey();
   const signedPrekeyPub = x25519.getPublicKey(signedPrekeySecret);
 
-  // PQ signed prekey: use real ML-KEM-768 via WASM if available, else fallback
-  let pqSignedPrekeySecret: Uint8Array;
-  let pqSignedPrekeyPub: Uint8Array;
-  if (wasmCrypto.kemAvailable()) {
-    const kemKp = wasmCrypto.kemKeypair();
-    pqSignedPrekeyPub = kemKp.public_key;
-    pqSignedPrekeySecret = kemKp.secret_key;
-  } else {
-    pqSignedPrekeySecret = randomBytes(2400);
-    pqSignedPrekeyPub = randomBytes(1184);
-  }
+  const pqSignedPrekey = wasmCrypto.kemKeypair();
 
   const oneTimePrekeysX25519: string[] = [];
   const oneTimePrekeysX25519Secret: string[] = [];
@@ -151,19 +159,9 @@ export function generateIdentityKeys(
     const xPub = x25519.getPublicKey(xSecret);
     oneTimePrekeysX25519.push(bytesToBase64(xPub));
     oneTimePrekeysX25519Secret.push(bytesToBase64(xSecret));
-    // PQ one-time prekeys: real KEM when WASM available
-    let pqPub: Uint8Array;
-    let pqSecret: Uint8Array;
-    if (wasmCrypto.kemAvailable()) {
-      const kemOtKp = wasmCrypto.kemKeypair();
-      pqPub = kemOtKp.public_key;
-      pqSecret = kemOtKp.secret_key;
-    } else {
-      pqSecret = randomBytes(2400);
-      pqPub = randomBytes(1184);
-    }
-    oneTimePrekeysMlkem768.push(bytesToBase64(pqPub));
-    oneTimePrekeysMlkem768Secret.push(bytesToBase64(pqSecret));
+    const pqOtpk = wasmCrypto.kemKeypair();
+    oneTimePrekeysMlkem768.push(bytesToBase64(pqOtpk.public_key));
+    oneTimePrekeysMlkem768Secret.push(bytesToBase64(pqOtpk.secret_key));
   }
 
   return {
@@ -176,8 +174,8 @@ export function generateIdentityKeys(
     identitySigSecret: bytesToBase64(identitySigSecret),
     signedPrekeyX25519Pub: bytesToBase64(signedPrekeyPub),
     signedPrekeyX25519Secret: bytesToBase64(signedPrekeySecret),
-    pqSignedPrekeyPubMlkem768: bytesToBase64(pqSignedPrekeyPub),
-    pqSignedPrekeySecretMlkem768: bytesToBase64(pqSignedPrekeySecret),
+    pqSignedPrekeyPubMlkem768: bytesToBase64(pqSignedPrekey.public_key),
+    pqSignedPrekeySecretMlkem768: bytesToBase64(pqSignedPrekey.secret_key),
     oneTimePrekeysX25519,
     oneTimePrekeysX25519Secret,
     oneTimePrekeysMlkem768,
@@ -848,6 +846,53 @@ export function isWasmCryptoAvailable(): boolean {
   return wasmCrypto.wasmAvailable();
 }
 
+/** Whether real session-based PQ direct messaging is available. */
+export function isPqSessionMessagingAvailable(): boolean {
+  return wasmCrypto.sessionMessagingAvailable();
+}
+
+/**
+ * Regenerate server-published prekeys while preserving the user's long-term
+ * identity and signed X25519 prekey material.
+ */
+export function regeneratePublishedPrekeys(
+  keys: GeneratedKeys,
+  oneTimeCount = Math.max(keys.oneTimePrekeysX25519.length, 16)
+): GeneratedKeys {
+  if (!wasmCrypto.kemAvailable()) {
+    throw new Error("Web post-quantum runtime unavailable in this build.");
+  }
+  if (oneTimeCount < 1 || oneTimeCount > 64) {
+    throw new Error("one-time prekey count must be in 1..64");
+  }
+
+  const oneTimePrekeysX25519: string[] = [];
+  const oneTimePrekeysX25519Secret: string[] = [];
+  const oneTimePrekeysMlkem768: string[] = [];
+  const oneTimePrekeysMlkem768Secret: string[] = [];
+
+  for (let idx = 0; idx < oneTimeCount; idx += 1) {
+    const xSecret = x25519.utils.randomPrivateKey();
+    const xPub = x25519.getPublicKey(xSecret);
+    const pqOtpk = wasmCrypto.kemKeypair();
+    oneTimePrekeysX25519.push(bytesToBase64(xPub));
+    oneTimePrekeysX25519Secret.push(bytesToBase64(xSecret));
+    oneTimePrekeysMlkem768.push(bytesToBase64(pqOtpk.public_key));
+    oneTimePrekeysMlkem768Secret.push(bytesToBase64(pqOtpk.secret_key));
+  }
+
+  const pqSignedPrekey = wasmCrypto.kemKeypair();
+  return {
+    ...keys,
+    pqSignedPrekeyPubMlkem768: bytesToBase64(pqSignedPrekey.public_key),
+    pqSignedPrekeySecretMlkem768: bytesToBase64(pqSignedPrekey.secret_key),
+    oneTimePrekeysX25519,
+    oneTimePrekeysX25519Secret,
+    oneTimePrekeysMlkem768,
+    oneTimePrekeysMlkem768Secret,
+  };
+}
+
 /**
  * Encrypt a message using WASM (ChaCha20-Poly1305 via pqmsg-core).
  * Falls back to WebCrypto AES-GCM if WASM is unavailable.
@@ -901,6 +946,61 @@ export async function decryptMessage(
     return bytesToUtf8(pt);
   }
   return decryptFallbackMessage(passphrase, wire);
+}
+
+export function initiateDirectMessageSession(
+  keys: GeneratedKeys,
+  peerBundle: BundleResponse,
+  plaintext: string
+): DirectMessageSessionSendResult {
+  const result = wasmCrypto.initiateSessionAndEncrypt(
+    keys,
+    keys.userId,
+    peerBundle.user_id,
+    peerBundle,
+    plaintext
+  );
+  return {
+    messageBytesBase64: result.message_bytes_base64,
+    sessionJson: result.session_json,
+    usedHandshake: result.used_handshake,
+  };
+}
+
+export function encryptDirectMessageWithSession(
+  sessionJson: string,
+  senderUserId: string,
+  peerUserId: string,
+  plaintext: string
+): DirectMessageSessionSendResult {
+  const result = wasmCrypto.encryptWithSession(sessionJson, senderUserId, peerUserId, plaintext);
+  return {
+    messageBytesBase64: result.message_bytes_base64,
+    sessionJson: result.session_json,
+    usedHandshake: result.used_handshake,
+  };
+}
+
+export function decryptDirectMessage(
+  keys: GeneratedKeys,
+  senderUserId: string,
+  messageBytesBase64: string,
+  existingSessionJson?: string | null
+): DirectMessageSessionDecryptResult {
+  const result = wasmCrypto.decryptDirectMessage(
+    keys,
+    keys.userId,
+    senderUserId,
+    messageBytesBase64,
+    existingSessionJson
+  );
+  return {
+    plaintextUtf8: result.plaintext_utf8,
+    plaintextBase64: result.plaintext_base64,
+    sessionJson: result.session_json,
+    usedHandshake: result.used_handshake,
+    updatedKeys: result.updated_keys as GeneratedKeys,
+  };
 }
 
 export function identityFingerprint(identityX25519PubB64: string): string {

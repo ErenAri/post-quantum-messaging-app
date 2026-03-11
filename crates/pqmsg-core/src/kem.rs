@@ -1,6 +1,11 @@
-#[cfg(not(any(feature = "pq-oqs", feature = "classical-only-INSECURE")))]
+#[cfg(not(any(
+    feature = "pq-oqs",
+    feature = "pq-rust",
+    feature = "classical-only-INSECURE"
+)))]
 compile_error!(
-    "pqmsg-core requires either the `pq-oqs` feature (default, recommended) \
+    "pqmsg-core requires either the `pq-oqs` feature (default, recommended), \
+     the `pq-rust` feature (pure Rust browser-safe PQ backend), \
      or the explicit `classical-only-INSECURE` opt-in. \
      Do not build without post-quantum support unless you know what you are doing."
 );
@@ -15,6 +20,11 @@ use crate::alg::KemAlgorithm;
 use crate::keys::SecretBytes;
 use crate::CoreError;
 use zeroize::Zeroizing;
+
+#[cfg(all(feature = "pq-rust", not(feature = "pq-oqs")))]
+use fips203::traits::{Decaps as _, Encaps as _, KeyGen as _, SerDes as _};
+#[cfg(all(feature = "pq-rust", not(feature = "pq-oqs")))]
+use rand_core::OsRng;
 
 pub struct KemKeyPair {
     pub public_key: Vec<u8>,
@@ -87,8 +97,6 @@ impl MlKem768 {
         })
     }
 
-    /// Validate that a public key has the correct length for this KEM algorithm.
-    /// Returns `Ok(())` if valid, `Err` if the key is malformed.
     pub fn validate_public_key(&self, public_key: &[u8]) -> Result<(), CoreError> {
         if self.kem.public_key_from_bytes(public_key).is_none() {
             return Err(CoreError::InvalidLength {
@@ -101,9 +109,61 @@ impl MlKem768 {
     }
 }
 
-/// FIPS-mode KEM wrapper that enforces ML-KEM-768-only and validates keys
-/// on every operation. When a FIPS-certified ML-KEM provider becomes available
-/// as a Rust crate, the inner `MlKem768` should be replaced with it.
+#[cfg(all(feature = "pq-rust", not(feature = "pq-oqs")))]
+pub struct MlKem768 {
+    algorithm: KemAlgorithm,
+}
+
+#[cfg(all(feature = "pq-rust", not(feature = "pq-oqs")))]
+impl MlKem768 {
+    pub fn new(algorithm: KemAlgorithm) -> Result<Self, CoreError> {
+        #[cfg(feature = "fips")]
+        if algorithm == KemAlgorithm::Kyber768Alias {
+            return Err(CoreError::PolicyViolation(
+                "fips: Kyber768Alias not permitted; use MlKem768",
+            ));
+        }
+        Ok(Self { algorithm })
+    }
+
+    pub fn new_preferred() -> Result<Self, CoreError> {
+        Self::new(KemAlgorithm::MlKem768)
+    }
+
+    pub fn algorithm(&self) -> KemAlgorithm {
+        self.algorithm
+    }
+
+    pub fn public_key_len(&self) -> usize {
+        fips203::ml_kem_768::EK_LEN
+    }
+
+    pub fn secret_key_len(&self) -> usize {
+        fips203::ml_kem_768::DK_LEN
+    }
+
+    pub fn ciphertext_len(&self) -> usize {
+        fips203::ml_kem_768::CT_LEN
+    }
+
+    pub fn keypair(&self) -> Result<KemKeyPair, CoreError> {
+        let (public_key, secret_key) = fips203::ml_kem_768::KG::try_keygen_with_rng(&mut OsRng)
+            .map_err(|_| CoreError::KemOperation)?;
+        Ok(KemKeyPair {
+            public_key: public_key.into_bytes().to_vec(),
+            secret_key: SecretBytes::from(secret_key.into_bytes().to_vec()),
+        })
+    }
+
+    pub fn validate_public_key(&self, public_key: &[u8]) -> Result<(), CoreError> {
+        let public_key =
+            to_fixed_array::<{ fips203::ml_kem_768::EK_LEN }>("kem.public_key", public_key)?;
+        fips203::ml_kem_768::EncapsKey::try_from_bytes(public_key)
+            .map(|_| ())
+            .map_err(|_| CoreError::KemOperation)
+    }
+}
+
 #[cfg(feature = "fips")]
 pub struct FipsKemWrapper {
     inner: MlKem768,
@@ -118,7 +178,6 @@ impl FipsKemWrapper {
 
     pub fn keypair(&self) -> Result<KemKeyPair, CoreError> {
         let kp = self.inner.keypair()?;
-        // Validate the generated public key before returning.
         self.inner.validate_public_key(&kp.public_key)?;
         Ok(kp)
     }
@@ -187,28 +246,76 @@ impl KemProvider for MlKem768 {
     }
 }
 
-#[cfg(not(feature = "pq-oqs"))]
-pub struct MlKem768;
-
-#[cfg(not(feature = "pq-oqs"))]
-impl MlKem768 {
-    pub fn new(_algorithm: KemAlgorithm) -> Result<Self, CoreError> {
-        Err(CoreError::UnsupportedAlgorithm("pq-oqs feature disabled"))
+#[cfg(all(feature = "pq-rust", not(feature = "pq-oqs")))]
+impl KemProvider for MlKem768 {
+    fn encapsulate(&self, recipient_public_key: &[u8]) -> Result<KemEncapsulation, CoreError> {
+        let public_key = to_fixed_array::<{ fips203::ml_kem_768::EK_LEN }>(
+            "kem.public_key",
+            recipient_public_key,
+        )?;
+        let public_key = fips203::ml_kem_768::EncapsKey::try_from_bytes(public_key)
+            .map_err(|_| CoreError::KemOperation)?;
+        let (shared_secret, ciphertext) = public_key
+            .try_encaps_with_rng(&mut OsRng)
+            .map_err(|_| CoreError::KemOperation)?;
+        Ok(KemEncapsulation {
+            ciphertext: ciphertext.into_bytes().to_vec(),
+            shared_secret: Zeroizing::new(shared_secret.into_bytes().to_vec()),
+        })
     }
 
-    pub fn new_preferred() -> Result<Self, CoreError> {
-        Err(CoreError::UnsupportedAlgorithm("pq-oqs feature disabled"))
-    }
-
-    pub fn keypair(&self) -> Result<KemKeyPair, CoreError> {
-        Err(CoreError::UnsupportedAlgorithm("pq-oqs feature disabled"))
+    fn decapsulate(
+        &self,
+        recipient_secret_key: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, CoreError> {
+        let recipient_secret_key = to_fixed_array::<{ fips203::ml_kem_768::DK_LEN }>(
+            "kem.secret_key",
+            recipient_secret_key,
+        )?;
+        let ciphertext =
+            to_fixed_array::<{ fips203::ml_kem_768::CT_LEN }>("kem.ciphertext", ciphertext)?;
+        let secret_key = fips203::ml_kem_768::DecapsKey::try_from_bytes(recipient_secret_key)
+            .map_err(|_| CoreError::KemOperation)?;
+        let ciphertext = fips203::ml_kem_768::CipherText::try_from_bytes(ciphertext)
+            .map_err(|_| CoreError::KemOperation)?;
+        let shared_secret = secret_key
+            .try_decaps(&ciphertext)
+            .map_err(|_| CoreError::KemOperation)?;
+        Ok(Zeroizing::new(shared_secret.into_bytes().to_vec()))
     }
 }
 
-#[cfg(not(feature = "pq-oqs"))]
+#[cfg(all(not(feature = "pq-oqs"), not(feature = "pq-rust")))]
+pub struct MlKem768;
+
+#[cfg(all(not(feature = "pq-oqs"), not(feature = "pq-rust")))]
+impl MlKem768 {
+    pub fn new(_algorithm: KemAlgorithm) -> Result<Self, CoreError> {
+        Err(CoreError::UnsupportedAlgorithm(
+            "PQ backend feature disabled",
+        ))
+    }
+
+    pub fn new_preferred() -> Result<Self, CoreError> {
+        Err(CoreError::UnsupportedAlgorithm(
+            "PQ backend feature disabled",
+        ))
+    }
+
+    pub fn keypair(&self) -> Result<KemKeyPair, CoreError> {
+        Err(CoreError::UnsupportedAlgorithm(
+            "PQ backend feature disabled",
+        ))
+    }
+}
+
+#[cfg(all(not(feature = "pq-oqs"), not(feature = "pq-rust")))]
 impl KemProvider for MlKem768 {
     fn encapsulate(&self, _recipient_public_key: &[u8]) -> Result<KemEncapsulation, CoreError> {
-        Err(CoreError::UnsupportedAlgorithm("pq-oqs feature disabled"))
+        Err(CoreError::UnsupportedAlgorithm(
+            "PQ backend feature disabled",
+        ))
     }
 
     fn decapsulate(
@@ -216,8 +323,19 @@ impl KemProvider for MlKem768 {
         _recipient_secret_key: &[u8],
         _ciphertext: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, CoreError> {
-        Err(CoreError::UnsupportedAlgorithm("pq-oqs feature disabled"))
+        Err(CoreError::UnsupportedAlgorithm(
+            "PQ backend feature disabled",
+        ))
     }
+}
+
+#[cfg(all(feature = "pq-rust", not(feature = "pq-oqs")))]
+fn to_fixed_array<const N: usize>(field: &'static str, value: &[u8]) -> Result<[u8; N], CoreError> {
+    value.try_into().map_err(|_| CoreError::InvalidLength {
+        field,
+        expected: N,
+        actual: value.len(),
+    })
 }
 
 #[cfg(test)]
@@ -226,7 +344,7 @@ mod tests {
     use crate::alg::KemAlgorithm;
 
     #[test]
-    #[cfg(feature = "pq-oqs")]
+    #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
     fn mlkem768_keypair_has_expected_lengths() {
         let kem = MlKem768::new(KemAlgorithm::MlKem768).expect("kem init");
         assert_eq!(kem.public_key_len(), 1184);
@@ -238,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "pq-oqs")]
+    #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
     fn mlkem768_rejects_short_public_key() {
         let kem = MlKem768::new(KemAlgorithm::MlKem768).expect("kem init");
         let short_key = vec![0u8; 32];
@@ -247,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "pq-oqs")]
+    #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
     fn mlkem768_validate_public_key_rejects_wrong_length() {
         let kem = MlKem768::new(KemAlgorithm::MlKem768).expect("kem init");
         assert!(kem.validate_public_key(&[0u8; 32]).is_err());
@@ -257,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "pq-oqs")]
+    #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
     fn mlkem768_validate_public_key_accepts_valid_key() {
         let kem = MlKem768::new(KemAlgorithm::MlKem768).expect("kem init");
         let kp = kem.keypair().expect("keypair");
@@ -265,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "pq-oqs")]
+    #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
     fn mlkem768_encapsulate_decapsulate_roundtrip() {
         let kem = MlKem768::new(KemAlgorithm::MlKem768).expect("kem init");
         let kp = kem.keypair().expect("keypair");
@@ -278,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "pq-oqs")]
+    #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
     fn mlkem768_decapsulate_rejects_short_ciphertext() {
         let kem = MlKem768::new(KemAlgorithm::MlKem768).expect("kem init");
         let kp = kem.keypair().expect("keypair");

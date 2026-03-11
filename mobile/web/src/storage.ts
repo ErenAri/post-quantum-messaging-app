@@ -1,4 +1,10 @@
 import { GeneratedKeys, openJsonWithPassphrase, sealJsonWithPassphrase } from "./crypto";
+import {
+  clearAllSessionCache,
+  clearSessionCache,
+  loadSessionCache,
+  saveSessionCache,
+} from "./db";
 
 export type SetupConfig = {
   serverUrl: string;
@@ -7,7 +13,6 @@ export type SetupConfig = {
   suiteLabel: "ml-kem-768" | "kyber768";
   peerUserId: string;
   displayName: string;
-  passphrase: string;
 };
 
 export type ConversationSummary = {
@@ -60,6 +65,7 @@ const PROFILE_CACHE_KEY = "pqmsg.web.profilecache.v1";
 const PINS_KEY = "pqmsg.web.pins.v1";
 const CURSORS_KEY = "pqmsg.web.cursors.v1";
 const KEYS_PREFIX = "pqmsg.web.keys.v1.";
+const DIRECT_MESSAGE_SESSION_PREFIX = "pqmsg.web.dmsession.v1.";
 
 export const DEFAULT_SETUP: SetupConfig = {
   serverUrl: "http://127.0.0.1:3000",
@@ -68,7 +74,6 @@ export const DEFAULT_SETUP: SetupConfig = {
   suiteLabel: "ml-kem-768",
   peerUserId: "bob",
   displayName: "",
-  passphrase: ""
 };
 
 export function loadSetup(): SetupConfig {
@@ -79,13 +84,14 @@ export function loadSetup(): SetupConfig {
   try {
     const parsed = JSON.parse(raw) as SetupConfig;
     return {
-      serverUrl: parsed.serverUrl || DEFAULT_SETUP.serverUrl,
-      userId: parsed.userId || DEFAULT_SETUP.userId,
-      deviceId: parsed.deviceId || DEFAULT_SETUP.deviceId,
-      suiteLabel: parsed.suiteLabel || DEFAULT_SETUP.suiteLabel,
-      peerUserId: parsed.peerUserId || DEFAULT_SETUP.peerUserId,
-      displayName: parsed.displayName || DEFAULT_SETUP.displayName,
-      passphrase: parsed.passphrase || DEFAULT_SETUP.passphrase
+      serverUrl: typeof parsed.serverUrl === "string" ? parsed.serverUrl : DEFAULT_SETUP.serverUrl,
+      userId: typeof parsed.userId === "string" ? parsed.userId : DEFAULT_SETUP.userId,
+      deviceId: typeof parsed.deviceId === "string" ? parsed.deviceId : DEFAULT_SETUP.deviceId,
+      suiteLabel: parsed.suiteLabel === "kyber768" || parsed.suiteLabel === "ml-kem-768"
+        ? parsed.suiteLabel
+        : DEFAULT_SETUP.suiteLabel,
+      peerUserId: typeof parsed.peerUserId === "string" ? parsed.peerUserId : DEFAULT_SETUP.peerUserId,
+      displayName: typeof parsed.displayName === "string" ? parsed.displayName : DEFAULT_SETUP.displayName,
     };
   } catch {
     return DEFAULT_SETUP;
@@ -122,6 +128,78 @@ export function hasLocalKeys(userId: string): boolean {
     return false;
   }
   return localStorage.getItem(`${KEYS_PREFIX}${normalized}`) !== null;
+}
+
+export function listLocalKeyUsers(): string[] {
+  const users = new Set<string>();
+  const storageKeys: string[] = [];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const storageKey = localStorage.key(index);
+    if (storageKey) {
+      storageKeys.push(storageKey);
+    }
+  }
+  if (storageKeys.length === 0) {
+    storageKeys.push(...Object.keys(localStorage));
+  }
+  for (const storageKey of storageKeys) {
+    if (!storageKey.startsWith(KEYS_PREFIX)) {
+      continue;
+    }
+    const userId = storageKey.slice(KEYS_PREFIX.length).trim();
+    if (userId) {
+      users.add(userId);
+    }
+  }
+  return [...users].sort((lhs, rhs) => lhs.localeCompare(rhs));
+}
+
+export async function saveDirectMessageSession(
+  userId: string,
+  peerUserId: string,
+  passphrase: string,
+  sessionJson: string
+): Promise<void> {
+  const key = directMessageSessionStorageKey(userId, peerUserId);
+  const sealed = await sealJsonWithPassphrase(sessionJson, passphrase);
+  await saveSessionCache(userId, peerUserId, sealed);
+  localStorage.removeItem(key);
+}
+
+export async function loadDirectMessageSession(
+  userId: string,
+  peerUserId: string,
+  passphrase: string
+): Promise<string | null> {
+  const key = directMessageSessionStorageKey(userId, peerUserId);
+  const sealed = (await loadSessionCache(userId, peerUserId)) ?? localStorage.getItem(key);
+  if (!sealed) {
+    return null;
+  }
+  const sessionJson = await openJsonWithPassphrase<string>(sealed, passphrase);
+  if (localStorage.getItem(key) === sealed) {
+    await saveSessionCache(userId, peerUserId, sealed);
+    localStorage.removeItem(key);
+  }
+  return sessionJson;
+}
+
+export async function clearDirectMessageSession(userId: string, peerUserId: string): Promise<void> {
+  localStorage.removeItem(directMessageSessionStorageKey(userId, peerUserId));
+  await clearSessionCache(userId, peerUserId);
+}
+
+export async function clearAllDirectMessageSessions(userId: string): Promise<void> {
+  const normalizedUser = userId.trim();
+  if (!normalizedUser) {
+    return;
+  }
+  for (const storageKey of Object.keys(localStorage)) {
+    if (storageKey.startsWith(`${DIRECT_MESSAGE_SESSION_PREFIX}${normalizedUser}:`)) {
+      localStorage.removeItem(storageKey);
+    }
+  }
+  await clearAllSessionCache(normalizedUser);
 }
 
 type ConversationRow = ConversationSummary & { userId: string };
@@ -411,7 +489,7 @@ export function markGroupConversationRead(userId: string, groupId: string): void
   }
 }
 
-export function wipeLocalState(userId: string): void {
+export async function wipeLocalState(userId: string): Promise<void> {
   const normalizedUser = userId.trim();
   if (!normalizedUser) {
     return;
@@ -449,6 +527,8 @@ export function wipeLocalState(userId: string): void {
     }
   }
   writeRecord(CURSORS_KEY, cursors);
+
+  await clearAllDirectMessageSessions(normalizedUser);
 }
 
 function parseRecord<T>(key: string, fallback: T): T {
@@ -485,4 +565,8 @@ function defaultConversationMeta(kind: ConversationKind, threadId: string): Conv
     sealedSenderDefault: false,
     ephemeralTtlDefault: 0,
   };
+}
+
+function directMessageSessionStorageKey(userId: string, peerUserId: string): string {
+  return `${DIRECT_MESSAGE_SESSION_PREFIX}${userId.trim()}:${peerUserId.trim()}`;
 }

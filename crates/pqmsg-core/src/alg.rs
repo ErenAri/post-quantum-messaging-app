@@ -256,7 +256,7 @@ pub fn runtime_crypto_profile() -> Result<RuntimeCryptoProfile, CoreError> {
         kdf: suite.kdf,
         aead: suite.aead,
         signature: suite.signature,
-        pq_oqs_enabled: cfg!(feature = "pq-oqs"),
+        pq_oqs_enabled: cfg!(any(feature = "pq-oqs", feature = "pq-rust")),
         fips_mode: is_fips_mode(),
     })
 }

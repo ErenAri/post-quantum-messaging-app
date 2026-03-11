@@ -1,0 +1,635 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { JSDOM } from "jsdom";
+
+type MockKeys = {
+  userId: string;
+  deviceId: string;
+  suite: "ml-kem-768";
+  identityX25519Pub: string;
+  identityX25519Secret: string;
+  identitySigPub: string;
+  identitySigSecret: string;
+  signedPrekeyX25519Pub: string;
+  signedPrekeyX25519Secret: string;
+  pqSignedPrekeyPubMlkem768: string;
+  pqSignedPrekeySecretMlkem768: string;
+  oneTimePrekeysX25519: string[];
+  oneTimePrekeysX25519Secret: string[];
+  oneTimePrekeysMlkem768: string[];
+  oneTimePrekeysMlkem768Secret: string[];
+};
+
+type BootOptions = {
+  existingUsers?: string[];
+  bundleUsers?: string[];
+  capabilities?: { web_client_policy?: string };
+  prepare?: (storage: typeof import("./storage")) => Promise<void> | void;
+};
+
+type FakeMessage = {
+  id: string;
+  conversationId: string;
+  sender: string;
+  recipient: string;
+  text: string;
+  timestamp: number;
+  status: "sending" | "sent" | "delivered" | "failed";
+  serverMessageId?: number;
+  fileId?: string;
+  mimeType?: string;
+  fileName?: string;
+  replyToId?: string;
+  replyPreview?: string;
+  reactions?: Array<{ emoji: string; sender: string }>;
+  editedAt?: number;
+  contentType?: "text" | "reply" | "reaction" | "edit";
+};
+
+function makeKeys(userId: string, deviceId = `${userId}-device`): MockKeys {
+  return {
+    userId,
+    deviceId,
+    suite: "ml-kem-768",
+    identityX25519Pub: `x25519-pub-${userId}`,
+    identityX25519Secret: `x25519-secret-${userId}`,
+    identitySigPub: `sig-pub-${userId}`,
+    identitySigSecret: `sig-secret-${userId}`,
+    signedPrekeyX25519Pub: `spk-pub-${userId}`,
+    signedPrekeyX25519Secret: `spk-secret-${userId}`,
+    pqSignedPrekeyPubMlkem768: `pq-spk-pub-${userId}`,
+    pqSignedPrekeySecretMlkem768: `pq-spk-secret-${userId}`,
+    oneTimePrekeysX25519: [],
+    oneTimePrekeysX25519Secret: [],
+    oneTimePrekeysMlkem768: [],
+    oneTimePrekeysMlkem768Secret: [],
+  };
+}
+
+function convId(userId: string, peerId: string): string {
+  return [userId, peerId].sort().join(":");
+}
+
+function flushPromises(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function eventually(assertion: () => void): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await flushPromises();
+    }
+  }
+  throw lastError;
+}
+
+function installDom(url = "http://localhost/"): JSDOM {
+  const dom = new JSDOM(`<!doctype html><html><body><div id="app"></div></body></html>`, { url });
+  const { window } = dom;
+  const bindings: Record<string, unknown> = {
+    window,
+    document: window.document,
+    navigator: window.navigator,
+    localStorage: window.localStorage,
+    sessionStorage: window.sessionStorage,
+    location: window.location,
+    history: window.history,
+    HTMLElement: window.HTMLElement,
+    HTMLInputElement: window.HTMLInputElement,
+    HTMLButtonElement: window.HTMLButtonElement,
+    HTMLTextAreaElement: window.HTMLTextAreaElement,
+    Node: window.Node,
+    Event: window.Event,
+    MouseEvent: window.MouseEvent,
+    KeyboardEvent: window.KeyboardEvent,
+    CustomEvent: window.CustomEvent,
+    File: window.File,
+    Blob: window.Blob,
+  };
+  for (const [key, value] of Object.entries(bindings)) {
+    Object.defineProperty(globalThis, key, {
+      configurable: true,
+      writable: true,
+      value,
+    });
+  }
+  vi.stubGlobal("requestAnimationFrame", ((callback: FrameRequestCallback) => {
+    return setTimeout(() => callback(Date.now()), 0) as unknown as number;
+  }) as typeof requestAnimationFrame);
+  vi.stubGlobal("cancelAnimationFrame", ((id: number) => clearTimeout(id)) as typeof cancelAnimationFrame);
+  Object.defineProperty(window.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: vi.fn().mockResolvedValue(undefined) },
+  });
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn().mockReturnValue({
+      matches: false,
+      media: "",
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn().mockReturnValue(false),
+    }),
+  });
+  Object.defineProperty(window, "scrollTo", {
+    configurable: true,
+    value: vi.fn(),
+  });
+  return dom;
+}
+
+async function bootApp(options: BootOptions = {}) {
+  vi.resetModules();
+  vi.clearAllMocks();
+  const dom = installDom();
+
+  const messagesByConversation = new Map<string, FakeMessage[]>();
+  const outbox: Array<{ id: string; userId: string; peerId: string; groupId?: string }> = [];
+  const sessionCache = new Map<string, string>();
+  const apiState = {
+    existingUsers: new Set(options.existingUsers ?? ["test1", "test2"]),
+    bundleUsers: new Set(options.bundleUsers ?? options.existingUsers ?? ["test1", "test2"]),
+    relays: [] as Array<{ peerId: string; body: string }>,
+    capabilities: {
+      capability_schema_version: 1,
+      security_profile: "research",
+      deployment_mode: "development",
+      tls_required: false,
+      tls_enabled: false,
+      supported_suite_ids: [1],
+      runtime_crypto_profile: {
+        protocol_version: 1,
+        suite_id: 1,
+        kem: "ml-kem-768",
+        dh: "x25519",
+        kdf: "hkdf-sha256",
+        aead: "chacha20-poly1305",
+        signature: "ed25519",
+        pq_oqs_enabled: true,
+        fips_mode: false,
+      },
+      production_baseline_met: false,
+      registration_pow_bits: 0,
+      prekey_bundle_reserve_count: 0,
+      pq_ratchet_interval: 0,
+      web_client_policy: options.capabilities?.web_client_policy ?? "interop_candidate",
+    },
+  };
+
+  vi.doMock("./db", () => ({
+    async saveMessage(message: FakeMessage) {
+      const list = messagesByConversation.get(message.conversationId) ?? [];
+      const index = list.findIndex((item) => item.id === message.id);
+      if (index >= 0) {
+        list[index] = { ...list[index], ...message };
+      } else {
+        list.push({ ...message });
+      }
+      messagesByConversation.set(message.conversationId, list);
+    },
+    async updateMessageStatus(id: string, status: FakeMessage["status"], serverMessageId?: number) {
+      for (const list of messagesByConversation.values()) {
+        const found = list.find((item) => item.id === id);
+        if (!found) {
+          continue;
+        }
+        found.status = status;
+        if (serverMessageId !== undefined) {
+          found.serverMessageId = serverMessageId;
+        }
+      }
+    },
+    async getMessages(conversationId: string) {
+      return [...(messagesByConversation.get(conversationId) ?? [])].sort((lhs, rhs) => lhs.timestamp - rhs.timestamp);
+    },
+    async clearAllMessages() {
+      messagesByConversation.clear();
+    },
+    async clearOutboxMessages() {
+      outbox.length = 0;
+    },
+    async searchMessages() {
+      return [];
+    },
+    async queueOutboxMessage(message: { id: string; userId: string; peerId: string; groupId?: string }) {
+      outbox.push({ ...message });
+    },
+    async getOutboxMessages(userId: string) {
+      return outbox.filter((item) => item.userId === userId);
+    },
+    async removeOutboxMessage(id: string) {
+      const index = outbox.findIndex((item) => item.id === id);
+      if (index >= 0) {
+        outbox.splice(index, 1);
+      }
+    },
+    async saveSessionCache(userId: string, peerId: string, sealedSession: string) {
+      sessionCache.set(`${userId}:${peerId}`, sealedSession);
+    },
+    async loadSessionCache(userId: string, peerId: string) {
+      return sessionCache.get(`${userId}:${peerId}`) ?? null;
+    },
+    async clearSessionCache(userId: string, peerId: string) {
+      sessionCache.delete(`${userId}:${peerId}`);
+    },
+    async clearAllSessionCache(userId?: string) {
+      if (!userId) {
+        sessionCache.clear();
+        return;
+      }
+      for (const key of [...sessionCache.keys()]) {
+        if (key.startsWith(`${userId}:`)) {
+          sessionCache.delete(key);
+        }
+      }
+    },
+    async addReaction() {
+      return undefined;
+    },
+    async editStoredMessage(id: string, text: string) {
+      for (const list of messagesByConversation.values()) {
+        const found = list.find((item) => item.id === id);
+        if (!found) {
+          continue;
+        }
+        found.text = text;
+        found.editedAt = Date.now();
+        return found;
+      }
+      return null;
+    },
+    async getMessage(id: string) {
+      for (const list of messagesByConversation.values()) {
+        const found = list.find((item) => item.id === id);
+        if (found) {
+          return found;
+        }
+      }
+      return null;
+    },
+  }));
+
+  vi.doMock("./realtime", () => ({
+    RealtimeInbox: class {
+      onMessage() {}
+      onReconnect() {}
+      connect() {}
+      disconnect() {}
+    },
+  }));
+
+  vi.doMock("./crypto", () => {
+    const emptyHeaders = () => ({});
+    return {
+      buildInboxAuthHeaders: emptyHeaders,
+      buildPrekeysAuthHeaders: emptyHeaders,
+      buildPublishPrekeysPayload: () => ({
+        signed_prekey_x25519_pub: "spk",
+        sig_over_spk: "sig",
+        pq_signed_prekey_pub_mlkem768: "pq",
+        sig_over_pqspk: "pq-sig",
+        one_time_prekeys_x25519: [],
+        one_time_prekeys_mlkem768: [],
+      }),
+      buildRelayAuthHeaders: emptyHeaders,
+      buildRetireDeviceAuthHeaders: emptyHeaders,
+      buildProfileGetAuthHeaders: emptyHeaders,
+      buildProfileUpsertAuthHeaders: emptyHeaders,
+      buildPresenceGetAuthHeaders: emptyHeaders,
+      buildPresenceUpdateAuthHeaders: emptyHeaders,
+      buildTypingGetAuthHeaders: emptyHeaders,
+      buildTypingUpdateAuthHeaders: emptyHeaders,
+      buildSendReceiptAuthHeaders: emptyHeaders,
+      buildGetReceiptsAuthHeaders: emptyHeaders,
+      buildContactsListAuthHeaders: emptyHeaders,
+      buildContactsUpsertAuthHeaders: emptyHeaders,
+      buildContactsRemoveAuthHeaders: emptyHeaders,
+      buildUserGroupsListAuthHeaders: emptyHeaders,
+      buildGroupMembersListAuthHeaders: emptyHeaders,
+      buildFileUploadAuthHeaders: emptyHeaders,
+      buildFileDownloadAuthHeaders: emptyHeaders,
+      buildInboxDeleteAuthHeaders: emptyHeaders,
+      buildPrekeysStatusAuthHeaders: emptyHeaders,
+      buildRotateInitAuthHeaders: emptyHeaders,
+      buildRotateConfirmAuthHeaders: emptyHeaders,
+      buildIdentityLogAuthHeaders: emptyHeaders,
+      buildSealedInboxAuthHeaders: emptyHeaders,
+      buildEphemeralRelayAuthHeaders: emptyHeaders,
+      buildDiscoveryHandlesAuthHeaders: emptyHeaders,
+      buildDiscoveryMatchAuthHeaders: emptyHeaders,
+      buildPushTokenAuthHeaders: emptyHeaders,
+      buildListDevicesAuthHeaders: emptyHeaders,
+      buildLinkDeviceAuthHeaders: emptyHeaders,
+      buildRevokeDeviceAuthHeaders: emptyHeaders,
+      decodeWireEnvelopeBase64: vi.fn(),
+      decryptDirectMessage: vi.fn((activeKeys: MockKeys, senderUserId: string) => ({
+        plaintextUtf8: `from ${senderUserId}`,
+        sessionJson: "decrypted-session",
+        updatedKeys: activeKeys,
+      })),
+      decryptFallbackMessage: vi.fn(() => ({ plaintext: "fallback" })),
+      encryptDirectMessageWithSession: vi.fn((sessionJson: string, senderUserId: string, peerUserId: string, plaintext: string) => ({
+        messageBytesBase64: `enc:${senderUserId}:${peerUserId}:${plaintext}`,
+        sessionJson: `${sessionJson}:next`,
+        usedHandshake: false,
+      })),
+      generateIdentityKeys: vi.fn((userId: string, deviceId: string) => makeKeys(userId, deviceId)),
+      identityFingerprint: vi.fn((value: string) => `fp:${value}`),
+      initWasmCrypto: vi.fn().mockResolvedValue(true),
+      initiateDirectMessageSession: vi.fn((activeKeys: MockKeys, bundle: { user_id?: string }, plaintext: string) => ({
+        messageBytesBase64: `init:${activeKeys.userId}:${bundle.user_id ?? "peer"}:${plaintext}`,
+        sessionJson: "handshake-session",
+        usedHandshake: true,
+      })),
+      isPqSessionMessagingAvailable: vi.fn(() => true),
+      regeneratePublishedPrekeys: vi.fn((activeKeys: MockKeys) => activeKeys),
+      sealJsonWithPassphrase: vi.fn(async (value: unknown) => JSON.stringify(value)),
+      openJsonWithPassphrase: vi.fn(async (sealed: string) => JSON.parse(sealed)),
+    };
+  });
+
+  vi.doMock("./server", () => {
+    class FakePqmsgApi {
+      constructor(readonly baseUrl: string) {}
+
+      async getCapabilities() {
+        return apiState.capabilities;
+      }
+
+      async listContacts() {
+        return { contacts: [] };
+      }
+
+      async listUserGroups() {
+        return { groups: [] };
+      }
+
+      async getProfile(userId: string) {
+        if (!apiState.existingUsers.has(userId)) {
+          throw new Error("HTTP 404: user not found");
+        }
+        return { user_id: userId, display_name: userId };
+      }
+
+      async getBundle(userId: string) {
+        if (!apiState.bundleUsers.has(userId)) {
+          throw new Error("HTTP 404: bundle not found");
+        }
+        return {
+          user_id: userId,
+          identity_x25519_pub: `bundle-x25519-${userId}`,
+          identity_sig_pub: `bundle-sig-${userId}`,
+          identity_fingerprint_sha256: `bundle-fp-${userId}`,
+          identity_key_version: 1,
+          signed_prekey_x25519_pub: `spk-${userId}`,
+          sig_over_spk: "sig",
+          pq_signed_prekey_pub_mlkem768: `pq-${userId}`,
+          sig_over_pqspk: "pq-sig",
+          one_time_prekey_x25519: null,
+          one_time_prekey_mlkem768: null,
+          bundle_generated_at: "2026-03-11T00:00:00Z",
+        };
+      }
+
+      async relay(peerId: string, request: { message_bytes_base64: string }) {
+        apiState.relays.push({ peerId, body: request.message_bytes_base64 });
+        return { message_id: apiState.relays.length, received_at: "2026-03-11T00:00:00Z" };
+      }
+
+      async relayEphemeral(peerId: string, request: { message_bytes_base64: string }) {
+        apiState.relays.push({ peerId, body: request.message_bytes_base64 });
+        return { message_id: apiState.relays.length, received_at: "2026-03-11T00:00:00Z" };
+      }
+
+      async sealedRelay(peerId: string, request: { message_bytes_base64: string }) {
+        apiState.relays.push({ peerId, body: request.message_bytes_base64 });
+        return { delivered_device_count: 1 };
+      }
+
+      async inbox(userId: string) {
+        return { user_id: userId, messages: [] };
+      }
+
+      async getTyping() {
+        return { typing: [] };
+      }
+
+      async getReceipts() {
+        return { receipts: [] };
+      }
+
+      async getPresence(userId: string) {
+        return { user_id: userId, status: "offline", updated_at: "2026-03-11T00:00:00Z" };
+      }
+
+      async updatePresence() {
+        return { ok: true };
+      }
+
+      async sendReceipt() {
+        return { ok: true };
+      }
+
+      async upsertContact() {
+        return { ok: true };
+      }
+
+      async listGroupMembers(groupId: string) {
+        return { group_id: groupId, members: [] };
+      }
+
+      async createInboxWsTicket(userId: string) {
+        return { ticket: `ticket-${userId}`, expires_at: "2026-03-11T00:00:30Z" };
+      }
+    }
+
+    return {
+      PqmsgApi: FakePqmsgApi,
+    };
+  });
+
+  const storage = await import("./storage");
+  if (options.prepare) {
+    await options.prepare(storage);
+  }
+  const router = await import("./router");
+  await import("./app");
+
+  return { dom, storage, router, apiState, messagesByConversation };
+}
+
+beforeEach(() => {
+  vi.useRealTimers();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.resetModules();
+});
+
+describe("web app flow coverage", () => {
+  it("signs in from a browser-local account list and lands in conversations", async () => {
+    const { router } = await bootApp({
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+      },
+    });
+
+    router.navigateTo({ screen: "sign-in" });
+    await flushPromises();
+
+    const quickFill = document.querySelector<HTMLElement>("[data-local-account='test1']");
+    expect(quickFill).not.toBeNull();
+    quickFill?.click();
+
+    const userInput = document.querySelector<HTMLInputElement>("#onb-uid");
+    const passInput = document.querySelector<HTMLInputElement>("#onb-pass");
+    expect(userInput?.value).toBe("test1");
+
+    passInput!.value = "pass-1";
+    document.querySelector<HTMLButtonElement>("#onb-go")!.click();
+
+    await eventually(() => {
+      expect(document.querySelector("#onb-status")?.textContent).toContain("Signed in!");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 450));
+
+    expect(router.getCurrentView()).toEqual({ screen: "conversations" });
+    expect(document.body.textContent).toContain("No conversations yet");
+  });
+
+  it("rejects a nonexistent new-chat target and keeps local conversations unchanged", async () => {
+    const { storage, router } = await bootApp({
+      existingUsers: ["test1"],
+      bundleUsers: ["test1"],
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "new-chat" });
+    await flushPromises();
+
+    const peerInput = document.querySelector<HTMLInputElement>("#nc-peer");
+    peerInput!.value = "ghost";
+    document.querySelector<HTMLButtonElement>("#nc-start")!.click();
+
+    await eventually(() => {
+      expect(document.querySelector("#nc-status")?.textContent).toContain("User @ghost was not found on this server");
+    });
+
+    expect(storage.loadConversations("test1")).toEqual([]);
+  });
+
+  it("sends a direct message through the PQ session path and updates local message state", async () => {
+    const { router, apiState, messagesByConversation } = await bootApp({
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        await storage.saveDirectMessageSession("test1", "test2", "pass-1", "existing-session");
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "test2",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "chat", peerId: "test2" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLInputElement>("#chat-input")).not.toBeNull();
+    });
+
+    const input = document.querySelector<HTMLInputElement>("#chat-input")!;
+    input.value = "hello from web";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>("#chat-send")!.click();
+
+    await eventually(() => {
+      expect(apiState.relays).toHaveLength(1);
+    });
+
+    const saved = messagesByConversation.get(convId("test1", "test2")) ?? [];
+    expect(saved).toHaveLength(1);
+    expect(saved[0].text).toBe("hello from web");
+    expect(saved[0].status).toBe("sent");
+    expect(document.body.textContent).toContain("hello from web");
+  });
+
+  it("logs out from settings and returns to onboarding while preserving the saved server URL", async () => {
+    const { storage, router } = await bootApp({
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "test2",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "settings" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLButtonElement>("#set-logout")).not.toBeNull();
+    });
+
+    document.querySelector<HTMLButtonElement>("#set-logout")!.click();
+    await flushPromises();
+
+    expect(router.getCurrentView()).toEqual({ screen: "onboarding" });
+    expect(storage.loadSetup()).toMatchObject({
+      serverUrl: "http://localhost:3000",
+      userId: "",
+      peerUserId: "",
+    });
+    expect(document.body.textContent).toContain("Create Account");
+  });
+
+  it("keeps unsupported web group and call surfaces in explicit holdback states", async () => {
+    const { router } = await bootApp({
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "create-group" });
+    await flushPromises();
+    expect(document.body.textContent).toContain("Web group creation is unavailable");
+
+    router.navigateTo({ screen: "call", peerId: "test2", callType: "audio" });
+    await flushPromises();
+    expect(document.body.textContent).toContain("Audio calling is unavailable on web");
+  });
+});

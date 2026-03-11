@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
-import { PqmsgApi } from "./server";
+import { PqmsgApi, PqmsgApiError } from "./server";
 
 // Mock global fetch
 const mockFetch = vi.fn() as Mock;
@@ -308,6 +308,16 @@ describe("PqmsgApi error handling", () => {
   it("throws on HTTP 500", async () => {
     mockFetch.mockResolvedValueOnce(errorResponse(500, "internal error"));
     await expect(api.getHealth()).rejects.toThrow("HTTP 500");
+  });
+
+  it("sanitizes server-controlled HTML in error messages", async () => {
+    mockFetch.mockResolvedValueOnce(errorResponse(400, "<script>alert(1)</script>   bad   request"));
+    await expect(api.getHealth()).rejects.toMatchObject({
+      name: "PqmsgApiError",
+      status: 400,
+      detail: "alert(1) bad request",
+      message: "HTTP 400: alert(1) bad request",
+    } satisfies Partial<PqmsgApiError>);
   });
 });
 

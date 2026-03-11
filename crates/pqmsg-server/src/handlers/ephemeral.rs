@@ -13,6 +13,8 @@ use crate::validation::*;
 use crate::{AppState, MAX_MESSAGE_BYTES};
 
 const MAX_TTL_SECONDS: u64 = 7 * 24 * 3600; // 1 week
+const DELIVERED_RELAY_RETENTION_DAYS: i64 = 7;
+const RECEIPT_RETENTION_DAYS: i64 = 30;
 
 pub(crate) async fn relay_ephemeral_message(
     State(state): State<AppState>,
@@ -189,6 +191,7 @@ async fn reap_expired_messages(state: &AppState) -> Result<(), crate::error::App
 /// expired identity rotation challenges, and old delivered relay messages.
 async fn reap_stale_data(state: &AppState) -> Result<(), crate::error::AppError> {
     let now_unix = Utc::now().timestamp();
+    let now_rfc3339 = Utc::now().to_rfc3339();
 
     // 1. Expired relay_dedup entries
     let dedup_deleted = sqlx::query("DELETE FROM relay_dedup WHERE expires_at_unix <= $1")
@@ -217,13 +220,107 @@ async fn reap_stale_data(state: &AppState) -> Result<(), crate::error::AppError>
             .await?
             .rows_affected();
 
-    let total = dedup_deleted + otk_x_deleted + otk_pq_deleted + challenge_deleted;
+    // 4. Expired coordination state should never become durable history.
+    let presence_deleted = sqlx::query("DELETE FROM presence_state WHERE expires_at <= $1")
+        .bind(&now_rfc3339)
+        .execute(state.pool())
+        .await?
+        .rows_affected();
+
+    let typing_deleted =
+        sqlx::query("DELETE FROM typing_state WHERE expires_at <= $1 OR is_typing = 0")
+            .bind(&now_rfc3339)
+            .execute(state.pool())
+            .await?
+            .rows_affected();
+
+    let ws_ticket_deleted = sqlx::query("DELETE FROM ws_inbox_tickets WHERE expires_at <= $1")
+        .bind(&now_rfc3339)
+        .execute(state.pool())
+        .await?
+        .rows_affected();
+
+    // 5. Once a device cursor has advanced past an envelope and it has aged out of the
+    // replay window, the server should not retain it as a long-term archive.
+    let delivered_relay_cutoff =
+        (Utc::now() - Duration::days(DELIVERED_RELAY_RETENTION_DAYS)).to_rfc3339();
+    let delivered_relay_deleted = sqlx::query(
+        "DELETE FROM relay_messages
+         WHERE message_id IN (
+            SELECT m.message_id
+            FROM relay_messages m
+            INNER JOIN inbox_cursors c
+              ON c.user_id = m.recipient_user_id
+             AND c.device_id = m.recipient_device_id
+            WHERE c.last_message_id >= m.message_id
+              AND m.received_at < $1
+         )",
+    )
+    .bind(&delivered_relay_cutoff)
+    .execute(state.pool())
+    .await?
+    .rows_affected();
+
+    let delivered_sealed_deleted = sqlx::query(
+        "DELETE FROM sealed_relay_messages
+         WHERE message_id IN (
+            SELECT m.message_id
+            FROM sealed_relay_messages m
+            INNER JOIN sealed_inbox_cursors c
+              ON c.user_id = m.recipient_user_id
+             AND c.device_id = m.recipient_device_id
+            WHERE c.last_message_id >= m.message_id
+              AND m.received_at < $1
+         )",
+    )
+    .bind(&delivered_relay_cutoff)
+    .execute(state.pool())
+    .await?
+    .rows_affected();
+
+    // 6. Receipt state is useful for UX but should not accumulate indefinitely.
+    let receipt_cutoff = (Utc::now() - Duration::days(RECEIPT_RETENTION_DAYS)).to_rfc3339();
+    let receipt_deleted = sqlx::query("DELETE FROM message_receipts WHERE created_at < $1")
+        .bind(&receipt_cutoff)
+        .execute(state.pool())
+        .await?
+        .rows_affected();
+
+    // 7. Remove expiry metadata that no longer points at a live relay row.
+    let orphaned_expiry_deleted = sqlx::query(
+        "DELETE FROM message_expiry_meta
+         WHERE NOT EXISTS (
+            SELECT 1 FROM relay_messages r WHERE r.message_id = message_expiry_meta.message_id
+         )",
+    )
+    .execute(state.pool())
+    .await?
+    .rows_affected();
+
+    let total = dedup_deleted
+        + otk_x_deleted
+        + otk_pq_deleted
+        + challenge_deleted
+        + presence_deleted
+        + typing_deleted
+        + ws_ticket_deleted
+        + delivered_relay_deleted
+        + delivered_sealed_deleted
+        + receipt_deleted
+        + orphaned_expiry_deleted;
     if total > 0 {
         tracing::info!(
             dedup = dedup_deleted,
             consumed_otk_x25519 = otk_x_deleted,
             consumed_otk_mlkem = otk_pq_deleted,
             expired_challenges = challenge_deleted,
+            expired_presence = presence_deleted,
+            expired_typing = typing_deleted,
+            expired_ws_tickets = ws_ticket_deleted,
+            delivered_relay = delivered_relay_deleted,
+            delivered_sealed_relay = delivered_sealed_deleted,
+            expired_receipts = receipt_deleted,
+            orphaned_message_expiry = orphaned_expiry_deleted,
             "stale data reaper cleanup"
         );
     }
@@ -325,5 +422,146 @@ mod tests {
 
         assert_eq!(remaining_x25519, 0);
         assert_eq!(remaining_mlkem, 0);
+    }
+
+    #[tokio::test]
+    async fn stale_data_reaper_prunes_delivered_relay_and_receipts() {
+        sqlx::any::install_default_drivers();
+        let database_url = "sqlite::memory:";
+        let db_backend = parse_db_backend(database_url).expect("sqlite backend");
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(database_url)
+            .await
+            .expect("connect sqlite memory");
+        init_db(&pool, db_backend).await.expect("migrate");
+
+        let rate_limiter = Arc::new(RateLimiter::new(8.0, 1.0, 64, StdDuration::from_secs(60)));
+        let state = AppState::new(pool.clone(), db_backend, rate_limiter);
+
+        for (user_id, device_id, identity_key) in [
+            ("alice", "alice-dev-1", vec![1_u8; 32]),
+            ("bob", "bob-dev-1", vec![2_u8; 32]),
+        ] {
+            sqlx::query(
+                "INSERT INTO users (
+                    user_id,
+                    identity_x25519_pub,
+                    identity_sig_pub,
+                    device_id,
+                    created_at,
+                    updated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(user_id)
+            .bind(identity_key.clone())
+            .bind(identity_key)
+            .bind(device_id)
+            .bind("2026-01-01T00:00:00Z")
+            .bind("2026-01-01T00:00:00Z")
+            .execute(&pool)
+            .await
+            .expect("insert user");
+        }
+
+        let relay_message_id: i64 = sqlx::query_scalar(
+            "INSERT INTO relay_messages (
+                recipient_user_id,
+                recipient_device_id,
+                sender_user_id,
+                device_id,
+                message_blob,
+                received_at
+             ) VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING message_id",
+        )
+        .bind("bob")
+        .bind("bob-dev-1")
+        .bind("alice")
+        .bind("alice-dev-1")
+        .bind(vec![9_u8; 16])
+        .bind("2026-01-01T00:00:00Z")
+        .fetch_one(&pool)
+        .await
+        .expect("insert relay");
+
+        let sealed_message_id: i64 = sqlx::query_scalar(
+            "INSERT INTO sealed_relay_messages (
+                recipient_user_id,
+                recipient_device_id,
+                message_blob,
+                received_at
+             ) VALUES ($1, $2, $3, $4)
+             RETURNING message_id",
+        )
+        .bind("bob")
+        .bind("bob-dev-1")
+        .bind(vec![7_u8; 16])
+        .bind("2026-01-01T00:00:00Z")
+        .fetch_one(&pool)
+        .await
+        .expect("insert sealed relay");
+
+        sqlx::query(
+            "INSERT INTO inbox_cursors (user_id, device_id, last_message_id, updated_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind("bob")
+        .bind("bob-dev-1")
+        .bind(relay_message_id)
+        .bind("2026-02-01T00:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert inbox cursor");
+
+        sqlx::query(
+            "INSERT INTO sealed_inbox_cursors (user_id, device_id, last_message_id, updated_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind("bob")
+        .bind("bob-dev-1")
+        .bind(sealed_message_id)
+        .bind("2026-02-01T00:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert sealed cursor");
+
+        sqlx::query(
+            "INSERT INTO message_receipts (
+                message_id,
+                recipient_user_id,
+                recipient_device_id,
+                receipt_type,
+                created_at
+             ) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(relay_message_id)
+        .bind("bob")
+        .bind("bob-dev-1")
+        .bind("delivered")
+        .bind("2026-01-01T00:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert receipt");
+
+        reap_stale_data(&state).await.expect("reap stale data");
+
+        let remaining_relay: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relay_messages")
+            .fetch_one(&pool)
+            .await
+            .expect("count relay");
+        let remaining_sealed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sealed_relay_messages")
+                .fetch_one(&pool)
+                .await
+                .expect("count sealed relay");
+        let remaining_receipts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_receipts")
+            .fetch_one(&pool)
+            .await
+            .expect("count receipts");
+
+        assert_eq!(remaining_relay, 0);
+        assert_eq!(remaining_sealed, 0);
+        assert_eq!(remaining_receipts, 0);
     }
 }

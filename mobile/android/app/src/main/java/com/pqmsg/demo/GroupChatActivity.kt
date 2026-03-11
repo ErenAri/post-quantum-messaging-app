@@ -11,10 +11,13 @@ import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.launch
-import uniffi.pqmsg_android.buildInboxAuthHeaders
+import uniffi.pqmsg_android.buildGroupMembersAddAuthHeaders
+import uniffi.pqmsg_android.buildGroupMembersListAuthHeaders
+import uniffi.pqmsg_android.buildGroupRelayAuthHeaders
+import uniffi.pqmsg_android.ServerBundle
+import uniffi.pqmsg_android.GroupRelayAuthRecipient
 import uniffi.pqmsg_android.encryptWithSession
 import uniffi.pqmsg_android.initiateSessionAndEncrypt
-import uniffi.pqmsg_android.ServerBundle
 import java.text.DateFormat
 import java.util.Date
 
@@ -115,10 +118,9 @@ class GroupChatActivity : AppCompatActivity() {
         // Fetch group members and send to each via group relay
         val members = context.api.listGroupMembers(
             groupId = groupId,
-            headers = buildInboxAuthHeaders(
+            headers = buildGroupMembersListAuthHeaders(
                 keysJson = keysJson,
-                userId = context.profile.userId,
-                since = 0L,
+                groupId = groupId,
             ).toHeaderMap(),
         )
 
@@ -147,25 +149,35 @@ class GroupChatActivity : AppCompatActivity() {
                 }
 
                 store.writeSession(context.profile.userId, peerUserId, sendResult.sessionJson)
-                GroupRelayRecipient(
+                val recipient = GroupRelayRecipient(
                     recipient_user_id = peerUserId,
                     message_bytes_base64 = sendResult.messageBytesBase64,
+                )
+                Pair(
+                    recipient,
+                    GroupRelayAuthRecipient(
+                        recipientUserId = peerUserId,
+                        messageBytesBase64 = sendResult.messageBytesBase64,
+                    ),
                 )
             }
 
         require(recipients.isNotEmpty()) { "No other members in group" }
 
+        val relayRecipients = recipients.map { it.first }
+        val authRecipients = recipients.map { it.second }
         val relayResult = context.api.relayGroupMessage(
             groupId = groupId,
-            headers = buildInboxAuthHeaders(
+            headers = buildGroupRelayAuthHeaders(
                 keysJson = keysJson,
-                userId = context.profile.userId,
-                since = 0L,
+                groupId = groupId,
+                senderUserId = context.profile.userId,
+                recipients = authRecipients,
             ).toHeaderMap(),
             request = GroupRelayRequest(
                 sender_user_id = context.profile.userId,
                 device_id = context.profile.deviceId,
-                recipients = recipients,
+                recipients = relayRecipients,
             ),
         )
 
@@ -225,10 +237,9 @@ class GroupChatActivity : AppCompatActivity() {
                 val keysJson = context.keysJson
                 val members = context.api.listGroupMembers(
                     groupId = groupId,
-                    headers = buildInboxAuthHeaders(
+                    headers = buildGroupMembersListAuthHeaders(
                         keysJson = keysJson,
-                        userId = context.profile.userId,
-                        since = 0L,
+                        groupId = groupId,
                     ).toHeaderMap(),
                 )
                 val memberList = members.members.joinToString("\n") {
@@ -264,10 +275,10 @@ class GroupChatActivity : AppCompatActivity() {
                         runCatching {
                             api.addGroupMember(
                                 groupId = groupId,
-                                headers = buildInboxAuthHeaders(
+                                headers = buildGroupMembersAddAuthHeaders(
                                     keysJson = keysJson,
-                                    userId = userId,
-                                    since = 0L,
+                                    groupId = groupId,
+                                    memberUserId = memberId,
                                 ).toHeaderMap(),
                                 request = AddGroupMemberRequest(member_user_id = memberId),
                             )

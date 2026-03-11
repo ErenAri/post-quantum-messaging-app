@@ -1,6 +1,33 @@
 import { describe, it, expect, vi } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
 import { sha256 } from "@noble/hashes/sha2";
+
+vi.mock("./crypto-wasm", () => ({
+  initWasm: vi.fn(async () => true),
+  wasmAvailable: vi.fn(() => false),
+  sessionMessagingAvailable: vi.fn(() => false),
+  kemAvailable: vi.fn(() => true),
+  kemKeypair: vi.fn(() => ({
+    public_key: new Uint8Array(1184).fill(7),
+    secret_key: new Uint8Array(2400).fill(9),
+  })),
+  pqSigAvailable: vi.fn(() => false),
+  mlDsaKeypair: vi.fn(),
+  mlDsaSign: vi.fn(),
+  mlDsaVerify: vi.fn(),
+  encrypt: vi.fn(),
+  decrypt: vi.fn(),
+  hkdfSha256: vi.fn(),
+  x25519Dh: vi.fn(),
+  x25519Keypair: vi.fn(),
+  wrapSecret: vi.fn(),
+  unwrapSecret: vi.fn(),
+  conversationAd: vi.fn(),
+  initiateSessionAndEncrypt: vi.fn(),
+  encryptWithSession: vi.fn(),
+  decryptDirectMessage: vi.fn(),
+}));
+
 import {
   generateIdentityKeys,
   buildPublishPrekeysPayload,

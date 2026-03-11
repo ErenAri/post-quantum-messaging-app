@@ -25,9 +25,10 @@ export type StoredMessage = {
 };
 
 const DB_NAME = "pqmsg-web";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const MESSAGES_STORE = "messages";
 const OUTBOX_STORE = "outbox";
+const SESSIONS_STORE = "sessions";
 
 export type OutboxMessage = {
   id: string;
@@ -38,6 +39,14 @@ export type OutboxMessage = {
   timestamp: number;
   sealed: boolean;
   ephemeralTtl: number;
+};
+
+type StoredSession = {
+  id: string;
+  userId: string;
+  peerId: string;
+  sealedSession: string;
+  updatedAt: number;
 };
 
 let dbInstance: IDBDatabase | null = null;
@@ -55,6 +64,10 @@ function open(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(OUTBOX_STORE)) {
         db.createObjectStore(OUTBOX_STORE, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(SESSIONS_STORE)) {
+        const store = db.createObjectStore(SESSIONS_STORE, { keyPath: "id" });
+        store.createIndex("by_user", "userId", { unique: false });
       }
     };
     request.onsuccess = () => {
@@ -218,6 +231,80 @@ export async function clearOutboxMessages(userId?: string): Promise<void> {
           if (message.userId === userId) {
             cursor.delete();
           }
+          cursor.continue();
+        }
+      };
+      request.onerror = () => reject(request.error);
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function saveSessionCache(
+  userId: string,
+  peerId: string,
+  sealedSession: string
+): Promise<void> {
+  const db = await open();
+  const session: StoredSession = {
+    id: `${userId}:${peerId}`,
+    userId,
+    peerId,
+    sealedSession,
+    updatedAt: Date.now(),
+  };
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SESSIONS_STORE, "readwrite");
+    tx.objectStore(SESSIONS_STORE).put(session);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function loadSessionCache(
+  userId: string,
+  peerId: string
+): Promise<string | null> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SESSIONS_STORE, "readonly");
+    const request = tx.objectStore(SESSIONS_STORE).get(`${userId}:${peerId}`);
+    request.onsuccess = () => {
+      const session = request.result as StoredSession | undefined;
+      resolve(session?.sealedSession ?? null);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function clearSessionCache(
+  userId: string,
+  peerId: string
+): Promise<void> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SESSIONS_STORE, "readwrite");
+    tx.objectStore(SESSIONS_STORE).delete(`${userId}:${peerId}`);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function clearAllSessionCache(userId?: string): Promise<void> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SESSIONS_STORE, "readwrite");
+    const store = tx.objectStore(SESSIONS_STORE);
+    if (!userId) {
+      store.clear();
+    } else {
+      const index = store.index("by_user");
+      const request = index.openCursor(userId);
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (cursor) {
+          cursor.delete();
           cursor.continue();
         }
       };

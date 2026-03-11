@@ -8,6 +8,7 @@ import uniffi.pqmsg_android.buildPrekeysStatusAuthHeaders
 import uniffi.pqmsg_android.buildPublishPrekeysPayload
 import uniffi.pqmsg_android.buildPushTokenAuthHeaders
 import uniffi.pqmsg_android.buildRegisterPayload
+import uniffi.pqmsg_android.buildUserGroupsListAuthHeaders
 import uniffi.pqmsg_android.decryptMessage
 import uniffi.pqmsg_android.generateIdentityKeys
 import uniffi.pqmsg_android.loadUserProfile
@@ -33,6 +34,10 @@ data class ComposeTarget(
 )
 
 object MessagingCoordinator {
+    private fun normalizePeerUserId(value: String): String {
+        return value.trim().removePrefix("@")
+    }
+
     suspend fun ensureReady(
         store: LocalStateStore,
         serverUrl: String,
@@ -294,10 +299,9 @@ object MessagingCoordinator {
     ): Int {
         val response = context.api.listUserGroups(
             context.profile.userId,
-            buildInboxAuthHeaders(
+            buildUserGroupsListAuthHeaders(
                 keysJson = context.keysJson,
                 userId = context.profile.userId,
-                since = 0,
             ).toHeaderMap(),
         )
         val existing = store.listGroups(context.profile.userId)
@@ -376,7 +380,7 @@ object MessagingCoordinator {
         require(trimmed.isNotBlank()) { "username or invite is empty" }
         val parsed = runCatching { Uri.parse(trimmed) }.getOrNull()
         if (parsed != null && parsed.scheme == "pqmsg") {
-            val peer = parsed.getQueryParameter("user")?.trim().orEmpty()
+            val peer = normalizePeerUserId(parsed.getQueryParameter("user").orEmpty())
             val server = parsed.getQueryParameter("server")?.trim().orEmpty()
             require(peer.isNotBlank()) { "invite is missing user" }
             val resolvedServer = if (server.isBlank()) fallbackServerUrl else server
@@ -385,8 +389,10 @@ object MessagingCoordinator {
                 serverUrl = ApiClientFactory.normalizeBaseUrl(resolvedServer),
             )
         }
+        val peerUserId = normalizePeerUserId(trimmed)
+        require(peerUserId.isNotBlank()) { "username or invite is empty" }
         return ComposeTarget(
-            peerUserId = trimmed,
+            peerUserId = peerUserId,
             serverUrl = ApiClientFactory.normalizeBaseUrl(fallbackServerUrl),
         )
     }

@@ -16,12 +16,8 @@ import {
   buildContactsListAuthHeaders,
   buildContactsUpsertAuthHeaders,
   buildContactsRemoveAuthHeaders,
-  buildGroupCreateAuthHeaders,
   buildUserGroupsListAuthHeaders,
   buildGroupMembersListAuthHeaders,
-  buildGroupMembersAddAuthHeaders,
-  buildGroupMembersRemoveAuthHeaders,
-  buildGroupRelayAuthHeaders,
   buildFileUploadAuthHeaders,
   buildFileDownloadAuthHeaders,
   buildInboxDeleteAuthHeaders,
@@ -38,11 +34,15 @@ import {
   buildLinkDeviceAuthHeaders,
   buildRevokeDeviceAuthHeaders,
   decodeWireEnvelopeBase64,
+  decryptDirectMessage,
   decryptFallbackMessage,
-  encryptFallbackMessage,
-  encodeWireEnvelopeBase64,
+  encryptDirectMessageWithSession,
   generateIdentityKeys,
   identityFingerprint,
+  initWasmCrypto,
+  initiateDirectMessageSession,
+  isPqSessionMessagingAvailable,
+  regeneratePublishedPrekeys,
   type GeneratedKeys,
 } from "./crypto";
 import { base64ToBytes, bytesToBase64 } from "./base64";
@@ -58,10 +58,13 @@ import {
   type ServerCapabilitiesResponse,
 } from "./server";
 import {
+  clearAllDirectMessageSessions,
   DEFAULT_SETUP,
   loadConversationMeta,
   loadConversationMetas,
+  loadDirectMessageSession,
   hasLocalKeys,
+  listLocalKeyUsers,
   loadConversations,
   loadGroupConversations,
   loadProfileDisplayNames,
@@ -74,6 +77,7 @@ import {
   updateConversationMeta,
   readCursor,
   saveKeys,
+  saveDirectMessageSession,
   saveSetup,
   upsertConversation,
   upsertGroupConversation,
@@ -101,10 +105,8 @@ import {
   editStoredMessage,
   getMessage,
   type StoredMessage,
-  type OutboxMessage,
 } from "./db";
 import { RealtimeInbox, type WsInboxMessage } from "./realtime";
-import { CallManager, type CallInfo } from "./call";
 import {
   getCurrentView,
   navigateTo,
@@ -115,6 +117,11 @@ import {
   type AppNotification,
 } from "./router";
 import { getWebBetaHoldback, WEB_BETA_SCOPE_SUMMARY } from "./betaScope";
+import {
+  normalizeBrowserUserId,
+  parseDirectChatTarget,
+  startDirectConversationFlow,
+} from "./webFlows";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -148,9 +155,6 @@ let sealedSenderEnabled = false;
 let sealedInboxCursor = 0;
 let sealedInboxPollTimer: ReturnType<typeof setInterval> | null = null;
 
-// Call state
-let callManager: CallManager | null = null;
-let currentCallInfo: CallInfo | null = null;
 let cachedCapabilities: ServerCapabilitiesResponse | null = null;
 let cachedCapabilitiesServerUrl: string | null = null;
 
@@ -172,7 +176,103 @@ async function loadServerCapabilitiesCached(): Promise<ServerCapabilitiesRespons
   }
 }
 
+async function ensureWebPqRuntime(): Promise<void> {
+  if (isPqSessionMessagingAvailable()) {
+    return;
+  }
+  const ready = await initWasmCrypto();
+  if (!ready || !isPqSessionMessagingAvailable()) {
+    throw new Error("Web post-quantum runtime unavailable in this build.");
+  }
+}
+
+async function persistDirectSession(peerUserId: string, sessionJson: string): Promise<void> {
+  await saveDirectMessageSession(setup.userId, peerUserId, getPassphrase(), sessionJson);
+}
+
+async function loadStoredDirectSession(peerUserId: string): Promise<string | null> {
+  return loadDirectMessageSession(setup.userId, peerUserId, getPassphrase());
+}
+
+async function syncUpdatedKeys(updatedKeys: GeneratedKeys): Promise<void> {
+  const passphrase = getPassphrase();
+  keys = updatedKeys;
+  await saveKeys(updatedKeys.userId, passphrase, updatedKeys);
+}
+
+async function encryptDirectPayload(
+  k: GeneratedKeys,
+  peerUserId: string,
+  plaintext: string
+): Promise<string> {
+  await ensureWebPqRuntime();
+  const existingSession = await loadStoredDirectSession(peerUserId);
+  if (existingSession) {
+    const result = encryptDirectMessageWithSession(existingSession, k.userId, peerUserId, plaintext);
+    await persistDirectSession(peerUserId, result.sessionJson);
+    return result.messageBytesBase64;
+  }
+
+  const api = new PqmsgApi(setup.serverUrl);
+  const bundle = await api.getBundle(peerUserId);
+  const fingerprint = bundle.identity_fingerprint_sha256 || identityFingerprint(bundle.identity_x25519_pub);
+  enforceIdentityPin(
+    peerUserId,
+    bundle.identity_sig_pub,
+    fingerprint,
+    bundle.identity_key_version,
+    bundle.bundle_generated_at
+  );
+  const result = initiateDirectMessageSession(k, bundle, plaintext);
+  await persistDirectSession(peerUserId, result.sessionJson);
+  return result.messageBytesBase64;
+}
+
+type DecryptedIncomingPayload = {
+  kind: "dm" | "group";
+  recipient: string;
+  plaintext: string;
+};
+
+async function decryptIncomingPayload(
+  k: GeneratedKeys,
+  senderUserId: string,
+  messageBytesBase64: string
+): Promise<DecryptedIncomingPayload> {
+  const activeKeys = keys ?? k;
+  try {
+    const envelope = decodeWireEnvelopeBase64(messageBytesBase64);
+    const plaintext = await decryptFallbackMessage(getPassphrase(), envelope);
+    const isDirectMessage = envelope.recipient === activeKeys.userId;
+    return {
+      kind: isDirectMessage ? "dm" : "group",
+      recipient: envelope.recipient,
+      plaintext,
+    };
+  } catch {
+    await ensureWebPqRuntime();
+    const existingSession = await loadStoredDirectSession(senderUserId);
+    const result = decryptDirectMessage(activeKeys, senderUserId, messageBytesBase64, existingSession);
+    await syncUpdatedKeys(result.updatedKeys);
+    await persistDirectSession(senderUserId, result.sessionJson);
+    return {
+      kind: "dm",
+      recipient: activeKeys.userId,
+      plaintext: result.plaintextUtf8,
+    };
+  }
+}
+
 async function ensureWebMessagingAllowed(kind: "direct" | "group"): Promise<boolean> {
+  if (kind === "direct") {
+    try {
+      await ensureWebPqRuntime();
+      return true;
+    } catch (e) {
+      notify(errorMsg(e), "error");
+      return false;
+    }
+  }
   const holdback = getWebBetaHoldback(await loadServerCapabilitiesCached());
   if (holdback.messagingAllowed) {
     return true;
@@ -513,21 +613,35 @@ async function syncGroupsBackground(): Promise<void> {
   }
 }
 
-function parseChatTarget(rawValue: string): string {
-  const trimmed = rawValue.trim();
-  if (!trimmed) {
-    return "";
+async function ensureDirectChatPeerExists(peerId: string): Promise<void> {
+  const normalizedPeer = peerId.trim().replace(/^@/, "");
+  if (!normalizedPeer) {
+    throw new Error("User ID is required");
   }
+  if (normalizedPeer === setup.userId) {
+    throw new Error("You can't chat with yourself");
+  }
+
+  const k = await ensureKeys();
+  const api = new PqmsgApi(setup.serverUrl);
+  const headers = buildProfileGetAuthHeaders(k, normalizedPeer);
   try {
-    const parsed = new URL(trimmed);
-    const invite = parsed.searchParams.get("invite")?.trim();
-    if (invite) {
-      return invite;
+    await api.getProfile(normalizedPeer, headers);
+    return;
+  } catch (err) {
+    if (!errorMsg(err).includes("HTTP 404")) {
+      throw err;
     }
-  } catch {
-    // Not a URL, treat as a direct user ID.
   }
-  return trimmed;
+  await api.getBundle(normalizedPeer);
+}
+
+function describePeerLookupError(peerId: string, err: unknown): string {
+  const message = errorMsg(err);
+  if (message.includes("HTTP 404")) {
+    return `User @${peerId} was not found on this server`;
+  }
+  return message;
 }
 
 // ---------------------------------------------------------------------------
@@ -596,6 +710,30 @@ function renderCreateAccount(): void {
           <button id="onb-back" class="btn-link">← Back</button>
         </div>
         <div id="onb-progress" class="progress-bar hidden"><div class="progress-fill"></div></div>
+        ${
+          localAccounts.length > 0
+            ? `
+          <div class="contacts-section">
+            <h3 class="section-label">Accounts on this browser</h3>
+            <div class="contacts-list">
+              ${localAccounts
+                .map(
+                  (accountId) => `
+                <button type="button" class="contact-row" data-local-account="${escHtml(accountId)}">
+                  <div class="avatar avatar-sm">${escHtml(accountId.slice(0, 2).toUpperCase())}</div>
+                  <div class="contact-info">
+                    <span class="contact-name">${escHtml(accountId)}</span>
+                    <span class="contact-id">Tap to fill username</span>
+                  </div>
+                </button>
+              `
+                )
+                .join("")}
+            </div>
+          </div>
+        `
+            : `<p class="onboarding-note">Only accounts created in this browser can sign in here.</p>`
+        }
         <p id="onb-status" class="onboarding-status"></p>
       </div>
     </div>
@@ -653,6 +791,10 @@ function renderCreateAccount(): void {
     progress.classList.remove("hidden");
 
     try {
+      status.textContent = "Loading crypto runtime...";
+      setProgress(progress, 10);
+      await ensureWebPqRuntime();
+
       status.textContent = "Generating keys…";
       setProgress(progress, 20);
       const userId = name.toLowerCase().replace(/[^a-z0-9_-]/g, "-").slice(0, 64) || `user-${Date.now()}`;
@@ -690,7 +832,6 @@ function renderCreateAccount(): void {
         suiteLabel: "ml-kem-768",
         peerUserId: "",
         displayName: name,
-        passphrase: "",
       };
       saveSetup(setup);
       sessionStorage.setItem("pqmsg.passphrase", pass);
@@ -712,11 +853,36 @@ function renderCreateAccount(): void {
 }
 
 function renderSignIn(): void {
+  const localAccounts = listLocalKeyUsers();
   app.innerHTML = `
     <div class="onboarding">
       <div class="onboarding-card">
         ${ONBOARDING_LOGO}
         <div class="onboarding-form">
+          ${
+            localAccounts.length > 0
+              ? `
+            <div class="contacts-section">
+              <h3 class="section-label">Accounts on this browser</h3>
+              <div class="contacts-list">
+                ${localAccounts
+                  .map(
+                    (accountId) => `
+                  <button type="button" class="contact-row" data-local-account="${escHtml(accountId)}">
+                    <div class="avatar avatar-sm">${escHtml(accountId.slice(0, 2).toUpperCase())}</div>
+                    <div class="contact-info">
+                      <span class="contact-name">${escHtml(accountId)}</span>
+                      <span class="contact-id">Tap to fill username</span>
+                    </div>
+                  </button>
+                ` 
+                  )
+                  .join("")}
+              </div>
+            </div>
+          `
+              : `<p class="onboarding-note">Only accounts created in this browser origin (${escHtml(location.origin)}) can be unlocked here.</p>`
+          }
           <label class="field">
             <span>User ID</span>
             <input id="onb-uid" type="text" placeholder="e.g. alice-smith" autocomplete="off" />
@@ -740,16 +906,39 @@ function renderSignIn(): void {
 
   q("#onb-back").addEventListener("click", () => navigateTo({ screen: "onboarding" }));
 
+  for (const button of document.querySelectorAll<HTMLElement>("[data-local-account]")) {
+    button.addEventListener("click", () => {
+      uidInput.value = button.dataset.localAccount || "";
+      passInput.focus();
+      status.textContent = "";
+      status.classList.remove("error-text");
+    });
+  }
+
   goBtn.addEventListener("click", async () => {
-    const uid = uidInput.value.trim();
+    const uid = normalizeBrowserUserId(uidInput.value);
     const pass = passInput.value;
-    if (!uid) { uidInput.focus(); return; }
-    if (!pass) { passInput.focus(); return; }
+    if (!uidInput.value.trim()) {
+      status.textContent = "Enter the username for an account saved in this browser.";
+      status.classList.add("error-text");
+      uidInput.focus();
+      return;
+    }
+    if (!passInput.value) {
+      status.textContent = "Enter the password used when creating this local account.";
+      status.classList.add("error-text");
+      passInput.focus();
+      return;
+    }
+    uidInput.value = uid;
 
     goBtn.disabled = true;
     status.classList.remove("error-text");
 
     try {
+      status.textContent = "Loading crypto runtime...";
+      await ensureWebPqRuntime();
+
       if (!hasLocalKeys(uid)) {
         throw new Error("No keys found for this User ID on this device");
       }
@@ -764,7 +953,6 @@ function renderSignIn(): void {
         suiteLabel: loadedKeys.suite,
         peerUserId: "",
         displayName: uid,
-        passphrase: "",
       };
       saveSetup(setup);
       sessionStorage.setItem("pqmsg.passphrase", pass);
@@ -845,18 +1033,15 @@ function renderConversations(): void {
   `;
 
   q("#fab-new").addEventListener("click", () => {
-    // Show a simple menu: New Chat or New Group
     const existing = document.querySelector(".fab-menu");
     if (existing) { existing.remove(); return; }
     const menu = document.createElement("div");
     menu.className = "fab-menu";
     menu.innerHTML = `
       <button class="fab-menu-item" id="fab-new-chat">New Chat</button>
-      <button class="fab-menu-item" id="fab-new-group">New Group</button>
     `;
     document.body.appendChild(menu);
     q("#fab-new-chat").addEventListener("click", () => { menu.remove(); navigateTo({ screen: "new-chat" }); });
-    q("#fab-new-group").addEventListener("click", () => { menu.remove(); navigateTo({ screen: "create-group" }); });
     // Close on outside click
     setTimeout(() => document.addEventListener("click", function close(e) {
       if (!(e.target as HTMLElement).closest(".fab-menu") && !(e.target as HTMLElement).closest("#fab-new")) {
@@ -1195,12 +1380,18 @@ async function renderChat(peerId: string): Promise<void> {
   const displayName = identity.primaryLabel;
   const meta = loadConversationMeta(setup.userId, "dm", peerId);
   const identityPin = readIdentityPin(setup.userId, peerId);
-  const webHoldback = getWebBetaHoldback(await loadServerCapabilitiesCached());
+  let directMessagingReady = isPqSessionMessagingAvailable();
+  if (!directMessagingReady) {
+    directMessagingReady = (await initWasmCrypto()) && isPqSessionMessagingAvailable();
+  }
   const presence = peerPresenceCache[peerId];
   const presenceText = presence?.status === "online" ? "online" : presence?.status === "away" ? "away" : "encrypted";
   const presenceClass = presence?.status === "online" ? "presence-online" : presence?.status === "away" ? "presence-away" : "";
   const fingerprintSummary = identityPin?.fingerprintSha256 || "Not pinned yet";
   const trustSummary = identityPin ? "Trusted on this device" : "Unverified";
+  const directMessagingBlockedReason = directMessagingReady
+    ? ""
+    : "Web post-quantum runtime is unavailable in this build, so direct messages cannot be sent yet.";
   const requestBanner = meta.requestState === "pending"
     ? `
       <div class="request-banner">
@@ -1244,12 +1435,12 @@ async function renderChat(peerId: string): Promise<void> {
         <span class="context-pill">${escHtml(presenceText)}</span>
         <button id="chat-open-details-inline" type="button" class="context-pill context-pill-link">Privacy & send defaults</button>
       </div>
-      ${webHoldback.messagingAllowed ? "" : `
-        <div class="beta-banner beta-banner-${webHoldback.tone} chat-holdback-banner">
-          <strong>${escHtml(webHoldback.title)}</strong>
-          <p>${escHtml(webHoldback.detail)}</p>
+      ${directMessagingBlockedReason ? `
+        <div class="beta-banner beta-banner-warning chat-holdback-banner">
+          <strong>Direct messaging unavailable</strong>
+          <p>${escHtml(directMessagingBlockedReason)}</p>
         </div>
-      `}
+      ` : ""}
       <div id="typing-indicator" class="typing-indicator hidden">
         <span class="typing-dots"><span></span><span></span><span></span></span>
         <span class="typing-text">${escHtml(displayName)} is typing</span>
@@ -1407,10 +1598,9 @@ async function renderChat(peerId: string): Promise<void> {
   let ephTtl = meta.ephemeralTtlDefault;
   let pendingAttachmentFile: File | null = null;
   let pendingAttachmentPreviewUrl: string | null = null;
-  const messagingAllowed = webHoldback.messagingAllowed;
   const syncSendAvailability = (): void => {
     const busy = sendInFlight;
-    sendBtn.disabled = !messagingAllowed || (!input.value.trim() && !pendingAttachmentFile) || busy;
+    sendBtn.disabled = !directMessagingReady || (!input.value.trim() && !pendingAttachmentFile) || busy;
     attachBtn.disabled = busy;
     emojiBtn.disabled = busy;
   };
@@ -1679,9 +1869,7 @@ async function renderChat(peerId: string): Promise<void> {
       try {
         const k = await ensureKeys();
         const api = new PqmsgApi(setup.serverUrl);
-        const passphrase = getPassphrase();
-        const envelope = await encryptFallbackMessage(passphrase, k.userId, peerId, text);
-        const messageBytesBase64 = encodeWireEnvelopeBase64(envelope);
+        const messageBytesBase64 = await encryptDirectPayload(k, peerId, text);
 
         if (useSealed) {
           await api.sealedRelay(peerId, { message_bytes_base64: messageBytesBase64 });
@@ -1694,9 +1882,6 @@ async function renderChat(peerId: string): Promise<void> {
             ttl_seconds: ephTtl,
           }, headers);
         } else {
-          const bundle = await api.getBundle(peerId);
-          const fingerprint = bundle.identity_fingerprint_sha256 || identityFingerprint(bundle.identity_x25519_pub);
-          enforceIdentityPin(peerId, bundle.identity_sig_pub, fingerprint, bundle.identity_key_version, bundle.bundle_generated_at);
           const headers = buildRelayAuthHeaders(k, peerId, messageBytesBase64);
           const relay = await api.relay(peerId, {
             sender_user_id: k.userId,
@@ -2023,6 +2208,7 @@ function renderNewChat(): void {
           <input id="nc-peer" type="text" placeholder="@username or invite link" autocomplete="off" />
         </label>
         <button id="nc-start" class="btn-primary">Start Chat</button>
+        <p id="nc-status" class="onboarding-status"></p>
         <div class="invite-section">
           <button id="nc-invite" class="btn-secondary">Copy Invite Link</button>
         </div>
@@ -2032,28 +2218,50 @@ function renderNewChat(): void {
 
   q("#nc-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
   const peerInput = q<HTMLInputElement>("#nc-peer");
+  const startBtn = q<HTMLButtonElement>("#nc-start");
+  const statusEl = q("#nc-status");
 
-  const startChat = (peer: string) => {
-    const resolvedPeer = parseChatTarget(peer).replace(/^@/, "");
-    if (!resolvedPeer) { peerInput.focus(); return; }
-    if (resolvedPeer === setup.userId) {
-      notify("You can't chat with yourself", "error");
-      return;
+  const startChat = async (peer: string) => {
+    statusEl.textContent = "";
+    statusEl.classList.remove("error-text");
+
+    const originalLabel = startBtn.textContent;
+    startBtn.disabled = true;
+    startBtn.textContent = "Checking...";
+    try {
+      const resolvedPeer = await startDirectConversationFlow(
+        {
+          rawTarget: peer,
+          currentUserId: setup.userId,
+        },
+        {
+          ensureDirectChatPeerExists,
+          addContactSilent,
+          markConversationAccepted,
+          setConversationArchived,
+          upsertConversation,
+          markConversationRead,
+        }
+      );
+      navigateTo({ screen: "chat", peerId: resolvedPeer });
+    } catch (e) {
+      const resolvedPeer = parseDirectChatTarget(peer).replace(/^@/, "");
+      const message = describePeerLookupError(resolvedPeer || "unknown", e);
+      statusEl.textContent = message;
+      statusEl.classList.add("error-text");
+      notify(message, "error");
+    } finally {
+      startBtn.disabled = false;
+      startBtn.textContent = originalLabel;
     }
-    void addContactSilent(resolvedPeer);
-    markConversationAccepted(resolvedPeer);
-    setConversationArchived("dm", resolvedPeer, false);
-    upsertConversation(setup.userId, resolvedPeer, "New conversation", false);
-    markConversationRead(setup.userId, resolvedPeer);
-    navigateTo({ screen: "chat", peerId: resolvedPeer });
   };
 
-  q("#nc-start").addEventListener("click", () => startChat(peerInput.value.trim()));
+  q("#nc-start").addEventListener("click", () => { void startChat(peerInput.value.trim()); });
 
   // Contact row clicks
   for (const row of document.querySelectorAll("[data-contact]")) {
     row.addEventListener("click", () => {
-      startChat((row as HTMLElement).dataset.contact!);
+      void startChat((row as HTMLElement).dataset.contact!);
     });
   }
 
@@ -2113,8 +2321,8 @@ async function renderGroupChat(groupId: string): Promise<void> {
         <div class="messages" id="messages-list" role="log" aria-live="polite"></div>
       </div>
       <div class="chat-input-bar">
-        <input id="gc-input" type="text" placeholder="Message to group" autocomplete="off" aria-label="Message to group" />
-        <button id="gc-send" class="send-btn" disabled aria-label="Send message">
+        <input id="gc-input" type="text" placeholder="Web group messaging is unavailable" autocomplete="off" aria-label="Group messaging unavailable" disabled />
+        <button id="gc-send" class="send-btn" disabled aria-label="Send message unavailable">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
           </svg>
@@ -2125,12 +2333,6 @@ async function renderGroupChat(groupId: string): Promise<void> {
 
   const msgList = q("#messages-list");
   const container = q("#messages-container");
-  const input = q<HTMLInputElement>("#gc-input");
-  const sendBtn = q<HTMLButtonElement>("#gc-send");
-  let sendInFlight = false;
-  const syncSendAvailability = (): void => {
-    sendBtn.disabled = !webHoldback.messagingAllowed || !input.value.trim() || sendInFlight;
-  };
 
   q("#gc-back").addEventListener("click", () => {
     activeGroupId = null;
@@ -2138,102 +2340,10 @@ async function renderGroupChat(groupId: string): Promise<void> {
   });
   q("#gc-info").addEventListener("click", () => navigateTo({ screen: "group-info", groupId }));
 
-  input.addEventListener("input", () => { syncSendAvailability(); });
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.repeat && !sendBtn.disabled && !sendInFlight) {
-      e.preventDefault();
-      sendBtn.click();
-    }
-  });
-
-  syncSendAvailability();
-
-  sendBtn.addEventListener("click", async () => {
-    const text = input.value.trim();
-    if (!text || sendInFlight) return;
-    if (!(await ensureWebMessagingAllowed("group"))) return;
-    sendInFlight = true;
-    input.value = "";
-    syncSendAvailability();
-    try {
-
-    // Handle edit mode
-    if (editContext) {
-      const { msgId } = editContext;
-      editContext = null;
-      sendBtn.textContent = "";
-      sendBtn.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>`;
-      const updated = await editStoredMessage(msgId, text);
-      if (updated) {
-        const bubble = document.getElementById(`msg-${msgId}`);
-        if (bubble) {
-          const btEl = bubble.querySelector(".bubble-text");
-          if (btEl) btEl.textContent = text;
-          const timeEl = bubble.querySelector(".bubble-time");
-          if (timeEl && !timeEl.querySelector(".edit-indicator")) {
-            timeEl.insertAdjacentHTML("beforeend", ' <span class="edit-indicator">(edited)</span>');
-          }
-        }
-      }
-      return;
-    }
-
-    const tempId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const msg: StoredMessage = {
-      id: tempId,
-      conversationId: `group:${groupId}`,
-      sender: setup.userId,
-      recipient: groupId,
-      text,
-      timestamp: Date.now(),
-      status: "sending",
-      replyToId: replyContext?.msgId,
-      replyPreview: replyContext?.preview,
-      contentType: replyContext ? "reply" : "text",
-    };
-
-    // Clear reply bar
-    if (replyContext) {
-      replyContext = null;
-      document.querySelector(".reply-compose-bar")?.remove();
-    }
-
-    await saveMessage(msg);
-    appendBubble(msgList, msg, container);
-
-    try {
-      const k = await ensureKeys();
-      const api = new PqmsgApi(setup.serverUrl);
-      const passphrase = getPassphrase();
-      const envelope = await encryptFallbackMessage(passphrase, k.userId, groupId, text);
-      const messageBytesBase64 = encodeWireEnvelopeBase64(envelope);
-      const headers = buildGroupRelayAuthHeaders(k, groupId, messageBytesBase64);
-      await api.relayGroupMessage(groupId, {
-        sender_user_id: k.userId,
-        device_id: k.deviceId,
-        message_bytes_base64: messageBytesBase64,
-      }, headers);
-
-      await updateMessageStatus(tempId, "sent");
-      upsertGroupConversation(setup.userId, groupId, setup.userId, `You: ${text}`, false);
-      markGroupConversationRead(setup.userId, groupId);
-      updateBubbleStatus(tempId, "sent");
-    } catch (e) {
-      await updateMessageStatus(tempId, "failed");
-      updateBubbleStatus(tempId, "failed");
-      notify(`Send failed: ${errorMsg(e)}`, "error");
-    }
-    } finally {
-      sendInFlight = false;
-      syncSendAvailability();
-    }
-  });
-
   // Load group message history
   const history = await getMessages(`group:${groupId}`);
   renderMessageList(msgList, history);
   scrollToBottom(container);
-  input.focus();
 
   // Group chat context menu
   msgList.addEventListener("contextmenu", (e) => {
@@ -2243,7 +2353,15 @@ async function renderGroupChat(groupId: string): Promise<void> {
     const msgId = bubble.id.replace("msg-", "");
     const isMine = bubble.classList.contains("bubble-sent");
     const serverMid = bubble.getAttribute("data-server-mid");
-    showBubbleContextMenu(e as MouseEvent, msgId, isMine, serverMid ? Number(serverMid) : null, bubble, input, sendBtn);
+    showBubbleContextMenu(
+      e as MouseEvent,
+      msgId,
+      isMine,
+      serverMid ? Number(serverMid) : null,
+      bubble,
+      q<HTMLInputElement>("#gc-input"),
+      q<HTMLButtonElement>("#gc-send"),
+    );
   });
 
   // Load members count
@@ -2282,36 +2400,20 @@ async function renderGroupInfo(groupId: string): Promise<void> {
       <div class="settings-body">
         <div class="settings-section">
           <h3>${escHtml(groupId)}</h3>
+          <div class="beta-banner beta-banner-warning">
+            <strong>Web group management is unavailable</strong>
+            <p>Group membership changes are outside the supported web beta path. Use Android for supported group messaging and member management.</p>
+          </div>
           <div id="gi-members"><p class="text-secondary">Loading members…</p></div>
         </div>
         <div class="settings-section">
-          <h3>Add Member</h3>
-          <div class="add-contact-row">
-            <input id="gi-add-id" type="text" placeholder="User ID" class="input-sm" />
-            <button id="gi-add-btn" class="btn-sm">Add</button>
-          </div>
+          <p class="text-secondary">Add and remove member actions stay on Android in this beta.</p>
         </div>
       </div>
     </div>
   `;
 
   q("#gi-back").addEventListener("click", () => navigateTo({ screen: "group-chat", groupId }));
-
-  // Add member
-  q("#gi-add-btn").addEventListener("click", async () => {
-    const userId = q<HTMLInputElement>("#gi-add-id").value.trim();
-    if (!userId) return;
-    try {
-      const k = await ensureKeys();
-      const api = new PqmsgApi(setup.serverUrl);
-      const headers = buildGroupMembersAddAuthHeaders(k, groupId, userId);
-      await api.addGroupMember(groupId, { member_user_id: userId }, headers);
-      notify("Member added", "success");
-      renderGroupInfo(groupId);
-    } catch (e) {
-      notify(`Add failed: ${errorMsg(e)}`, "error");
-    }
-  });
 
   // Load members
   try {
@@ -2326,28 +2428,11 @@ async function renderGroupInfo(groupId: string): Promise<void> {
       <div class="contact-manage-row">
         <span>${escHtml(m.user_id)}</span>
         <span class="text-secondary">${new Date(m.joined_at).toLocaleDateString()}</span>
-        ${m.user_id !== setup.userId ? `<button class="btn-sm btn-danger-sm" data-remove-member="${escHtml(m.user_id)}">Remove</button>` : '<span class="text-secondary">you</span>'}
+        ${m.user_id !== setup.userId ? '<span class="text-secondary">managed on Android</span>' : '<span class="text-secondary">you</span>'}
       </div>
     `).join("");
-
-    // Remove member handlers
-    for (const btn of document.querySelectorAll("[data-remove-member]")) {
-      btn.addEventListener("click", async () => {
-        const memberId = (btn as HTMLElement).dataset.removeMember!;
-        try {
-          const kk = await ensureKeys();
-          const api2 = new PqmsgApi(setup.serverUrl);
-          const h = buildGroupMembersRemoveAuthHeaders(kk, groupId, memberId);
-          await api2.removeGroupMember(groupId, { member_user_id: memberId }, h);
-          notify("Member removed", "success");
-          renderGroupInfo(groupId);
-        } catch (e2) {
-          notify(`Remove failed: ${errorMsg(e2)}`, "error");
-        }
-      });
-    }
   } catch (e) {
-    q("#gi-members").innerHTML = `<p class="error-text">Failed to load: ${errorMsg(e)}</p>`;
+    q("#gi-members").innerHTML = `<p class="error-text">Failed to load: ${escHtml(errorMsg(e))}</p>`;
   }
 }
 
@@ -2379,6 +2464,10 @@ function renderCreateGroup(): void {
         <h1 class="topbar-title">New Group</h1>
       </header>
       <div class="settings-body">
+        <div class="beta-banner beta-banner-warning">
+          <strong>Web group creation is unavailable</strong>
+          <p>The supported web beta path covers direct messaging only. Create and manage groups from Android.</p>
+        </div>
         <label class="field">
           <span>Group Name</span>
           <input id="cg-name" type="text" placeholder="e.g. project-team" autocomplete="off" />
@@ -2389,34 +2478,12 @@ function renderCreateGroup(): void {
             <div class="contacts-list">${contactRows}</div>
           </div>
         ` : ""}
-        <button id="cg-create" class="btn-primary">Create Group</button>
+        <button id="cg-create" class="btn-primary" disabled>Group creation unavailable on web</button>
       </div>
     </div>
   `;
 
   q("#cg-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
-
-  q("#cg-create").addEventListener("click", async () => {
-    const name = q<HTMLInputElement>("#cg-name").value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-");
-    if (!name) { q<HTMLInputElement>("#cg-name").focus(); return; }
-
-    const checkboxes = document.querySelectorAll<HTMLInputElement>(".cg-member-cb:checked");
-    const memberIds = Array.from(checkboxes).map(cb => cb.value);
-    // Always include self
-    if (!memberIds.includes(setup.userId)) memberIds.push(setup.userId);
-
-    try {
-      const k = await ensureKeys();
-      const api = new PqmsgApi(setup.serverUrl);
-      const headers = buildGroupCreateAuthHeaders(k, name, memberIds);
-      const res = await api.createGroup({ group_id: name, member_user_ids: memberIds }, headers);
-      upsertGroupConversation(setup.userId, res.group_id, res.owner_user_id, "Group created", false);
-      notify("Group created!", "success");
-      navigateTo({ screen: "group-chat", groupId: res.group_id });
-    } catch (e) {
-      notify(`Create group failed: ${errorMsg(e)}`, "error");
-    }
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2499,6 +2566,11 @@ async function renderSettings(): Promise<void> {
           <div class="settings-row"><span>Device</span><span class="mono">${escHtml(setup.deviceId)}</span></div>
         </div>
         <div class="settings-section">
+          <h3>Session</h3>
+          <p class="text-secondary settings-desc">Sign out of this browser while keeping your encrypted local keys available for a later sign-in.</p>
+          <button id="set-logout" class="btn-secondary">Log Out</button>
+        </div>
+        <div class="settings-section">
           <h3>People</h3>
           <div id="contacts-manage">
             ${cachedContacts.length === 0 ? '<p class="text-secondary">No contacts yet</p>' :
@@ -2568,10 +2640,6 @@ async function renderSettings(): Promise<void> {
             <button id="set-server-info" class="btn-sm">Server Info</button>
           </div>
         </div>
-        <div class="settings-section">
-          <h3>Session</h3>
-          <button id="set-logout" class="btn-secondary">Log Out</button>
-        </div>
           </div>
         </details>
         <div class="settings-section">
@@ -2611,6 +2679,7 @@ async function renderSettings(): Promise<void> {
     const alias = q<HTMLInputElement>("#set-add-contact-alias").value.trim();
     if (!contactId) { q<HTMLInputElement>("#set-add-contact-id").focus(); return; }
     try {
+      await ensureDirectChatPeerExists(contactId);
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
       const headers = buildContactsUpsertAuthHeaders(k, contactId, alias || contactId, false, "");
@@ -2621,7 +2690,7 @@ async function renderSettings(): Promise<void> {
       // Re-render to show updated list
       renderSettings();
     } catch (e) {
-      notify(`Add contact failed: ${errorMsg(e)}`, "error");
+      notify(`Add contact failed: ${describePeerLookupError(contactId, e)}`, "error");
     }
   });
 
@@ -2714,6 +2783,7 @@ async function renderSettings(): Promise<void> {
       const rotatedKeys: GeneratedKeys = { ...k, ...newKeys };
       const passphrase = getPassphrase();
       await saveKeys(k.userId, passphrase, rotatedKeys);
+      await clearAllDirectMessageSessions(k.userId);
       keys = rotatedKeys;
       statusEl.innerHTML = `<span class="text-success">✓ Rotated to v${result.identity_key_version}</span>`;
       notify("Identity key rotated successfully", "success");
@@ -2733,7 +2803,7 @@ async function renderSettings(): Promise<void> {
     } catch {
       // Best-effort server retirement
     }
-    wipeLocalState(setup.userId);
+    await wipeLocalState(setup.userId);
     await clearOutboxMessages(setup.userId);
     await clearAllMessages();
     keys = null;
@@ -2741,7 +2811,7 @@ async function renderSettings(): Promise<void> {
     stopAllTimers();
     cachedContacts = [];
     peerPresenceCache = {};
-    setup = { ...DEFAULT_SETUP, serverUrl: setup.serverUrl, suiteLabel: setup.suiteLabel, displayName: "", passphrase: "" };
+    setup = { ...DEFAULT_SETUP, serverUrl: setup.serverUrl, suiteLabel: setup.suiteLabel, displayName: "" };
     saveSetup(setup);
     navigateTo({ screen: "onboarding" });
     notify("Account deleted", "info");
@@ -2872,7 +2942,7 @@ function renderLinkDevice(): void {
 async function renderCall(peerId: string, callType: "audio" | "video"): Promise<void> {
   const contact = cachedContacts.find(ct => ct.contact_user_id === peerId);
   const displayName = contact?.alias || peerId;
-  void callType;
+  const callMode = callType === "video" ? "Video" : "Audio";
 
   app.innerHTML = `
     <div class="call-shell">
@@ -2882,8 +2952,8 @@ async function renderCall(peerId: string, callType: "audio" | "video"): Promise<
         </div>
         <h2 class="call-name">${escHtml(displayName)}</h2>
         <div class="beta-banner beta-banner-warning">
-          <strong>Calling is not in this beta</strong>
-          <p>Use Android messaging for the supported beta path. Web calling stays disabled in this release.</p>
+          <strong>${callMode} calling is unavailable on web</strong>
+          <p>Use the supported messaging path instead. Web calling stays disabled in this beta.</p>
         </div>
         <div class="call-controls">
           <button id="call-back-chat" class="btn-secondary">Back to chat</button>
@@ -2896,6 +2966,7 @@ async function renderCall(peerId: string, callType: "audio" | "video"): Promise<
     navigateTo({ screen: "chat", peerId });
   });
   return;
+  /*
 
   app.innerHTML = `
     <div class="call-shell">
@@ -3030,6 +3101,7 @@ async function renderCall(peerId: string, callType: "audio" | "video"): Promise<
     const btn = e.currentTarget as HTMLButtonElement;
     btn.classList.toggle("call-btn-active", disabled === true);
   });
+  */
 }
 
 async function renderIncomingCall(
@@ -3041,7 +3113,7 @@ async function renderIncomingCall(
   const contact = cachedContacts.find(ct => ct.contact_user_id === peerId);
   const displayName = contact?.alias || peerId;
   void callId;
-  void callType;
+  const callMode = callType === "video" ? "video" : "audio";
   void sdpOfferBase64;
 
   app.innerHTML = `
@@ -3052,7 +3124,7 @@ async function renderIncomingCall(
         </div>
         <h2 class="call-name">${escHtml(displayName)}</h2>
         <div class="beta-banner beta-banner-warning">
-          <strong>Incoming web calls are disabled</strong>
+          <strong>Incoming ${callMode} calls are disabled on web</strong>
           <p>Calling is out of scope for this beta. Return to conversations and continue on the messaging path.</p>
         </div>
         <div class="call-controls">
@@ -3066,6 +3138,7 @@ async function renderIncomingCall(
     navigateTo({ screen: "conversations" });
   });
   return;
+  /*
 
   app.innerHTML = `
     <div class="call-shell">
@@ -3121,6 +3194,7 @@ async function renderIncomingCall(
       navigateTo({ screen: "conversations" });
     }
   });
+  */
 }
 
 // ---------------------------------------------------------------------------
@@ -3142,11 +3216,10 @@ async function connectRealtime(): Promise<void> {
 async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
   try {
     const k = await ensureKeys();
-    const envelope = decodeWireEnvelopeBase64(wsMsg.message_bytes_base64);
-    const passphrase = getPassphrase();
-    const plaintext = await decryptFallbackMessage(passphrase, envelope);
-    const isDirectMessage = envelope.recipient === k.userId;
-    const groupId = isDirectMessage ? null : envelope.recipient;
+    const decrypted = await decryptIncomingPayload(k, wsMsg.sender_user_id, wsMsg.message_bytes_base64);
+    const plaintext = decrypted.plaintext;
+    const isDirectMessage = decrypted.kind === "dm";
+    const groupId = isDirectMessage ? null : decrypted.recipient;
     const conversationId = isDirectMessage
       ? convId(k.userId, wsMsg.sender_user_id)
       : `group:${groupId}`;
@@ -3154,7 +3227,7 @@ async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
       id: `srv-${wsMsg.message_id}`,
       conversationId,
       sender: wsMsg.sender_user_id,
-      recipient: isDirectMessage ? k.userId : envelope.recipient,
+      recipient: isDirectMessage ? k.userId : decrypted.recipient,
       text: isDirectMessage
         ? plaintext
         : `${resolvePeerIdentity(wsMsg.sender_user_id).primaryLabel}: ${plaintext}`,
@@ -3225,15 +3298,14 @@ async function pollInboxSilent(): Promise<void> {
     if (inbox.messages.length === 0) return;
 
     let cursor = since;
-    const passphrase = getPassphrase();
     let conversationListChanged = false;
     for (const message of inbox.messages) {
       cursor = Math.max(cursor, message.message_id);
       try {
-        const envelope = decodeWireEnvelopeBase64(message.message_bytes_base64);
-        const plaintext = await decryptFallbackMessage(passphrase, envelope);
-        const isDirectMessage = envelope.recipient === k.userId;
-        const groupId = isDirectMessage ? null : envelope.recipient;
+        const decrypted = await decryptIncomingPayload(k, message.sender_user_id, message.message_bytes_base64);
+        const plaintext = decrypted.plaintext;
+        const isDirectMessage = decrypted.kind === "dm";
+        const groupId = isDirectMessage ? null : decrypted.recipient;
         const conversationId = isDirectMessage
           ? convId(k.userId, message.sender_user_id)
           : `group:${groupId}`;
@@ -3245,7 +3317,7 @@ async function pollInboxSilent(): Promise<void> {
           id: `srv-${message.message_id}`,
           conversationId,
           sender: message.sender_user_id,
-          recipient: isDirectMessage ? k.userId : envelope.recipient,
+          recipient: isDirectMessage ? k.userId : decrypted.recipient,
           text: isDirectMessage
             ? plaintext
             : `${resolvePeerIdentity(message.sender_user_id).primaryLabel}: ${plaintext}`,
@@ -3599,32 +3671,26 @@ async function drainOutbox(): Promise<void> {
       return;
     }
     const api = new PqmsgApi(setup.serverUrl);
-    const passphrase = getPassphrase();
     const queued = await getOutboxMessages(k.userId);
     for (const item of queued) {
       try {
         if (item.groupId) {
-          const envelope = await encryptFallbackMessage(passphrase, k.userId, item.groupId, item.text);
-          const messageBytesBase64 = encodeWireEnvelopeBase64(envelope);
-          const headers = buildGroupRelayAuthHeaders(k, item.groupId, messageBytesBase64);
-          await api.relayGroupMessage(item.groupId, {
-            sender_user_id: k.userId, device_id: k.deviceId, message_bytes_base64: messageBytesBase64,
-          }, headers);
+          await removeOutboxMessage(item.id);
+          await updateMessageStatus(item.id, "failed");
+          updateBubbleStatus(item.id, "failed");
+          continue;
         } else if (item.sealed) {
-          const envelope = await encryptFallbackMessage(passphrase, k.userId, item.peerId, item.text);
-          const messageBytesBase64 = encodeWireEnvelopeBase64(envelope);
+          const messageBytesBase64 = await encryptDirectPayload(k, item.peerId, item.text);
           await api.sealedRelay(item.peerId, { message_bytes_base64: messageBytesBase64 });
         } else if (item.ephemeralTtl > 0) {
-          const envelope = await encryptFallbackMessage(passphrase, k.userId, item.peerId, item.text);
-          const messageBytesBase64 = encodeWireEnvelopeBase64(envelope);
+          const messageBytesBase64 = await encryptDirectPayload(k, item.peerId, item.text);
           const headers = buildEphemeralRelayAuthHeaders(k, item.peerId, item.ephemeralTtl);
           await api.relayEphemeral(item.peerId, {
             sender_user_id: k.userId, device_id: k.deviceId,
             message_bytes_base64: messageBytesBase64, ttl_seconds: item.ephemeralTtl,
           }, headers);
         } else {
-          const envelope = await encryptFallbackMessage(passphrase, k.userId, item.peerId, item.text);
-          const messageBytesBase64 = encodeWireEnvelopeBase64(envelope);
+          const messageBytesBase64 = await encryptDirectPayload(k, item.peerId, item.text);
           const headers = buildRelayAuthHeaders(k, item.peerId, messageBytesBase64);
           await api.relay(item.peerId, {
             sender_user_id: k.userId, device_id: k.deviceId, message_bytes_base64: messageBytesBase64,
@@ -3879,13 +3945,11 @@ async function pollSealedInbox(): Promise<void> {
     const api = new PqmsgApi(setup.serverUrl);
     const headers = buildSealedInboxAuthHeaders(k, sealedInboxCursor);
     const res = await api.sealedInbox(k.userId, sealedInboxCursor, headers);
-    const passphrase = getPassphrase();
     let conversationListChanged = false;
     for (const item of res.messages) {
       try {
-        const envelope = decodeWireEnvelopeBase64(item.message_bytes_base64);
-        const plaintext = await decryptFallbackMessage(passphrase, envelope);
-        const senderId = envelope.sender;
+        const plaintext = (await decryptIncomingPayload(k, item.sender_user_id, item.message_bytes_base64)).plaintext;
+        const senderId = item.sender_user_id;
         const msgId = String(item.message_id);
         const msg: StoredMessage = {
           id: msgId,
@@ -4148,11 +4212,8 @@ function refreshConversationsIfVisible(): void {
 }
 
 async function logoutCurrentSession(): Promise<void> {
-  try {
-    await callManager?.hangup("sign-out");
-  } catch {
-    // Best-effort call cleanup
-  }
+  const previousServerUrl = setup.serverUrl;
+  const previousSuiteLabel = setup.suiteLabel;
 
   if (realtimeInbox) {
     realtimeInbox.disconnect();
@@ -4161,8 +4222,6 @@ async function logoutCurrentSession(): Promise<void> {
 
   stopAllTimers();
   keys = null;
-  callManager = null;
-  currentCallInfo = null;
   activeChatPeer = null;
   activeGroupId = null;
   cachedContacts = [];
@@ -4171,14 +4230,18 @@ async function logoutCurrentSession(): Promise<void> {
   peerPresenceCache = {};
   receiptCursor = 0;
   sealedInboxCursor = 0;
+  cachedCapabilities = null;
+  cachedCapabilitiesServerUrl = null;
+  activeInboxFilter = "all";
   sessionStorage.removeItem("pqmsg.passphrase");
   setup = {
     ...DEFAULT_SETUP,
-    serverUrl: setup.serverUrl,
-    suiteLabel: setup.suiteLabel,
+    serverUrl: previousServerUrl,
+    suiteLabel: previousSuiteLabel,
+    peerUserId: "",
   };
   saveSetup(setup);
-  navigateTo({ screen: "sign-in" });
+  navigateTo({ screen: "onboarding" });
   notify("Logged out", "info");
 }
 
@@ -4202,7 +4265,7 @@ async function loadPrekeyStatus(): Promise<void> {
     `;
   } catch (e) {
     const el = document.getElementById("prekey-status");
-    if (el) el.innerHTML = `<p class="error-text">Failed: ${errorMsg(e)}</p>`;
+    if (el) el.innerHTML = `<p class="error-text">Failed: ${escHtml(errorMsg(e))}</p>`;
   }
 }
 
@@ -4248,8 +4311,6 @@ async function ensureKeys(): Promise<GeneratedKeys> {
 }
 
 function getPassphrase(): string {
-  // Try setup passphrase or prompt
-  if (setup.passphrase) return setup.passphrase;
   const stored = sessionStorage.getItem("pqmsg.passphrase");
   if (stored) return stored;
   const entered = prompt("Enter your passphrase to unlock your keys:");
@@ -4331,5 +4392,20 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
 
 // Service worker
 if ("serviceWorker" in navigator) {
-  void navigator.serviceWorker.register("/sw.js");
+  const isLocalDevOrigin =
+    location.protocol !== "https:" ||
+    location.hostname === "localhost" ||
+    location.hostname === "127.0.0.1";
+
+  if (isLocalDevOrigin) {
+    void navigator.serviceWorker.getRegistrations()
+      .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))
+      .catch(() => {
+        // Best-effort cleanup for stale local dev registrations.
+      });
+  } else {
+    void navigator.serviceWorker.register("/sw.js").catch(() => {
+      // Best-effort in production-like environments.
+    });
+  }
 }

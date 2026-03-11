@@ -1,7 +1,7 @@
 import type { ServerCapabilitiesResponse } from "./server";
 
 export const WEB_BETA_SCOPE_SUMMARY =
-  "Android messaging is the supported beta path. Web stays outside this beta, and calling is unavailable.";
+  "Web direct messages use the local post-quantum runtime when available. Web group messaging and calling are unavailable in the supported beta path.";
 
 export type WebBetaHoldback = {
   messagingAllowed: boolean;
@@ -13,31 +13,25 @@ export type WebBetaHoldback = {
 export function getWebBetaHoldback(
   caps: ServerCapabilitiesResponse | null
 ): WebBetaHoldback {
+  const policySuffix = caps
+    ? `Server policy is ${caps.web_client_policy}.`
+    : "Server capabilities could not be verified.";
+
   if (!caps) {
     return {
       messagingAllowed: false,
-      title: "Web demo-only holdback",
+      title: "Web group messaging unavailable",
       detail:
-        "Server capabilities could not be verified, so outbound web messaging stays disabled. Use Android, iOS, or CLI for interoperable chat. Calling is not part of this beta.",
-      tone: "warning",
-    };
-  }
-
-  if (caps.web_client_policy === "demo_only") {
-    return {
-      messagingAllowed: false,
-      title: "Web demo-only holdback",
-      detail:
-        "Outbound web messaging is disabled because the server policy is demo_only. Use Android, iOS, or CLI for interoperable chat. Calling is not part of this beta.",
+        `${policySuffix} Direct web messaging still requires the local PQ runtime. Group messaging and calling are not part of the supported web beta.`,
       tone: "warning",
     };
   }
 
   return {
-    messagingAllowed: true,
-    title: "Web remains outside the supported beta scope",
+    messagingAllowed: false,
+    title: "Web group messaging unavailable",
     detail:
-      "This server does not block web messaging by policy, but Android is still the supported beta client and calling remains unavailable.",
-    tone: "info",
+      `${policySuffix} Direct web messaging still uses the local PQ runtime. Group messaging and calling stay out of scope for the supported web beta.`,
+    tone: "warning",
   };
 }

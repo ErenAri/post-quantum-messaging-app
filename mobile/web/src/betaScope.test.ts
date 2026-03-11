@@ -2,14 +2,14 @@ import { describe, expect, it } from "vitest";
 import { getWebBetaHoldback, WEB_BETA_SCOPE_SUMMARY } from "./betaScope";
 
 describe("betaScope", () => {
-  it("blocks outbound messaging when capabilities are unavailable", () => {
+  it("blocks outbound group messaging when capabilities are unavailable", () => {
     const holdback = getWebBetaHoldback(null);
     expect(holdback.messagingAllowed).toBe(false);
-    expect(holdback.title).toContain("demo-only");
+    expect(holdback.title).toContain("group");
     expect(holdback.detail).toContain("could not be verified");
   });
 
-  it("blocks outbound messaging when server policy is demo_only", () => {
+  it("blocks outbound group messaging when server policy is demo_only", () => {
     const holdback = getWebBetaHoldback({
       capability_schema_version: 1,
       security_profile: "research",
@@ -36,9 +36,10 @@ describe("betaScope", () => {
     });
     expect(holdback.messagingAllowed).toBe(false);
     expect(holdback.detail).toContain("demo_only");
+    expect(holdback.detail).toContain("Direct web messaging");
   });
 
-  it("keeps web outside beta even when server policy allows messaging", () => {
+  it("still blocks group messaging when server policy looks interoperable", () => {
     const holdback = getWebBetaHoldback({
       capability_schema_version: 1,
       security_profile: "research",
@@ -63,13 +64,14 @@ describe("betaScope", () => {
       pq_ratchet_interval: 4,
       web_client_policy: "interop_candidate",
     });
-    expect(holdback.messagingAllowed).toBe(true);
-    expect(holdback.title).toContain("outside");
-    expect(holdback.detail).toContain("Android");
+    expect(holdback.messagingAllowed).toBe(false);
+    expect(holdback.title).toContain("group messaging unavailable");
+    expect(holdback.detail).toContain("interop_candidate");
+    expect(holdback.detail).toContain("out of scope");
   });
 
   it("exposes the shared scope summary", () => {
-    expect(WEB_BETA_SCOPE_SUMMARY).toContain("Android messaging");
+    expect(WEB_BETA_SCOPE_SUMMARY).toContain("direct messages");
     expect(WEB_BETA_SCOPE_SUMMARY).toContain("calling");
   });
 });

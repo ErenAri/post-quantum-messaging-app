@@ -50,6 +50,18 @@ const AUTH_TAG_PUSH_DEVICE_ID: u16 = critical_type(0x3210);
 const AUTH_TAG_PUSH_TOKEN_HASH: u16 = critical_type(0x3211);
 const AUTH_TAG_LINK_DEVICE_ID: u16 = critical_type(0x3212);
 const AUTH_TAG_REVOKE_DEVICE_ID: u16 = critical_type(0x3213);
+const AUTH_TAG_CONTACT_USER_ID: u16 = critical_type(0x3219);
+const AUTH_TAG_CONTACT_ALIAS_HASH: u16 = critical_type(0x321A);
+const AUTH_TAG_CONTACT_VERIFIED_FLAG: u16 = critical_type(0x321B);
+const AUTH_TAG_CONTACT_FINGERPRINT: u16 = critical_type(0x321C);
+const AUTH_TAG_GROUP_ID: u16 = critical_type(0x321D);
+const AUTH_TAG_GROUP_MEMBER_USER_ID: u16 = critical_type(0x321E);
+const AUTH_TAG_GROUP_MEMBERS_HASH: u16 = critical_type(0x321F);
+const AUTH_TAG_GROUP_SENDER_USER_ID: u16 = critical_type(0x3220);
+const AUTH_TAG_PRESENCE_STATUS: u16 = critical_type(0x3229);
+const AUTH_TAG_TYPING_PEER_ID: u16 = critical_type(0x322A);
+const AUTH_TAG_TYPING_STATE_FLAG: u16 = critical_type(0x322B);
+const AUTH_TAG_GROUP_RECIPIENTS_HASH: u16 = critical_type(0x322C);
 const ROTATE_SIG_TAG_USER_ID: u16 = critical_type(0x3101);
 const ROTATE_SIG_TAG_CHALLENGE_ID: u16 = critical_type(0x3102);
 const ROTATE_SIG_TAG_CHALLENGE_NONCE: u16 = critical_type(0x3103);
@@ -150,6 +162,12 @@ pub struct RequestAuthHeaders {
     pub auth_timestamp: String,
     pub auth_nonce: String,
     pub auth_signature: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct GroupRelayAuthRecipient {
+    pub recipient_user_id: String,
+    pub message_bytes_base64: String,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -457,6 +475,90 @@ fn auth_common_records(
             value: nonce.as_bytes().to_vec(),
         },
     ]
+}
+
+fn hash_string_list_sha256(values: &[String]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    for value in values {
+        hasher.update(value.as_bytes());
+    }
+    hasher.finalize().to_vec()
+}
+
+fn normalize_contact_alias_for_auth(alias: &str) -> String {
+    alias.trim().to_string()
+}
+
+fn normalize_fingerprint_sha256_for_auth(
+    fingerprint_sha256: Option<String>,
+) -> Result<Option<String>, PqmsgAndroidError> {
+    let Some(fingerprint_sha256) = fingerprint_sha256 else {
+        return Ok(None);
+    };
+    let normalized = fingerprint_sha256.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    if normalized.len() != 64 {
+        return Err(invalid_input(
+            "verified_fingerprint_sha256 must be 64 lowercase hex characters",
+        ));
+    }
+    if !normalized.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(invalid_input(
+            "verified_fingerprint_sha256 must be 64 lowercase hex characters",
+        ));
+    }
+    Ok(Some(normalized))
+}
+
+fn normalize_group_members_for_auth(member_user_ids: &[String]) -> Vec<String> {
+    let mut normalized_members: Vec<String> = member_user_ids
+        .iter()
+        .map(|member_user_id| member_user_id.trim().to_string())
+        .collect();
+    normalized_members.sort_unstable();
+    normalized_members.dedup();
+    normalized_members
+}
+
+fn normalize_presence_status_for_auth(status: &str) -> Result<String, PqmsgAndroidError> {
+    let normalized = status.trim().to_ascii_lowercase();
+    let valid = matches!(normalized.as_str(), "offline" | "online" | "away" | "busy");
+    if valid {
+        Ok(normalized)
+    } else {
+        Err(invalid_input(
+            "status must be one of offline|online|away|busy",
+        ))
+    }
+}
+
+fn hash_group_recipients_sha256(
+    recipients: &[GroupRelayAuthRecipient],
+) -> Result<Vec<u8>, PqmsgAndroidError> {
+    let mut normalized: Vec<(String, Vec<u8>)> = Vec::with_capacity(recipients.len());
+    for recipient in recipients {
+        let mut blob_hasher = Sha256::new();
+        blob_hasher.update(decode_b64(
+            "message_bytes_base64",
+            &recipient.message_bytes_base64,
+        )?);
+        normalized.push((
+            recipient.recipient_user_id.clone(),
+            blob_hasher.finalize().to_vec(),
+        ));
+    }
+    normalized.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut hasher = Sha256::new();
+    for (recipient_user_id, message_hash) in normalized {
+        hasher.update(recipient_user_id.as_bytes());
+        hasher.update([0x00]);
+        hasher.update(&message_hash);
+        hasher.update([0x01]);
+    }
+    Ok(hasher.finalize().to_vec())
 }
 
 #[uniffi::export]
@@ -967,6 +1069,565 @@ pub fn build_inbox_auth_headers(
         auth_nonce: nonce,
         auth_signature: B64.encode(signature),
     })
+}
+
+#[uniffi::export]
+pub fn build_contacts_list_auth_headers(
+    keys_json: String,
+    user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "contacts-list",
+        &user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode contacts-list auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_contacts_upsert_auth_headers(
+    keys_json: String,
+    user_id: String,
+    contact_user_id: String,
+    alias: String,
+    verified_by_qr: bool,
+    verified_fingerprint_sha256: Option<String>,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let alias = normalize_contact_alias_for_auth(&alias);
+    let verified_fingerprint_sha256 =
+        normalize_fingerprint_sha256_for_auth(verified_fingerprint_sha256)?;
+    let mut records = auth_common_records(
+        "contacts-upsert",
+        &user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_CONTACT_USER_ID,
+        value: contact_user_id.as_bytes().to_vec(),
+    });
+    let mut alias_hasher = Sha256::new();
+    alias_hasher.update(alias.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_CONTACT_ALIAS_HASH,
+        value: alias_hasher.finalize().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_CONTACT_VERIFIED_FLAG,
+        value: vec![if verified_by_qr { 1 } else { 0 }],
+    });
+    if let Some(fingerprint) = verified_fingerprint_sha256 {
+        records.push(TlvRecord {
+            ty: AUTH_TAG_CONTACT_FINGERPRINT,
+            value: fingerprint.as_bytes().to_vec(),
+        });
+    }
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode contacts-upsert auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_contacts_remove_auth_headers(
+    keys_json: String,
+    user_id: String,
+    contact_user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "contacts-remove",
+        &user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_CONTACT_USER_ID,
+        value: contact_user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode contacts-remove auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_group_create_auth_headers(
+    keys_json: String,
+    group_id: String,
+    member_user_ids: Vec<String>,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let normalized_members = normalize_group_members_for_auth(&member_user_ids);
+    let mut records = auth_common_records(
+        "groups-create",
+        &keys.user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_MEMBERS_HASH,
+        value: hash_string_list_sha256(&normalized_members),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode groups-create auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: keys.user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_user_groups_list_auth_headers(
+    keys_json: String,
+    user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("groups-list", &user_id, &keys.device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode groups-list auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_group_members_list_auth_headers(
+    keys_json: String,
+    group_id: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "groups-members-list",
+        &keys.user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode groups-members-list auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: keys.user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_group_members_add_auth_headers(
+    keys_json: String,
+    group_id: String,
+    member_user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "groups-members-add",
+        &keys.user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_MEMBER_USER_ID,
+        value: member_user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode groups-members-add auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: keys.user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_group_members_remove_auth_headers(
+    keys_json: String,
+    group_id: String,
+    member_user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "groups-members-remove",
+        &keys.user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_MEMBER_USER_ID,
+        value: member_user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode groups-members-remove auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: keys.user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_group_relay_auth_headers(
+    keys_json: String,
+    group_id: String,
+    sender_user_id: String,
+    recipients: Vec<GroupRelayAuthRecipient>,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != sender_user_id {
+        return Err(invalid_input(format!(
+            "sender_user_id '{}' does not match keys user '{}'",
+            sender_user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "groups-relay",
+        &sender_user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_ID,
+        value: group_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_SENDER_USER_ID,
+        value: sender_user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_GROUP_RECIPIENTS_HASH,
+        value: hash_group_recipients_sha256(&recipients)?,
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode groups-relay auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: sender_user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_presence_update_auth_headers(
+    keys_json: String,
+    user_id: String,
+    status: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let status = normalize_presence_status_for_auth(&status)?;
+    let mut records = auth_common_records(
+        "presence-update",
+        &user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PRESENCE_STATUS,
+        value: status.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode presence-update auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_presence_get_auth_headers(
+    keys_json: String,
+    user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "presence-get",
+        &keys.user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode presence-get auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: keys.user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_typing_update_auth_headers(
+    keys_json: String,
+    peer_user_id: String,
+    is_typing: bool,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "typing-update",
+        &keys.user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_TYPING_PEER_ID,
+        value: peer_user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_TYPING_STATE_FLAG,
+        value: vec![if is_typing { 1 } else { 0 }],
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode typing-update auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: keys.user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_typing_get_auth_headers(
+    keys_json: String,
+    user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("typing-get", &user_id, &keys.device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode typing-get auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_send_receipt_auth_headers(
+    keys_json: String,
+    user_id: String,
+    message_id: i64,
+    receipt_type: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    build_format_string_auth_headers(
+        keys_json,
+        format!(
+            "receipt:{}:{}:{}:{}",
+            user_id, keys.device_id, message_id, receipt_type
+        ),
+    )
+}
+
+#[uniffi::export]
+pub fn build_get_receipts_auth_headers(
+    keys_json: String,
+    user_id: String,
+    since_id: i64,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    build_format_string_auth_headers(
+        keys_json,
+        format!("get-receipts:{}:{}:{}", user_id, keys.device_id, since_id),
+    )
 }
 
 #[uniffi::export]
@@ -1646,6 +2307,38 @@ impl From<base64::DecodeError> for PqmsgAndroidError {
 mod tests {
     use super::*;
 
+    fn decode_signature(signature_base64: &str) -> Signature {
+        let signature = B64.decode(signature_base64).expect("decode signature");
+        let signature: [u8; 64] = signature.try_into().expect("signature length");
+        Signature::from_bytes(&signature)
+    }
+
+    fn verify_auth_signature(
+        keys_json: &str,
+        headers: &RequestAuthHeaders,
+        transcript: &[u8],
+    ) -> VerifyingKey {
+        let keys = read_keys_file(keys_json).expect("read keys");
+        let signing_key = auth_signing_key_for_user(&keys).expect("auth signing key");
+        let verifying_key = signing_key.verifying_key();
+        let signature = decode_signature(&headers.auth_signature);
+        verifying_key
+            .verify(transcript, &signature)
+            .expect("verify auth signature");
+        verifying_key
+    }
+
+    fn auth_timestamp_from_headers(headers: &RequestAuthHeaders) -> i64 {
+        headers
+            .auth_timestamp
+            .parse::<i64>()
+            .expect("parse auth timestamp")
+    }
+
+    fn tlv_transcript_from_records(records: Vec<TlvRecord>) -> Vec<u8> {
+        encode(&records).expect("encode tlv transcript")
+    }
+
     #[test]
     fn secondary_device_package_roundtrip_preserves_identity_and_rebinds_device_material() {
         let source_keys_json = generate_identity_keys(
@@ -1743,6 +2436,159 @@ mod tests {
         assert_eq!(headers.auth_user, "bob");
         assert_eq!(headers.auth_device, "bob-android-1");
         assert!(!headers.auth_signature.is_empty());
+    }
+
+    #[test]
+    fn contacts_upsert_auth_headers_follow_server_normalization_rules() {
+        let keys_json = generate_identity_keys(
+            "alice".to_string(),
+            "alice-android-1".to_string(),
+            Suite::MlKem768,
+            8,
+        )
+        .expect("generate keys");
+
+        let headers = build_contacts_upsert_auth_headers(
+            keys_json.clone(),
+            "alice".to_string(),
+            "bob".to_string(),
+            "  Bob Alias  ".to_string(),
+            true,
+            Some("AA".repeat(32)),
+        )
+        .expect("contacts upsert headers");
+
+        let timestamp = auth_timestamp_from_headers(&headers);
+        let mut records = auth_common_records(
+            "contacts-upsert",
+            "alice",
+            "alice-android-1",
+            timestamp,
+            &headers.auth_nonce,
+        );
+        records.push(TlvRecord {
+            ty: AUTH_TAG_RECIPIENT_ID,
+            value: b"alice".to_vec(),
+        });
+        records.push(TlvRecord {
+            ty: AUTH_TAG_CONTACT_USER_ID,
+            value: b"bob".to_vec(),
+        });
+        let mut alias_hasher = Sha256::new();
+        alias_hasher.update(b"Bob Alias");
+        records.push(TlvRecord {
+            ty: AUTH_TAG_CONTACT_ALIAS_HASH,
+            value: alias_hasher.finalize().to_vec(),
+        });
+        records.push(TlvRecord {
+            ty: AUTH_TAG_CONTACT_VERIFIED_FLAG,
+            value: vec![1],
+        });
+        records.push(TlvRecord {
+            ty: AUTH_TAG_CONTACT_FINGERPRINT,
+            value: b"aa".repeat(32),
+        });
+        let transcript = tlv_transcript_from_records(records);
+        verify_auth_signature(&keys_json, &headers, &transcript);
+    }
+
+    #[test]
+    fn group_create_auth_headers_hash_trimmed_sorted_unique_members() {
+        let keys_json = generate_identity_keys(
+            "alice".to_string(),
+            "alice-android-1".to_string(),
+            Suite::MlKem768,
+            8,
+        )
+        .expect("generate keys");
+
+        let headers = build_group_create_auth_headers(
+            keys_json.clone(),
+            "group-1".to_string(),
+            vec![
+                "  carol ".to_string(),
+                "bob".to_string(),
+                "carol".to_string(),
+                " alice ".to_string(),
+            ],
+        )
+        .expect("group create headers");
+
+        let timestamp = auth_timestamp_from_headers(&headers);
+        let mut records = auth_common_records(
+            "groups-create",
+            "alice",
+            "alice-android-1",
+            timestamp,
+            &headers.auth_nonce,
+        );
+        records.push(TlvRecord {
+            ty: AUTH_TAG_GROUP_ID,
+            value: b"group-1".to_vec(),
+        });
+        records.push(TlvRecord {
+            ty: AUTH_TAG_GROUP_MEMBERS_HASH,
+            value: hash_string_list_sha256(&[
+                "alice".to_string(),
+                "bob".to_string(),
+                "carol".to_string(),
+            ]),
+        });
+        let transcript = tlv_transcript_from_records(records);
+        verify_auth_signature(&keys_json, &headers, &transcript);
+    }
+
+    #[test]
+    fn presence_and_receipts_auth_headers_match_server_transcripts() {
+        let keys_json = generate_identity_keys(
+            "alice".to_string(),
+            "alice-android-1".to_string(),
+            Suite::MlKem768,
+            8,
+        )
+        .expect("generate keys");
+
+        let presence_headers = build_presence_update_auth_headers(
+            keys_json.clone(),
+            "alice".to_string(),
+            "  ONline ".to_string(),
+        )
+        .expect("presence update headers");
+        let presence_timestamp = auth_timestamp_from_headers(&presence_headers);
+        let mut presence_records = auth_common_records(
+            "presence-update",
+            "alice",
+            "alice-android-1",
+            presence_timestamp,
+            &presence_headers.auth_nonce,
+        );
+        presence_records.push(TlvRecord {
+            ty: AUTH_TAG_RECIPIENT_ID,
+            value: b"alice".to_vec(),
+        });
+        presence_records.push(TlvRecord {
+            ty: AUTH_TAG_PRESENCE_STATUS,
+            value: b"online".to_vec(),
+        });
+        let presence_transcript = tlv_transcript_from_records(presence_records);
+        verify_auth_signature(&keys_json, &presence_headers, &presence_transcript);
+
+        let receipt_headers = build_send_receipt_auth_headers(
+            keys_json.clone(),
+            "alice".to_string(),
+            42,
+            "delivered".to_string(),
+        )
+        .expect("send receipt headers");
+        let receipt_transcript = b"receipt:alice:alice-android-1:42:delivered".to_vec();
+        let verifying_key =
+            verify_auth_signature(&keys_json, &receipt_headers, &receipt_transcript);
+
+        let wrong_receipt_transcript = b"receipt:alice:alice-android-1:42:read".to_vec();
+        let signature = decode_signature(&receipt_headers.auth_signature);
+        assert!(verifying_key
+            .verify(&wrong_receipt_transcript, &signature)
+            .is_err());
     }
 }
 

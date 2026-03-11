@@ -22,8 +22,12 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import uniffi.pqmsg_android.ServerBundle
-import uniffi.pqmsg_android.buildInboxAuthHeaders
+import uniffi.pqmsg_android.buildPresenceGetAuthHeaders
+import uniffi.pqmsg_android.buildPresenceUpdateAuthHeaders
 import uniffi.pqmsg_android.buildRelayAuthHeaders
+import uniffi.pqmsg_android.buildSendReceiptAuthHeaders
+import uniffi.pqmsg_android.buildTypingGetAuthHeaders
+import uniffi.pqmsg_android.buildTypingUpdateAuthHeaders
 import uniffi.pqmsg_android.encryptWithSession
 import uniffi.pqmsg_android.initiateSessionAndEncrypt
 import java.io.ByteArrayOutputStream
@@ -105,7 +109,6 @@ class ChatActivity : AppCompatActivity() {
         }
 
         store.saveSetup(setup.copy(peerUserId = activePeerUserId))
-        store.markPeerAccepted(setup.userId, activePeerUserId)
         store.markConversationRead(setup.userId, activePeerUserId)
 
         setContentView(R.layout.activity_chat)
@@ -689,10 +692,10 @@ class ChatActivity : AppCompatActivity() {
                 val api = ApiClientFactory.create(setup.serverUrl)
                 api.updateTyping(
                     peerUserId = activePeerUserId,
-                    headers = buildInboxAuthHeaders(
+                    headers = buildTypingUpdateAuthHeaders(
                         keysJson = keysJson,
-                        userId = setup.userId,
-                        since = 0L,
+                        peerUserId = activePeerUserId,
+                        isTyping = true,
                     ).toHeaderMap(),
                     request = TypingUpdateRequest(is_typing = true),
                 )
@@ -710,10 +713,9 @@ class ChatActivity : AppCompatActivity() {
                     val api = ApiClientFactory.create(setup.serverUrl)
                     val response = api.getTyping(
                         userId = setup.userId,
-                        headers = buildInboxAuthHeaders(
+                        headers = buildTypingGetAuthHeaders(
                             keysJson = keysJson,
                             userId = setup.userId,
-                            since = 0L,
                         ).toHeaderMap(),
                     )
                     val wasTyping = peerIsTyping
@@ -735,10 +737,10 @@ class ChatActivity : AppCompatActivity() {
                 val api = ApiClientFactory.create(setup.serverUrl)
                 api.updatePresence(
                     userId = setup.userId,
-                    headers = buildInboxAuthHeaders(
+                    headers = buildPresenceUpdateAuthHeaders(
                         keysJson = keysJson,
                         userId = setup.userId,
-                        since = 0L,
+                        status = "online",
                     ).toHeaderMap(),
                     request = PresenceUpdateRequest(status = "online"),
                 )
@@ -752,8 +754,15 @@ class ChatActivity : AppCompatActivity() {
             while (isActive) {
                 runCatching {
                     val setup = currentSetup()
+                    val keysJson = store.readKeys(setup.userId) ?: return@launch
                     val api = ApiClientFactory.create(setup.serverUrl)
-                    val response = api.getPresence(userId = activePeerUserId)
+                    val response = api.getPresence(
+                        userId = activePeerUserId,
+                        headers = buildPresenceGetAuthHeaders(
+                            keysJson = keysJson,
+                            userId = activePeerUserId,
+                        ).toHeaderMap(),
+                    )
                     val wasOnline = peerPresenceOnline
                     peerPresenceOnline = response.active
                     if (peerPresenceOnline != wasOnline) refreshMeta()
@@ -776,10 +785,11 @@ class ChatActivity : AppCompatActivity() {
                 if (lastInbound?.transportMessageId != null) {
                     api.sendReceipt(
                         userId = setup.userId,
-                        headers = buildInboxAuthHeaders(
+                        headers = buildSendReceiptAuthHeaders(
                             keysJson = keysJson,
                             userId = setup.userId,
-                            since = 0L,
+                            messageId = lastInbound.transportMessageId,
+                            receiptType = "read",
                         ).toHeaderMap(),
                         request = SendReceiptRequest(
                             message_id = lastInbound.transportMessageId,

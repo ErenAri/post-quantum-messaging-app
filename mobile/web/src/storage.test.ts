@@ -1,4 +1,27 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+const sessionCache = new Map<string, string>();
+vi.mock("./db", () => ({
+  saveSessionCache: async (userId: string, peerId: string, sealedSession: string) => {
+    sessionCache.set(`${userId}:${peerId}`, sealedSession);
+  },
+  loadSessionCache: async (userId: string, peerId: string) =>
+    sessionCache.get(`${userId}:${peerId}`) ?? null,
+  clearSessionCache: async (userId: string, peerId: string) => {
+    sessionCache.delete(`${userId}:${peerId}`);
+  },
+  clearAllSessionCache: async (userId?: string) => {
+    if (!userId) {
+      sessionCache.clear();
+      return;
+    }
+    for (const key of [...sessionCache.keys()]) {
+      if (key.startsWith(`${userId}:`)) {
+        sessionCache.delete(key);
+      }
+    }
+  },
+}));
+
 import {
   loadSetup,
   saveSetup,
@@ -18,13 +41,17 @@ import {
   writeProfileDisplayName,
   loadProfileDisplayNames,
   hasLocalKeys,
+  listLocalKeyUsers,
   loadGroupConversations,
   upsertGroupConversation,
   markGroupConversationRead,
+  saveDirectMessageSession,
+  loadDirectMessageSession,
   wipeLocalState,
   type SetupConfig,
   type IdentityPin,
 } from "./storage";
+import { sealJsonWithPassphrase } from "./crypto";
 
 // Mock localStorage
 const store: Record<string, string> = {};
@@ -40,6 +67,7 @@ vi.stubGlobal("localStorage", localStorageMock);
 
 beforeEach(() => {
   localStorageMock.clear();
+  sessionCache.clear();
 });
 
 describe("loadSetup / saveSetup", () => {
@@ -56,7 +84,6 @@ describe("loadSetup / saveSetup", () => {
       suiteLabel: "ml-kem-768",
       peerUserId: "bob",
       displayName: "Alice",
-      passphrase: "secret",
     };
     saveSetup(config);
     expect(loadSetup()).toEqual(config);
@@ -67,6 +94,28 @@ describe("loadSetup / saveSetup", () => {
     const setup = loadSetup();
     expect(setup.serverUrl).toBe("http://test");
     expect(setup.suiteLabel).toBe(DEFAULT_SETUP.suiteLabel);
+  });
+
+  it("preserves explicitly cleared setup fields", () => {
+    localStorageMock.setItem(
+      "pqmsg.web.setup.v1",
+      JSON.stringify({
+        serverUrl: "http://localhost:3000",
+        userId: "",
+        deviceId: "",
+        suiteLabel: "ml-kem-768",
+        peerUserId: "",
+        displayName: "",
+      }),
+    );
+    expect(loadSetup()).toEqual({
+      serverUrl: "http://localhost:3000",
+      userId: "",
+      deviceId: "",
+      suiteLabel: "ml-kem-768",
+      peerUserId: "",
+      displayName: "",
+    });
   });
 
   it("returns defaults on corrupt JSON", () => {
@@ -285,6 +334,42 @@ describe("hasLocalKeys", () => {
   });
 });
 
+describe("listLocalKeyUsers", () => {
+  it("returns stored key owners in sorted order", () => {
+    localStorageMock.setItem("pqmsg.web.keys.v1.charlie", "sealed-charlie");
+    localStorageMock.setItem("pqmsg.web.keys.v1.alice", "sealed-alice");
+    localStorageMock.setItem("pqmsg.web.keys.v1.bob", "sealed-bob");
+
+    expect(listLocalKeyUsers()).toEqual(["alice", "bob", "charlie"]);
+  });
+
+  it("ignores unrelated local storage entries", () => {
+    localStorageMock.setItem("pqmsg.web.keys.v1.alice", "sealed-alice");
+    localStorageMock.setItem("something-else", "value");
+
+    expect(listLocalKeyUsers()).toEqual(["alice"]);
+  });
+});
+
+describe("direct message sessions", () => {
+  it("stores sealed sessions in IndexedDB-backed cache", async () => {
+    await saveDirectMessageSession("alice", "bob", "pass-1", "session-json");
+
+    expect(sessionCache.size).toBe(1);
+    expect(localStorageMock.getItem("pqmsg.web.dmsession.v1.alice:bob")).toBeNull();
+    await expect(loadDirectMessageSession("alice", "bob", "pass-1")).resolves.toBe("session-json");
+  });
+
+  it("migrates legacy localStorage sessions on read", async () => {
+    const sealed = await sealJsonWithPassphrase("legacy-session", "pass-1");
+    localStorageMock.setItem("pqmsg.web.dmsession.v1.alice:bob", sealed);
+
+    await expect(loadDirectMessageSession("alice", "bob", "pass-1")).resolves.toBe("legacy-session");
+    expect(sessionCache.get("alice:bob")).toBe(sealed);
+    expect(localStorageMock.getItem("pqmsg.web.dmsession.v1.alice:bob")).toBeNull();
+  });
+});
+
 describe("group conversations", () => {
   it("loadGroupConversations returns empty initially", () => {
     expect(loadGroupConversations("alice")).toEqual([]);
@@ -328,39 +413,39 @@ describe("group conversations", () => {
 });
 
 describe("wipeLocalState", () => {
-  it("removes keys for the user", () => {
+  it("removes keys for the user", async () => {
     localStorageMock.setItem("pqmsg.web.keys.v1.alice", "sealed-data");
-    wipeLocalState("alice");
+    await wipeLocalState("alice");
     expect(hasLocalKeys("alice")).toBe(false);
   });
 
-  it("removes conversations for the user", () => {
+  it("removes conversations for the user", async () => {
     upsertConversation("alice", "bob", "hi", false);
     upsertConversation("eve", "bob", "yo", false);
-    wipeLocalState("alice");
+    await wipeLocalState("alice");
     expect(loadConversations("alice")).toHaveLength(0);
     expect(loadConversations("eve")).toHaveLength(1);
   });
 
-  it("removes group conversations for the user", () => {
+  it("removes group conversations for the user", async () => {
     upsertGroupConversation("alice", "g1", "alice", "msg", false);
     upsertGroupConversation("eve", "g2", "eve", "msg", false);
-    wipeLocalState("alice");
+    await wipeLocalState("alice");
     expect(loadGroupConversations("alice")).toHaveLength(0);
     expect(loadGroupConversations("eve")).toHaveLength(1);
   });
 
-  it("removes cursors for the user", () => {
+  it("removes cursors for the user", async () => {
     writeCursor("alice", 42);
     writeCursor("alice", 10, "d1");
     writeCursor("eve", 99);
-    wipeLocalState("alice");
+    await wipeLocalState("alice");
     expect(readCursor("alice")).toBe(0);
     expect(readCursor("alice", "d1")).toBe(0);
     expect(readCursor("eve")).toBe(99);
   });
 
-  it("removes identity pins for the user", () => {
+  it("removes identity pins for the user", async () => {
     const pin: IdentityPin = {
       fingerprintSha256: "abc",
       identityKeyVersion: 1,
@@ -369,27 +454,37 @@ describe("wipeLocalState", () => {
     };
     writeIdentityPin("alice", "bob", pin);
     writeIdentityPin("eve", "bob", pin);
-    wipeLocalState("alice");
+    await wipeLocalState("alice");
     expect(listIdentityPins("alice")).toHaveLength(0);
     expect(listIdentityPins("eve")).toHaveLength(1);
   });
 
-  it("does nothing for empty userId", () => {
+  it("does nothing for empty userId", async () => {
     upsertConversation("alice", "bob", "hi", false);
-    wipeLocalState("");
-    wipeLocalState("  ");
+    await wipeLocalState("");
+    await wipeLocalState("  ");
     expect(loadConversations("alice")).toHaveLength(1);
   });
 
-  it("removes conversation meta and profile caches for the user", () => {
+  it("removes conversation meta and profile caches for the user", async () => {
     updateConversationMeta("alice", "dm", "bob", { pinnedAt: 1 });
     updateConversationMeta("eve", "dm", "bob", { pinnedAt: 2 });
     writeProfileDisplayName("alice", "bob", "Bob");
     writeProfileDisplayName("eve", "bob", "Bob");
-    wipeLocalState("alice");
+    await wipeLocalState("alice");
     expect(loadConversationMetas("alice")).toHaveLength(0);
     expect(loadConversationMetas("eve")).toHaveLength(1);
     expect(loadProfileDisplayNames("alice")).toHaveLength(0);
     expect(loadProfileDisplayNames("eve")).toHaveLength(1);
+  });
+
+  it("removes session cache for the user", async () => {
+    await saveDirectMessageSession("alice", "bob", "pass-1", "session-json");
+    await saveDirectMessageSession("eve", "bob", "pass-2", "session-json-2");
+
+    await wipeLocalState("alice");
+
+    await expect(loadDirectMessageSession("alice", "bob", "pass-1")).resolves.toBeNull();
+    await expect(loadDirectMessageSession("eve", "bob", "pass-2")).resolves.toBe("session-json-2");
   });
 });
