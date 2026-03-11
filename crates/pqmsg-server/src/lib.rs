@@ -25,12 +25,16 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 mod auth;
+mod blob_store;
 mod db;
+mod ephemeral_state;
 mod error;
 mod types;
 mod validation;
 
+pub use blob_store::BlobStore;
 pub use db::{init_db, parse_db_backend, DbBackend};
+pub use ephemeral_state::EphemeralStateStore;
 pub use error::AppError;
 
 use auth::*;
@@ -60,6 +64,7 @@ pub(crate) const SHA256_HEX_LEN: usize = 64;
 pub(crate) const MAX_DISCOVERY_HASHES: usize = 4096;
 pub(crate) const MAX_GROUP_MEMBERS: usize = 512;
 pub(crate) const MAX_FILE_BLOB_BYTES: usize = 900_000;
+pub(crate) const MAX_BACKUP_BLOB_BYTES: usize = 5_000_000;
 pub(crate) const MAX_AVATAR_BLOB_BYTES: usize = 262_144;
 pub(crate) const MAX_TYPING_EVENTS: i64 = 128;
 pub(crate) const PRESENCE_TTL_SECONDS: i64 = 180;
@@ -291,6 +296,8 @@ pub struct AppState {
     cors_allowed_origins: Vec<String>,
     trusted_proxies: Arc<Vec<std::net::IpAddr>>,
     push_spawn_semaphore: Arc<Semaphore>,
+    blob_store: Arc<BlobStore>,
+    ephemeral_state: Arc<EphemeralStateStore>,
 }
 
 impl AppState {
@@ -317,6 +324,8 @@ impl AppState {
             cors_allowed_origins: Vec::new(),
             trusted_proxies: Arc::new(Vec::new()),
             push_spawn_semaphore: Arc::new(Semaphore::new(64)),
+            blob_store: Arc::new(BlobStore::in_memory()),
+            ephemeral_state: Arc::new(EphemeralStateStore::disabled()),
         }
     }
 
@@ -347,6 +356,8 @@ impl AppState {
             cors_allowed_origins: Vec::new(),
             trusted_proxies: Arc::new(Vec::new()),
             push_spawn_semaphore: Arc::new(Semaphore::new(64)),
+            blob_store: Arc::new(BlobStore::in_memory()),
+            ephemeral_state: Arc::new(EphemeralStateStore::disabled()),
         }
     }
 
@@ -476,8 +487,26 @@ impl AppState {
         &self.push_spawn_semaphore
     }
 
+    pub(crate) fn blob_store(&self) -> &BlobStore {
+        &self.blob_store
+    }
+
+    pub(crate) fn ephemeral_state(&self) -> &EphemeralStateStore {
+        &self.ephemeral_state
+    }
+
     pub fn with_realtime_hub(mut self, hub: RealtimeHub) -> Self {
         self.realtime_hub = hub;
+        self
+    }
+
+    pub fn with_blob_store(mut self, blob_store: Arc<BlobStore>) -> Self {
+        self.blob_store = blob_store;
+        self
+    }
+
+    pub fn with_ephemeral_state(mut self, ephemeral_state: Arc<EphemeralStateStore>) -> Self {
+        self.ephemeral_state = ephemeral_state;
         self
     }
 }
@@ -1588,6 +1617,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/users/:user_id/push-token", post(register_push_token))
         .route("/v1/files/upload", post(upload_file))
         .route("/v1/files/:file_id", get(download_file))
+        .route("/v1/users/:user_id/backups", post(upload_backup))
+        .route(
+            "/v1/users/:user_id/backups/latest",
+            get(download_latest_backup),
+        )
         .route(
             "/v1/users/:user_id/profile",
             get(get_user_profile).post(upsert_user_profile),

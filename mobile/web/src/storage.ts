@@ -1,8 +1,11 @@
 import { GeneratedKeys, openJsonWithPassphrase, sealJsonWithPassphrase } from "./crypto";
 import {
   clearAllSessionCache,
+  clearMetadataRecord,
   clearSessionCache,
+  loadMetadataRecord,
   loadSessionCache,
+  saveMetadataRecord,
   saveSessionCache,
 } from "./db";
 
@@ -66,6 +69,16 @@ const PINS_KEY = "pqmsg.web.pins.v1";
 const CURSORS_KEY = "pqmsg.web.cursors.v1";
 const KEYS_PREFIX = "pqmsg.web.keys.v1.";
 const DIRECT_MESSAGE_SESSION_PREFIX = "pqmsg.web.dmsession.v1.";
+const METADATA_KEYS = [
+  SETUP_KEY,
+  CONVERSATIONS_KEY,
+  GROUP_CONVOS_KEY,
+  CONVERSATION_META_KEY,
+  PROFILE_CACHE_KEY,
+  PINS_KEY,
+  CURSORS_KEY,
+] as const;
+const metadataCache = new Map<string, string | null>();
 
 export const DEFAULT_SETUP: SetupConfig = {
   serverUrl: "http://127.0.0.1:3000",
@@ -76,8 +89,35 @@ export const DEFAULT_SETUP: SetupConfig = {
   displayName: "",
 };
 
+export async function initMetadataStorage(): Promise<void> {
+  for (const key of METADATA_KEYS) {
+    try {
+      const persisted = await loadMetadataRecord(key);
+      if (persisted !== null) {
+        metadataCache.set(key, persisted);
+        localStorage.removeItem(key);
+        continue;
+      }
+    } catch {
+      // Keep the synchronous localStorage fallback for browsers where IndexedDB is unavailable.
+    }
+
+    const legacy = localStorage.getItem(key);
+    metadataCache.set(key, legacy);
+    if (legacy === null) {
+      continue;
+    }
+    try {
+      await saveMetadataRecord(key, legacy);
+      localStorage.removeItem(key);
+    } catch {
+      // Legacy localStorage copy remains the fallback persistence path.
+    }
+  }
+}
+
 export function loadSetup(): SetupConfig {
-  const raw = localStorage.getItem(SETUP_KEY);
+  const raw = readMetadataJson(SETUP_KEY);
   if (!raw) {
     return DEFAULT_SETUP;
   }
@@ -99,7 +139,7 @@ export function loadSetup(): SetupConfig {
 }
 
 export function saveSetup(setup: SetupConfig): void {
-  localStorage.setItem(SETUP_KEY, JSON.stringify(setup));
+  writeRecord(SETUP_KEY, setup);
 }
 
 export async function saveKeys(
@@ -245,7 +285,7 @@ export function upsertConversation(
       updatedAt: now
     });
   }
-  localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(all));
+  writeRecord(CONVERSATIONS_KEY, all);
 }
 
 export function markConversationRead(userId: string, peerUserId: string): void {
@@ -253,7 +293,7 @@ export function markConversationRead(userId: string, peerUserId: string): void {
   const idx = all.findIndex((item) => item.userId === userId && item.peerUserId === peerUserId);
   if (idx >= 0) {
     all[idx].unreadCount = 0;
-    localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(all));
+    writeRecord(CONVERSATIONS_KEY, all);
   }
 }
 
@@ -394,7 +434,7 @@ export function writeCursor(userId: string, cursor: number, deviceId?: string): 
   const cursors = parseRecord<Record<string, number>>(CURSORS_KEY, {});
   const key = deviceId ? `${userId}:${deviceId}` : userId;
   cursors[key] = cursor;
-  localStorage.setItem(CURSORS_KEY, JSON.stringify(cursors));
+  writeRecord(CURSORS_KEY, cursors);
 }
 
 type PinRow = IdentityPin & { userId: string; peerUserId: string };
@@ -422,7 +462,7 @@ export function writeIdentityPin(userId: string, peerUserId: string, pin: Identi
   } else {
     pins.push(row);
   }
-  localStorage.setItem(PINS_KEY, JSON.stringify(pins));
+  writeRecord(PINS_KEY, pins);
 }
 
 export function listIdentityPins(userId: string): Array<{ peerUserId: string; pin: IdentityPin }> {
@@ -477,7 +517,7 @@ export function upsertGroupConversation(
   } else {
     all.push({ userId, groupId, ownerUserId, lastPreview: normalizedPreview, unreadCount: incrementUnread ? 1 : 0, updatedAt: now });
   }
-  localStorage.setItem(GROUP_CONVOS_KEY, JSON.stringify(all));
+  writeRecord(GROUP_CONVOS_KEY, all);
 }
 
 export function markGroupConversationRead(userId: string, groupId: string): void {
@@ -485,7 +525,7 @@ export function markGroupConversationRead(userId: string, groupId: string): void
   const idx = all.findIndex(item => item.userId === userId && item.groupId === groupId);
   if (idx >= 0) {
     all[idx].unreadCount = 0;
-    localStorage.setItem(GROUP_CONVOS_KEY, JSON.stringify(all));
+    writeRecord(GROUP_CONVOS_KEY, all);
   }
 }
 
@@ -532,7 +572,7 @@ export async function wipeLocalState(userId: string): Promise<void> {
 }
 
 function parseRecord<T>(key: string, fallback: T): T {
-  const raw = localStorage.getItem(key);
+  const raw = readMetadataJson(key);
   if (!raw) {
     return fallback;
   }
@@ -545,14 +585,51 @@ function parseRecord<T>(key: string, fallback: T): T {
 
 function writeRecord<T>(key: string, value: T): void {
   if (Array.isArray(value) && value.length === 0) {
-    localStorage.removeItem(key);
+    persistMetadataJson(key, null);
     return;
   }
   if (typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length === 0) {
-    localStorage.removeItem(key);
+    persistMetadataJson(key, null);
     return;
   }
-  localStorage.setItem(key, JSON.stringify(value));
+  persistMetadataJson(key, JSON.stringify(value));
+}
+
+function readMetadataJson(key: string): string | null {
+  if (metadataCache.has(key)) {
+    const cached = metadataCache.get(key) ?? null;
+    if (cached !== null) {
+      return cached;
+    }
+    const legacy = localStorage.getItem(key);
+    if (legacy !== null) {
+      metadataCache.set(key, legacy);
+      return legacy;
+    }
+    return null;
+  }
+  const raw = localStorage.getItem(key);
+  metadataCache.set(key, raw);
+  return raw;
+}
+
+function persistMetadataJson(key: string, raw: string | null): void {
+  metadataCache.set(key, raw);
+  if (raw === null) {
+    localStorage.removeItem(key);
+    void clearMetadataRecord(key).catch(() => {
+      // Best-effort cleanup only.
+    });
+    return;
+  }
+  localStorage.setItem(key, raw);
+  void saveMetadataRecord(key, raw)
+    .then(() => {
+      localStorage.removeItem(key);
+    })
+    .catch(() => {
+      // Legacy localStorage mirror remains as the fallback persistence path.
+    });
 }
 
 function defaultConversationMeta(kind: ConversationKind, threadId: string): ConversationMeta {

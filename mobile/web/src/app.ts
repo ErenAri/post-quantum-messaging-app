@@ -60,6 +60,7 @@ import {
 import {
   clearAllDirectMessageSessions,
   DEFAULT_SETUP,
+  initMetadataStorage,
   loadConversationMeta,
   loadConversationMetas,
   loadDirectMessageSession,
@@ -128,7 +129,7 @@ import {
 // ---------------------------------------------------------------------------
 
 const app = document.getElementById("app")!;
-let setup = loadSetup();
+let setup = DEFAULT_SETUP;
 let keys: GeneratedKeys | null = null;
 let realtimeInbox: RealtimeInbox | null = null;
 let activeChatPeer: string | null = null;
@@ -159,6 +160,31 @@ let cachedCapabilities: ServerCapabilitiesResponse | null = null;
 let cachedCapabilitiesServerUrl: string | null = null;
 
 type InboxFilter = "all" | "unread" | "groups" | "requests" | "archived";
+
+async function bootstrapApp(): Promise<void> {
+  try {
+    await initMetadataStorage();
+  } catch {
+    // Best-effort hydration; storage falls back to legacy localStorage if IndexedDB is unavailable.
+  }
+
+  setup = loadSetup();
+  if (setup.userId && hasLocalKeys(setup.userId)) {
+    const params = new URLSearchParams(location.search);
+    const invite = params.get("invite");
+    if (invite && invite !== setup.userId) {
+      navigateTo({ screen: "new-chat" });
+    } else {
+      navigateTo({ screen: "conversations" });
+    }
+  } else {
+    navigateTo({ screen: "onboarding" });
+  }
+
+  onViewChange(render);
+  onNotification(showToast);
+  render(getCurrentView());
+}
 
 async function loadServerCapabilitiesCached(): Promise<ServerCapabilitiesResponse | null> {
   if (cachedCapabilities && cachedCapabilitiesServerUrl === setup.serverUrl) {
@@ -314,22 +340,7 @@ const ONBOARDING_LOGO = `
   <p class="onboarding-sub">Post-quantum encrypted messaging</p>
 `;
 
-// Determine initial screen
-if (setup.userId && hasLocalKeys(setup.userId)) {
-  const params = new URLSearchParams(location.search);
-  const invite = params.get("invite");
-  if (invite && invite !== setup.userId) {
-    navigateTo({ screen: "new-chat" });
-  } else {
-    navigateTo({ screen: "conversations" });
-  }
-} else {
-  navigateTo({ screen: "onboarding" });
-}
-
-onViewChange(render);
-onNotification(showToast);
-render(getCurrentView());
+void bootstrapApp();
 
 // Offline banner
 window.addEventListener("offline", () => showOfflineBanner(true));

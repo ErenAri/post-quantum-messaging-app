@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 const sessionCache = new Map<string, string>();
+const metadataCache = new Map<string, string>();
 vi.mock("./db", () => ({
   saveSessionCache: async (userId: string, peerId: string, sealedSession: string) => {
     sessionCache.set(`${userId}:${peerId}`, sealedSession);
@@ -20,10 +21,18 @@ vi.mock("./db", () => ({
       }
     }
   },
+  saveMetadataRecord: async (id: string, rawJson: string) => {
+    metadataCache.set(id, rawJson);
+  },
+  loadMetadataRecord: async (id: string) => metadataCache.get(id) ?? null,
+  clearMetadataRecord: async (id: string) => {
+    metadataCache.delete(id);
+  },
 }));
 
 import {
   loadSetup,
+  initMetadataStorage,
   saveSetup,
   DEFAULT_SETUP,
   loadConversations,
@@ -65,9 +74,11 @@ const localStorageMock = {
 };
 vi.stubGlobal("localStorage", localStorageMock);
 
-beforeEach(() => {
+beforeEach(async () => {
   localStorageMock.clear();
   sessionCache.clear();
+  metadataCache.clear();
+  await initMetadataStorage();
 });
 
 describe("loadSetup / saveSetup", () => {

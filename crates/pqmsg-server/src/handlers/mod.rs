@@ -1,3 +1,4 @@
+mod backups;
 mod calls;
 mod channels;
 mod discovery;
@@ -11,6 +12,7 @@ mod receipts;
 mod stories;
 mod util;
 
+pub(crate) use backups::*;
 pub(crate) use calls::*;
 pub(crate) use channels::*;
 pub(crate) use discovery::*;

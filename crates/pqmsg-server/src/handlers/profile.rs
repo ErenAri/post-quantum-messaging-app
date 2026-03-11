@@ -10,6 +10,7 @@ use uuid::Uuid;
 use super::util::*;
 use crate::auth::*;
 use crate::db::*;
+use crate::ephemeral_state::PresenceRecord;
 use crate::error::AppError;
 use crate::types::*;
 use crate::validation::*;
@@ -105,8 +106,13 @@ pub(crate) async fn upload_file(
 
     let now = Utc::now().to_rfc3339();
     let file_id = Uuid::new_v4().simple().to_string();
+    let object_key = format!("files/{file_id}");
     let byte_len =
         i64::try_from(file_blob.len()).map_err(|_| AppError::internal("file byte_len overflow"))?;
+    state
+        .blob_store()
+        .put(&object_key, &file_blob)
+        .map_err(|_| AppError::internal("persist encrypted file blob"))?;
     sqlx::query(
         "INSERT INTO encrypted_files (
             file_id,
@@ -114,17 +120,19 @@ pub(crate) async fn upload_file(
             owner_device_id,
             recipient_user_id,
             mime_type,
+            object_key,
             file_blob,
             byte_len,
             created_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(&file_id)
     .bind(&auth.user_id)
     .bind(&request.device_id)
     .bind(&request.recipient_user_id)
     .bind(&mime_type)
-    .bind(&file_blob)
+    .bind(&object_key)
+    .bind(Vec::<u8>::new())
     .bind(byte_len)
     .bind(&now)
     .execute(state.pool())
@@ -160,6 +168,7 @@ pub(crate) async fn download_file(
             owner_user_id,
             recipient_user_id,
             mime_type,
+            object_key,
             file_blob,
             created_at
          FROM encrypted_files
@@ -178,7 +187,16 @@ pub(crate) async fn download_file(
         return Err(AppError::not_found("file not found"));
     }
 
-    let file_blob: Vec<u8> = row.try_get("file_blob")?;
+    let object_key: Option<String> = row.try_get("object_key")?;
+    let file_blob = if let Some(object_key) = object_key {
+        state
+            .blob_store()
+            .get(&object_key)
+            .map_err(|_| AppError::internal("read encrypted file blob"))?
+            .ok_or_else(|| AppError::not_found("file not found"))?
+    } else {
+        row.try_get("file_blob")?
+    };
     Ok(Json(FileDownloadResponse {
         file_id: row.try_get("file_id")?,
         owner_user_id,
@@ -234,27 +252,52 @@ pub(crate) async fn upsert_user_profile(
     ensure_user_exists(state.pool(), &user_id).await?;
 
     let now = Utc::now().to_rfc3339();
+    let avatar_object_key = if let Some(blob) = avatar_blob.as_ref() {
+        let object_key = format!("avatars/{user_id}/{}", Uuid::new_v4().simple());
+        state
+            .blob_store()
+            .put(&object_key, blob)
+            .map_err(|_| AppError::internal("persist avatar blob"))?;
+        Some(object_key)
+    } else {
+        None
+    };
+    let previous_avatar_object_key: Option<String> =
+        sqlx::query_scalar("SELECT avatar_object_key FROM user_profiles WHERE user_id = $1")
+            .bind(&user_id)
+            .fetch_optional(state.pool())
+            .await?
+            .flatten();
     sqlx::query(
         "INSERT INTO user_profiles (
             user_id,
             display_name,
             avatar_mime,
             avatar_blob,
+            avatar_object_key,
             updated_at
-         ) VALUES ($1, $2, $3, $4, $5)
+         ) VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (user_id) DO UPDATE SET
             display_name = EXCLUDED.display_name,
             avatar_mime = EXCLUDED.avatar_mime,
             avatar_blob = EXCLUDED.avatar_blob,
+            avatar_object_key = EXCLUDED.avatar_object_key,
             updated_at = EXCLUDED.updated_at",
     )
     .bind(&user_id)
     .bind(&display_name)
     .bind(&avatar_mime)
-    .bind(&avatar_blob)
+    .bind(Option::<Vec<u8>>::None)
+    .bind(&avatar_object_key)
     .bind(&now)
     .execute(state.pool())
     .await?;
+
+    if let Some(previous_key) = previous_avatar_object_key {
+        if avatar_object_key.as_deref() != Some(previous_key.as_str()) {
+            let _ = state.blob_store().delete(&previous_key);
+        }
+    }
 
     let avatar_bytes_base64 = avatar_blob.as_ref().map(|value| B64.encode(value));
     Ok(Json(UserProfileResponse {
@@ -281,7 +324,7 @@ pub(crate) async fn get_user_profile(
     ensure_user_exists(state.pool(), &user_id).await?;
 
     let row = sqlx::query(
-        "SELECT display_name, avatar_mime, avatar_blob, updated_at
+        "SELECT display_name, avatar_mime, avatar_blob, avatar_object_key, updated_at
          FROM user_profiles
          WHERE user_id = $1",
     )
@@ -299,7 +342,18 @@ pub(crate) async fn get_user_profile(
         }));
     };
 
-    let avatar_blob: Option<Vec<u8>> = row.try_get("avatar_blob")?;
+    let avatar_object_key: Option<String> = row.try_get("avatar_object_key")?;
+    let avatar_blob: Option<Vec<u8>> = if let Some(object_key) = avatar_object_key {
+        Some(
+            state
+                .blob_store()
+                .get(&object_key)
+                .map_err(|_| AppError::internal("read avatar blob"))?
+                .ok_or_else(|| AppError::not_found("profile avatar not found"))?,
+        )
+    } else {
+        row.try_get("avatar_blob")?
+    };
     Ok(Json(UserProfileResponse {
         user_id,
         display_name: row.try_get("display_name")?,
@@ -334,6 +388,29 @@ pub(crate) async fn update_presence(
     } else {
         (Utc::now() + Duration::seconds(PRESENCE_TTL_SECONDS)).to_rfc3339()
     };
+    if state.ephemeral_state().is_distributed() {
+        if status == "offline" {
+            state.ephemeral_state().clear_presence(&user_id)?;
+        } else {
+            state.ephemeral_state().set_presence(
+                &PresenceRecord {
+                    user_id: user_id.clone(),
+                    device_id: auth.device_id.clone(),
+                    status: status.clone(),
+                    updated_at: now.clone(),
+                    expires_at: expires_at.clone(),
+                },
+                PRESENCE_TTL_SECONDS as usize,
+            )?;
+        }
+        return Ok(Json(PresenceResponse {
+            user_id,
+            status: status.clone(),
+            active: status != "offline",
+            updated_at: Some(now),
+            expires_at: Some(expires_at),
+        }));
+    }
     sqlx::query(
         "INSERT INTO presence_state (
             user_id,
@@ -379,6 +456,31 @@ pub(crate) async fn get_presence(
     verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
     ensure_user_exists(state.pool(), &auth.user_id).await?;
     ensure_user_exists(state.pool(), &user_id).await?;
+
+    if state.ephemeral_state().is_distributed() {
+        if let Some(record) = state.ephemeral_state().get_presence(&user_id)? {
+            let now = Utc::now().to_rfc3339();
+            let active = record.expires_at > now;
+            return Ok(Json(PresenceResponse {
+                user_id,
+                status: if active {
+                    record.status
+                } else {
+                    "offline".to_string()
+                },
+                active,
+                updated_at: Some(record.updated_at),
+                expires_at: Some(record.expires_at),
+            }));
+        }
+        return Ok(Json(PresenceResponse {
+            user_id,
+            status: "offline".to_string(),
+            active: false,
+            updated_at: None,
+            expires_at: None,
+        }));
+    }
 
     let row = sqlx::query(
         "SELECT status, updated_at, expires_at
@@ -441,6 +543,41 @@ pub(crate) async fn update_typing(
     ensure_user_exists(state.pool(), &peer_user_id).await?;
 
     let now = Utc::now().to_rfc3339();
+    if state.ephemeral_state().is_distributed() {
+        if request.is_typing {
+            let expires_at = (Utc::now() + Duration::seconds(TYPING_TTL_SECONDS)).to_rfc3339();
+            let indicator = TypingIndicator {
+                sender_user_id: auth.user_id.clone(),
+                sender_device_id: auth.device_id.clone(),
+                updated_at: now.clone(),
+                expires_at: expires_at.clone(),
+            };
+            state.ephemeral_state().set_typing(
+                &peer_user_id,
+                &indicator,
+                TYPING_TTL_SECONDS as usize,
+            )?;
+            return Ok(Json(TypingUpdateResponse {
+                recipient_user_id: peer_user_id,
+                sender_user_id: auth.user_id,
+                sender_device_id: auth.device_id,
+                is_typing: true,
+                updated_at: now,
+                expires_at: Some(expires_at),
+            }));
+        }
+        state
+            .ephemeral_state()
+            .clear_typing(&peer_user_id, &auth.user_id, &auth.device_id)?;
+        return Ok(Json(TypingUpdateResponse {
+            recipient_user_id: peer_user_id,
+            sender_user_id: auth.user_id,
+            sender_device_id: auth.device_id,
+            is_typing: false,
+            updated_at: now,
+            expires_at: None,
+        }));
+    }
     if request.is_typing {
         let expires_at = (Utc::now() + Duration::seconds(TYPING_TTL_SECONDS)).to_rfc3339();
         sqlx::query(
@@ -510,6 +647,18 @@ pub(crate) async fn get_typing(
     let inbox_compat_auth_message = inbox_auth_message(&auth, &user_id, 0)?;
     verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
     ensure_user_exists(state.pool(), &user_id).await?;
+
+    if state.ephemeral_state().is_distributed() {
+        let typing = state
+            .ephemeral_state()
+            .list_typing(&user_id, MAX_TYPING_EVENTS as usize)?
+            .unwrap_or_default();
+        return Ok(Json(TypingInboxResponse {
+            user_id,
+            typing,
+            checked_at: Utc::now().to_rfc3339(),
+        }));
+    }
 
     let now = Utc::now().to_rfc3339();
     sqlx::query(

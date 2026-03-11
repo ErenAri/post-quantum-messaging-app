@@ -153,6 +153,7 @@ async function bootApp(options: BootOptions = {}) {
   const messagesByConversation = new Map<string, FakeMessage[]>();
   const outbox: Array<{ id: string; userId: string; peerId: string; groupId?: string }> = [];
   const sessionCache = new Map<string, string>();
+  const metadataRecords = new Map<string, string>();
   const apiState = {
     existingUsers: new Set(options.existingUsers ?? ["test1", "test2"]),
     bundleUsers: new Set(options.bundleUsers ?? options.existingUsers ?? ["test1", "test2"]),
@@ -249,6 +250,15 @@ async function bootApp(options: BootOptions = {}) {
           sessionCache.delete(key);
         }
       }
+    },
+    async saveMetadataRecord(id: string, rawJson: string) {
+      metadataRecords.set(id, rawJson);
+    },
+    async loadMetadataRecord(id: string) {
+      return metadataRecords.get(id) ?? null;
+    },
+    async clearMetadataRecord(id: string) {
+      metadataRecords.delete(id);
     },
     async addReaction() {
       return undefined;
@@ -459,8 +469,18 @@ async function bootApp(options: BootOptions = {}) {
   if (options.prepare) {
     await options.prepare(storage);
   }
+  const preparedSetup = storage.loadSetup();
+  const shouldResumeSession =
+    preparedSetup.userId.length > 0 && storage.hasLocalKeys(preparedSetup.userId);
   const router = await import("./router");
   await import("./app");
+  if (shouldResumeSession) {
+    await eventually(() => {
+      expect(router.getCurrentView()).toEqual({ screen: "conversations" });
+    });
+  } else {
+    await flushPromises();
+  }
 
   return { dom, storage, router, apiState, messagesByConversation };
 }

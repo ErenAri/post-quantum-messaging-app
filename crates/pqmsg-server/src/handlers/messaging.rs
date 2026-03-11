@@ -15,6 +15,7 @@ use sqlx::{AnyPool, Row};
 use super::util::*;
 use crate::auth::*;
 use crate::db::*;
+use crate::ephemeral_state::WsInboxTicketRecord;
 use crate::error::AppError;
 use crate::types::*;
 use crate::validation::*;
@@ -66,18 +67,31 @@ pub(crate) async fn create_ws_inbox_ticket(
     let issued_at = Utc::now();
     let expires_at = issued_at + Duration::seconds(30);
     let ticket = uuid::Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO ws_inbox_tickets (ticket, user_id, device_id, since, issued_at, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(&ticket)
-    .bind(&user_id)
-    .bind(&auth.device_id)
-    .bind(since)
-    .bind(issued_at.to_rfc3339())
-    .bind(expires_at.to_rfc3339())
-    .execute(state.pool())
-    .await?;
+    if state.ephemeral_state().is_distributed() {
+        state.ephemeral_state().put_ws_ticket(
+            &ticket,
+            &WsInboxTicketRecord {
+                user_id: user_id.clone(),
+                device_id: auth.device_id.clone(),
+                since,
+                expires_at: expires_at.to_rfc3339(),
+            },
+            30,
+        )?;
+    } else {
+        sqlx::query(
+            "INSERT INTO ws_inbox_tickets (ticket, user_id, device_id, since, issued_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(&ticket)
+        .bind(&user_id)
+        .bind(&auth.device_id)
+        .bind(since)
+        .bind(issued_at.to_rfc3339())
+        .bind(expires_at.to_rfc3339())
+        .execute(state.pool())
+        .await?;
+    }
 
     Ok(Json(WsInboxTicketResponse {
         ticket,
@@ -123,34 +137,49 @@ async fn consume_ws_inbox_ticket(
 
     purge_expired_ws_inbox_tickets(state).await?;
     let now = Utc::now().to_rfc3339();
-    let row = sqlx::query(
-        "DELETE FROM ws_inbox_tickets
-         WHERE ticket = $1
-         RETURNING user_id, device_id, since, expires_at",
-    )
-    .bind(trimmed_ticket)
-    .fetch_optional(state.pool())
-    .await?;
-    let Some(row) = row else {
-        return Err(AppError::bad_request("invalid or expired websocket ticket"));
+    let (device_id, since) = if state.ephemeral_state().is_distributed() {
+        let Some(record) = state.ephemeral_state().consume_ws_ticket(trimmed_ticket)? else {
+            return Err(AppError::bad_request("invalid or expired websocket ticket"));
+        };
+        if record.user_id != user_id {
+            return Err(AppError::bad_request("websocket ticket user_id mismatch"));
+        }
+        if record.expires_at <= now {
+            return Err(AppError::bad_request("invalid or expired websocket ticket"));
+        }
+        (record.device_id, record.since)
+    } else {
+        let row = sqlx::query(
+            "DELETE FROM ws_inbox_tickets
+             WHERE ticket = $1
+             RETURNING user_id, device_id, since, expires_at",
+        )
+        .bind(trimmed_ticket)
+        .fetch_optional(state.pool())
+        .await?;
+        let Some(row) = row else {
+            return Err(AppError::bad_request("invalid or expired websocket ticket"));
+        };
+
+        let ticket_user_id: String = row.try_get("user_id")?;
+        if ticket_user_id != user_id {
+            return Err(AppError::bad_request("websocket ticket user_id mismatch"));
+        }
+        let expires_at: String = row.try_get("expires_at")?;
+        if expires_at <= now {
+            return Err(AppError::bad_request("invalid or expired websocket ticket"));
+        }
+
+        (row.try_get("device_id")?, row.try_get("since")?)
     };
-
-    let ticket_user_id: String = row.try_get("user_id")?;
-    if ticket_user_id != user_id {
-        return Err(AppError::bad_request("websocket ticket user_id mismatch"));
-    }
-    let expires_at: String = row.try_get("expires_at")?;
-    if expires_at <= now {
-        return Err(AppError::bad_request("invalid or expired websocket ticket"));
-    }
-
-    let device_id: String = row.try_get("device_id")?;
-    let since: i64 = row.try_get("since")?;
     enforce_inbox_cursor_monotonic(state, user_id, &device_id, since).await?;
     Ok((device_id, since))
 }
 
 async fn purge_expired_ws_inbox_tickets(state: &AppState) -> Result<(), AppError> {
+    if state.ephemeral_state().is_distributed() {
+        return Ok(());
+    }
     let now = Utc::now().to_rfc3339();
     sqlx::query("DELETE FROM ws_inbox_tickets WHERE expires_at <= $1")
         .bind(now)

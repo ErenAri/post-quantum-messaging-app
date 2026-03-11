@@ -1520,6 +1520,53 @@ fn profile_get_auth_headers(
     ]
 }
 
+fn backup_upload_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    backup_version: i64,
+    encrypted_backup_blob: &[u8],
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "backups-upload-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let blob_hash = hex::encode(Sha256::digest(encrypted_backup_blob));
+    let message = format!(
+        "backups-upload:{user_id}:{device_id}:{timestamp}:{nonce}:{backup_version}:{blob_hash}"
+    );
+    let signature = signing_key.sign(message.as_bytes()).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
+fn backup_download_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "backups-download-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let message = format!("backups-download:{user_id}:{device_id}:{timestamp}:{nonce}:{user_id}");
+    let signature = signing_key.sign(message.as_bytes()).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
 fn presence_update_auth_headers(
     signing_key: &SigningKey,
     user_id: &str,
@@ -4573,6 +4620,194 @@ async fn rich_media_profile_presence_typing_reject_invalid_inputs() {
     )
     .await;
     assert_eq!(status_typing_self, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn encrypted_backups_roundtrip_and_replace_latest_blob() {
+    let app = test_app().await;
+    let alice_sig = signing_key(14);
+    let alice_x = [14u8; 32];
+
+    let (status_register, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/users/register",
+        register_payload("alice", "alice-dev-1", alice_x, &alice_sig),
+    )
+    .await;
+    assert_eq!(status_register, StatusCode::OK);
+
+    let first_backup = b"encrypted-backup-v1";
+    let first_upload_headers =
+        backup_upload_auth_headers(&alice_sig, "alice", "alice-dev-1", 1, first_backup);
+    let (status_first_upload, first_upload_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/backups",
+        json!({
+            "device_id": "alice-dev-1",
+            "backup_version": 1,
+            "recovery_hint": "first-device",
+            "encrypted_backup_bytes_base64": B64.encode(first_backup),
+        }),
+        &first_upload_headers,
+    )
+    .await;
+    assert_eq!(status_first_upload, StatusCode::OK);
+    assert_eq!(first_upload_payload["backup_version"].as_i64(), Some(1));
+    assert_eq!(
+        first_upload_payload["byte_len"].as_u64(),
+        Some(first_backup.len() as u64)
+    );
+
+    let second_backup = b"encrypted-backup-v2";
+    let second_backup_b64 = B64.encode(second_backup);
+    let second_upload_headers =
+        backup_upload_auth_headers(&alice_sig, "alice", "alice-dev-1", 2, second_backup);
+    let (status_second_upload, second_upload_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/backups",
+        json!({
+            "device_id": "alice-dev-1",
+            "backup_version": 2,
+            "recovery_hint": "replacement",
+            "encrypted_backup_bytes_base64": B64.encode(second_backup),
+        }),
+        &second_upload_headers,
+    )
+    .await;
+    assert_eq!(status_second_upload, StatusCode::OK);
+    assert_eq!(second_upload_payload["backup_version"].as_i64(), Some(2));
+
+    let download_headers = backup_download_auth_headers(&alice_sig, "alice", "alice-dev-1");
+    let (status_download, download_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/alice/backups/latest",
+        json!({}),
+        &download_headers,
+    )
+    .await;
+    assert_eq!(status_download, StatusCode::OK);
+    assert_eq!(download_payload["backup_version"].as_i64(), Some(2));
+    assert_eq!(
+        download_payload["recovery_hint"].as_str(),
+        Some("replacement")
+    );
+    assert_eq!(
+        download_payload["encrypted_backup_bytes_base64"].as_str(),
+        Some(second_backup_b64.as_str())
+    );
+}
+
+#[tokio::test]
+async fn encrypted_backups_roundtrip_and_replace_latest_version() {
+    let app = test_app().await;
+    let alice_sig = signing_key(176);
+
+    let reg_alice = register_payload("alice-backup", "alice-backup-dev", [86u8; 32], &alice_sig);
+    let (status_reg_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_reg_alice, StatusCode::OK);
+
+    let backup_v1 = vec![0x01, 0x02, 0x03, 0x04];
+    let backup_v1_hash = hex::encode(Sha256::digest(&backup_v1));
+    let upload_v1_headers = format_string_auth_headers(
+        &alice_sig,
+        "alice-backup",
+        "alice-backup-dev",
+        format!(
+            "backups-upload:{}:{}:{}:{}",
+            "alice-backup", "alice-backup-dev", 1, backup_v1_hash
+        ),
+    );
+    let (status_upload_v1, upload_v1_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice-backup/backups",
+        json!({
+            "device_id": "alice-backup-dev",
+            "backup_version": 1,
+            "recovery_hint": "local test hint",
+            "encrypted_backup_bytes_base64": B64.encode(&backup_v1),
+        }),
+        &upload_v1_headers,
+    )
+    .await;
+    assert_eq!(status_upload_v1, StatusCode::OK);
+    assert_eq!(upload_v1_payload["backup_version"].as_i64(), Some(1));
+    assert_eq!(
+        upload_v1_payload["byte_len"].as_u64(),
+        Some(backup_v1.len() as u64)
+    );
+
+    let download_headers = format_string_auth_headers(
+        &alice_sig,
+        "alice-backup",
+        "alice-backup-dev",
+        "backups-download:alice-backup:alice-backup-dev:alice-backup",
+    );
+    let (status_download_v1, download_v1_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/alice-backup/backups/latest",
+        json!({}),
+        &download_headers,
+    )
+    .await;
+    assert_eq!(status_download_v1, StatusCode::OK);
+    assert_eq!(download_v1_payload["backup_version"].as_i64(), Some(1));
+    assert_eq!(
+        download_v1_payload["encrypted_backup_bytes_base64"].as_str(),
+        Some(B64.encode(&backup_v1).as_str())
+    );
+
+    let backup_v2 = vec![0x05, 0x06, 0x07, 0x08, 0x09];
+    let backup_v2_hash = hex::encode(Sha256::digest(&backup_v2));
+    let upload_v2_headers = format_string_auth_headers(
+        &alice_sig,
+        "alice-backup",
+        "alice-backup-dev",
+        format!(
+            "backups-upload:{}:{}:{}:{}",
+            "alice-backup", "alice-backup-dev", 2, backup_v2_hash
+        ),
+    );
+    let (status_upload_v2, upload_v2_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice-backup/backups",
+        json!({
+            "device_id": "alice-backup-dev",
+            "backup_version": 2,
+            "recovery_hint": "replacement",
+            "encrypted_backup_bytes_base64": B64.encode(&backup_v2),
+        }),
+        &upload_v2_headers,
+    )
+    .await;
+    assert_eq!(status_upload_v2, StatusCode::OK);
+    assert_eq!(upload_v2_payload["backup_version"].as_i64(), Some(2));
+
+    let (status_download_v2, download_v2_payload) = json_request_with_headers(
+        app,
+        Method::GET,
+        "/v1/users/alice-backup/backups/latest",
+        json!({}),
+        &download_headers,
+    )
+    .await;
+    assert_eq!(status_download_v2, StatusCode::OK);
+    assert_eq!(download_v2_payload["backup_version"].as_i64(), Some(2));
+    assert_eq!(
+        download_v2_payload["encrypted_backup_bytes_base64"].as_str(),
+        Some(B64.encode(&backup_v2).as_str())
+    );
+    assert_eq!(
+        download_v2_payload["recovery_hint"].as_str(),
+        Some("replacement")
+    );
 }
 
 // ---------------------------------------------------------------------------

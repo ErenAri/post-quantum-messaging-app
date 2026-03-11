@@ -4,8 +4,9 @@ use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
 use pqmsg_core::alg::{enforce_runtime_security_profile, RuntimeCryptoProfile, SecurityProfile};
 use pqmsg_server::{
-    build_router, init_db, parse_db_backend, AppState, AuditLogger, AuthReplayCache, DbBackend,
-    DeploymentMode, DosHardeningPolicy, PushNotifier, RateLimiter, RealtimeHub,
+    build_router, init_db, parse_db_backend, AppState, AuditLogger, AuthReplayCache, BlobStore,
+    DbBackend, DeploymentMode, DosHardeningPolicy, EphemeralStateStore, PushNotifier,
+    RateLimiter, RealtimeHub,
 };
 use sentry::ClientOptions;
 use sqlx::any::AnyPoolOptions;
@@ -252,6 +253,8 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr = env::var("PQMSG_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
     let database_url =
         env::var("PQMSG_DATABASE_URL").unwrap_or_else(|_| "sqlite://pqmsg-server.db".to_string());
+    let blob_store_dir =
+        env::var("PQMSG_BLOB_STORE_DIR").unwrap_or_else(|_| "./pqmsg-blob-store".to_string());
     let db_backend = parse_db_backend(&database_url)
         .map_err(|message| anyhow::anyhow!("{message} (check PQMSG_DATABASE_URL)"))?;
     let db_max_connections = parse_env_u32("PQMSG_DB_MAX_CONNECTIONS", 20)?;
@@ -278,6 +281,8 @@ async fn main() -> anyhow::Result<()> {
         });
     let rate_limit_redis_key_prefix = env::var("PQMSG_RATE_LIMIT_REDIS_KEY_PREFIX")
         .unwrap_or_else(|_| "pqmsg:ratelimit:".to_string());
+    let ephemeral_redis_key_prefix = env::var("PQMSG_EPHEMERAL_REDIS_KEY_PREFIX")
+        .unwrap_or_else(|_| "pqmsg:ephemeral:".to_string());
     let mut dos_policy = DosHardeningPolicy::for_security_profile(security_profile);
     if let Some(bits) = parse_env_optional_u8("PQMSG_REGISTRATION_POW_BITS")? {
         dos_policy = dos_policy.with_registration_pow_bits(bits);
@@ -437,6 +442,17 @@ async fn main() -> anyhow::Result<()> {
     } else {
         RealtimeHub::new()
     };
+    let blob_store = Arc::new(
+        BlobStore::local_fs(&blob_store_dir)
+            .with_context(|| format!("failed to initialize blob store at '{blob_store_dir}'"))?,
+    );
+    let ephemeral_state = Arc::new(if let Some(redis_url) = &rate_limit_redis_url {
+        EphemeralStateStore::with_redis(redis_url, ephemeral_redis_key_prefix.clone()).with_context(
+            || format!("failed to initialize redis ephemeral state with url '{redis_url}'"),
+        )?
+    } else {
+        EphemeralStateStore::disabled()
+    });
     let state =
         AppState::with_security_profile(pool, db_backend, rate_limiter.clone(), security_profile)
             .with_deployment_mode(deployment_mode)
@@ -449,7 +465,9 @@ async fn main() -> anyhow::Result<()> {
             .with_auth_replay(auth_replay)
             .with_cors_allowed_origins(cors_allowed_origins)
             .with_trusted_proxies(trusted_proxies)
-            .with_realtime_hub(realtime_hub);
+            .with_realtime_hub(realtime_hub)
+            .with_blob_store(blob_store)
+            .with_ephemeral_state(ephemeral_state);
 
     // Spawn the ephemeral message expiry reaper
     tokio::spawn(pqmsg_server::run_message_expiry_reaper(state.clone()));

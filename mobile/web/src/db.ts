@@ -25,10 +25,11 @@ export type StoredMessage = {
 };
 
 const DB_NAME = "pqmsg-web";
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const MESSAGES_STORE = "messages";
 const OUTBOX_STORE = "outbox";
 const SESSIONS_STORE = "sessions";
+const METADATA_STORE = "metadata";
 
 export type OutboxMessage = {
   id: string;
@@ -46,6 +47,12 @@ type StoredSession = {
   userId: string;
   peerId: string;
   sealedSession: string;
+  updatedAt: number;
+};
+
+type StoredMetadata = {
+  id: string;
+  rawJson: string;
   updatedAt: number;
 };
 
@@ -68,6 +75,9 @@ function open(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(SESSIONS_STORE)) {
         const store = db.createObjectStore(SESSIONS_STORE, { keyPath: "id" });
         store.createIndex("by_user", "userId", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(METADATA_STORE)) {
+        db.createObjectStore(METADATA_STORE, { keyPath: "id" });
       }
     };
     request.onsuccess = () => {
@@ -310,6 +320,44 @@ export async function clearAllSessionCache(userId?: string): Promise<void> {
       };
       request.onerror = () => reject(request.error);
     }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function saveMetadataRecord(id: string, rawJson: string): Promise<void> {
+  const db = await open();
+  const record: StoredMetadata = {
+    id,
+    rawJson,
+    updatedAt: Date.now(),
+  };
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(METADATA_STORE, "readwrite");
+    tx.objectStore(METADATA_STORE).put(record);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function loadMetadataRecord(id: string): Promise<string | null> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(METADATA_STORE, "readonly");
+    const request = tx.objectStore(METADATA_STORE).get(id);
+    request.onsuccess = () => {
+      const record = request.result as StoredMetadata | undefined;
+      resolve(record?.rawJson ?? null);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function clearMetadataRecord(id: string): Promise<void> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(METADATA_STORE, "readwrite");
+    tx.objectStore(METADATA_STORE).delete(id);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });

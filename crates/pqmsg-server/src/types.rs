@@ -408,6 +408,35 @@ pub(crate) struct UpsertProfileRequest {
     pub(crate) avatar_bytes_base64: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct BackupUploadRequest {
+    pub(crate) device_id: String,
+    pub(crate) backup_version: i64,
+    pub(crate) recovery_hint: Option<String>,
+    pub(crate) encrypted_backup_bytes_base64: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct BackupUploadResponse {
+    pub(crate) backup_id: String,
+    pub(crate) user_id: String,
+    pub(crate) device_id: String,
+    pub(crate) backup_version: i64,
+    pub(crate) byte_len: usize,
+    pub(crate) uploaded_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct BackupDownloadResponse {
+    pub(crate) backup_id: String,
+    pub(crate) user_id: String,
+    pub(crate) device_id: String,
+    pub(crate) backup_version: i64,
+    pub(crate) recovery_hint: Option<String>,
+    pub(crate) encrypted_backup_bytes_base64: String,
+    pub(crate) uploaded_at: String,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct UserProfileResponse {
     pub(crate) user_id: String,
@@ -446,7 +475,7 @@ pub(crate) struct TypingUpdateResponse {
     pub(crate) expires_at: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct TypingIndicator {
     pub(crate) sender_user_id: String,
     pub(crate) sender_device_id: String,
