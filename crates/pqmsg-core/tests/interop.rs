@@ -62,6 +62,8 @@ fn wire_message_encode_decode_roundtrip() {
         msg_num: 42,
         prev_chain_len: 7,
         pq_step_ct: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        pq_target_pub_hash: None,
+        pq_next_public_key: None,
         aead_nonce: [0x11; 12],
         ciphertext: b"hello-wire".to_vec(),
     };
@@ -88,6 +90,8 @@ fn wire_message_without_pq_step_roundtrips() {
         msg_num: 0,
         prev_chain_len: 0,
         pq_step_ct: None,
+        pq_target_pub_hash: None,
+        pq_next_public_key: None,
         aead_nonce: [0x00; 12],
         ciphertext: b"no-pq".to_vec(),
     };
@@ -107,6 +111,8 @@ fn wire_encoding_is_deterministic() {
         msg_num: 100,
         prev_chain_len: 3,
         pq_step_ct: None,
+        pq_target_pub_hash: None,
+        pq_next_public_key: None,
         aead_nonce: [0xFF; 12],
         ciphertext: vec![0x00; 16],
     };
@@ -341,6 +347,8 @@ fn wire_encoding_pinned_vector() {
         msg_num: 0,
         prev_chain_len: 0,
         pq_step_ct: None,
+        pq_target_pub_hash: None,
+        pq_next_public_key: None,
         aead_nonce: [0u8; 12],
         ciphertext: vec![0xCA, 0xFE],
     };

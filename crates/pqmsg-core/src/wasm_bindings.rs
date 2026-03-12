@@ -37,7 +37,9 @@ use crate::keys::{KEMPreKey, PreKeyBundle, SecretBytes};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::pq_sig::MlDsa65;
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
-use crate::ratchet::pq::{PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL};
+use crate::ratchet::pq::{
+    PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL, DEFAULT_PQ_RATCHET_KEY_HISTORY,
+};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::sealed::{open_message_with_cert, seal_message_with_cert, SenderCertificate};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
@@ -499,6 +501,9 @@ fn mandatory_pq_ratchet_state(
         local_public_key: local_pq_prekey.public_key.clone(),
         local_secret_key: local_pq_prekey.secret_key.clone(),
         remote_public_key,
+        local_key_history: Vec::new(),
+        max_key_history: DEFAULT_PQ_RATCHET_KEY_HISTORY,
+        last_remote_update_msg_num: 0,
     }
 }
 

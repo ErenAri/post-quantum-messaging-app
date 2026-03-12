@@ -553,7 +553,7 @@ mod tests {
         alice_initiate, bob_receive, pq_signed_prekey_signature_message,
         signed_prekey_signature_message, InitialMessage, SignatureVerifier,
     };
-    use crate::kem::{KemEncapsulation, KemProvider};
+    use crate::kem::{KemEncapsulation, KemKeyPair, KemProvider};
     use crate::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
     use crate::CoreError;
     use rand::rngs::OsRng;
@@ -583,6 +583,16 @@ mod tests {
     }
 
     impl KemProvider for MockKem {
+        fn keypair(&self) -> Result<KemKeyPair, CoreError> {
+            let mut seed = [0u8; 32];
+            OsRng.fill_bytes(&mut seed);
+            let seed = seed.to_vec();
+            Ok(KemKeyPair {
+                public_key: seed.clone(),
+                secret_key: SecretBytes::from(seed),
+            })
+        }
+
         fn encapsulate(&self, recipient_public_key: &[u8]) -> Result<KemEncapsulation, CoreError> {
             if recipient_public_key.len() != 32 {
                 return Err(CoreError::InvalidLength {

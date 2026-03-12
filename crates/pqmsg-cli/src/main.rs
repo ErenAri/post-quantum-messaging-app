@@ -19,7 +19,9 @@ use pqmsg_core::handshake::{
 };
 use pqmsg_core::kem::MlKem768;
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
-use pqmsg_core::ratchet::pq::{PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL};
+use pqmsg_core::ratchet::pq::{
+    PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL, DEFAULT_PQ_RATCHET_KEY_HISTORY,
+};
 use pqmsg_core::sealed::{
     derive_pairwise_sealed_sender_key, open_message as open_sealed_message,
     seal_message as seal_sealed_message, SealedEnvelope,
@@ -3149,6 +3151,9 @@ fn mandatory_pq_ratchet_state(
         local_public_key: local_pq_prekey.public_key.clone(),
         local_secret_key: local_pq_prekey.secret_key.clone(),
         remote_public_key,
+        local_key_history: Vec::new(),
+        max_key_history: DEFAULT_PQ_RATCHET_KEY_HISTORY,
+        last_remote_update_msg_num: 0,
     }
 }
 
@@ -4886,7 +4891,7 @@ mod tests {
             production_baseline_met: false,
             registration_pow_bits: 0,
             prekey_bundle_reserve_count: 2,
-            pq_ratchet_interval: 4,
+            pq_ratchet_interval: 1,
             authenticated_direct_messaging_supported: false,
             web_client_policy: "demo_only".to_string(),
         }

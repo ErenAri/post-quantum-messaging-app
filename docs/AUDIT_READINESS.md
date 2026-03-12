@@ -96,7 +96,7 @@ Defined in `crates/pqmsg-core/src/alg.rs`:
 | Control | Implementation | Evidence |
 |---------|---------------|----------|
 | Hybrid key agreement | PQXDH = X25519 + ML-KEM-768 | `crates/pqmsg-core/src/handshake.rs` |
-| PQ ratchet re-keying | Configurable interval (default every 50 messages) | `crates/pqmsg-core/src/ratchet/pq.rs` |
+| PQ ratchet re-keying | Configurable interval (supported default: every message) | `crates/pqmsg-core/src/ratchet/pq.rs` |
 | Signed prekey expiry | Server rejects stale prekeys (>30 day default) | `crates/pqmsg-server/src/handlers/prekeys.rs` |
 | ML-KEM key validation | Encapsulation key length + decapsulation round-trip check | `crates/pqmsg-core/src/kem.rs` |
 | FIPS mode | Compile-time gate restricting to FIPS-approved suites | `crates/pqmsg-core/src/alg.rs`, `kem.rs` |

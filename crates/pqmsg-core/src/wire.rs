@@ -20,6 +20,8 @@ const TAG_PREV_CHAIN_LEN: u16 = critical_type(0x1005);
 const TAG_PQ_STEP_CT: u16 = critical_type(0x1006);
 const TAG_AEAD_NONCE: u16 = critical_type(0x1007);
 const TAG_CIPHERTEXT: u16 = critical_type(0x1008);
+const TAG_PQ_TARGET_PUB_HASH: u16 = critical_type(0x1009);
+const TAG_PQ_NEXT_PUB: u16 = critical_type(0x100A);
 
 // V2 wire message TLV tags (header encrypted, padding applied)
 const TAG_V2_VERSION: u16 = critical_type(0x1101);
@@ -94,6 +96,8 @@ pub struct WireMessage {
     pub msg_num: u32,
     pub prev_chain_len: u32,
     pub pq_step_ct: Option<Vec<u8>>,
+    pub pq_target_pub_hash: Option<Vec<u8>>,
+    pub pq_next_public_key: Option<Vec<u8>>,
     pub aead_nonce: [u8; 12],
     pub ciphertext: Vec<u8>,
 }
@@ -128,6 +132,18 @@ impl WireMessage {
                 value: ct.clone(),
             });
         }
+        if let Some(target_pub_hash) = &self.pq_target_pub_hash {
+            records.push(TlvRecord {
+                ty: TAG_PQ_TARGET_PUB_HASH,
+                value: target_pub_hash.clone(),
+            });
+        }
+        if let Some(next_pub) = &self.pq_next_public_key {
+            records.push(TlvRecord {
+                ty: TAG_PQ_NEXT_PUB,
+                value: next_pub.clone(),
+            });
+        }
         records.push(TlvRecord {
             ty: TAG_AEAD_NONCE,
             value: self.aead_nonce.to_vec(),
@@ -147,6 +163,8 @@ impl WireMessage {
             TAG_MSG_NUM,
             TAG_PREV_CHAIN_LEN,
             TAG_PQ_STEP_CT,
+            TAG_PQ_TARGET_PUB_HASH,
+            TAG_PQ_NEXT_PUB,
             TAG_AEAD_NONCE,
             TAG_CIPHERTEXT,
         ];
@@ -173,6 +191,8 @@ impl WireMessage {
             "wire.prev_chain_len",
         )?;
         let pq_step_ct = map.get(&TAG_PQ_STEP_CT).map(|v| v.to_vec());
+        let pq_target_pub_hash = map.get(&TAG_PQ_TARGET_PUB_HASH).map(|v| v.to_vec());
+        let pq_next_public_key = map.get(&TAG_PQ_NEXT_PUB).map(|v| v.to_vec());
         let aead_nonce = parse_12(
             require_from_map(&map, TAG_AEAD_NONCE, "wire.aead_nonce")?,
             "wire.aead_nonce",
@@ -186,6 +206,8 @@ impl WireMessage {
             msg_num,
             prev_chain_len,
             pq_step_ct,
+            pq_target_pub_hash,
+            pq_next_public_key,
             aead_nonce,
             ciphertext,
         })
@@ -204,6 +226,8 @@ pub struct HeaderPlaintext {
     pub msg_num: u32,
     pub prev_chain_len: u32,
     pub pq_step_ct: Option<Vec<u8>>,
+    pub pq_target_pub_hash: Option<Vec<u8>>,
+    pub pq_next_public_key: Option<Vec<u8>>,
 }
 
 impl HeaderPlaintext {
@@ -229,6 +253,18 @@ impl HeaderPlaintext {
                 value: ct.clone(),
             });
         }
+        if let Some(target_pub_hash) = &self.pq_target_pub_hash {
+            records.push(TlvRecord {
+                ty: TAG_PQ_TARGET_PUB_HASH,
+                value: target_pub_hash.clone(),
+            });
+        }
+        if let Some(next_pub) = &self.pq_next_public_key {
+            records.push(TlvRecord {
+                ty: TAG_PQ_NEXT_PUB,
+                value: next_pub.clone(),
+            });
+        }
         encode(&records)
     }
 
@@ -239,6 +275,8 @@ impl HeaderPlaintext {
             TAG_MSG_NUM,
             TAG_PREV_CHAIN_LEN,
             TAG_PQ_STEP_CT,
+            TAG_PQ_TARGET_PUB_HASH,
+            TAG_PQ_NEXT_PUB,
         ];
         let records = decode_strict(input, &known_types)?;
         let map = build_record_map(&records);
@@ -255,11 +293,15 @@ impl HeaderPlaintext {
             "header.prev_chain_len",
         )?;
         let pq_step_ct = map.get(&TAG_PQ_STEP_CT).map(|v| v.to_vec());
+        let pq_target_pub_hash = map.get(&TAG_PQ_TARGET_PUB_HASH).map(|v| v.to_vec());
+        let pq_next_public_key = map.get(&TAG_PQ_NEXT_PUB).map(|v| v.to_vec());
         Ok(Self {
             sender_dh_pub,
             msg_num,
             prev_chain_len,
             pq_step_ct,
+            pq_target_pub_hash,
+            pq_next_public_key,
         })
     }
 }
@@ -535,6 +577,8 @@ mod tests {
             msg_num: 1,
             prev_chain_len: 0,
             pq_step_ct: None,
+            pq_target_pub_hash: None,
+            pq_next_public_key: None,
             aead_nonce: [0xBB; 12],
             ciphertext: vec![0xCC; 48],
         }
@@ -663,6 +707,8 @@ mod tests {
             msg_num: 42,
             prev_chain_len: 10,
             pq_step_ct: Some(vec![0xFF; 64]),
+            pq_target_pub_hash: None,
+            pq_next_public_key: None,
         };
         let encoded = header.encode().expect("encode header");
         let decoded = HeaderPlaintext::decode(&encoded).expect("decode header");
@@ -676,6 +722,8 @@ mod tests {
             msg_num: 0,
             prev_chain_len: 0,
             pq_step_ct: None,
+            pq_target_pub_hash: None,
+            pq_next_public_key: None,
         };
         let encoded = header.encode().expect("encode header");
         let decoded = HeaderPlaintext::decode(&encoded).expect("decode header");
@@ -708,7 +756,7 @@ mod tests {
     #[test]
     fn decode_wire_message_rejects_unknown_tag() {
         // A message starting with an unknown critical tag
-        let mut bad = vec![0xFF, 0xFF, 0x00, 0x02, 0x00, 0x01];
+        let bad = vec![0xFF, 0xFF, 0x00, 0x02, 0x00, 0x01];
         assert!(decode_wire_message(&bad).is_err());
     }
 
@@ -758,6 +806,8 @@ mod tests {
             msg_num: 7,
             prev_chain_len: 3,
             pq_step_ct: Some(vec![0xBB; 16]),
+            pq_target_pub_hash: None,
+            pq_next_public_key: None,
         };
         let plaintext = header.encode().expect("encode header");
         let encrypted = encrypt_header(&hk, &plaintext);
@@ -780,6 +830,8 @@ mod tests {
             msg_num: 0,
             prev_chain_len: 0,
             pq_step_ct: None,
+            pq_target_pub_hash: None,
+            pq_next_public_key: None,
         };
         let plaintext = header.encode().expect("encode");
         let encrypted = encrypt_header(&hk, &plaintext);
@@ -797,6 +849,8 @@ mod tests {
             msg_num: 5,
             prev_chain_len: 2,
             pq_step_ct: None,
+            pq_target_pub_hash: None,
+            pq_next_public_key: None,
         };
         let plaintext = header.encode().expect("encode");
         let encrypted = encrypt_header(&hk, &plaintext);

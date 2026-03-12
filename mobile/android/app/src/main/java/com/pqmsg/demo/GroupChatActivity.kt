@@ -154,6 +154,7 @@ class GroupChatActivity : AppCompatActivity() {
                     userId = context.profile.userId,
                     peerUserId = peerUserId,
                     sessionJson = store.readSession(context.profile.userId, peerUserId),
+                    requiredPqRatchetInterval = context.capabilities.pq_ratchet_interval,
                 )
                 val sendResult = if (existingSession.isNullOrBlank()) {
                     val bundle = context.api.getBundle(peerUserId)

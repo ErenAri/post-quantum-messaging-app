@@ -95,7 +95,7 @@ class ServerApiTest {
               "production_baseline_met": false,
               "registration_pow_bits": 0,
               "prekey_bundle_reserve_count": 10,
-              "pq_ratchet_interval": 5,
+              "pq_ratchet_interval": 1,
               "contact_discovery_supported": false,
               "presence_supported": false,
               "typing_indicators_supported": false,
@@ -134,7 +134,7 @@ class ServerApiTest {
     }
 
     @Test
-    fun validate_capabilities_requires_mandatory_pq_ratchet() {
+    fun validate_capabilities_requires_per_message_pq_ratchet() {
         val parsed = gson.fromJson(
             """
             {
@@ -158,7 +158,7 @@ class ServerApiTest {
               "production_baseline_met": false,
               "registration_pow_bits": 0,
               "prekey_bundle_reserve_count": 10,
-              "pq_ratchet_interval": 0,
+              "pq_ratchet_interval": 5,
               "contact_discovery_supported": false,
               "presence_supported": false,
               "typing_indicators_supported": false,

@@ -289,6 +289,7 @@ class ChatActivity : AppCompatActivity() {
             userId = context.profile.userId,
             peerUserId = activePeerUserId,
             sessionJson = store.readSession(context.profile.userId, activePeerUserId),
+            requiredPqRatchetInterval = context.capabilities.pq_ratchet_interval,
         )
         var peerTransportIdentityX25519Pub: String? =
             store.readIdentityPin(context.profile.userId, activePeerUserId)

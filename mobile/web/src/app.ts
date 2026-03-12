@@ -251,8 +251,8 @@ async function ensureMandatoryPqRatchetPolicy(): Promise<ServerCapabilitiesRespo
   if (!capabilities) {
     throw new Error("Server capabilities could not be verified.");
   }
-  if (capabilities.pq_ratchet_interval <= 0) {
-    throw new Error("Server is not advertising mandatory PQ ratchet support.");
+  if (capabilities.pq_ratchet_interval !== 1) {
+    throw new Error("Server is not advertising per-message PQ ratchet support.");
   }
   if (!capabilities.sealed_sender_required) {
     throw new Error("Server is not advertising sealed-sender-only direct messaging.");
@@ -277,21 +277,27 @@ async function loadStoredDirectSession(peerUserId: string): Promise<string | nul
   return loadDirectMessageSession(setup.userId, peerUserId, getPassphrase());
 }
 
-function sessionRequiresRehandshake(sessionJson: string): boolean {
+function sessionRequiresRehandshake(sessionJson: string, requiredPqRatchetInterval: number): boolean {
   try {
-    const parsed = JSON.parse(sessionJson) as { snapshot?: { pq_ratchet?: unknown } };
-    return !parsed.snapshot?.pq_ratchet;
+    const parsed = JSON.parse(sessionJson) as {
+      snapshot?: { pq_ratchet?: { interval?: unknown } | null };
+    };
+    const interval = parsed.snapshot?.pq_ratchet?.interval;
+    return typeof interval !== "number" || interval !== requiredPqRatchetInterval;
   } catch {
     return true;
   }
 }
 
-async function loadCompatibleDirectSession(peerUserId: string): Promise<{ sessionJson: string | null; clearedLegacy: boolean }> {
+async function loadCompatibleDirectSession(
+  peerUserId: string,
+  requiredPqRatchetInterval: number
+): Promise<{ sessionJson: string | null; clearedLegacy: boolean }> {
   const existingSession = await loadStoredDirectSession(peerUserId);
   if (!existingSession) {
     return { sessionJson: null, clearedLegacy: false };
   }
-  if (!sessionRequiresRehandshake(existingSession)) {
+  if (!sessionRequiresRehandshake(existingSession, requiredPqRatchetInterval)) {
     return { sessionJson: existingSession, clearedLegacy: false };
   }
   await clearDirectMessageSession(setup.userId, peerUserId);
@@ -310,8 +316,11 @@ async function encryptDirectPayload(
   plaintext: string
 ): Promise<string> {
   await ensureWebPqRuntime();
-  await ensureMandatoryPqRatchetPolicy();
-  const { sessionJson: existingSession } = await loadCompatibleDirectSession(peerUserId);
+  const capabilities = await ensureMandatoryPqRatchetPolicy();
+  const { sessionJson: existingSession } = await loadCompatibleDirectSession(
+    peerUserId,
+    capabilities.pq_ratchet_interval
+  );
   const api = new PqmsgApi(setup.serverUrl);
   if (existingSession) {
     const result = encryptDirectMessageWithSession(existingSession, k.userId, peerUserId, plaintext);
@@ -385,7 +394,10 @@ async function decryptIncomingPayload(
   const {
     sessionJson: existingSession,
     clearedLegacy,
-  } = await loadCompatibleDirectSession(resolvedSenderUserId);
+  } = await loadCompatibleDirectSession(
+    resolvedSenderUserId,
+    capabilities.pq_ratchet_interval
+  );
   let result: ReturnType<typeof decryptDirectMessage>;
   try {
     result = decryptDirectMessage(
@@ -4437,7 +4449,7 @@ async function renderServerInfo(): Promise<void> {
           <div class="settings-row"><span>Schema</span><span>v${caps.capability_schema_version}</span></div>
           <div class="settings-row"><span>Suites</span><span class="mono">${caps.supported_suite_ids.join(", ")}</span></div>
           <div class="settings-row"><span>Web Policy</span><span class="mono">${escHtml(caps.web_client_policy)}</span></div>
-          <div class="settings-row"><span>PQ Ratchet</span><span>every ${caps.pq_ratchet_interval} msgs</span></div>
+          <div class="settings-row"><span>PQ Ratchet</span><span>${caps.pq_ratchet_interval === 1 ? "every message" : `every ${caps.pq_ratchet_interval} msgs`}</span></div>
           <div class="settings-row"><span>Presence</span><span>${caps.presence_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Typing</span><span>${caps.typing_indicators_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Read Receipts</span><span>${caps.read_receipts_supported ? "Enabled" : "Disabled"}</span></div>

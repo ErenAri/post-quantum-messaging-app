@@ -40,11 +40,15 @@ object MessagingCoordinator {
         return value.trim().removePrefix("@")
     }
 
-    private fun sessionRequiresRehandshake(sessionJson: String): Boolean {
+    private fun sessionRequiresRehandshake(
+        sessionJson: String,
+        requiredPqRatchetInterval: Int,
+    ): Boolean {
         return try {
             val parsed = JSONObject(sessionJson)
             val snapshot = parsed.optJSONObject("snapshot") ?: return true
-            snapshot.isNull("pq_ratchet")
+            val pqRatchet = snapshot.optJSONObject("pq_ratchet") ?: return true
+            pqRatchet.optInt("interval", -1) != requiredPqRatchetInterval
         } catch (_: Exception) {
             true
         }
@@ -55,11 +59,12 @@ object MessagingCoordinator {
         userId: String,
         peerUserId: String,
         sessionJson: String?,
+        requiredPqRatchetInterval: Int,
     ): String? {
         if (sessionJson.isNullOrBlank()) {
             return null
         }
-        if (!sessionRequiresRehandshake(sessionJson)) {
+        if (!sessionRequiresRehandshake(sessionJson, requiredPqRatchetInterval)) {
             return sessionJson
         }
         store.clearSession(userId, peerUserId)
@@ -276,6 +281,7 @@ object MessagingCoordinator {
                 userId = context.profile.userId,
                 peerUserId = peer,
                 sessionJson = store.readSession(context.profile.userId, peer),
+                requiredPqRatchetInterval = context.capabilities.pq_ratchet_interval,
             )
             val result = decryptMessage(
                 keysJson = workingKeysJson,

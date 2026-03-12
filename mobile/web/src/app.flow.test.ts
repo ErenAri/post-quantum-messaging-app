@@ -202,7 +202,7 @@ async function bootApp(options: BootOptions = {}) {
       production_baseline_met: false,
       registration_pow_bits: 0,
       prekey_bundle_reserve_count: 0,
-      pq_ratchet_interval: 50,
+      pq_ratchet_interval: 1,
       contact_discovery_supported: false,
       presence_supported: false,
       typing_indicators_supported: false,
@@ -683,7 +683,7 @@ describe("web app flow coverage", () => {
           "test1",
           "test2",
           "pass-1",
-          JSON.stringify({ snapshot: { pq_ratchet: { interval: 50 } } }),
+          JSON.stringify({ snapshot: { pq_ratchet: { interval: 1 } } }),
         );
         storage.saveSetup({
           serverUrl: "http://localhost:3000",
@@ -727,7 +727,7 @@ describe("web app flow coverage", () => {
           "test1",
           "test2",
           "pass-1",
-          JSON.stringify({ snapshot: { pq_ratchet: { interval: 50 } } }),
+          JSON.stringify({ snapshot: { pq_ratchet: { interval: 1 } } }),
         );
         storage.saveSetup({
           serverUrl: "http://localhost:3000",
@@ -765,7 +765,7 @@ describe("web app flow coverage", () => {
           "test1",
           "test2",
           "pass-1",
-          JSON.stringify({ snapshot: {} }),
+          JSON.stringify({ snapshot: { pq_ratchet: { interval: 50 } } }),
         );
         storage.saveSetup({
           serverUrl: "http://localhost:3000",

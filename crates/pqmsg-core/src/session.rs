@@ -5,7 +5,7 @@ use crate::aead::{
 use crate::dh::{generate_keypair, DhKeyPair, DhPublicKey};
 use crate::kdf::hkdf_sha256_32;
 use crate::kem::KemProvider;
-use crate::ratchet::pq::{self, PqRatchetState};
+use crate::ratchet::pq::{self, PqLocalKeyRecord, PqRatchetState, DEFAULT_PQ_RATCHET_KEY_HISTORY};
 use crate::ratchet::{dh_root_step, ChainState, SkippedKeyId, SkippedMessageKeys};
 use crate::tlv::{critical_type, encode, TlvRecord};
 use crate::wire::{WireMessage, WireMessageV2, DEFAULT_SUITE_ID, WIRE_VERSION, WIRE_VERSION_V2};
@@ -25,6 +25,20 @@ const AD_TAG_SENDER_DH_PUB: u16 = critical_type(0x1104);
 const AD_TAG_MSG_NUM: u16 = critical_type(0x1105);
 const AD_TAG_PREV_CHAIN_LEN: u16 = critical_type(0x1106);
 const AD_TAG_PQ_STEP_CT: u16 = critical_type(0x1107);
+const AD_TAG_PQ_TARGET_PUB_HASH: u16 = critical_type(0x1108);
+const AD_TAG_PQ_NEXT_PUB: u16 = critical_type(0x1109);
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PqLocalKeyRecordSnapshot {
+    pub public_key: Vec<u8>,
+    pub secret_key: Vec<u8>,
+}
+
+impl Drop for PqLocalKeyRecordSnapshot {
+    fn drop(&mut self) {
+        self.secret_key.zeroize();
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PqRatchetSnapshot {
@@ -32,6 +46,12 @@ pub struct PqRatchetSnapshot {
     pub local_public_key: Vec<u8>,
     pub local_secret_key: Vec<u8>,
     pub remote_public_key: Vec<u8>,
+    #[serde(default)]
+    pub local_key_history: Vec<PqLocalKeyRecordSnapshot>,
+    #[serde(default = "default_pq_ratchet_key_history")]
+    pub max_key_history: usize,
+    #[serde(default)]
+    pub last_remote_update_msg_num: u32,
 }
 
 impl Drop for PqRatchetSnapshot {
@@ -111,6 +131,10 @@ impl Drop for SessionSnapshot {
 
 fn default_wire_version() -> u16 {
     WIRE_VERSION
+}
+
+fn default_pq_ratchet_key_history() -> usize {
+    DEFAULT_PQ_RATCHET_KEY_HISTORY
 }
 
 pub struct SessionState {
@@ -324,6 +348,16 @@ impl SessionState {
             local_public_key: s.local_public_key.clone(),
             local_secret_key: s.local_secret_key.as_slice().to_vec(),
             remote_public_key: s.remote_public_key.clone(),
+            local_key_history: s
+                .local_key_history
+                .iter()
+                .map(|record| PqLocalKeyRecordSnapshot {
+                    public_key: record.public_key.clone(),
+                    secret_key: record.secret_key.as_slice().to_vec(),
+                })
+                .collect(),
+            max_key_history: s.max_key_history,
+            last_remote_update_msg_num: s.last_remote_update_msg_num,
         });
 
         SessionSnapshot {
@@ -377,11 +411,24 @@ impl SessionState {
 
         let pq_state = snapshot.pq_ratchet.take().map(|mut s| {
             let secret = std::mem::take(&mut s.local_secret_key);
+            let local_key_history = std::mem::take(&mut s.local_key_history)
+                .into_iter()
+                .map(|mut record| {
+                    let secret_key = std::mem::take(&mut record.secret_key);
+                    PqLocalKeyRecord {
+                        public_key: std::mem::take(&mut record.public_key),
+                        secret_key: crate::keys::SecretBytes::from(secret_key),
+                    }
+                })
+                .collect();
             PqRatchetState {
                 interval: s.interval,
                 local_public_key: s.local_public_key.clone(),
                 local_secret_key: crate::keys::SecretBytes::from(secret),
                 remote_public_key: s.remote_public_key.clone(),
+                local_key_history,
+                max_key_history: s.max_key_history,
+                last_remote_update_msg_num: s.last_remote_update_msg_num,
             }
         });
 
@@ -413,10 +460,24 @@ impl SessionState {
     pub fn encrypt(&mut self, message: &[u8], ad: &[u8]) -> Result<Vec<u8>, CoreError> {
         let (msg_num, mut message_key) = self.sending_chain.next_message_key()?;
         let mut pq_step_ct = None;
+        let mut pq_target_pub_hash = None;
+        let mut pq_next_public_key = None;
 
         if let (Some(state), Some(kem)) = (&self.pq_state, &self.pq_kem) {
             if let Some(mut step) = pq::sender_step(state, kem.as_ref(), &self.root_key, msg_num)? {
                 self.root_key = std::mem::take(&mut step.root_key);
+                pq_target_pub_hash = Some(std::mem::take(&mut step.target_public_key_hash));
+                pq_next_public_key = Some(step.next_local_keypair.public_key.clone());
+                if let Some(state) = self.pq_state.as_mut() {
+                    let next_local_keypair = std::mem::replace(
+                        &mut step.next_local_keypair,
+                        crate::kem::KemKeyPair {
+                            public_key: Vec::new(),
+                            secret_key: crate::keys::SecretBytes::from(Vec::new()),
+                        },
+                    );
+                    state.commit_local_key_rotation(next_local_keypair);
+                }
                 pq_step_ct = Some(std::mem::take(&mut step.ciphertext));
             }
         }
@@ -430,6 +491,8 @@ impl SessionState {
             msg_num,
             prev_chain_len,
             pq_step_ct.as_deref(),
+            pq_target_pub_hash.as_deref(),
+            pq_next_public_key.as_deref(),
             ad,
         )?;
         let mut rng = OsRng;
@@ -450,6 +513,8 @@ impl SessionState {
                 msg_num,
                 prev_chain_len,
                 pq_step_ct,
+                pq_target_pub_hash,
+                pq_next_public_key,
             };
             let header_bytes = header.encode()?;
             // Encrypt header with sending header key (AES-256-CTR)
@@ -474,6 +539,8 @@ impl SessionState {
                 msg_num,
                 prev_chain_len,
                 pq_step_ct,
+                pq_target_pub_hash,
+                pq_next_public_key,
                 aead_nonce: envelope.nonce,
                 ciphertext: envelope.ciphertext,
             };
@@ -494,6 +561,8 @@ impl SessionState {
             msg_num,
             prev_chain_len,
             pq_step_ct,
+            pq_target_pub_hash,
+            pq_next_public_key,
             aead_nonce,
             ciphertext,
         ) = match &decoded {
@@ -504,6 +573,8 @@ impl SessionState {
                 wire.msg_num,
                 wire.prev_chain_len,
                 wire.pq_step_ct.clone(),
+                wire.pq_target_pub_hash.clone(),
+                wire.pq_next_public_key.clone(),
                 wire.aead_nonce,
                 wire.ciphertext.clone(),
             ),
@@ -517,6 +588,8 @@ impl SessionState {
                     header.msg_num,
                     header.prev_chain_len,
                     header.pq_step_ct,
+                    header.pq_target_pub_hash,
+                    header.pq_next_public_key,
                     wire.aead_nonce,
                     wire.ciphertext.clone(),
                 )
@@ -558,6 +631,8 @@ impl SessionState {
                 msg_num,
                 prev_chain_len,
                 pq_step_ct.as_deref(),
+                pq_target_pub_hash.as_deref(),
+                pq_next_public_key.as_deref(),
                 ad,
             )?,
         };
@@ -572,9 +647,17 @@ impl SessionState {
         };
 
         if let Some(ct) = pq_step_ct.as_deref() {
-            let state = self.pq_state.as_ref().ok_or(CoreError::PqRatchetDisabled)?;
+            let state = self.pq_state.as_mut().ok_or(CoreError::PqRatchetDisabled)?;
             let kem = self.pq_kem.as_ref().ok_or(CoreError::PqRatchetDisabled)?;
-            self.root_key = pq::receiver_step(state, kem.as_ref(), &self.root_key, ct)?;
+            self.root_key = pq::receiver_step(
+                state,
+                kem.as_ref(),
+                &self.root_key,
+                ct,
+                pq_target_pub_hash.as_deref(),
+                pq_next_public_key.as_deref(),
+                msg_num,
+            )?;
         }
 
         Ok(plaintext)
@@ -628,6 +711,9 @@ impl SessionState {
 
         self.prev_chain_len = self.sending_chain.next_msg_num();
         self.remote_dh_pub = new_remote_dh_pub;
+        if let Some(state) = self.pq_state.as_mut() {
+            state.reset_remote_update_tracking();
+        }
 
         let mut rng = OsRng;
         self.local_dh = generate_keypair(&mut rng);
@@ -649,6 +735,8 @@ fn session_associated_data(
     msg_num: u32,
     prev_chain_len: u32,
     pq_step_ct: Option<&[u8]>,
+    pq_target_pub_hash: Option<&[u8]>,
+    pq_next_public_key: Option<&[u8]>,
     external_ad: &[u8],
 ) -> Result<Vec<u8>, CoreError> {
     let mut records = vec![
@@ -683,6 +771,18 @@ fn session_associated_data(
             value: pq_step_ct.to_vec(),
         });
     }
+    if let Some(pq_target_pub_hash) = pq_target_pub_hash {
+        records.push(TlvRecord {
+            ty: AD_TAG_PQ_TARGET_PUB_HASH,
+            value: pq_target_pub_hash.to_vec(),
+        });
+    }
+    if let Some(pq_next_public_key) = pq_next_public_key {
+        records.push(TlvRecord {
+            ty: AD_TAG_PQ_NEXT_PUB,
+            value: pq_next_public_key.to_vec(),
+        });
+    }
     encode(&records)
 }
 
@@ -694,9 +794,9 @@ mod tests {
         alice_initiate, bob_receive, pq_signed_prekey_signature_message,
         signed_prekey_signature_message, SignatureVerifier,
     };
-    use crate::kem::{KemEncapsulation, KemProvider};
+    use crate::kem::{KemEncapsulation, KemKeyPair, KemProvider};
     use crate::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
-    use crate::ratchet::pq::PqRatchetState;
+    use crate::ratchet::pq::{PqRatchetState, DEFAULT_PQ_RATCHET_KEY_HISTORY};
     use crate::wire::{WireMessage, WIRE_VERSION_V2};
     use crate::CoreError;
     use rand::rngs::OsRng;
@@ -724,6 +824,16 @@ mod tests {
     }
 
     impl KemProvider for MockKem {
+        fn keypair(&self) -> Result<KemKeyPair, CoreError> {
+            let mut seed = [0u8; 32];
+            OsRng.fill_bytes(&mut seed);
+            let seed = seed.to_vec();
+            Ok(KemKeyPair {
+                public_key: seed.clone(),
+                secret_key: SecretBytes::from(seed),
+            })
+        }
+
         fn encapsulate(&self, recipient_public_key: &[u8]) -> Result<KemEncapsulation, CoreError> {
             if recipient_public_key.len() != 32 {
                 return Err(CoreError::InvalidLength {
@@ -946,6 +1056,9 @@ mod tests {
                 local_public_key: alice_pq.to_vec(),
                 local_secret_key: SecretBytes::from(alice_pq.to_vec()),
                 remote_public_key: bob_pq.to_vec(),
+                local_key_history: Vec::new(),
+                max_key_history: DEFAULT_PQ_RATCHET_KEY_HISTORY,
+                last_remote_update_msg_num: 0,
             },
             Box::new(MockKem),
         );
@@ -955,6 +1068,9 @@ mod tests {
                 local_public_key: bob_pq.to_vec(),
                 local_secret_key: SecretBytes::from(bob_pq.to_vec()),
                 remote_public_key: alice_pq.to_vec(),
+                local_key_history: Vec::new(),
+                max_key_history: DEFAULT_PQ_RATCHET_KEY_HISTORY,
+                last_remote_update_msg_num: 0,
             },
             Box::new(MockKem),
         );
@@ -997,6 +1113,9 @@ mod tests {
                 local_public_key: alice_pq.to_vec(),
                 local_secret_key: SecretBytes::from(alice_pq.to_vec()),
                 remote_public_key: bob_pq.to_vec(),
+                local_key_history: Vec::new(),
+                max_key_history: DEFAULT_PQ_RATCHET_KEY_HISTORY,
+                last_remote_update_msg_num: 0,
             },
             Box::new(MockKem),
         );
@@ -1006,6 +1125,9 @@ mod tests {
                 local_public_key: bob_pq.to_vec(),
                 local_secret_key: SecretBytes::from(bob_pq.to_vec()),
                 remote_public_key: alice_pq.to_vec(),
+                local_key_history: Vec::new(),
+                max_key_history: DEFAULT_PQ_RATCHET_KEY_HISTORY,
+                last_remote_update_msg_num: 0,
             },
             Box::new(MockKem),
         );
@@ -1037,6 +1159,9 @@ mod tests {
                 local_public_key: alice_pq.to_vec(),
                 local_secret_key: SecretBytes::from(alice_pq.to_vec()),
                 remote_public_key: bob_pq.to_vec(),
+                local_key_history: Vec::new(),
+                max_key_history: DEFAULT_PQ_RATCHET_KEY_HISTORY,
+                last_remote_update_msg_num: 0,
             },
             Box::new(MockKem),
         );
@@ -1046,6 +1171,9 @@ mod tests {
                 local_public_key: bob_pq.to_vec(),
                 local_secret_key: SecretBytes::from(bob_pq.to_vec()),
                 remote_public_key: alice_pq.to_vec(),
+                local_key_history: Vec::new(),
+                max_key_history: DEFAULT_PQ_RATCHET_KEY_HISTORY,
+                last_remote_update_msg_num: 0,
             },
             Box::new(MockKem),
         );
@@ -1064,6 +1192,71 @@ mod tests {
         assert!(parsed.pq_step_ct.is_some());
         let plain = bob.decrypt(&wire, ad).expect("decrypt after restore");
         assert_eq!(plain, b"restored");
+    }
+
+    #[test]
+    fn pq_step_rotates_advertised_public_keys_each_message() {
+        let (mut alice, mut bob) = setup_sessions(32);
+        let ad = b"session-ad";
+        let mut rng = OsRng;
+        let mut alice_pq = [0u8; 32];
+        let mut bob_pq = [0u8; 32];
+        rng.fill_bytes(&mut alice_pq);
+        rng.fill_bytes(&mut bob_pq);
+
+        alice.enable_pq_ratchet(
+            PqRatchetState {
+                interval: 1,
+                local_public_key: alice_pq.to_vec(),
+                local_secret_key: SecretBytes::from(alice_pq.to_vec()),
+                remote_public_key: bob_pq.to_vec(),
+                local_key_history: Vec::new(),
+                max_key_history: DEFAULT_PQ_RATCHET_KEY_HISTORY,
+                last_remote_update_msg_num: 0,
+            },
+            Box::new(MockKem),
+        );
+        bob.enable_pq_ratchet(
+            PqRatchetState {
+                interval: 1,
+                local_public_key: bob_pq.to_vec(),
+                local_secret_key: SecretBytes::from(bob_pq.to_vec()),
+                remote_public_key: alice_pq.to_vec(),
+                local_key_history: Vec::new(),
+                max_key_history: DEFAULT_PQ_RATCHET_KEY_HISTORY,
+                last_remote_update_msg_num: 0,
+            },
+            Box::new(MockKem),
+        );
+
+        let wire1 = alice.encrypt(b"m1", ad).expect("encrypt m1");
+        let parsed1 = WireMessage::decode(&wire1).expect("decode m1");
+        let next_pub1 = parsed1
+            .pq_next_public_key
+            .clone()
+            .expect("first message advertises next pq pub");
+        let target_hash1 = parsed1
+            .pq_target_pub_hash
+            .clone()
+            .expect("first message targets recipient pq pub");
+        let plain1 = bob.decrypt(&wire1, ad).expect("decrypt m1");
+        assert_eq!(plain1, b"m1");
+
+        let wire2 = alice.encrypt(b"m2", ad).expect("encrypt m2");
+        let parsed2 = WireMessage::decode(&wire2).expect("decode m2");
+        let next_pub2 = parsed2
+            .pq_next_public_key
+            .clone()
+            .expect("second message advertises next pq pub");
+        let target_hash2 = parsed2
+            .pq_target_pub_hash
+            .clone()
+            .expect("second message targets recipient pq pub");
+        let plain2 = bob.decrypt(&wire2, ad).expect("decrypt m2");
+        assert_eq!(plain2, b"m2");
+
+        assert_ne!(next_pub1, next_pub2);
+        assert_eq!(target_hash1, target_hash2);
     }
 
     fn setup_v2_sessions(max_skipped: usize) -> (SessionState, SessionState) {

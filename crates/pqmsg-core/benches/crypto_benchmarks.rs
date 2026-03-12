@@ -225,6 +225,8 @@ fn bench_wire(c: &mut Criterion) {
         msg_num: 42,
         prev_chain_len: 10,
         pq_step_ct: Some(vec![0xBB; 1088]),
+        pq_target_pub_hash: None,
+        pq_next_public_key: None,
         aead_nonce: [0xCC; 12],
         ciphertext: vec![0xDD; 256],
     };

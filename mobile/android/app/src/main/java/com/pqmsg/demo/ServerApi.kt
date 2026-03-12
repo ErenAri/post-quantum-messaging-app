@@ -1041,8 +1041,8 @@ object ApiClientFactory {
         ) {
             "Server '${capabilities.deployment_mode}' deployment is missing its production baseline"
         }
-        require(capabilities.pq_ratchet_interval > 0) {
-            "Server is not advertising mandatory PQ ratchet support"
+        require(capabilities.pq_ratchet_interval == 1) {
+            "Server is not advertising per-message PQ ratchet support"
         }
         require(capabilities.sealed_sender_required) {
             "Server is not advertising sealed-sender-only direct messaging"

@@ -37,6 +37,7 @@ pub struct KemEncapsulation {
 }
 
 pub trait KemProvider {
+    fn keypair(&self) -> Result<KemKeyPair, CoreError>;
     fn encapsulate(&self, recipient_public_key: &[u8]) -> Result<KemEncapsulation, CoreError>;
     fn decapsulate(
         &self,
@@ -185,6 +186,10 @@ impl FipsKemWrapper {
 
 #[cfg(feature = "fips")]
 impl KemProvider for FipsKemWrapper {
+    fn keypair(&self) -> Result<KemKeyPair, CoreError> {
+        FipsKemWrapper::keypair(self)
+    }
+
     fn encapsulate(&self, recipient_public_key: &[u8]) -> Result<KemEncapsulation, CoreError> {
         self.inner.validate_public_key(recipient_public_key)?;
         self.inner.encapsulate(recipient_public_key)
@@ -201,6 +206,10 @@ impl KemProvider for FipsKemWrapper {
 
 #[cfg(feature = "pq-oqs")]
 impl KemProvider for MlKem768 {
+    fn keypair(&self) -> Result<KemKeyPair, CoreError> {
+        MlKem768::keypair(self)
+    }
+
     fn encapsulate(&self, recipient_public_key: &[u8]) -> Result<KemEncapsulation, CoreError> {
         let Some(public_key_ref) = self.kem.public_key_from_bytes(recipient_public_key) else {
             return Err(CoreError::InvalidLength {
@@ -248,6 +257,10 @@ impl KemProvider for MlKem768 {
 
 #[cfg(all(feature = "pq-rust", not(feature = "pq-oqs")))]
 impl KemProvider for MlKem768 {
+    fn keypair(&self) -> Result<KemKeyPair, CoreError> {
+        MlKem768::keypair(self)
+    }
+
     fn encapsulate(&self, recipient_public_key: &[u8]) -> Result<KemEncapsulation, CoreError> {
         let public_key = to_fixed_array::<{ fips203::ml_kem_768::EK_LEN }>(
             "kem.public_key",
@@ -312,6 +325,12 @@ impl MlKem768 {
 
 #[cfg(all(not(feature = "pq-oqs"), not(feature = "pq-rust")))]
 impl KemProvider for MlKem768 {
+    fn keypair(&self) -> Result<KemKeyPair, CoreError> {
+        Err(CoreError::UnsupportedAlgorithm(
+            "PQ backend feature disabled",
+        ))
+    }
+
     fn encapsulate(&self, _recipient_public_key: &[u8]) -> Result<KemEncapsulation, CoreError> {
         Err(CoreError::UnsupportedAlgorithm(
             "PQ backend feature disabled",
