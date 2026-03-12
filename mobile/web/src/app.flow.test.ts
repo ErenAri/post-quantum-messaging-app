@@ -25,6 +25,7 @@ type BootOptions = {
   existingUsers?: string[];
   bundleUsers?: string[];
   capabilities?: { web_client_policy?: string };
+  profileTokensRequireContact?: boolean;
   prepare?: (storage: typeof import("./storage")) => Promise<void> | void;
 };
 
@@ -175,6 +176,7 @@ async function bootApp(options: BootOptions = {}) {
   const apiState = {
     existingUsers: new Set(options.existingUsers ?? ["test1", "test2"]),
     bundleUsers: new Set(options.bundleUsers ?? options.existingUsers ?? ["test1", "test2"]),
+    contacts: new Set<string>(),
     relays: [] as Array<{ peerId: string; body: string }>,
     presenceCalls: 0,
     typingCalls: 0,
@@ -444,7 +446,16 @@ async function bootApp(options: BootOptions = {}) {
       }
 
       async listContacts() {
-        return { contacts: [] };
+        return {
+          contacts: Array.from(apiState.contacts.values()).map((contact_user_id) => ({
+            contact_user_id,
+            alias: null,
+            verified_by_qr: false,
+            verified_fingerprint_sha256: null,
+            created_at: "2026-03-11T00:00:00Z",
+            updated_at: "2026-03-11T00:00:00Z",
+          })),
+        };
       }
 
       async listUserGroups() {
@@ -458,7 +469,10 @@ async function bootApp(options: BootOptions = {}) {
         return {
           user_id: userId,
           display_name: userId,
-          sealed_delivery_token: `delivery-token:${userId}`,
+          sealed_delivery_token:
+            options.profileTokensRequireContact && !apiState.contacts.has(userId)
+              ? null
+              : `delivery-token:${userId}`,
         };
       }
 
@@ -550,7 +564,8 @@ async function bootApp(options: BootOptions = {}) {
         return { ok: true };
       }
 
-      async upsertContact() {
+      async upsertContact(_userId: string, request: { contact_user_id: string }) {
+        apiState.contacts.add(request.contact_user_id);
         return { ok: true };
       }
 
@@ -701,6 +716,45 @@ describe("web app flow coverage", () => {
     expect(saved[0].text).toBe("hello from web");
     expect(saved[0].status).toBe("sent");
     expect(document.body.textContent).toContain("hello from web");
+  });
+
+  it("creates a contact before sending when delivery tokens are contact-scoped", async () => {
+    const { router, apiState } = await bootApp({
+      profileTokensRequireContact: true,
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        await storage.saveDirectMessageSession(
+          "test1",
+          "test2",
+          "pass-1",
+          JSON.stringify({ snapshot: { pq_ratchet: { interval: 50 } } }),
+        );
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "test2",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "chat", peerId: "test2" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLInputElement>("#chat-input")).not.toBeNull();
+    });
+
+    const input = document.querySelector<HTMLInputElement>("#chat-input")!;
+    input.value = "hello contact scoped";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>("#chat-send")!.click();
+
+    await eventually(() => {
+      expect(apiState.contacts.has("test2")).toBe(true);
+      expect(apiState.relays).toHaveLength(1);
+    });
   });
 
   it("clears legacy stored sessions and re-establishes them with a fresh handshake", async () => {

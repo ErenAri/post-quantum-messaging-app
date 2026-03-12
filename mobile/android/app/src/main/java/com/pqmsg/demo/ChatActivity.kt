@@ -22,6 +22,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import uniffi.pqmsg_android.ServerBundle
+import uniffi.pqmsg_android.buildContactsUpsertAuthHeaders
 import uniffi.pqmsg_android.buildProfileGetAuthHeaders
 import uniffi.pqmsg_android.buildPresenceGetAuthHeaders
 import uniffi.pqmsg_android.buildPresenceUpdateAuthHeaders
@@ -400,10 +401,31 @@ class ChatActivity : AppCompatActivity() {
             keysJson = context.keysJson,
             userId = peerUserId,
         ).toHeaderMap()
-        val profile = context.api.getUserProfile(peerUserId, headers)
+        var profile = context.api.getUserProfile(peerUserId, headers)
+        if (profile.sealed_delivery_token.isNullOrBlank()) {
+            context.api.upsertContact(
+                userId = context.profile.userId,
+                headers = buildContactsUpsertAuthHeaders(
+                    keysJson = context.keysJson,
+                    userId = context.profile.userId,
+                    contactUserId = peerUserId,
+                    alias = "",
+                    verifiedByQr = false,
+                    verifiedFingerprintSha256 = "",
+                ).toHeaderMap(),
+                request = UpsertContactRequest(
+                    contact_user_id = peerUserId,
+                    alias = null,
+                    verified_by_qr = false,
+                    verified_fingerprint_sha256 = null,
+                ),
+            )
+            store.markPeerAccepted(context.profile.userId, peerUserId)
+            profile = context.api.getUserProfile(peerUserId, headers)
+        }
         return profile.sealed_delivery_token
             ?.takeIf { it.isNotBlank() }
-            ?: error("Peer is missing a sealed delivery token")
+            ?: error("Direct messaging requires adding this user as a contact first")
     }
 
     private fun syncThread() {

@@ -449,10 +449,18 @@ async function loadPeerSealedDeliveryToken(
     return cached;
   }
   const headers = buildProfileGetAuthHeaders(k, peerUserId);
-  const profile = await api.getProfile(peerUserId, headers);
-  const sealedDeliveryToken = profile.sealed_delivery_token?.trim() || "";
+  let profile = await api.getProfile(peerUserId, headers);
+  let sealedDeliveryToken = profile.sealed_delivery_token?.trim() || "";
   if (!sealedDeliveryToken) {
-    throw new Error("Peer is missing a sealed delivery token.");
+    const contactHeaders = buildContactsUpsertAuthHeaders(k, peerUserId, peerUserId, false, "");
+    await api.upsertContact(k.userId, { contact_user_id: peerUserId }, contactHeaders);
+    markConversationAccepted(peerUserId);
+    void loadContactsBackground();
+    profile = await api.getProfile(peerUserId, headers);
+    sealedDeliveryToken = profile.sealed_delivery_token?.trim() || "";
+  }
+  if (!sealedDeliveryToken) {
+    throw new Error("Direct messaging requires adding this user as a contact first.");
   }
   cachedSealedDeliveryTokens[peerUserId] = sealedDeliveryToken;
   const displayName = profile.display_name?.trim() || "";

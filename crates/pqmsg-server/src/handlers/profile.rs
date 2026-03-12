@@ -37,6 +37,28 @@ fn ensure_typing_supported(state: &AppState) -> Result<(), AppError> {
     Ok(())
 }
 
+async fn may_read_sealed_delivery_token(
+    state: &AppState,
+    requester_user_id: &str,
+    target_user_id: &str,
+) -> Result<bool, AppError> {
+    if requester_user_id == target_user_id {
+        return Ok(true);
+    }
+    let contact_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT 1
+         FROM contacts
+         WHERE user_id = $1 AND contact_user_id = $2
+         LIMIT 1",
+    )
+    .bind(requester_user_id)
+    .bind(target_user_id)
+    .fetch_optional(state.pool())
+    .await?
+    .is_some();
+    Ok(contact_exists)
+}
+
 pub(crate) async fn register_push_token(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
@@ -343,6 +365,8 @@ pub(crate) async fn get_user_profile(
     verify_request_auth(&state, &auth, &auth_message).await?;
     ensure_user_exists(state.pool(), &auth.user_id).await?;
     ensure_user_exists(state.pool(), &user_id).await?;
+    let include_sealed_delivery_token =
+        may_read_sealed_delivery_token(&state, &auth.user_id, &user_id).await?;
 
     let row = sqlx::query(
         "SELECT display_name, avatar_mime, avatar_blob, avatar_object_key, updated_at
@@ -354,15 +378,19 @@ pub(crate) async fn get_user_profile(
     .await?;
 
     let Some(row) = row else {
-        let sealed_delivery_token = encode_sealed_delivery_token(
-            &ensure_sealed_delivery_token(state.pool(), &user_id).await?,
-        );
+        let sealed_delivery_token = if include_sealed_delivery_token {
+            Some(encode_sealed_delivery_token(
+                &ensure_sealed_delivery_token(state.pool(), &user_id).await?,
+            ))
+        } else {
+            None
+        };
         return Ok(Json(UserProfileResponse {
             user_id,
             display_name: None,
             avatar_mime: None,
             avatar_bytes_base64: None,
-            sealed_delivery_token: Some(sealed_delivery_token),
+            sealed_delivery_token,
             updated_at: None,
         }));
     };
@@ -379,14 +407,19 @@ pub(crate) async fn get_user_profile(
     } else {
         row.try_get("avatar_blob")?
     };
-    let sealed_delivery_token =
-        encode_sealed_delivery_token(&ensure_sealed_delivery_token(state.pool(), &user_id).await?);
+    let sealed_delivery_token = if include_sealed_delivery_token {
+        Some(encode_sealed_delivery_token(
+            &ensure_sealed_delivery_token(state.pool(), &user_id).await?,
+        ))
+    } else {
+        None
+    };
     Ok(Json(UserProfileResponse {
         user_id,
         display_name: row.try_get("display_name")?,
         avatar_mime: row.try_get("avatar_mime")?,
         avatar_bytes_base64: avatar_blob.map(|value| B64.encode(value)),
-        sealed_delivery_token: Some(sealed_delivery_token),
+        sealed_delivery_token,
         updated_at: row.try_get("updated_at")?,
     }))
 }

@@ -760,6 +760,8 @@ Recipients obtain the delivery token from an authenticated profile read:
 
 `GET /v1/users/{user_id}/profile`
 
+The `sealed_delivery_token` field is only returned to the target user themself or to callers who have explicitly added that user as a contact.
+
 `GET /v1/sealed-inbox/{user_id}?since=<message_id>`
 
 Requires authenticated transport headers (Section 3.1).
@@ -866,6 +868,8 @@ Both `avatar_mime` and `avatar_bytes_base64` MUST be supplied together or omitte
 `GET /v1/users/{user_id}/profile`
 
 Requires authenticated transport headers.
+
+`sealed_delivery_token` is withheld unless the caller is `{user_id}` or has explicitly added `{user_id}` as a contact.
 
 Response:
 

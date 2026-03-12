@@ -1629,6 +1629,33 @@ async fn fetch_sealed_delivery_token(
         .to_string()
 }
 
+async fn add_contact_for_delivery_access(
+    app: Router,
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+    contact_user_id: &str,
+) {
+    let headers = contacts_upsert_auth_headers(
+        signing_key,
+        user_id,
+        device_id,
+        contact_user_id,
+        None,
+        false,
+        None,
+    );
+    let (status, body) = json_request_with_headers(
+        app,
+        Method::POST,
+        &format!("/v1/users/{user_id}/contacts"),
+        json!({ "contact_user_id": contact_user_id }),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "contact upsert failed: {body}");
+}
+
 fn backup_upload_auth_headers(
     signing_key: &SigningKey,
     user_id: &str,
@@ -2507,6 +2534,7 @@ async fn current_device_retire_clears_device_scoped_server_state() {
     assert_eq!(status_relay, StatusCode::OK);
 
     let sealed_blob = b"retire-test-sealed".to_vec();
+    add_contact_for_delivery_access(app.clone(), &alice_sig, "alice", "alice-dev-1", "bob").await;
     let bob_delivery_token =
         fetch_sealed_delivery_token(app.clone(), &alice_sig, "alice", "alice-dev-1", "bob").await;
     let (status_sealed_relay, _) = json_request(
@@ -3369,6 +3397,7 @@ async fn sealed_websocket_inbox_accepts_one_time_ticket_query() {
     }
 
     let sealed_blob = b"sealed-ws-ticket-ciphertext".to_vec();
+    add_contact_for_delivery_access(app.clone(), &alice_sig, "alice", "alice-dev-1", "bob").await;
     let bob_delivery_token =
         fetch_sealed_delivery_token(app.clone(), &alice_sig, "alice", "alice-dev-1", "bob").await;
     let relay = json!({
@@ -4348,6 +4377,7 @@ async fn sealed_sender_relay_and_inbox_flow() {
     assert_eq!(bundle_payload["user_id"].as_str(), Some("bob"));
 
     let sealed_blob = b"sealed-ciphertext-placeholder".to_vec();
+    add_contact_for_delivery_access(app.clone(), &alice_sig, "alice", "alice-dev-1", "bob").await;
     let bob_delivery_token =
         fetch_sealed_delivery_token(app.clone(), &alice_sig, "alice", "alice-dev-1", "bob").await;
     let relay_body = json!({
@@ -4418,9 +4448,9 @@ async fn sealed_sender_rejects_wrong_delivery_token() {
     .await;
     assert_eq!(status_carol, StatusCode::OK);
 
+    add_contact_for_delivery_access(app.clone(), &alice_sig, "alice", "alice-dev-1", "carol").await;
     let carol_delivery_token =
-        fetch_sealed_delivery_token(app.clone(), &alice_sig, "alice", "alice-dev-1", "carol")
-            .await;
+        fetch_sealed_delivery_token(app.clone(), &alice_sig, "alice", "alice-dev-1", "carol").await;
     let (status_relay, relay_payload) = json_request(
         app.clone(),
         Method::POST,
@@ -4490,8 +4520,10 @@ async fn sealed_sender_uses_peer_ip_when_proxy_headers_are_untrusted() {
         assert_eq!(status_prekeys, StatusCode::OK);
     }
 
+    add_contact_for_delivery_access(app.clone(), &carol_sig, "carol", "carol-dev-1", "bob").await;
     let bob_delivery_token =
         fetch_sealed_delivery_token(app.clone(), &carol_sig, "carol", "carol-dev-1", "bob").await;
+    add_contact_for_delivery_access(app.clone(), &bob_sig, "bob", "bob-dev-1", "carol").await;
     let carol_delivery_token =
         fetch_sealed_delivery_token(app.clone(), &bob_sig, "bob", "bob-dev-1", "carol").await;
 
@@ -4778,6 +4810,24 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
         profile_get_payload["avatar_bytes_base64"].as_str(),
         Some(B64.encode(avatar).as_str())
     );
+    assert!(profile_get_payload["sealed_delivery_token"].is_null());
+
+    add_contact_for_delivery_access(app.clone(), &bob_sig, "bob", "bob-dev-1", "alice").await;
+    let profile_get_after_contact_headers =
+        profile_get_auth_headers(&bob_sig, "bob", "bob-dev-1", "alice");
+    let (status_profile_get_after_contact, profile_get_after_contact_payload) =
+        json_request_with_headers(
+            app.clone(),
+            Method::GET,
+            "/v1/users/alice/profile",
+            json!({}),
+            &profile_get_after_contact_headers,
+        )
+        .await;
+    assert_eq!(status_profile_get_after_contact, StatusCode::OK);
+    assert!(profile_get_after_contact_payload["sealed_delivery_token"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
 
     let presence_update_headers =
         presence_update_auth_headers(&alice_sig, "alice", "alice-dev-1", "alice", "online");
