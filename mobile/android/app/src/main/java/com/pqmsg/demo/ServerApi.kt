@@ -155,6 +155,46 @@ data class IdentityLogResponse(
     val events: List<IdentityLogItem>,
 )
 
+data class TransparencyLeafRecord(
+    val user_id: String,
+    val version: Long,
+    val identity_x25519_pub: String,
+    val identity_sig_pub: String,
+    val identity_pq_sig_pub: String?,
+    val timestamp: Long,
+)
+
+data class TransparencyPathItem(
+    val hash: String,
+    val is_left: Boolean,
+)
+
+data class TransparencyInclusionProofResponse(
+    val leaf_index: Long,
+    val path: List<TransparencyPathItem>,
+)
+
+data class TransparencyConsistencyProofResponse(
+    val old_size: Long,
+    val new_size: Long,
+    val proof_hashes: List<String>,
+)
+
+data class TransparencySignedTreeHeadResponse(
+    val epoch: Long,
+    val tree_size: Long,
+    val root_hash: String,
+    val signature: String,
+)
+
+data class TransparencyProofResponse(
+    val user_id: String,
+    val leaf: TransparencyLeafRecord,
+    val inclusion_proof: TransparencyInclusionProofResponse,
+    val signed_tree_head: TransparencySignedTreeHeadResponse,
+    val consistency_proof: TransparencyConsistencyProofResponse?,
+)
+
 data class BundleResponse(
     val user_id: String,
     val device_id: String,
@@ -541,8 +581,10 @@ data class ServerCapabilitiesResponse(
     val group_messaging_supported: Boolean,
     val sealed_sender_required: Boolean,
     val sender_certificate_supported: Boolean,
+    val key_transparency_supported: Boolean,
     val sealed_delivery_tokens_supported: Boolean,
     val sender_certificate_issuer_ed25519_pub: String,
+    val transparency_log_issuer_ed25519_pub: String,
     val authenticated_direct_messaging_supported: Boolean,
     val ephemeral_messaging_supported: Boolean,
     val web_client_policy: String,
@@ -683,6 +725,12 @@ interface PqmsgApi {
         @Path("user_id") userId: String,
         @HeaderMap headers: Map<String, String>,
     ): IdentityLogResponse
+
+    @GET("/v1/transparency/users/{user_id}/proof")
+    suspend fun getTransparencyProof(
+        @Path("user_id") userId: String,
+        @Query("previous_tree_size") previousTreeSize: Long? = null,
+    ): TransparencyProofResponse
 
     @GET("/v1/users/{user_id}/bundle")
     suspend fun getBundle(@Path("user_id") userId: String): BundleResponse
@@ -1050,11 +1098,17 @@ object ApiClientFactory {
         require(capabilities.sender_certificate_supported) {
             "Server is not advertising sender certificate support"
         }
+        require(capabilities.key_transparency_supported) {
+            "Server is not advertising key transparency support"
+        }
         require(capabilities.sealed_delivery_tokens_supported) {
             "Server is not advertising sealed delivery token support"
         }
         require(capabilities.sender_certificate_issuer_ed25519_pub.isNotBlank()) {
             "Server is missing the sender certificate issuer public key"
+        }
+        require(capabilities.transparency_log_issuer_ed25519_pub.isNotBlank()) {
+            "Server is missing the transparency log issuer public key"
         }
         require(!capabilities.authenticated_direct_messaging_supported) {
             "Server still exposes legacy authenticated direct messaging"

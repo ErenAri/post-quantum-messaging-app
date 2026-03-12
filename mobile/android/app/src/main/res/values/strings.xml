@@ -32,6 +32,7 @@
     <string name="button_attach_media">Attach Media</string>
     <string name="button_clear_attachment">Clear Attachment</string>
     <string name="button_cancel">Cancel</string>
+    <string name="button_close">Close</string>
     <string name="button_send">Send</string>
     <string name="button_poll">Poll Inbox</string>
     <string name="button_back_setup">Back To Setup</string>
@@ -40,6 +41,7 @@
     <string name="button_compose_conversation">Compose</string>
     <string name="button_refresh_conversations">Refresh</string>
     <string name="button_sync_thread">Refresh Chat</string>
+    <string name="button_verify_safety_number">Verify Safety Number</string>
     <string name="button_open_message_requests">Message Requests</string>
     <string name="button_share_invite">Share Invite</string>
     <string name="button_open_security_center">Open Security Center</string>
@@ -54,6 +56,7 @@
     <string name="button_reset_local_state">Reset Local State</string>
     <string name="button_accept_request">Accept</string>
     <string name="button_ignore_request">Ignore</string>
+    <string name="button_mark_verified">Mark Verified</string>
     <string name="button_trust_new_key">Trust New Key</string>
     <string name="button_show_error_details">Show technical details</string>
     <string name="button_hide_error_details">Hide technical details</string>
@@ -91,6 +94,10 @@
     <string name="reset_local_state_message">Retire the current device on the server when keys are still available, then delete all local keys, sessions, pins, cursors, conversations, and message history for %1$s on this device?</string>
     <string name="status_ready">Ready</string>
     <string name="chat_log_empty">Messages will appear here after you start the conversation.</string>
+    <string name="safety_number_dialog_title">Safety Number</string>
+    <string name="safety_number_dialog_body">Compare this number with %1$s on another channel before marking the identity verified.\n\n%2$s</string>
+    <string name="safety_number_dialog_verified_note">This contact is already verified against the current fingerprint.</string>
+    <string name="safety_number_verified_message">Contact marked as verified against the current safety number.</string>
 
     <!-- Group chat -->
     <string name="group_chat_title">Group Chat</string>
@@ -106,7 +113,7 @@
     <string name="group_chat_log_empty">Group messages will appear here.</string>
 
     <!-- Contact discovery -->
-    <string name="discovery_title">Contact Discovery</string>
+    <string name="discovery_title">Contacts</string>
     <string name="button_open_contacts">Contacts</string>
     <string name="button_discover_contacts">Discover Contacts</string>
     <string name="button_add_contact">Add Contact</string>
@@ -114,6 +121,9 @@
     <string name="hint_contact_hash">Phone or email SHA-256 hash</string>
     <string name="hint_contact_user_id">Contact username</string>
     <string name="hint_contact_alias">Alias (optional)</string>
+    <string name="contacts_manual_only_notice">Manual contacts only. Add people by exact username or invite link. Private contact discovery is unavailable in this privacy profile.</string>
+    <string name="contacts_manual_status">%1$d manual contact(s)</string>
+    <string name="contacts_added_status">Contact added: %1$s</string>
 
     <!-- Typing / Presence / Receipts -->
     <string name="typing_indicator">typing…</string>

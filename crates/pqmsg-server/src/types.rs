@@ -335,6 +335,57 @@ pub(crate) struct IdentityLogResponse {
     pub(crate) events: Vec<IdentityLogItem>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct TransparencyProofQuery {
+    pub(crate) previous_tree_size: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TransparencyLeafRecord {
+    pub(crate) user_id: String,
+    pub(crate) version: u64,
+    pub(crate) identity_x25519_pub: String,
+    pub(crate) identity_sig_pub: String,
+    pub(crate) identity_pq_sig_pub: Option<String>,
+    pub(crate) timestamp: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TransparencyPathItem {
+    pub(crate) hash: String,
+    pub(crate) is_left: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TransparencyInclusionProofResponse {
+    pub(crate) leaf_index: u64,
+    pub(crate) path: Vec<TransparencyPathItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TransparencyConsistencyProofResponse {
+    pub(crate) old_size: u64,
+    pub(crate) new_size: u64,
+    pub(crate) proof_hashes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TransparencySignedTreeHeadResponse {
+    pub(crate) epoch: u64,
+    pub(crate) tree_size: u64,
+    pub(crate) root_hash: String,
+    pub(crate) signature: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TransparencyProofResponse {
+    pub(crate) user_id: String,
+    pub(crate) leaf: TransparencyLeafRecord,
+    pub(crate) inclusion_proof: TransparencyInclusionProofResponse,
+    pub(crate) signed_tree_head: TransparencySignedTreeHeadResponse,
+    pub(crate) consistency_proof: Option<TransparencyConsistencyProofResponse>,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct BundleResponse {
     pub(crate) user_id: String,
@@ -631,8 +682,10 @@ pub(crate) struct ServerCapabilitiesResponse {
     pub(crate) group_messaging_supported: bool,
     pub(crate) sealed_sender_required: bool,
     pub(crate) sender_certificate_supported: bool,
+    pub(crate) key_transparency_supported: bool,
     pub(crate) sealed_delivery_tokens_supported: bool,
     pub(crate) sender_certificate_issuer_ed25519_pub: String,
+    pub(crate) transparency_log_issuer_ed25519_pub: String,
     pub(crate) authenticated_direct_messaging_supported: bool,
     pub(crate) ephemeral_messaging_supported: bool,
     pub(crate) web_client_policy: &'static str,

@@ -104,6 +104,7 @@ flowchart TD
 - PQ ratchet support is always compiled in `pqmsg-core`; runtime behavior is configured by session state and interval policy.
 - Clients expose active crypto profile and fail closed when PQ backend is not available.
 - Clients pin peer identity fingerprints and require explicit trust on key changes.
+- Android applies screen security (`FLAG_SECURE`) across the app to block screenshots and recent-app previews by default.
 - Clients track seen ciphertext blobs and reject replayed transport message IDs per peer.
 - CLI, Android, and iOS clients auto-replenish one-time prekeys when server low-inventory signals are observed.
 - CLI persists keys, sessions, and message archives encrypted at rest; Android persists keys/sessions in keystore-backed encrypted files and metadata in encrypted preferences; iOS persists keys/sessions in Keychain and metadata in file-protected application support storage.

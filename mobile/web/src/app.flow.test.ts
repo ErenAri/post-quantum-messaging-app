@@ -26,6 +26,7 @@ type BootOptions = {
   bundleUsers?: string[];
   capabilities?: { web_client_policy?: string };
   profileTokensRequireContact?: boolean;
+  transparencyMismatchUsers?: string[];
   prepare?: (storage: typeof import("./storage")) => Promise<void> | void;
 };
 
@@ -213,8 +214,10 @@ async function bootApp(options: BootOptions = {}) {
       group_messaging_supported: false,
       sealed_sender_required: true,
       sender_certificate_supported: true,
+      key_transparency_supported: true,
       sealed_delivery_tokens_supported: true,
       sender_certificate_issuer_ed25519_pub: "issuer-ed25519-pub",
+      transparency_log_issuer_ed25519_pub: "issuer-ed25519-pub",
       authenticated_direct_messaging_supported: false,
       ephemeral_messaging_supported: false,
       web_client_policy: options.capabilities?.web_client_policy ?? "interop_candidate",
@@ -390,6 +393,17 @@ async function bootApp(options: BootOptions = {}) {
         pq_sig_by_new_identity: "pq-sig-new",
       })),
       buildIdentityLogAuthHeaders: emptyHeaders,
+      verifyTransparencyProof: vi.fn((proofJson: string) => {
+        const proof = JSON.parse(proofJson);
+        return {
+          verified: true,
+          consistencyVerified: Boolean(proof.consistency_proof),
+          leafUserId: proof.leaf.user_id,
+          leafVersion: proof.leaf.version,
+          treeSize: proof.signed_tree_head.tree_size,
+          epoch: proof.signed_tree_head.epoch,
+        };
+      }),
       buildSealedInboxAuthHeaders: emptyHeaders,
       buildSenderCertificateAuthHeaders: emptyHeaders,
       buildEphemeralRelayAuthHeaders: emptyHeaders,
@@ -496,6 +510,54 @@ async function bootApp(options: BootOptions = {}) {
           one_time_prekey_x25519: null,
           one_time_prekey_mlkem768: null,
           bundle_generated_at: "2026-03-11T00:00:00Z",
+        };
+      }
+
+      async getIdentityLog(userId: string) {
+        return {
+          user_id: userId,
+          events: [
+            {
+              version: 1,
+              identity_x25519_pub: `bundle-x25519-${userId}`,
+              identity_sig_pub: `bundle-sig-${userId}`,
+              identity_pq_sig_pub: `bundle-pq-sig-${userId}`,
+              device_id: `${userId}-device`,
+              event_type: "initial",
+              changed_at: "2026-03-11T00:00:00Z",
+              identity_fingerprint_sha256: `fp:bundle-x25519-${userId}`,
+            },
+          ],
+        };
+      }
+
+      async getTransparencyProof(userId: string, previousTreeSize?: number) {
+        const mismatched = new Set(options.transparencyMismatchUsers ?? []);
+        return {
+          user_id: userId,
+          leaf: {
+            user_id: userId,
+            version: previousTreeSize ? 2 : 1,
+            identity_x25519_pub: mismatched.has(userId)
+              ? `tampered-x25519-${userId}`
+              : `bundle-x25519-${userId}`,
+            identity_sig_pub: `bundle-sig-${userId}`,
+            identity_pq_sig_pub: `bundle-pq-sig-${userId}`,
+            timestamp: 1700000000,
+          },
+          inclusion_proof: {
+            leaf_index: 0,
+            path: [],
+          },
+          signed_tree_head: {
+            epoch: previousTreeSize ? 2 : 1,
+            tree_size: previousTreeSize ? 2 : 1,
+            root_hash: "root-hash",
+            signature: "root-signature",
+          },
+          consistency_proof: previousTreeSize
+            ? { old_size: previousTreeSize, new_size: 2, proof_hashes: [] }
+            : null,
         };
       }
 
@@ -757,6 +819,47 @@ describe("web app flow coverage", () => {
     });
   });
 
+  it("blocks direct messaging when the peer transparency proof does not match the pinned identity", async () => {
+    const { router, apiState, messagesByConversation } = await bootApp({
+      transparencyMismatchUsers: ["test2"],
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        await storage.saveDirectMessageSession(
+          "test1",
+          "test2",
+          "pass-1",
+          JSON.stringify({ snapshot: { pq_ratchet: { interval: 1 } } }),
+        );
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "test2",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "chat", peerId: "test2" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLInputElement>("#chat-input")).not.toBeNull();
+    });
+
+    const input = document.querySelector<HTMLInputElement>("#chat-input")!;
+    input.value = "blocked by transparency";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>("#chat-send")!.click();
+
+    await eventually(() => {
+      const saved = messagesByConversation.get(convId("test1", "test2")) ?? [];
+      expect(saved).toHaveLength(1);
+      expect(saved[0].status).toBe("failed");
+      expect(apiState.relays).toHaveLength(0);
+    });
+  });
+
   it("clears legacy stored sessions and re-establishes them with a fresh handshake", async () => {
     const { storage, router, apiState } = await bootApp({
       prepare: async (storage) => {
@@ -847,6 +950,29 @@ describe("web app flow coverage", () => {
     });
 
     expect(realtimeState.connectCalls).toBe(1);
+  });
+
+  it("shows verified transparency status in the identity log view", async () => {
+    const { router } = await bootApp({
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "test2",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "identity-log" });
+    await eventually(() => {
+      expect(document.body.textContent).toContain("Transparency");
+      expect(document.body.textContent).toContain("Verified.");
+    });
   });
 
   it("logs out from settings and returns to onboarding while preserving the saved server URL", async () => {

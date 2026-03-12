@@ -51,6 +51,7 @@ The Chat screen is intentionally limited to messaging actions for the current be
 - detected peer identity key changes trigger explicit user confirmation before send,
 - HTTP transport is allowed only for local emulator/demo hosts in debug mode,
 - HTTPS transport requires certificate pinning configured via `BuildConfig.TLS_PIN_SHA256`,
+- all Android activities set `FLAG_SECURE`, so screenshots and app-switcher previews are blocked by default,
 - relay and inbox requests include Ed25519-signed auth headers generated from local identity signing keys,
 - inbox processing enforces per-peer monotonic transport message IDs and local seen-ciphertext replay rejection,
 - chat send/poll flows perform authenticated prekey-inventory checks and auto-replenish one-time prekeys when inventory is low,

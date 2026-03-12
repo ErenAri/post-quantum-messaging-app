@@ -33,6 +33,7 @@ import {
   buildLinkDeviceAuthHeaders,
   buildRevokeDeviceAuthHeaders,
   decryptDirectMessage,
+  computeSafetyNumber,
   encryptDirectMessageWithSession,
   generateIdentityKeys,
   identityFingerprint,
@@ -42,6 +43,7 @@ import {
   openTransportEnvelopeWithSenderCert,
   regeneratePublishedPrekeys,
   sealTransportEnvelopeWithSenderCert,
+  verifyTransparencyProof,
   type GeneratedKeys,
 } from "./crypto";
 import {
@@ -53,6 +55,7 @@ import {
   type DiscoveryMatchItem,
   type DeviceRecord,
   type ServerCapabilitiesResponse,
+  type TransparencyProofResponse,
 } from "./server";
 import {
   clearDirectMessageSession,
@@ -76,6 +79,7 @@ import {
   updateConversationMeta,
   readCursor,
   readSealedCursor,
+  readTransparencyCheckpoint,
   saveKeys,
   saveDirectMessageSession,
   saveSetup,
@@ -86,6 +90,8 @@ import {
   writeCursor,
   writeSealedCursor,
   writeIdentityPin,
+  writeTransparencyCheckpoint,
+  type IdentityPin,
   type ConversationKind,
   type ConversationMeta,
   type ConversationRequestState,
@@ -260,11 +266,17 @@ async function ensureMandatoryPqRatchetPolicy(): Promise<ServerCapabilitiesRespo
   if (!capabilities.sender_certificate_supported) {
     throw new Error("Server is not advertising sender certificate support.");
   }
+  if (!capabilities.key_transparency_supported) {
+    throw new Error("Server is not advertising key transparency support.");
+  }
   if (!capabilities.sealed_delivery_tokens_supported) {
     throw new Error("Server is not advertising sealed delivery token support.");
   }
   if (!capabilities.sender_certificate_issuer_ed25519_pub) {
     throw new Error("Server is not advertising the sender certificate issuer key.");
+  }
+  if (!capabilities.transparency_log_issuer_ed25519_pub) {
+    throw new Error("Server is not advertising the transparency log issuer key.");
   }
   return capabilities;
 }
@@ -344,10 +356,12 @@ async function encryptDirectPayload(
     peerUserId,
     bundle.identity_x25519_pub,
     bundle.identity_sig_pub,
+    bundle.identity_pq_sig_pub,
     fingerprint,
     bundle.identity_key_version,
     bundle.bundle_generated_at
   );
+  await ensurePeerTransparencyVerified(peerUserId, api, readIdentityPin(setup.userId, peerUserId));
   const result = initiateDirectMessageSession(k, bundle, plaintext);
   await persistDirectSession(peerUserId, result.sessionJson);
   const senderCertificateBase64 = await issueSenderCertificate(k, api);
@@ -391,6 +405,7 @@ async function decryptIncomingPayload(
   if (!resolvedSenderUserId) {
     throw new Error("Missing sender identity for incoming message");
   }
+  await ensurePeerTransparencyVerified(resolvedSenderUserId, new PqmsgApi(setup.serverUrl));
   const {
     sessionJson: existingSession,
     clearedLegacy,
@@ -428,6 +443,7 @@ async function loadPeerTransportIdentityX25519(
 ): Promise<string> {
   const pinned = readIdentityPin(setup.userId, peerUserId);
   if (pinned?.identityX25519Pub) {
+    await ensurePeerTransparencyVerified(peerUserId, api, pinned);
     return pinned.identityX25519Pub;
   }
   const bundle = await api.getBundle(peerUserId);
@@ -438,10 +454,12 @@ async function loadPeerTransportIdentityX25519(
     peerUserId,
     bundle.identity_x25519_pub,
     bundle.identity_sig_pub,
+    bundle.identity_pq_sig_pub,
     fingerprint,
     bundle.identity_key_version,
     bundle.bundle_generated_at
   );
+  await ensurePeerTransparencyVerified(peerUserId, api, readIdentityPin(setup.userId, peerUserId));
   return bundle.identity_x25519_pub;
 }
 
@@ -449,6 +467,58 @@ async function issueSenderCertificate(k: GeneratedKeys, api: PqmsgApi): Promise<
   const headers = buildSenderCertificateAuthHeaders(k);
   const response = await api.getSenderCertificate(k.userId, headers);
   return response.certificate_base64;
+}
+
+type PeerTransparencyAssessment = {
+  leafVersion: number;
+  treeSize: number;
+  consistencyVerified: boolean;
+};
+
+function transparencyProofMatchesPin(
+  peerUserId: string,
+  proof: TransparencyProofResponse,
+  pin: IdentityPin
+): boolean {
+  if (proof.user_id !== peerUserId || proof.leaf.user_id !== peerUserId) {
+    return false;
+  }
+  return (
+    proof.leaf.version === pin.identityKeyVersion
+    && proof.leaf.identity_x25519_pub === pin.identityX25519Pub
+    && proof.leaf.identity_sig_pub === pin.identitySigPub
+    && (proof.leaf.identity_pq_sig_pub ?? "") === pin.identityPqSigPub
+  );
+}
+
+async function ensurePeerTransparencyVerified(
+  peerUserId: string,
+  api: PqmsgApi,
+  identityPin?: IdentityPin | null
+): Promise<PeerTransparencyAssessment> {
+  const capabilities = await ensureMandatoryPqRatchetPolicy();
+  const pin = identityPin?.identityPqSigPub?.trim()
+    ? identityPin
+    : await ensurePeerIdentityPinForTrust(peerUserId, api);
+  const checkpoint = readTransparencyCheckpoint(setup.serverUrl, peerUserId);
+  const proof = await api.getTransparencyProof(peerUserId, checkpoint?.tree_size);
+  const verification = verifyTransparencyProof(
+    JSON.stringify(proof),
+    capabilities.transparency_log_issuer_ed25519_pub,
+    checkpoint ? JSON.stringify(checkpoint) : null,
+  );
+  if (!transparencyProofMatchesPin(peerUserId, proof, pin)) {
+    throw new Error(`Peer transparency proof does not match the pinned hybrid identity for ${peerUserId}.`);
+  }
+  if (verification.leafUserId !== peerUserId || verification.leafVersion !== proof.leaf.version) {
+    throw new Error(`Peer transparency proof returned an unexpected leaf for ${peerUserId}.`);
+  }
+  writeTransparencyCheckpoint(setup.serverUrl, peerUserId, proof.signed_tree_head);
+  return {
+    leafVersion: verification.leafVersion,
+    treeSize: verification.treeSize,
+    consistencyVerified: verification.consistencyVerified,
+  };
 }
 
 async function loadPeerSealedDeliveryToken(
@@ -696,6 +766,30 @@ function markConversationAccepted(peerId: string): void {
   setConversationArchived("dm", peerId, false);
 }
 
+function isContactFingerprintVerified(
+  contact: ContactEntry | undefined,
+  identityPin: IdentityPin | null
+): boolean {
+  if (!contact?.verified_by_qr || !identityPin) {
+    return false;
+  }
+  const verifiedFingerprint = contact.verified_fingerprint_sha256?.trim().toLowerCase() || "";
+  return verifiedFingerprint === identityPin.fingerprintSha256.trim().toLowerCase();
+}
+
+function upsertCachedContact(contact: ContactEntry): void {
+  const existingIndex = cachedContacts.findIndex((item) => item.contact_user_id === contact.contact_user_id);
+  if (existingIndex >= 0) {
+    cachedContacts = [
+      ...cachedContacts.slice(0, existingIndex),
+      contact,
+      ...cachedContacts.slice(existingIndex + 1),
+    ];
+    return;
+  }
+  cachedContacts = [...cachedContacts, contact].sort((lhs, rhs) => lhs.contact_user_id.localeCompare(rhs.contact_user_id));
+}
+
 function markConversationDismissed(peerId: string): void {
   updateConversationMeta(setup.userId, "dm", peerId, {
     requestState: "dismissed",
@@ -827,7 +921,7 @@ async function syncGroupsBackground(): Promise<void> {
 }
 
 async function ensureDirectChatPeerExists(peerId: string): Promise<void> {
-  const normalizedPeer = peerId.trim().replace(/^@/, "");
+  const normalizedPeer = parseDirectChatTarget(peerId).replace(/^@/, "").trim();
   if (!normalizedPeer) {
     throw new Error("User ID is required");
   }
@@ -1608,10 +1702,12 @@ function showConversationActionMenu(anchor: HTMLElement, kind: ConversationKind,
 // ---------------------------------------------------------------------------
 
 async function renderChat(peerId: string): Promise<void> {
+  const contact = cachedContacts.find((item) => item.contact_user_id === peerId);
   const identity = resolvePeerIdentity(peerId);
   const displayName = identity.primaryLabel;
   const meta = loadConversationMeta(setup.userId, "dm", peerId);
   const identityPin = readIdentityPin(setup.userId, peerId);
+  const transparencyCheckpoint = readTransparencyCheckpoint(setup.serverUrl, peerId);
   let directMessagingReady = isPqSessionMessagingAvailable();
   if (!directMessagingReady) {
     directMessagingReady = (await initWasmCrypto()) && isPqSessionMessagingAvailable();
@@ -1632,7 +1728,33 @@ async function renderChat(peerId: string): Promise<void> {
         : ""
     : "";
   const fingerprintSummary = identityPin?.fingerprintSha256 || "Not pinned yet";
-  const trustSummary = identityPin ? "Trusted on this device" : "Unverified";
+  const verifiedBySafetyNumber = isContactFingerprintVerified(contact, identityPin);
+  const trustSummary = verifiedBySafetyNumber
+    ? "Verified via safety number"
+    : identityPin
+      ? "Trusted on this device"
+      : "Unverified";
+  const transparencySummary = transparencyCheckpoint
+    ? `Transparency auto-verified in tree #${transparencyCheckpoint.tree_size}`
+    : "Transparency auto-check runs before encrypted traffic.";
+  let safetyNumber = "";
+  if (identityPin?.identityPqSigPub?.trim() && directMessagingReady && hasLocalKeys(setup.userId)) {
+    try {
+      const localKeys = await ensureKeys();
+      safetyNumber = computeSafetyNumber(
+        localKeys,
+        peerId,
+        identityPin.identityX25519Pub,
+        identityPin.identityPqSigPub
+      );
+    } catch {
+      safetyNumber = "";
+    }
+  }
+  const safetyNumberSummary = identityPin
+    ? safetyNumber || "Unavailable until a fresh hybrid identity bundle is observed."
+    : "Available after the first peer bundle is pinned.";
+  const verifySafetyLabel = verifiedBySafetyNumber ? "View Safety Number" : "Verify Safety Number";
   const directMessagingBlockedReason = directMessagingReady
     ? ""
     : "Web post-quantum runtime is unavailable in this build, so direct messages cannot be sent yet.";
@@ -1676,6 +1798,7 @@ async function renderChat(peerId: string): Promise<void> {
       ${requestBanner}
       <div class="chat-context-strip" role="status" aria-live="polite">
         <span class="context-pill context-pill-secure">${escHtml(trustSummary)}</span>
+        <span class="context-pill">${escHtml(transparencySummary)}</span>
         <span class="context-pill">${escHtml(presenceText)}</span>
         <button id="chat-open-details-inline" type="button" class="context-pill context-pill-link">Privacy & send defaults</button>
       </div>
@@ -1705,7 +1828,9 @@ async function renderChat(peerId: string): Promise<void> {
             </button>
           </div>
           <div class="chat-details-row"><span>Trust</span><strong>${escHtml(trustSummary)}</strong></div>
+          <div class="chat-details-row"><span>Transparency</span><strong>${escHtml(transparencySummary)}</strong></div>
           <div class="chat-details-row column"><span>Identity fingerprint</span><span class="mono fingerprint">${escHtml(fingerprintSummary)}</span></div>
+          <div class="chat-details-row column"><span>Safety number</span><span class="mono fingerprint">${escHtml(safetyNumberSummary)}</span></div>
           <div class="chat-details-row">
             <span>Sealed sender</span>
             <strong>Required</strong>
@@ -1715,6 +1840,7 @@ async function renderChat(peerId: string): Promise<void> {
             <strong>Unavailable</strong>
           </div>
           <div class="chat-details-actions">
+            <button id="detail-verify-safety" class="btn-secondary" ${identityPin ? "" : "disabled"}>${verifySafetyLabel}</button>
             <button id="detail-pin" class="btn-secondary">${meta.pinnedAt ? "Unpin Chat" : "Pin Chat"}</button>
             <button id="detail-archive" class="btn-secondary">${meta.archivedAt ? "Unarchive" : "Archive"}</button>
           </div>
@@ -1939,6 +2065,15 @@ async function renderChat(peerId: string): Promise<void> {
     notify(next.pinnedAt ? "Chat pinned" : "Chat unpinned", "success");
     refreshConversationsIfVisible();
     void renderChat(peerId);
+  });
+  q("#detail-verify-safety").addEventListener("click", () => {
+    void (async () => {
+      try {
+        await verifyPeerSafetyNumber(peerId);
+      } catch (error) {
+        notify(`Safety-number verification failed: ${errorMsg(error)}`, "error");
+      }
+    })();
   });
   q("#detail-archive").addEventListener("click", () => {
     const archived = !meta.archivedAt;
@@ -2828,6 +2963,7 @@ async function renderSettings(): Promise<void> {
         </div>
         <div class="settings-section">
           <h3>People</h3>
+          <p class="text-secondary settings-desc">Manual contacts only. Add people by exact username or invite link. Private discovery stays unavailable in this privacy profile.</p>
           <div id="contacts-manage">
             ${cachedContacts.length === 0 ? '<p class="text-secondary">No contacts yet</p>' :
               cachedContacts.map(c => `
@@ -2840,7 +2976,7 @@ async function renderSettings(): Promise<void> {
             }
           </div>
           <div class="add-contact-row">
-            <input id="set-add-contact-id" type="text" placeholder="User ID" class="input-sm" />
+            <input id="set-add-contact-id" type="text" placeholder="Username or invite link" class="input-sm" />
             <input id="set-add-contact-alias" type="text" placeholder="Alias (optional)" class="input-sm" />
             <button id="set-add-contact" class="btn-sm">Add</button>
           </div>
@@ -2937,11 +3073,12 @@ async function renderSettings(): Promise<void> {
 
   // Add contact
   q("#set-add-contact").addEventListener("click", async () => {
-    const contactId = q<HTMLInputElement>("#set-add-contact-id").value.trim();
+    const rawTarget = q<HTMLInputElement>("#set-add-contact-id").value.trim();
     const alias = q<HTMLInputElement>("#set-add-contact-alias").value.trim();
-    if (!contactId) { q<HTMLInputElement>("#set-add-contact-id").focus(); return; }
+    if (!rawTarget) { q<HTMLInputElement>("#set-add-contact-id").focus(); return; }
     try {
-      await ensureDirectChatPeerExists(contactId);
+      const contactId = parseDirectChatTarget(rawTarget).replace(/^@/, "").trim();
+      await ensureDirectChatPeerExists(rawTarget);
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
       const headers = buildContactsUpsertAuthHeaders(k, contactId, alias || contactId, false, "");
@@ -2952,7 +3089,7 @@ async function renderSettings(): Promise<void> {
       // Re-render to show updated list
       renderSettings();
     } catch (e) {
-      notify(`Add contact failed: ${describePeerLookupError(contactId, e)}`, "error");
+      notify(`Add contact failed: ${describePeerLookupError(rawTarget, e)}`, "error");
     }
   });
 
@@ -4135,12 +4272,56 @@ async function renderIdentityLog(): Promise<void> {
     const api = new PqmsgApi(setup.serverUrl);
     const headers = buildIdentityLogAuthHeaders(k);
     const res = await api.getIdentityLog(k.userId, headers);
+    const capabilities = await loadServerCapabilitiesCached();
     const body = document.getElementById("idlog-body")!;
+    let transparencySummary = "";
+    if (capabilities?.key_transparency_supported && capabilities.transparency_log_issuer_ed25519_pub) {
+      try {
+        const checkpoint = readTransparencyCheckpoint(setup.serverUrl, k.userId);
+        const proof = await api.getTransparencyProof(k.userId, checkpoint?.tree_size);
+        const verification = verifyTransparencyProof(
+          JSON.stringify(proof),
+          capabilities.transparency_log_issuer_ed25519_pub,
+          checkpoint ? JSON.stringify(checkpoint) : null,
+        );
+        writeTransparencyCheckpoint(setup.serverUrl, k.userId, proof.signed_tree_head);
+        const fingerprintMatches = res.events[0]
+          ? identityFingerprint(
+              proof.leaf.identity_x25519_pub,
+              proof.leaf.identity_pq_sig_pub ?? undefined,
+            ).toLowerCase() === res.events[0].identity_fingerprint_sha256.toLowerCase()
+          : true;
+        const versionMatches = res.events[0] ? res.events[0].version === verification.leafVersion : true;
+        const consistencyLine = checkpoint
+          ? verification.consistencyVerified
+            ? "Append-only growth verified against the last saved checkpoint."
+            : "Proof verified, but append-only growth was not checked."
+          : "First verified transparency checkpoint saved on this device.";
+        transparencySummary = `
+          <div class="settings-section">
+            <h3>Transparency</h3>
+            <p class="text-secondary settings-desc">
+              <strong>Verified.</strong> Current identity version v${verification.leafVersion} is included in signed tree #${verification.treeSize}.
+            </p>
+            <p class="text-secondary settings-desc">${escHtml(consistencyLine)}</p>
+            <p class="text-secondary settings-desc">${fingerprintMatches && versionMatches ? "Identity log matches the signed transparency leaf." : "Warning: identity log and transparency leaf do not match exactly on this device."}</p>
+          </div>
+        `;
+      } catch (error) {
+        transparencySummary = `
+          <div class="settings-section">
+            <h3>Transparency</h3>
+            <p class="text-danger">Verification failed: ${escHtml(errorMsg(error))}</p>
+          </div>
+        `;
+      }
+    }
     if (res.events.length === 0) {
-      body.innerHTML = '<p class="text-secondary">No identity events recorded.</p>';
+      body.innerHTML = `${transparencySummary}<p class="text-secondary">No identity events recorded.</p>`;
       return;
     }
     body.innerHTML = `
+      ${transparencySummary}
       <table class="idlog-table">
         <thead>
           <tr><th>Ver</th><th>Event</th><th>Device</th><th>Date</th><th>Fingerprint</th></tr>
@@ -4576,6 +4757,7 @@ function enforceIdentityPin(
   peerUserId: string,
   identityX25519Pub: string,
   identitySigPub: string,
+  identityPqSigPub: string,
   fingerprint: string,
   identityVersion: number,
   observedAt: string
@@ -4587,6 +4769,7 @@ function enforceIdentityPin(
       identityKeyVersion: identityVersion,
       identityX25519Pub,
       identitySigPub,
+      identityPqSigPub,
       observedAt,
     });
     return;
@@ -4601,8 +4784,98 @@ function enforceIdentityPin(
     identityKeyVersion: identityVersion,
     identityX25519Pub,
     identitySigPub,
+    identityPqSigPub,
     observedAt,
   });
+}
+
+async function ensurePeerIdentityPinForTrust(peerUserId: string, api: PqmsgApi): Promise<IdentityPin> {
+  const existing = readIdentityPin(setup.userId, peerUserId);
+  if (existing?.identityPqSigPub?.trim()) {
+    return existing;
+  }
+  const bundle = await api.getBundle(peerUserId);
+  const fingerprint =
+    bundle.identity_fingerprint_sha256
+    || identityFingerprint(bundle.identity_x25519_pub, bundle.identity_pq_sig_pub);
+  enforceIdentityPin(
+    peerUserId,
+    bundle.identity_x25519_pub,
+    bundle.identity_sig_pub,
+    bundle.identity_pq_sig_pub,
+    fingerprint,
+    bundle.identity_key_version,
+    bundle.bundle_generated_at
+  );
+  const refreshed = readIdentityPin(setup.userId, peerUserId);
+  if (!refreshed) {
+    throw new Error(`Unable to pin identity for ${peerUserId}`);
+  }
+  return refreshed;
+}
+
+async function verifyPeerSafetyNumber(peerUserId: string): Promise<void> {
+  await ensureWebPqRuntime();
+  const k = await ensureKeys();
+  const api = new PqmsgApi(setup.serverUrl);
+  const identityPin = await ensurePeerIdentityPinForTrust(peerUserId, api);
+  if (!identityPin.identityPqSigPub.trim()) {
+    throw new Error("Peer PQ identity key is unavailable for safety-number verification.");
+  }
+  const safetyNumber = computeSafetyNumber(
+    k,
+    peerUserId,
+    identityPin.identityX25519Pub,
+    identityPin.identityPqSigPub
+  );
+  const contact = cachedContacts.find((item) => item.contact_user_id === peerUserId);
+  const alias = contact?.alias?.trim() || cachedProfileNames[peerUserId]?.trim() || peerUserId;
+  const alreadyVerified = isContactFingerprintVerified(contact, identityPin);
+  const accepted = alreadyVerified || confirm(
+    `Safety number for ${alias}\n\n${safetyNumber}\n\nMark this contact as verified against the current fingerprint?`
+  );
+  if (!accepted) {
+    notify("Safety-number verification canceled", "info");
+    return;
+  }
+  if (!alreadyVerified) {
+    const headers = buildContactsUpsertAuthHeaders(
+      k,
+      peerUserId,
+      alias,
+      true,
+      identityPin.fingerprintSha256
+    );
+    await api.upsertContact(
+      k.userId,
+      {
+        contact_user_id: peerUserId,
+        alias: contact?.alias || undefined,
+        verified_by_qr: true,
+        verified_fingerprint_sha256: identityPin.fingerprintSha256,
+      },
+      headers
+    );
+    const now = new Date().toISOString();
+    upsertCachedContact({
+      contact_user_id: peerUserId,
+      alias: contact?.alias || null,
+      verified_by_qr: true,
+      verified_fingerprint_sha256: identityPin.fingerprintSha256,
+      created_at: contact?.created_at || now,
+      updated_at: now,
+    });
+    markConversationAccepted(peerUserId);
+    void loadContactsBackground();
+  }
+  notify(
+    alreadyVerified ? "Safety number matches the saved verification" : "Contact verified via safety number",
+    "success"
+  );
+  const view = getCurrentView();
+  if (view.screen === "chat" && view.peerId === peerUserId) {
+    void renderChat(peerUserId);
+  }
 }
 
 async function ensureKeys(): Promise<GeneratedKeys> {

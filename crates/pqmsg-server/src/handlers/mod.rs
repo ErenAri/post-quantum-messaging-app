@@ -10,6 +10,7 @@ mod prekeys;
 mod profile;
 mod receipts;
 mod stories;
+mod transparency;
 mod util;
 
 pub(crate) use backups::*;
@@ -25,6 +26,7 @@ pub(crate) use prekeys::*;
 pub(crate) use profile::*;
 pub(crate) use receipts::*;
 pub(crate) use stories::*;
+pub(crate) use transparency::*;
 pub(crate) use util::*;
 
 use axum::extract::State;
@@ -58,8 +60,10 @@ fn capabilities_response(state: &AppState) -> ServerCapabilitiesResponse {
         group_messaging_supported: state.group_messaging_supported(),
         sealed_sender_required: state.sealed_sender_required(),
         sender_certificate_supported: state.sender_certificate_supported(),
+        key_transparency_supported: state.key_transparency_supported(),
         sealed_delivery_tokens_supported: true,
         sender_certificate_issuer_ed25519_pub: state.sender_certificate_issuer_public_key_b64(),
+        transparency_log_issuer_ed25519_pub: state.transparency_log_issuer_public_key_b64(),
         authenticated_direct_messaging_supported: state.authenticated_direct_messaging_supported(),
         ephemeral_messaging_supported: state.ephemeral_messaging_supported(),
         web_client_policy: "demo_only",

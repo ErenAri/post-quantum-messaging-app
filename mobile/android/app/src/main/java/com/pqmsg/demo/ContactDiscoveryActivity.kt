@@ -63,6 +63,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
             statusText.text = "Not signed in"
             return
         }
+        statusText.text = getString(R.string.contacts_manual_only_notice)
         lifecycleScope.launch {
             runCatching {
                 val context = MessagingCoordinator.ensureReady(
@@ -80,7 +81,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 )
                 currentContacts = response.contacts
                 renderContacts()
-                statusText.text = "${currentContacts.size} contact(s)"
+                statusText.text = getString(R.string.contacts_manual_status, currentContacts.size)
             }.onFailure {
                 statusText.text = UiErrorMapper.fromThrowable(it, "Load contacts").headline
             }
@@ -114,9 +115,9 @@ class ContactDiscoveryActivity : AppCompatActivity() {
     }
 
     private fun addContact() {
-        val userId = contactUserIdInput.text.toString().trim()
-        if (userId.isBlank()) {
-            statusText.text = "Enter a username"
+        val rawTarget = contactUserIdInput.text.toString().trim()
+        if (rawTarget.isBlank()) {
+            statusText.text = "Enter a username or invite link"
             return
         }
         val alias = contactAliasInput.text.toString().trim().ifBlank { null }
@@ -124,24 +125,32 @@ class ContactDiscoveryActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             runCatching {
+                val target = MessagingCoordinator.parseComposeTarget(rawTarget, setup.serverUrl)
+                require(
+                    ApiClientFactory.normalizeBaseUrl(target.serverUrl) ==
+                        ApiClientFactory.normalizeBaseUrl(setup.serverUrl),
+                ) {
+                    "Contacts can only be added for the active server profile"
+                }
                 val context = MessagingCoordinator.ensureReady(
                     store = store,
-                    serverUrl = setup.serverUrl,
+                    serverUrl = target.serverUrl,
                     userId = setup.userId,
                     suiteLabel = setup.suiteLabel,
                 )
+                context.api.getBundle(target.peerUserId)
                 context.api.upsertContact(
                     userId = context.profile.userId,
                     headers = buildContactsUpsertAuthHeaders(
                         keysJson = context.keysJson,
                         userId = context.profile.userId,
-                        contactUserId = userId,
-                        alias = alias.orEmpty(),
+                        contactUserId = target.peerUserId,
+                        alias = alias ?: target.peerUserId,
                         verifiedByQr = false,
                         verifiedFingerprintSha256 = null,
                     ).toHeaderMap(),
                     request = UpsertContactRequest(
-                        contact_user_id = userId,
+                        contact_user_id = target.peerUserId,
                         alias = alias,
                         verified_by_qr = null,
                         verified_fingerprint_sha256 = null,
@@ -149,7 +158,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 )
                 contactUserIdInput.setText("")
                 contactAliasInput.setText("")
-                statusText.text = "Contact added: $userId"
+                statusText.text = getString(R.string.contacts_added_status, target.peerUserId)
                 loadContacts()
             }.onFailure {
                 statusText.text = UiErrorMapper.fromThrowable(it, "Add contact").headline

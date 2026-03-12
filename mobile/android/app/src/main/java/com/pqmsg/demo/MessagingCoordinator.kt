@@ -1,6 +1,7 @@
 package com.pqmsg.demo
 
 import android.net.Uri
+import com.google.gson.Gson
 import org.json.JSONObject
 import uniffi.pqmsg_android.Suite
 import uniffi.pqmsg_android.buildPrekeysAuthHeaders
@@ -15,9 +16,12 @@ import uniffi.pqmsg_android.generateIdentityKeys
 import uniffi.pqmsg_android.loadUserProfile
 import uniffi.pqmsg_android.openSealedMessageWithSenderCert
 import uniffi.pqmsg_android.replenishOneTimePrekeys
+import uniffi.pqmsg_android.verifyTransparencyProof
 import java.security.MessageDigest
+import java.util.Base64
 
 data class ReadyMessagingContext(
+    val serverUrl: String,
     val keysJson: String,
     val profile: uniffi.pqmsg_android.UserProfile,
     val api: PqmsgApi,
@@ -35,9 +39,27 @@ data class ComposeTarget(
     val serverUrl: String,
 )
 
+data class PeerTransparencyStatus(
+    val leafVersion: ULong,
+    val treeSize: ULong,
+    val consistencyVerified: Boolean,
+)
+
 object MessagingCoordinator {
+    private val gson = Gson()
+
     private fun normalizePeerUserId(value: String): String {
         return value.trim().removePrefix("@")
+    }
+
+    private fun extractQueryParameterFallback(rawValue: String, key: String): String {
+        val pattern = Regex("""(?:[?&])${Regex.escape(key)}=([^&#]+)""")
+        val encoded = pattern.find(rawValue)?.groupValues?.getOrNull(1).orEmpty()
+        return if (encoded.isBlank()) {
+            ""
+        } else {
+            java.net.URLDecoder.decode(encoded, Charsets.UTF_8).trim()
+        }
     }
 
     private fun sessionRequiresRehandshake(
@@ -194,10 +216,125 @@ object MessagingCoordinator {
         )
 
         return ReadyMessagingContext(
+            serverUrl = normalizedServer,
             keysJson = readyKeysJson,
             profile = readyProfile,
             api = api,
             capabilities = capabilities,
+        )
+    }
+
+    internal fun transparencyProofMatchesIdentityPin(
+        peerUserId: String,
+        proof: TransparencyProofResponse,
+        pin: IdentityPin,
+    ): Boolean {
+        if (proof.user_id != peerUserId || proof.leaf.user_id != peerUserId) {
+            return false
+        }
+        return proof.leaf.version.toInt() == pin.identityKeyVersion &&
+            proof.leaf.identity_x25519_pub == pin.identityX25519Pub &&
+            proof.leaf.identity_sig_pub == pin.identitySigPub &&
+            (proof.leaf.identity_pq_sig_pub ?: "") == pin.identityPqSigPub
+    }
+
+    internal fun transparencyLeafFingerprint(leaf: TransparencyLeafRecord): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update(Base64.getDecoder().decode(leaf.identity_x25519_pub))
+        val pqSig = leaf.identity_pq_sig_pub?.trim().orEmpty()
+        if (pqSig.isNotBlank()) {
+            digest.update(Base64.getDecoder().decode(pqSig))
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    internal fun bundleIdentityFingerprint(bundle: BundleResponse): String {
+        val fromServer = bundle.identity_fingerprint_sha256?.trim()?.lowercase()
+        if (!fromServer.isNullOrEmpty()) {
+            return fromServer
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update(Base64.getDecoder().decode(bundle.identity_x25519_pub))
+        bundle.identity_pq_sig_pub
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { digest.update(Base64.getDecoder().decode(it)) }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private suspend fun ensurePeerIdentityPinForTransparency(
+        store: LocalStateStore,
+        context: ReadyMessagingContext,
+        peerUserId: String,
+        bundleOverride: BundleResponse? = null,
+    ): IdentityPin {
+        val existing = store.readIdentityPin(context.profile.userId, peerUserId)
+        if (existing?.identityPqSigPub?.isNotBlank() == true) {
+            return existing
+        }
+        val bundle = bundleOverride ?: context.api.getBundle(peerUserId)
+        val observed = IdentityPin(
+            fingerprintSha256 = bundleIdentityFingerprint(bundle),
+            identityKeyVersion = bundle.identity_key_version ?: 1,
+            identityX25519Pub = bundle.identity_x25519_pub,
+            identitySigPub = bundle.identity_sig_pub,
+            identityPqSigPub = bundle.identity_pq_sig_pub,
+            observedAt = bundle.bundle_generated_at,
+        )
+        if (existing != null && existing.fingerprintSha256.trim().lowercase() != observed.fingerprintSha256) {
+            error("identity key changed for $peerUserId; transparency check blocked")
+        }
+        if (existing != observed) {
+            store.writeIdentityPin(context.profile.userId, peerUserId, observed)
+        }
+        return observed
+    }
+
+    suspend fun ensurePeerTransparencyVerified(
+        store: LocalStateStore,
+        context: ReadyMessagingContext,
+        peerUserId: String,
+        bundleOverride: BundleResponse? = null,
+    ): PeerTransparencyStatus {
+        val pin = ensurePeerIdentityPinForTransparency(
+            store = store,
+            context = context,
+            peerUserId = peerUserId,
+            bundleOverride = bundleOverride,
+        )
+        val previousCheckpointJson = store.readTransparencyCheckpoint(context.serverUrl, peerUserId)
+        val previousTreeSize = previousCheckpointJson?.let {
+            runCatching {
+                gson.fromJson(it, TransparencySignedTreeHeadResponse::class.java).tree_size
+            }.getOrNull()
+        }
+        val proof = context.api.getTransparencyProof(
+            userId = peerUserId,
+            previousTreeSize = previousTreeSize,
+        )
+        check(proof.user_id == peerUserId) {
+            "transparency proof response user mismatch: expected '$peerUserId' got '${proof.user_id}'"
+        }
+        val verification = verifyTransparencyProof(
+            gson.toJson(proof),
+            context.capabilities.transparency_log_issuer_ed25519_pub,
+            previousCheckpointJson,
+        )
+        check(verification.leafUserId == peerUserId) {
+            "transparency proof leaf mismatch: expected '$peerUserId' got '${verification.leafUserId}'"
+        }
+        check(transparencyProofMatchesIdentityPin(peerUserId, proof, pin)) {
+            "transparency proof does not match the pinned hybrid identity for $peerUserId"
+        }
+        store.writeTransparencyCheckpoint(
+            context.serverUrl,
+            peerUserId,
+            gson.toJson(proof.signed_tree_head),
+        )
+        return PeerTransparencyStatus(
+            leafVersion = verification.leafVersion,
+            treeSize = verification.treeSize,
+            consistencyVerified = verification.consistencyVerified,
         )
     }
 
@@ -222,6 +359,7 @@ object MessagingCoordinator {
         val activePeerId = activePeer?.trim().orEmpty()
         val knownPeers = store.listConversations(context.profile.userId)
             .mapTo(mutableSetOf()) { it.peerUserId }
+        val transparencyVerifiedPeers = mutableSetOf<String>()
         var deliveredMessages = 0
         var pendingRequests = 0
         var workingKeysJson = context.keysJson
@@ -283,6 +421,13 @@ object MessagingCoordinator {
                 sessionJson = store.readSession(context.profile.userId, peer),
                 requiredPqRatchetInterval = context.capabilities.pq_ratchet_interval,
             )
+            if (transparencyVerifiedPeers.add(peer)) {
+                ensurePeerTransparencyVerified(
+                    store = store,
+                    context = context,
+                    peerUserId = peer,
+                )
+            }
             val result = decryptMessage(
                 keysJson = workingKeysJson,
                 recipientUserId = context.profile.userId,
@@ -434,7 +579,33 @@ object MessagingCoordinator {
     fun parseComposeTarget(input: String, fallbackServerUrl: String): ComposeTarget {
         val trimmed = input.trim()
         require(trimmed.isNotBlank()) { "username or invite is empty" }
+        val webInvitePeer = normalizePeerUserId(extractQueryParameterFallback(trimmed, "invite"))
+        if (webInvitePeer.isNotBlank()) {
+            val inviteServer = extractQueryParameterFallback(trimmed, "server")
+            val resolvedInviteServer = if (inviteServer.isBlank()) fallbackServerUrl else inviteServer
+            return ComposeTarget(
+                peerUserId = webInvitePeer,
+                serverUrl = ApiClientFactory.normalizeBaseUrl(resolvedInviteServer),
+            )
+        }
         val parsed = runCatching { Uri.parse(trimmed) }.getOrNull()
+        if (parsed != null) {
+            val invitePeer = normalizePeerUserId(
+                parsed.getQueryParameter("invite").orEmpty().ifBlank {
+                    extractQueryParameterFallback(trimmed, "invite")
+                },
+            )
+            if (invitePeer.isNotBlank()) {
+                val inviteServer = parsed.getQueryParameter("server")?.trim().orEmpty().ifBlank {
+                    extractQueryParameterFallback(trimmed, "server")
+                }
+                val resolvedInviteServer = if (inviteServer.isBlank()) fallbackServerUrl else inviteServer
+                return ComposeTarget(
+                    peerUserId = invitePeer,
+                    serverUrl = ApiClientFactory.normalizeBaseUrl(resolvedInviteServer),
+                )
+            }
+        }
         if (parsed != null && parsed.scheme == "pqmsg") {
             val peer = normalizePeerUserId(parsed.getQueryParameter("user").orEmpty())
             val server = parsed.getQueryParameter("server")?.trim().orEmpty()

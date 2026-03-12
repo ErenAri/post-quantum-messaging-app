@@ -5,13 +5,17 @@ use axum::Router;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::Utc;
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use pqmsg_core::alg::SecurityProfile;
 use pqmsg_core::alg::PROTOCOL_VERSION_V1;
 use pqmsg_core::dh::DhPublicKey;
 use pqmsg_core::handshake::{pq_signed_prekey_signature_message, signed_prekey_signature_message};
+use pqmsg_core::key_transparency::{
+    verify_consistency_proof, verify_inclusion_proof, ConsistencyProof, InclusionProof,
+    SignedTreeHead, TransparencyLeaf,
+};
 use pqmsg_core::pq_sig::{MlDsa65, PqSignatureProvider, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
 use pqmsg_core::ratchet::pq::DEFAULT_PQ_RATCHET_INTERVAL;
 use pqmsg_core::tlv::{critical_type, encode, TlvRecord};
@@ -765,6 +769,101 @@ fn identity_log_auth_headers(
         (AUTH_HEADER_NONCE, nonce),
         (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
     ]
+}
+
+fn transparency_leaf_from_value(value: &Value) -> TransparencyLeaf {
+    let identity_x25519_pub = B64
+        .decode(
+            value["identity_x25519_pub"]
+                .as_str()
+                .expect("identity_x25519_pub"),
+        )
+        .expect("decode identity_x25519_pub");
+    let identity_sig_pub = B64
+        .decode(
+            value["identity_sig_pub"]
+                .as_str()
+                .expect("identity_sig_pub"),
+        )
+        .expect("decode identity_sig_pub");
+    let identity_pq_sig_pub = value["identity_pq_sig_pub"]
+        .as_str()
+        .map(|raw| B64.decode(raw).expect("decode identity_pq_sig_pub"));
+    TransparencyLeaf {
+        user_id: value["user_id"].as_str().expect("leaf.user_id").to_string(),
+        version: value["version"].as_u64().expect("leaf.version"),
+        identity_x25519_pub: identity_x25519_pub
+            .try_into()
+            .expect("32-byte identity_x25519_pub"),
+        identity_sig_pub,
+        identity_pq_sig_pub,
+        timestamp: value["timestamp"].as_u64().expect("leaf.timestamp"),
+    }
+}
+
+fn transparency_sth_from_value(value: &Value) -> SignedTreeHead {
+    SignedTreeHead {
+        epoch: value["epoch"].as_u64().expect("sth.epoch"),
+        tree_size: value["tree_size"].as_u64().expect("sth.tree_size"),
+        root_hash: B64
+            .decode(value["root_hash"].as_str().expect("sth.root_hash"))
+            .expect("decode root_hash")
+            .try_into()
+            .expect("32-byte root_hash"),
+        signature: B64
+            .decode(value["signature"].as_str().expect("sth.signature"))
+            .expect("decode sth signature"),
+    }
+}
+
+fn transparency_inclusion_proof_from_value(value: &Value) -> InclusionProof {
+    InclusionProof {
+        leaf_index: value["leaf_index"].as_u64().expect("proof.leaf_index"),
+        path: value["path"]
+            .as_array()
+            .expect("proof.path")
+            .iter()
+            .map(|item| {
+                let hash = B64
+                    .decode(item["hash"].as_str().expect("path.hash"))
+                    .expect("decode path hash");
+                (
+                    hash.try_into().expect("32-byte path hash"),
+                    item["is_left"].as_bool().expect("path.is_left"),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn transparency_consistency_proof_from_value(value: &Value) -> ConsistencyProof {
+    ConsistencyProof {
+        old_size: value["old_size"].as_u64().expect("consistency.old_size"),
+        new_size: value["new_size"].as_u64().expect("consistency.new_size"),
+        proof_hashes: value["proof_hashes"]
+            .as_array()
+            .expect("consistency.proof_hashes")
+            .iter()
+            .map(|item| {
+                B64.decode(item.as_str().expect("proof hash"))
+                    .expect("decode consistency proof hash")
+                    .try_into()
+                    .expect("32-byte consistency proof hash")
+            })
+            .collect(),
+    }
+}
+
+fn transparency_verifying_key_from_capabilities(capabilities: &Value) -> VerifyingKey {
+    let issuer = B64
+        .decode(
+            capabilities["transparency_log_issuer_ed25519_pub"]
+                .as_str()
+                .expect("transparency issuer"),
+        )
+        .expect("decode transparency issuer");
+    VerifyingKey::from_bytes(&issuer.try_into().expect("32-byte transparency issuer"))
+        .expect("verifying key")
 }
 
 fn prekeys_status_auth_headers(
@@ -2460,6 +2559,153 @@ async fn identity_rotation_happy_path_and_log() {
     );
     assert_eq!(events[1]["version"].as_u64(), Some(1));
     assert_eq!(events[1]["event_type"].as_str(), Some("initial"));
+}
+
+#[tokio::test]
+async fn transparency_proof_verifies_current_hybrid_identity_leaf() {
+    let app = test_app().await;
+    let key = signing_key(77);
+
+    let reg = register_payload("alice-transparency", "alice-device", [3u8; 32], &key);
+    let (status_reg, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg).await;
+    assert_eq!(status_reg, StatusCode::OK);
+
+    let (status_caps, caps) =
+        json_request(app.clone(), Method::GET, "/v1/capabilities", json!({})).await;
+    assert_eq!(status_caps, StatusCode::OK);
+    assert_eq!(caps["key_transparency_supported"].as_bool(), Some(true));
+    let verifying_key = transparency_verifying_key_from_capabilities(&caps);
+
+    let (status_proof, proof_body) = json_request(
+        app.clone(),
+        Method::GET,
+        "/v1/transparency/users/alice-transparency/proof",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_proof, StatusCode::OK);
+    assert_eq!(proof_body["user_id"].as_str(), Some("alice-transparency"));
+    assert!(proof_body["consistency_proof"].is_null());
+
+    let leaf = transparency_leaf_from_value(&proof_body["leaf"]);
+    let inclusion = transparency_inclusion_proof_from_value(&proof_body["inclusion_proof"]);
+    let sth = transparency_sth_from_value(&proof_body["signed_tree_head"]);
+    verify_inclusion_proof(&leaf.hash(), &inclusion, &sth, &verifying_key)
+        .expect("inclusion proof should verify");
+    assert_eq!(
+        B64.encode(&key.pq_public),
+        proof_body["leaf"]["identity_pq_sig_pub"]
+            .as_str()
+            .expect("identity_pq_sig_pub")
+    );
+}
+
+#[tokio::test]
+async fn transparency_proof_returns_consistency_proof_after_rotation() {
+    let app = test_app().await;
+    let key_old = signing_key(88);
+    let key_new = signing_key(89);
+
+    let reg = register_payload("bob-transparency", "bob-dev-1", [1u8; 32], &key_old);
+    let (status_reg, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg).await;
+    assert_eq!(status_reg, StatusCode::OK);
+
+    let (status_caps, caps) =
+        json_request(app.clone(), Method::GET, "/v1/capabilities", json!({})).await;
+    assert_eq!(status_caps, StatusCode::OK);
+    let verifying_key = transparency_verifying_key_from_capabilities(&caps);
+
+    let (status_first, first_proof_body) = json_request(
+        app.clone(),
+        Method::GET,
+        "/v1/transparency/users/bob-transparency/proof",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_first, StatusCode::OK);
+    let first_sth = transparency_sth_from_value(&first_proof_body["signed_tree_head"]);
+    assert_eq!(first_sth.tree_size, 1);
+
+    let new_identity_x25519 = [2u8; 32];
+    let new_identity_sig = key_new.verifying_key().to_bytes();
+    let rotate_init = json!({
+        "new_identity_x25519_pub": B64.encode(new_identity_x25519),
+        "new_identity_sig_pub": B64.encode(new_identity_sig),
+        "new_identity_pq_sig_pub": B64.encode(&key_new.pq_public),
+        "new_device_id": "bob-dev-2"
+    });
+    let rotate_init_auth =
+        rotate_init_auth_headers(&key_old, "bob-transparency", "bob-dev-1", &rotate_init);
+    let (status_init, body_init) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob-transparency/rotate/init",
+        rotate_init,
+        &rotate_init_auth,
+    )
+    .await;
+    assert_eq!(status_init, StatusCode::OK);
+    let challenge_id = body_init["challenge_id"].as_str().expect("challenge_id");
+    let challenge_nonce = B64
+        .decode(
+            body_init["challenge_nonce"]
+                .as_str()
+                .expect("challenge_nonce"),
+        )
+        .expect("challenge nonce");
+    let message = rotation_signature_message(
+        "bob-transparency",
+        challenge_id,
+        &challenge_nonce,
+        &new_identity_x25519,
+        &new_identity_sig,
+        &key_new.pq_public,
+        "bob-dev-2",
+    );
+    let rotate_confirm = json!({
+        "challenge_id": challenge_id,
+        "sig_by_current_identity": B64.encode(key_old.sign(&message).to_bytes()),
+        "sig_by_new_identity": B64.encode(key_new.sign(&message).to_bytes()),
+        "pq_sig_by_current_identity": pq_signature_b64(&key_old, &message),
+        "pq_sig_by_new_identity": pq_signature_b64(&key_new, &message)
+    });
+    let rotate_confirm_auth =
+        rotate_confirm_auth_headers(&key_old, "bob-transparency", "bob-dev-1", &rotate_confirm);
+    let (status_confirm, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob-transparency/rotate/confirm",
+        rotate_confirm,
+        &rotate_confirm_auth,
+    )
+    .await;
+    assert_eq!(status_confirm, StatusCode::OK);
+
+    let (status_second, second_proof_body) = json_request(
+        app.clone(),
+        Method::GET,
+        "/v1/transparency/users/bob-transparency/proof?previous_tree_size=1",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_second, StatusCode::OK);
+    let second_leaf = transparency_leaf_from_value(&second_proof_body["leaf"]);
+    let second_inclusion =
+        transparency_inclusion_proof_from_value(&second_proof_body["inclusion_proof"]);
+    let second_sth = transparency_sth_from_value(&second_proof_body["signed_tree_head"]);
+    let consistency =
+        transparency_consistency_proof_from_value(&second_proof_body["consistency_proof"]);
+    verify_inclusion_proof(
+        &second_leaf.hash(),
+        &second_inclusion,
+        &second_sth,
+        &verifying_key,
+    )
+    .expect("second inclusion proof should verify");
+    verify_consistency_proof(&first_sth, &second_sth, &consistency, &verifying_key)
+        .expect("consistency proof should verify");
+    assert_eq!(second_sth.tree_size, 2);
+    assert_eq!(second_leaf.version, 2);
 }
 
 #[tokio::test]

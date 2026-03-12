@@ -33,6 +33,11 @@ use crate::handshake::{
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::kem::MlKem768;
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+use crate::key_transparency::{
+    verify_consistency_proof, verify_inclusion_proof, ConsistencyProof, InclusionProof,
+    SignedTreeHead, TransparencyLeaf,
+};
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::keys::{KEMPreKey, PreKeyBundle, SecretBytes};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::pq_sig::MlDsa65;
@@ -40,6 +45,8 @@ use crate::pq_sig::MlDsa65;
 use crate::ratchet::pq::{
     PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL, DEFAULT_PQ_RATCHET_KEY_HISTORY,
 };
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+use crate::safety_number::compute_safety_number;
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::sealed::{open_message_with_cert, seal_message_with_cert, SenderCertificate};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
@@ -224,6 +231,201 @@ pub fn wasm_conversation_ad(sender: &str, recipient: &str) -> Result<Vec<u8>, Js
 // ---------------------------------------------------------------------------
 // KEM operations (ML-KEM-768) — only available with `wasm-pq` feature
 // ---------------------------------------------------------------------------
+
+/// Generate an ML-KEM-768 keypair. Returns JSON: {public_key: number[], secret_key: number[]}.
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_compute_safety_number(
+    local_user_id: &str,
+    local_identity_x25519_pub_b64: &str,
+    local_identity_pq_sig_pub_b64: &str,
+    peer_user_id: &str,
+    peer_identity_x25519_pub_b64: &str,
+    peer_identity_pq_sig_pub_b64: &str,
+) -> Result<String, JsValue> {
+    let local_identity_x25519 = decode_b64_32(
+        "local_identity_x25519_pub_b64",
+        local_identity_x25519_pub_b64,
+    )?;
+    let peer_identity_x25519 =
+        decode_b64_32("peer_identity_x25519_pub_b64", peer_identity_x25519_pub_b64)?;
+    let local_identity_pq_sig = decode_b64(
+        "local_identity_pq_sig_pub_b64",
+        local_identity_pq_sig_pub_b64,
+    )?;
+    let peer_identity_pq_sig =
+        decode_b64("peer_identity_pq_sig_pub_b64", peer_identity_pq_sig_pub_b64)?;
+    Ok(compute_safety_number(
+        local_user_id,
+        &local_identity_x25519,
+        &local_identity_pq_sig,
+        peer_user_id,
+        &peer_identity_x25519,
+        &peer_identity_pq_sig,
+    ))
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[derive(Deserialize)]
+struct WasmTransparencyLeafRecord {
+    user_id: String,
+    version: u64,
+    identity_x25519_pub: String,
+    identity_sig_pub: String,
+    identity_pq_sig_pub: Option<String>,
+    timestamp: u64,
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[derive(Deserialize)]
+struct WasmTransparencyPathItem {
+    hash: String,
+    is_left: bool,
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[derive(Deserialize)]
+struct WasmTransparencyInclusionProof {
+    leaf_index: u64,
+    path: Vec<WasmTransparencyPathItem>,
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[derive(Deserialize)]
+struct WasmTransparencyConsistencyProof {
+    old_size: u64,
+    new_size: u64,
+    proof_hashes: Vec<String>,
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[derive(Clone, Deserialize)]
+struct WasmTransparencySignedTreeHead {
+    epoch: u64,
+    tree_size: u64,
+    root_hash: String,
+    signature: String,
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[derive(Deserialize)]
+struct WasmTransparencyProofDocument {
+    leaf: WasmTransparencyLeafRecord,
+    inclusion_proof: WasmTransparencyInclusionProof,
+    signed_tree_head: WasmTransparencySignedTreeHead,
+    consistency_proof: Option<WasmTransparencyConsistencyProof>,
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[derive(Serialize)]
+struct WasmTransparencyVerificationResult {
+    verified: bool,
+    consistency_verified: bool,
+    leaf_user_id: String,
+    leaf_version: u64,
+    tree_size: u64,
+    epoch: u64,
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+fn parse_transparency_leaf(value: WasmTransparencyLeafRecord) -> Result<TransparencyLeaf, JsValue> {
+    Ok(TransparencyLeaf {
+        user_id: value.user_id,
+        version: value.version,
+        identity_x25519_pub: decode_b64_32(
+            "transparency.leaf.identity_x25519_pub",
+            &value.identity_x25519_pub,
+        )?,
+        identity_sig_pub: decode_b64(
+            "transparency.leaf.identity_sig_pub",
+            &value.identity_sig_pub,
+        )?,
+        identity_pq_sig_pub: value
+            .identity_pq_sig_pub
+            .as_ref()
+            .map(|raw| decode_b64("transparency.leaf.identity_pq_sig_pub", raw))
+            .transpose()?,
+        timestamp: value.timestamp,
+    })
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+fn parse_transparency_sth(
+    value: WasmTransparencySignedTreeHead,
+) -> Result<SignedTreeHead, JsValue> {
+    Ok(SignedTreeHead {
+        epoch: value.epoch,
+        tree_size: value.tree_size,
+        root_hash: decode_b64_32("transparency.signed_tree_head.root_hash", &value.root_hash)?,
+        signature: decode_b64("transparency.signed_tree_head.signature", &value.signature)?,
+    })
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[wasm_bindgen]
+pub fn wasm_verify_transparency_proof(
+    proof_json: &str,
+    server_pub_key_b64: &str,
+    previous_sth_json: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let document: WasmTransparencyProofDocument =
+        serde_json::from_str(proof_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let leaf = parse_transparency_leaf(document.leaf)?;
+    let inclusion_proof = InclusionProof {
+        leaf_index: document.inclusion_proof.leaf_index,
+        path: document
+            .inclusion_proof
+            .path
+            .into_iter()
+            .map(|item| {
+                Ok((
+                    decode_b64_32("transparency.inclusion_proof.path.hash", &item.hash)?,
+                    item.is_left,
+                ))
+            })
+            .collect::<Result<Vec<_>, JsValue>>()?,
+    };
+    let sth = parse_transparency_sth(document.signed_tree_head)?;
+    let server_pub_key = VerifyingKey::from_bytes(&decode_b64_32(
+        "transparency.server_pub_key",
+        server_pub_key_b64,
+    )?)
+    .map_err(|_| JsValue::from_str("invalid transparency server public key"))?;
+    verify_inclusion_proof(&leaf.hash(), &inclusion_proof, &sth, &server_pub_key)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let mut consistency_verified = false;
+    if let Some(previous_sth_json) = previous_sth_json {
+        let previous_sth_value: WasmTransparencySignedTreeHead =
+            serde_json::from_str(&previous_sth_json)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let previous_sth = parse_transparency_sth(previous_sth_value)?;
+        if let Some(consistency) = document.consistency_proof {
+            let proof = ConsistencyProof {
+                old_size: consistency.old_size,
+                new_size: consistency.new_size,
+                proof_hashes: consistency
+                    .proof_hashes
+                    .into_iter()
+                    .map(|hash| decode_b64_32("transparency.consistency_proof.hash", &hash))
+                    .collect::<Result<Vec<_>, JsValue>>()?,
+            };
+            verify_consistency_proof(&previous_sth, &sth, &proof, &server_pub_key)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            consistency_verified = true;
+        }
+    }
+
+    serde_wasm_bindgen::to_value(&WasmTransparencyVerificationResult {
+        verified: true,
+        consistency_verified,
+        leaf_user_id: leaf.user_id,
+        leaf_version: leaf.version,
+        tree_size: sth.tree_size,
+        epoch: sth.epoch,
+    })
+    .map_err(|e| JsValue::from_str(&e.to_string()))
+}
 
 /// Generate an ML-KEM-768 keypair. Returns JSON: {public_key: number[], secret_key: number[]}.
 #[wasm_bindgen]

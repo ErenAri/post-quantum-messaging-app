@@ -156,6 +156,15 @@ export type CertifiedSealedTransportResult = {
   payloadMessageBytesBase64: string;
 };
 
+export type TransparencyVerificationResult = {
+  verified: boolean;
+  consistencyVerified: boolean;
+  leafUserId: string;
+  leafVersion: number;
+  treeSize: number;
+  epoch: number;
+};
+
 export function generateIdentityKeys(
   userId: string,
   deviceId: string,
@@ -1083,6 +1092,42 @@ export function openTransportEnvelopeWithSenderCert(
     senderUserId: result.sender_user_id,
     senderDeviceId: result.sender_device_id,
     payloadMessageBytesBase64: result.payload_message_bytes_base64,
+  };
+}
+
+export function computeSafetyNumber(
+  keys: GeneratedKeys,
+  peerUserId: string,
+  peerIdentityX25519PubB64: string,
+  peerIdentityPqSigPubB64: string
+): string {
+  return wasmCrypto.computeSafetyNumber(
+    keys.userId,
+    keys.identityX25519Pub,
+    keys.identityPqSigPub,
+    peerUserId,
+    peerIdentityX25519PubB64,
+    peerIdentityPqSigPubB64
+  );
+}
+
+export function verifyTransparencyProof(
+  proofJson: string,
+  serverPubKeyB64: string,
+  previousSthJson?: string | null,
+): TransparencyVerificationResult {
+  const result = wasmCrypto.verifyTransparencyProof(
+    proofJson,
+    serverPubKeyB64,
+    previousSthJson ?? null,
+  );
+  return {
+    verified: result.verified,
+    consistencyVerified: result.consistency_verified,
+    leafUserId: result.leaf_user_id,
+    leafVersion: result.leaf_version,
+    treeSize: result.tree_size,
+    epoch: result.epoch,
   };
 }
 

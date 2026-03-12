@@ -193,8 +193,9 @@ export type ContactEntry = {
   contact_user_id: string;
   alias: string | null;
   verified_by_qr: boolean;
-  fingerprint: string | null;
-  added_at: string;
+  verified_fingerprint_sha256: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type ContactsListResponse = {
@@ -205,7 +206,7 @@ export type UpsertContactRequest = {
   contact_user_id: string;
   alias?: string;
   verified_by_qr?: boolean;
-  fingerprint?: string;
+  verified_fingerprint_sha256?: string;
 };
 
 export type RemoveContactRequest = {
@@ -371,6 +372,46 @@ export type IdentityLogItem = {
 export type IdentityLogResponse = {
   user_id: string;
   events: IdentityLogItem[];
+};
+
+export type TransparencyLeafRecord = {
+  user_id: string;
+  version: number;
+  identity_x25519_pub: string;
+  identity_sig_pub: string;
+  identity_pq_sig_pub: string | null;
+  timestamp: number;
+};
+
+export type TransparencyPathItem = {
+  hash: string;
+  is_left: boolean;
+};
+
+export type TransparencyInclusionProofResponse = {
+  leaf_index: number;
+  path: TransparencyPathItem[];
+};
+
+export type TransparencyConsistencyProofResponse = {
+  old_size: number;
+  new_size: number;
+  proof_hashes: string[];
+};
+
+export type TransparencySignedTreeHeadResponse = {
+  epoch: number;
+  tree_size: number;
+  root_hash: string;
+  signature: string;
+};
+
+export type TransparencyProofResponse = {
+  user_id: string;
+  leaf: TransparencyLeafRecord;
+  inclusion_proof: TransparencyInclusionProofResponse;
+  signed_tree_head: TransparencySignedTreeHeadResponse;
+  consistency_proof: TransparencyConsistencyProofResponse | null;
 };
 
 export type SealedRelayRequest = {
@@ -580,8 +621,10 @@ export type ServerCapabilitiesResponse = {
   group_messaging_supported: boolean;
   sealed_sender_required: boolean;
   sender_certificate_supported: boolean;
+  key_transparency_supported: boolean;
   sealed_delivery_tokens_supported: boolean;
   sender_certificate_issuer_ed25519_pub: string;
+  transparency_log_issuer_ed25519_pub: string;
   authenticated_direct_messaging_supported: boolean;
   ephemeral_messaging_supported: boolean;
   web_client_policy: string;
@@ -605,6 +648,21 @@ export class PqmsgApi {
 
   async getCapabilities(): Promise<ServerCapabilitiesResponse> {
     return this.request<ServerCapabilitiesResponse>("GET", "/v1/capabilities", undefined, {});
+  }
+
+  async getTransparencyProof(
+    userId: string,
+    previousTreeSize?: number,
+  ): Promise<TransparencyProofResponse> {
+    const query = previousTreeSize && previousTreeSize > 0
+      ? `?previous_tree_size=${encodeURIComponent(String(previousTreeSize))}`
+      : "";
+    return this.request<TransparencyProofResponse>(
+      "GET",
+      `/v1/transparency/users/${encodeURIComponent(userId)}/proof${query}`,
+      undefined,
+      {},
+    );
   }
 
   async registerUser(payload: RegisterUserRequest): Promise<RegisterUserResponse> {

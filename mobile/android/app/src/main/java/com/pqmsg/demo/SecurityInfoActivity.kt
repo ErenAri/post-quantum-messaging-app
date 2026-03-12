@@ -12,6 +12,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
+import com.google.gson.Gson
 import kotlinx.coroutines.launch
 import uniffi.pqmsg_android.Suite
 import uniffi.pqmsg_android.activeCryptoProfile
@@ -29,6 +30,7 @@ import uniffi.pqmsg_android.buildPublishPrekeysPayload
 import uniffi.pqmsg_android.generateIdentityKeys
 import uniffi.pqmsg_android.loadUserProfile
 import uniffi.pqmsg_android.prepareSecondaryDevicePackage
+import uniffi.pqmsg_android.verifyTransparencyProof
 
 class SecurityInfoActivity : AppCompatActivity() {
     private lateinit var store: LocalStateStore
@@ -56,6 +58,10 @@ class SecurityInfoActivity : AppCompatActivity() {
     private lateinit var localStateText: TextView
     private var lastDeviceSnapshot: DeviceListResponse? = null
     private var lastIdentityLogSnapshot: IdentityLogResponse? = null
+    private var lastTransparencyProofSnapshot: TransparencyProofResponse? = null
+    private var lastTransparencyVerification: uniffi.pqmsg_android.TransparencyVerificationResult? = null
+    private var lastTransparencyUsedCheckpoint: Boolean = false
+    private val gson = Gson()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -93,12 +99,18 @@ class SecurityInfoActivity : AppCompatActivity() {
         serverInput.doAfterTextChanged {
             lastDeviceSnapshot = null
             lastIdentityLogSnapshot = null
+            lastTransparencyProofSnapshot = null
+            lastTransparencyVerification = null
+            lastTransparencyUsedCheckpoint = false
             renderSecurityInfo()
             syncActionAvailability()
         }
         userInput.doAfterTextChanged {
             lastDeviceSnapshot = null
             lastIdentityLogSnapshot = null
+            lastTransparencyProofSnapshot = null
+            lastTransparencyVerification = null
+            lastTransparencyUsedCheckpoint = false
             if (managedDeviceInput.text.toString().trim().isBlank()) {
                 managedDeviceInput.setText(defaultManagedDeviceId(it?.toString().orEmpty().trim()))
             }
@@ -369,7 +381,51 @@ class SecurityInfoActivity : AppCompatActivity() {
             "identity log response user mismatch: expected '$user' got '${response.user_id}'"
         }
         lastIdentityLogSnapshot = response
-        return "Loaded ${response.events.size} identity event(s) for ${response.user_id}"
+        val previousCheckpointJson = store.readTransparencyCheckpoint(
+            serverInput.text.toString().trim(),
+            user,
+        )
+        lastTransparencyUsedCheckpoint = !previousCheckpointJson.isNullOrBlank()
+        val previousTreeSize = previousCheckpointJson?.let {
+            runCatching {
+                gson.fromJson(it, TransparencySignedTreeHeadResponse::class.java).tree_size
+            }.getOrNull()
+        }
+        val proof = context.api.getTransparencyProof(
+            userId = user,
+            previousTreeSize = previousTreeSize,
+        )
+        check(proof.user_id == user) {
+            "transparency proof response user mismatch: expected '$user' got '${proof.user_id}'"
+        }
+        val verification = verifyTransparencyProof(
+            gson.toJson(proof),
+            context.capabilities.transparency_log_issuer_ed25519_pub,
+            previousCheckpointJson,
+        )
+        response.events.firstOrNull()?.let { latest ->
+            check(latest.version.toULong() == verification.leafVersion) {
+                "identity log latest version ${latest.version} does not match transparency leaf ${verification.leafVersion}"
+            }
+            check(latest.identity_x25519_pub == proof.leaf.identity_x25519_pub) {
+                "identity log and transparency leaf x25519 keys do not match"
+            }
+            check((latest.identity_pq_sig_pub ?: "") == (proof.leaf.identity_pq_sig_pub ?: "")) {
+                "identity log and transparency leaf PQ identity keys do not match"
+            }
+        }
+        store.writeTransparencyCheckpoint(
+            serverInput.text.toString().trim(),
+            user,
+            gson.toJson(proof.signed_tree_head),
+        )
+        lastTransparencyProofSnapshot = proof
+        lastTransparencyVerification = verification
+        return if (verification.consistencyVerified) {
+            "Loaded ${response.events.size} identity event(s) for ${response.user_id} and verified append-only transparency growth"
+        } else {
+            "Loaded ${response.events.size} identity event(s) for ${response.user_id} and verified the current transparency proof"
+        }
     }
 
     private suspend fun rotateIdentity(): String {
@@ -566,6 +622,22 @@ class SecurityInfoActivity : AppCompatActivity() {
         }
         return buildString {
             append("Identity Log\n")
+            lastTransparencyVerification?.let { verification ->
+                append(
+                    "Transparency: verified v${verification.leafVersion} in tree #${verification.treeSize}"
+                )
+                append('\n')
+                append(
+                    if (lastTransparencyUsedCheckpoint && verification.consistencyVerified) {
+                        "Append-only growth verified against the saved checkpoint"
+                    } else if (lastTransparencyUsedCheckpoint) {
+                        "Current proof verified, but append-only growth was not checked"
+                    } else {
+                        "First verified transparency checkpoint saved on this device"
+                    }
+                )
+                append('\n')
+            }
             append(
                 snapshot.events.joinToString("\n") { event ->
                     "v${event.version} ${event.event_type} ${event.device_id} ${event.changed_at}"

@@ -311,6 +311,7 @@ describe("identity pins", () => {
     identityKeyVersion: 1,
     identityX25519Pub: "x25519-pub",
     identitySigPub: "pubkey",
+    identityPqSigPub: "pq-pubkey",
     observedAt: "2025-01-01T00:00:00Z",
   };
 
@@ -343,6 +344,25 @@ describe("identity pins", () => {
     writeIdentityPin("alice", "bob", pin);
     expect(readIdentityPin("eve", "bob")).toBeNull();
     expect(listIdentityPins("eve")).toHaveLength(0);
+  });
+
+  it("defaults missing PQ identity material for legacy pins", async () => {
+    metadataCache.set(
+      "pqmsg.web.pins.v1",
+      JSON.stringify([
+        {
+          userId: "alice",
+          peerUserId: "bob",
+          fingerprintSha256: "legacy",
+          identityKeyVersion: 1,
+          identityX25519Pub: "x25519-pub",
+          identitySigPub: "sig-pub",
+          observedAt: "2025-01-01T00:00:00Z",
+        },
+      ])
+    );
+    await initMetadataStorage();
+    expect(readIdentityPin("alice", "bob")?.identityPqSigPub).toBe("");
   });
 });
 

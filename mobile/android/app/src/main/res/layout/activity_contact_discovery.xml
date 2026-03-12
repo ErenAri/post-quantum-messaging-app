@@ -40,6 +40,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="10dp"
+                android:text="@string/contacts_manual_only_notice"
                 android:textAppearance="@style/TextAppearance.MaterialComponents.Body1"
                 android:textColor="@color/pq_surface" />
         </LinearLayout>
@@ -67,7 +68,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:hint="@string/hint_contact_user_id">
+                android:hint="@string/hint_username_or_invite">
 
                 <com.google.android.material.textfield.TextInputEditText
                     android:id="@+id/editContactUserId"

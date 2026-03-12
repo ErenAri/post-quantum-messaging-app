@@ -22,6 +22,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import uniffi.pqmsg_android.ServerBundle
+import uniffi.pqmsg_android.buildContactsListAuthHeaders
 import uniffi.pqmsg_android.buildContactsUpsertAuthHeaders
 import uniffi.pqmsg_android.buildProfileGetAuthHeaders
 import uniffi.pqmsg_android.buildPresenceGetAuthHeaders
@@ -30,11 +31,11 @@ import uniffi.pqmsg_android.buildSendReceiptAuthHeaders
 import uniffi.pqmsg_android.buildSenderCertificateAuthHeaders
 import uniffi.pqmsg_android.buildTypingGetAuthHeaders
 import uniffi.pqmsg_android.buildTypingUpdateAuthHeaders
+import uniffi.pqmsg_android.computeSafetyNumberWithPeer
 import uniffi.pqmsg_android.encryptWithSession
 import uniffi.pqmsg_android.initiateSessionAndEncrypt
 import uniffi.pqmsg_android.sealMessageWithSenderCert
 import java.io.ByteArrayOutputStream
-import java.security.MessageDigest
 import java.text.DateFormat
 import java.util.Base64
 import java.util.Date
@@ -48,6 +49,7 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var clearAttachmentButton: Button
     private lateinit var sendButton: Button
     private lateinit var syncButton: Button
+    private lateinit var verifySafetyButton: Button
     private lateinit var backButton: Button
     private lateinit var chatLogScroll: NestedScrollView
     private lateinit var chatLog: TextView
@@ -120,6 +122,7 @@ class ChatActivity : AppCompatActivity() {
         clearAttachmentButton = findViewById(R.id.buttonClearAttachment)
         sendButton = findViewById(R.id.buttonSend)
         syncButton = findViewById(R.id.buttonSyncThread)
+        verifySafetyButton = findViewById(R.id.buttonVerifySafetyNumber)
         backButton = findViewById(R.id.buttonBackSetup)
         chatLogScroll = findViewById(R.id.scrollChatLog)
         chatLog = findViewById(R.id.textChatLog)
@@ -149,6 +152,14 @@ class ChatActivity : AppCompatActivity() {
 
         syncButton.setOnClickListener {
             syncThread()
+        }
+
+        verifySafetyButton.setOnClickListener {
+            lifecycleScope.launch {
+                runAction("Verify safety number") {
+                    verifySafetyNumberFlow()
+                }
+            }
         }
 
         backButton.setOnClickListener {
@@ -330,6 +341,12 @@ class ChatActivity : AppCompatActivity() {
             localUserId = context.profile.userId,
             peerUserId = activePeerUserId,
         )
+        MessagingCoordinator.ensurePeerTransparencyVerified(
+            store = store,
+            context = context,
+            peerUserId = activePeerUserId,
+            bundleOverride = latestBundle,
+        )
         val senderCertificateBase64 = context.api.getSenderCertificate(
             context.profile.userId,
             buildSenderCertificateAuthHeaders(
@@ -429,6 +446,102 @@ class ChatActivity : AppCompatActivity() {
             ?: error("Direct messaging requires adding this user as a contact first")
     }
 
+    private suspend fun ensurePeerIdentityPinForTrust(
+        context: ReadyMessagingContext,
+        localUserId: String,
+        peerUserId: String,
+    ): IdentityPin {
+        val existing = store.readIdentityPin(localUserId, peerUserId)
+        if (existing?.identityPqSigPub?.isNotBlank() == true) {
+            return existing
+        }
+        val fetched = latestBundle ?: context.api.getBundle(peerUserId).also {
+            latestBundle = it
+            store.writeBundleFetchedAt(localUserId, peerUserId, it.bundle_generated_at)
+        }
+        enforceIdentityPin(localUserId, peerUserId, fetched)
+        return store.readIdentityPin(localUserId, peerUserId)
+            ?: error("Unable to pin peer identity for $peerUserId")
+    }
+
+    private suspend fun verifySafetyNumberFlow() {
+        val setup = currentSetup()
+        val context = MessagingCoordinator.ensureReady(
+            store = store,
+            serverUrl = setup.serverUrl,
+            userId = setup.userId,
+            suiteLabel = setup.suiteLabel,
+            deviceId = setup.deviceId,
+            pushToken = "",
+        )
+        val pin = ensurePeerIdentityPinForTrust(context, context.profile.userId, activePeerUserId)
+        if (pin.identityPqSigPub.isBlank()) {
+            error("Peer PQ identity key is unavailable for safety-number verification")
+        }
+        val safetyNumber = computeSafetyNumberWithPeer(
+            keysJson = context.keysJson,
+            peerUserId = activePeerUserId,
+            peerIdentityX25519PubB64 = pin.identityX25519Pub,
+            peerIdentityPqSigPubB64 = pin.identityPqSigPub,
+        )
+        val contacts = context.api.listContacts(
+            userId = context.profile.userId,
+            headers = buildContactsListAuthHeaders(
+                keysJson = context.keysJson,
+                userId = context.profile.userId,
+            ).toHeaderMap(),
+        ).contacts
+        val existingContact = contacts.find { it.contact_user_id == activePeerUserId }
+        val alreadyVerified =
+            existingContact?.verified_by_qr == true &&
+                existingContact.verified_fingerprint_sha256
+                    ?.trim()
+                    ?.lowercase() == pin.fingerprintSha256.trim().lowercase()
+        if (alreadyVerified) {
+            AlertDialog.Builder(this)
+                .setTitle(R.string.safety_number_dialog_title)
+                .setMessage(
+                    getString(
+                        R.string.safety_number_dialog_body,
+                        activePeerUserId,
+                        safetyNumber,
+                    ) + "\n\n" + getString(R.string.safety_number_dialog_verified_note),
+                )
+                .setPositiveButton(R.string.button_close, null)
+                .show()
+            return
+        }
+        val accepted = confirmSafetyNumberVerification(activePeerUserId, safetyNumber)
+        if (!accepted) {
+            return
+        }
+        val aliasForHeaders = existingContact?.alias?.takeIf { it.isNotBlank() } ?: activePeerUserId
+        context.api.upsertContact(
+            userId = context.profile.userId,
+            headers = buildContactsUpsertAuthHeaders(
+                keysJson = context.keysJson,
+                userId = context.profile.userId,
+                contactUserId = activePeerUserId,
+                alias = aliasForHeaders,
+                verifiedByQr = true,
+                verifiedFingerprintSha256 = pin.fingerprintSha256,
+            ).toHeaderMap(),
+            request = UpsertContactRequest(
+                contact_user_id = activePeerUserId,
+                alias = existingContact?.alias,
+                verified_by_qr = true,
+                verified_fingerprint_sha256 = pin.fingerprintSha256,
+            ),
+        )
+        store.markPeerAccepted(context.profile.userId, activePeerUserId)
+        AlertDialog.Builder(this)
+            .setTitle(R.string.safety_number_dialog_title)
+            .setMessage(getString(R.string.safety_number_verified_message))
+            .setPositiveButton(R.string.button_close, null)
+            .show()
+        refreshMeta()
+    }
+
     private fun syncThread() {
         if (syncInFlight) {
             return
@@ -463,6 +576,7 @@ class ChatActivity : AppCompatActivity() {
         val observedVersion = bundle.identity_key_version ?: 1
         val observedX25519Pub = bundle.identity_x25519_pub
         val observedSigPub = bundle.identity_sig_pub
+        val observedPqSigPub = bundle.identity_pq_sig_pub
         val observedAt = bundle.bundle_generated_at
         val existing = store.readIdentityPin(localUser, peerUser)
         if (existing == null) {
@@ -474,6 +588,7 @@ class ChatActivity : AppCompatActivity() {
                     identityKeyVersion = observedVersion,
                     identityX25519Pub = observedX25519Pub,
                     identitySigPub = observedSigPub,
+                    identityPqSigPub = observedPqSigPub,
                     observedAt = observedAt,
                 ),
             )
@@ -484,7 +599,8 @@ class ChatActivity : AppCompatActivity() {
             if (
                 existing.identityKeyVersion != observedVersion ||
                     existing.identityX25519Pub != observedX25519Pub ||
-                    existing.identitySigPub != observedSigPub
+                    existing.identitySigPub != observedSigPub ||
+                    existing.identityPqSigPub != observedPqSigPub
             ) {
                 store.writeIdentityPin(
                     localUser,
@@ -494,6 +610,7 @@ class ChatActivity : AppCompatActivity() {
                         identityKeyVersion = observedVersion,
                         identityX25519Pub = observedX25519Pub,
                         identitySigPub = observedSigPub,
+                        identityPqSigPub = observedPqSigPub,
                         observedAt = observedAt,
                     ),
                 )
@@ -513,9 +630,47 @@ class ChatActivity : AppCompatActivity() {
                 identityKeyVersion = observedVersion,
                 identityX25519Pub = observedX25519Pub,
                 identitySigPub = observedSigPub,
+                identityPqSigPub = observedPqSigPub,
                 observedAt = observedAt,
             ),
         )
+    }
+
+    private suspend fun confirmSafetyNumberVerification(
+        peerUser: String,
+        safetyNumber: String,
+    ): Boolean {
+        return suspendCancellableCoroutine { continuation ->
+            val dialog = AlertDialog.Builder(this)
+                .setTitle(R.string.safety_number_dialog_title)
+                .setMessage(
+                    getString(
+                        R.string.safety_number_dialog_body,
+                        peerUser,
+                        safetyNumber,
+                    ),
+                )
+                .setPositiveButton(R.string.button_mark_verified) { _, _ ->
+                    if (continuation.isActive) {
+                        continuation.resume(true)
+                    }
+                }
+                .setNegativeButton(R.string.button_cancel) { _, _ ->
+                    if (continuation.isActive) {
+                        continuation.resume(false)
+                    }
+                }
+                .setOnCancelListener {
+                    if (continuation.isActive) {
+                        continuation.resume(false)
+                    }
+                }
+                .create()
+            dialog.show()
+            continuation.invokeOnCancellation {
+                dialog.dismiss()
+            }
+        }
     }
 
     private suspend fun confirmIdentityKeyChange(
@@ -566,23 +721,23 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private fun bundleIdentityFingerprint(bundle: BundleResponse): String {
-        val fromServer = bundle.identity_fingerprint_sha256?.trim()?.lowercase()
-        if (!fromServer.isNullOrEmpty()) {
-            return fromServer
-        }
-        val identityKey = Base64.getDecoder().decode(bundle.identity_x25519_pub)
-        val digest = MessageDigest.getInstance("SHA-256").digest(identityKey)
-        return digest.joinToString("") { "%02x".format(it) }
+        return MessagingCoordinator.bundleIdentityFingerprint(bundle)
     }
 
     private fun refreshMeta() {
         val setup = currentSetup()
         val cursor = store.readSealedCursor(setup.userId)
         val bundleFetched = store.readBundleFetchedAt(setup.userId, activePeerUserId)
+        val transparencyCheckpoint = store.readTransparencyCheckpoint(setup.serverUrl, activePeerUserId)
         val bundleLine = if (bundleFetched.isNullOrBlank()) {
             "Peer bundle is fetched automatically on first send."
         } else {
             "Peer bundle cached at $bundleFetched"
+        }
+        val transparencyLine = if (transparencyCheckpoint.isNullOrBlank()) {
+            "Peer transparency proof is checked automatically before encrypted traffic."
+        } else {
+            "Peer transparency checkpoint saved for this chat."
         }
         val syncSummary = if (syncInFlight) "Refreshing..." else "Ready"
         val protectionSummary = buildList {
@@ -598,7 +753,7 @@ class ChatActivity : AppCompatActivity() {
                 append(protectionSummary)
             }
         }
-        chatMeta.text = "$activePeerUserId | metadata minimized\n$bundleLine\n$statusSummary"
+        chatMeta.text = "$activePeerUserId | metadata minimized\n$bundleLine\n$transparencyLine\n$statusSummary"
     }
 
     private fun renderThreadHistory() {
@@ -624,6 +779,7 @@ class ChatActivity : AppCompatActivity() {
         sendButton.isEnabled = hasPayload && hasIdentity && !syncInFlight
         clearAttachmentButton.isEnabled = pendingAttachment != null
         syncButton.isEnabled = hasIdentity && !syncInFlight
+        verifySafetyButton.isEnabled = hasIdentity && !syncInFlight
     }
 
     private fun hasIdentity(): Boolean {

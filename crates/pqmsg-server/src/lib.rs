@@ -492,6 +492,10 @@ impl AppState {
         true
     }
 
+    pub fn key_transparency_supported(&self) -> bool {
+        true
+    }
+
     pub fn sender_certificate_signing_key(&self) -> &SigningKey {
         self.sender_certificate_signing_key.as_ref()
     }
@@ -502,6 +506,10 @@ impl AppState {
                 .verifying_key()
                 .to_bytes(),
         )
+    }
+
+    pub fn transparency_log_issuer_public_key_b64(&self) -> String {
+        self.sender_certificate_issuer_public_key_b64()
     }
 
     pub fn authenticated_direct_messaging_supported(&self) -> bool {
@@ -1977,6 +1985,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/users/:user_id/rotate/init", post(rotate_init))
         .route("/v1/users/:user_id/rotate/confirm", post(rotate_confirm))
         .route("/v1/users/:user_id/identity-log", get(get_identity_log))
+        .route(
+            "/v1/transparency/users/:user_id/proof",
+            get(get_transparency_proof),
+        )
         .route(
             "/v1/users/:user_id/sender-certificate",
             get(issue_sender_certificate),

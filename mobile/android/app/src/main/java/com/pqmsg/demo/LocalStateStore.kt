@@ -24,6 +24,7 @@ data class IdentityPin(
     val identityKeyVersion: Int,
     val identityX25519Pub: String,
     val identitySigPub: String,
+    val identityPqSigPub: String,
     val observedAt: String,
 )
 
@@ -222,6 +223,18 @@ class LocalStateStore(context: Context) {
         removeLegacyKeys("sealed_cursor_$userId")
     }
 
+    fun readTransparencyCheckpoint(serverUrl: String, userId: String): String? {
+        return getNullableString(transparencyCheckpointKey(serverUrl, userId))
+    }
+
+    fun writeTransparencyCheckpoint(serverUrl: String, userId: String, checkpointJson: String) {
+        val key = transparencyCheckpointKey(serverUrl, userId)
+        prefs.edit()
+            .putString(key, checkpointJson)
+            .apply()
+        removeLegacyKeys(key)
+    }
+
     fun readPeerLastMessageId(userId: String, peerUserId: String): Long {
         return getLong("peer_last_${userId}_$peerUserId", 0L)
     }
@@ -264,6 +277,7 @@ class LocalStateStore(context: Context) {
             identityKeyVersion = getInt("${keyBase}_ver", 1),
             identityX25519Pub = getString("${keyBase}_x25519", ""),
             identitySigPub = getString("${keyBase}_sig", ""),
+            identityPqSigPub = getString("${keyBase}_pq_sig", ""),
             observedAt = getString("${keyBase}_at", ""),
         )
     }
@@ -275,6 +289,7 @@ class LocalStateStore(context: Context) {
             .putInt("${keyBase}_ver", pin.identityKeyVersion)
             .putString("${keyBase}_x25519", pin.identityX25519Pub)
             .putString("${keyBase}_sig", pin.identitySigPub)
+            .putString("${keyBase}_pq_sig", pin.identityPqSigPub)
             .putString("${keyBase}_at", pin.observedAt)
             .apply()
         removeLegacyKeys(
@@ -282,6 +297,7 @@ class LocalStateStore(context: Context) {
             "${keyBase}_ver",
             "${keyBase}_x25519",
             "${keyBase}_sig",
+            "${keyBase}_pq_sig",
             "${keyBase}_at",
         )
     }
@@ -704,6 +720,7 @@ class LocalStateStore(context: Context) {
         deletePath(File(rootDir, "outbox/$userId.json"))
         messageStore.clearUser(userId)
         removePrefsForUser(userId)
+        clearTransparencyCheckpoints(userId)
 
         val currentSetup = loadSetup()
         if (currentSetup.userId == userId) {
@@ -754,6 +771,18 @@ class LocalStateStore(context: Context) {
         }
         messageStore.importOutboxItems(userId, legacy)
         deletePath(path)
+    }
+
+    private fun clearTransparencyCheckpoints(userId: String) {
+        val editor = prefs.edit()
+        prefs.all.keys
+            .filter { it.startsWith("transparency_") && it.endsWith("_${userId}") }
+            .forEach(editor::remove)
+        editor.apply()
+    }
+
+    private fun transparencyCheckpointKey(serverUrl: String, userId: String): String {
+        return "transparency_${serverUrl.trim()}_${userId.trim()}"
     }
 
     private inline fun <reified T> readLegacyList(path: File): List<T> {

@@ -58,6 +58,14 @@
                     android:layout_height="wrap_content"
                     android:text="@string/button_sync_thread" />
 
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonVerifySafetyNumber"
+                    style="@style/Widget.PQMsg.Button.Secondary"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:text="@string/button_verify_safety_number" />
+
                 <TextView
                     android:id="@+id/textChatBetaScope"
                     android:layout_width="0dp"

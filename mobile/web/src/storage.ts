@@ -62,7 +62,15 @@ export type IdentityPin = {
   identityKeyVersion: number;
   identityX25519Pub: string;
   identitySigPub: string;
+  identityPqSigPub: string;
   observedAt: string;
+};
+
+export type TransparencyCheckpoint = {
+  epoch: number;
+  tree_size: number;
+  root_hash: string;
+  signature: string;
 };
 
 const SETUP_KEY = "pqmsg.web.setup.v1";
@@ -72,6 +80,7 @@ const CONVERSATION_META_KEY = "pqmsg.web.conversationmeta.v1";
 const PROFILE_CACHE_KEY = "pqmsg.web.profilecache.v1";
 const PINS_KEY = "pqmsg.web.pins.v1";
 const CURSORS_KEY = "pqmsg.web.cursors.v1";
+const TRANSPARENCY_KEY = "pqmsg.web.transparency.v1";
 const METADATA_KEYS = [
   SETUP_KEY,
   CONVERSATIONS_KEY,
@@ -80,6 +89,7 @@ const METADATA_KEYS = [
   PROFILE_CACHE_KEY,
   PINS_KEY,
   CURSORS_KEY,
+  TRANSPARENCY_KEY,
 ] as const;
 const metadataCache = new Map<string, string | null>();
 const localKeyUsers = new Set<string>();
@@ -404,6 +414,24 @@ export function writeSealedCursor(userId: string, cursor: number, deviceId?: str
   writeCursor(userId, cursor, sealedKey);
 }
 
+export function readTransparencyCheckpoint(
+  serverUrl: string,
+  userId: string,
+): TransparencyCheckpoint | null {
+  const checkpoints = parseRecord<Record<string, TransparencyCheckpoint>>(TRANSPARENCY_KEY, {});
+  return checkpoints[`${serverUrl.trim()}::${userId.trim()}`] ?? null;
+}
+
+export function writeTransparencyCheckpoint(
+  serverUrl: string,
+  userId: string,
+  checkpoint: TransparencyCheckpoint,
+): void {
+  const checkpoints = parseRecord<Record<string, TransparencyCheckpoint>>(TRANSPARENCY_KEY, {});
+  checkpoints[`${serverUrl.trim()}::${userId.trim()}`] = checkpoint;
+  writeRecord(TRANSPARENCY_KEY, checkpoints);
+}
+
 type PinRow = IdentityPin & { userId: string; peerUserId: string };
 
 export function readIdentityPin(userId: string, peerUserId: string): IdentityPin | null {
@@ -417,6 +445,7 @@ export function readIdentityPin(userId: string, peerUserId: string): IdentityPin
     identityKeyVersion: found.identityKeyVersion,
     identityX25519Pub: found.identityX25519Pub,
     identitySigPub: found.identitySigPub,
+    identityPqSigPub: typeof found.identityPqSigPub === "string" ? found.identityPqSigPub : "",
     observedAt: found.observedAt
   };
 }
@@ -444,6 +473,7 @@ export function listIdentityPins(userId: string): Array<{ peerUserId: string; pi
         identityKeyVersion: item.identityKeyVersion,
         identityX25519Pub: item.identityX25519Pub,
         identitySigPub: item.identitySigPub,
+        identityPqSigPub: typeof item.identityPqSigPub === "string" ? item.identityPqSigPub : "",
         observedAt: item.observedAt
       }
     }))
@@ -537,6 +567,14 @@ export async function wipeLocalState(userId: string): Promise<void> {
     }
   }
   writeRecord(CURSORS_KEY, cursors);
+
+  const checkpoints = parseRecord<Record<string, TransparencyCheckpoint>>(TRANSPARENCY_KEY, {});
+  for (const checkpointKey of Object.keys(checkpoints)) {
+    if (checkpointKey.endsWith(`::${normalizedUser}`)) {
+      delete checkpoints[checkpointKey];
+    }
+  }
+  writeRecord(TRANSPARENCY_KEY, checkpoints);
 
   await clearAllDirectMessageSessions(normalizedUser);
 }

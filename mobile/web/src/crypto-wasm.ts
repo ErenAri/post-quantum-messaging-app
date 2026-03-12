@@ -81,6 +81,15 @@ export interface WasmOpenedCertifiedSealedMessage {
   payload_message_bytes_base64: string;
 }
 
+export interface WasmTransparencyVerificationResult {
+  verified: boolean;
+  consistency_verified: boolean;
+  leaf_user_id: string;
+  leaf_version: number;
+  tree_size: number;
+  epoch: number;
+}
+
 export interface KemKeyPair {
   public_key: Uint8Array;
   secret_key: Uint8Array;
@@ -187,6 +196,42 @@ export function unwrapSecret(passphrase: string, wrappedJson: Uint8Array): Uint8
 export function conversationAd(sender: string, recipient: string): Uint8Array {
   if (!wasmModule) throw new Error("WASM not initialized");
   return wasmModule.wasm_conversation_ad(sender, recipient) as unknown as Uint8Array;
+}
+
+export function computeSafetyNumber(
+  localUserId: string,
+  localIdentityX25519PubB64: string,
+  localIdentityPqSigPubB64: string,
+  peerUserId: string,
+  peerIdentityX25519PubB64: string,
+  peerIdentityPqSigPubB64: string
+): string {
+  if (!wasmModule || typeof wasmModule.wasm_compute_safety_number !== "function") {
+    throw new Error("WASM PQ runtime is required to compute safety numbers");
+  }
+  return wasmModule.wasm_compute_safety_number(
+    localUserId,
+    localIdentityX25519PubB64,
+    localIdentityPqSigPubB64,
+    peerUserId,
+    peerIdentityX25519PubB64,
+    peerIdentityPqSigPubB64
+  ) as string;
+}
+
+export function verifyTransparencyProof(
+  proofJson: string,
+  serverPubKeyB64: string,
+  previousSthJson?: string | null,
+): WasmTransparencyVerificationResult {
+  if (!wasmModule || typeof wasmModule.wasm_verify_transparency_proof !== "function") {
+    throw new Error("WASM PQ runtime is required to verify transparency proofs");
+  }
+  return wasmModule.wasm_verify_transparency_proof(
+    proofJson,
+    serverPubKeyB64,
+    previousSthJson ?? null,
+  ) as WasmTransparencyVerificationResult;
 }
 
 /** Check if PQ KEM operations are available in WASM. */

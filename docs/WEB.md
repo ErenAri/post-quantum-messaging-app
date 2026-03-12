@@ -4,10 +4,9 @@
 
 This document specifies the Web client demonstration and beta-holdback path for the PQ messaging prototype.
 
-The web client supports two crypto modes:
+The web client requires the WASM PQ runtime for messaging:
 
-- **WASM PQ mode**: real ML-KEM-768 key encapsulation and ML-DSA-65 signatures via compiled Rust WASM bindings,
-- **WebCrypto fallback mode**: browser-native Ed25519 request authentication, `PBKDF2 + AES-256-GCM` local storage, and `AES-256-GCM` message payloads.
+- **WASM PQ mode**: real ML-KEM-768 key encapsulation and ML-DSA-65 signatures via compiled Rust WASM bindings.
 
 The current release train does not treat the web client as a supported beta messaging client, and web calling is out of scope.
 
@@ -34,6 +33,8 @@ For the current beta:
 - Android is the supported messaging beta client.
 - Web remains demo-only.
 - Outbound web messaging is blocked whenever the server reports `web_client_policy = demo_only`.
+- Web messaging fails closed when the browser lacks HTTPS-or-loopback origin protection, IndexedDB, SubtleCrypto, WebAssembly, or text encoding support.
+- The SPA shell ships an explicit CSP and hardened browser response headers in the Vite dev/preview surface.
 - Calling is unavailable from the web UI.
 
 ## 3. Prerequisites
@@ -73,7 +74,7 @@ npm run preview
 2. Fetch peer bundle before first send.
 3. Review the server capability policy before treating web messaging as available.
 4. Poll inbox to decrypt.
-5. Review pinned identities and fallback profile in Security Snapshot.
+5. Review pinned identities and trust state in Security Snapshot.
 
 ## 7. PWA Shell Components
 
@@ -83,11 +84,7 @@ npm run preview
 
 ## 8. Interoperability Note
 
-Web fallback envelopes are intentionally explicit in wire mode:
-
-- `mode = webcrypto-fallback-v1`.
-
-Clients receiving unknown envelope modes should reject decode and continue polling.
+Web messaging requires the WASM PQ runtime. Legacy fallback envelopes are rejected on the hardened path.
 
 Do not treat the web client as part of the supported beta even when WASM PQ crypto is available. The Android messaging path remains the release baseline.
 

@@ -83,6 +83,7 @@ describe("PqmsgApi methods", () => {
       user_id: "alice",
       identity_x25519_pub: "pub",
       identity_sig_pub: "sig",
+      identity_pq_sig_pub: "pq-sig",
       device_id: "d1",
     });
     expect(result.user_id).toBe("alice");
@@ -305,6 +306,14 @@ describe("PqmsgApi methods", () => {
     const [url] = mockFetch.mock.calls[0];
     expect(url).toBe("http://localhost:8080/v1/capabilities");
   });
+
+  it("getTransparencyProof sends GET with optional previous_tree_size", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ user_id: "alice" }));
+    await api.getTransparencyProof("alice", 7);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("http://localhost:8080/v1/transparency/users/alice/proof?previous_tree_size=7");
+    expect(opts.method).toBe("GET");
+  });
 });
 
 describe("PqmsgApi error handling", () => {
@@ -316,6 +325,7 @@ describe("PqmsgApi error handling", () => {
       user_id: "x",
       identity_x25519_pub: "p",
       identity_sig_pub: "s",
+      identity_pq_sig_pub: "pq",
       device_id: "d",
     })).rejects.toThrow("HTTP 400: bad request");
   });
@@ -357,6 +367,7 @@ describe("PqmsgApi request body", () => {
       user_id: "alice",
       identity_x25519_pub: "pub",
       identity_sig_pub: "sig",
+      identity_pq_sig_pub: "pq-sig",
       device_id: "d1",
     });
     const [, opts] = mockFetch.mock.calls[0];
@@ -371,6 +382,7 @@ describe("PqmsgApi request body", () => {
       user_id: "alice",
       identity_x25519_pub: "pub",
       identity_sig_pub: "sig",
+      identity_pq_sig_pub: "pq-sig",
       device_id: "d1",
     });
     const [, opts] = mockFetch.mock.calls[0];

@@ -16,11 +16,16 @@ use pqmsg_core::handshake::{
     SignatureVerifier,
 };
 use pqmsg_core::kem::MlKem768;
+use pqmsg_core::key_transparency::{
+    verify_consistency_proof, verify_inclusion_proof, ConsistencyProof, InclusionProof,
+    SignedTreeHead, TransparencyLeaf,
+};
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
 use pqmsg_core::pq_sig::{MlDsa65, PqSignatureProvider};
 use pqmsg_core::ratchet::pq::{
     PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL, DEFAULT_PQ_RATCHET_KEY_HISTORY,
 };
+use pqmsg_core::safety_number::compute_safety_number;
 use pqmsg_core::sealed::{open_message_with_cert, seal_message_with_cert, SenderCertificate};
 use pqmsg_core::session::{SessionRole, SessionSnapshot, SessionState};
 use pqmsg_core::storage::{
@@ -212,6 +217,61 @@ pub struct RotateConfirmPayload {
     pub sig_by_new_identity: String,
     pub pq_sig_by_current_identity: String,
     pub pq_sig_by_new_identity: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TransparencyLeafRecord {
+    user_id: String,
+    version: u64,
+    identity_x25519_pub: String,
+    identity_sig_pub: String,
+    identity_pq_sig_pub: Option<String>,
+    timestamp: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TransparencyPathItem {
+    hash: String,
+    is_left: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TransparencyInclusionProofRecord {
+    leaf_index: u64,
+    path: Vec<TransparencyPathItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TransparencyConsistencyProofRecord {
+    old_size: u64,
+    new_size: u64,
+    proof_hashes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+pub struct TransparencySignedTreeHeadRecord {
+    pub epoch: u64,
+    pub tree_size: u64,
+    pub root_hash: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TransparencyProofDocument {
+    leaf: TransparencyLeafRecord,
+    inclusion_proof: TransparencyInclusionProofRecord,
+    signed_tree_head: TransparencySignedTreeHeadRecord,
+    consistency_proof: Option<TransparencyConsistencyProofRecord>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TransparencyVerificationResult {
+    pub verified: bool,
+    pub consistency_verified: bool,
+    pub leaf_user_id: String,
+    pub leaf_version: u64,
+    pub tree_size: u64,
+    pub epoch: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
@@ -748,6 +808,36 @@ pub fn load_user_profile(keys_json: String) -> Result<UserProfile, PqmsgAndroidE
 }
 
 #[uniffi::export]
+pub fn compute_safety_number_with_peer(
+    keys_json: String,
+    peer_user_id: String,
+    peer_identity_x25519_pub_b64: String,
+    peer_identity_pq_sig_pub_b64: String,
+) -> Result<String, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    let local_identity_x25519 =
+        decode_b64_32("identity_x25519_pub_b64", &keys.identity_x25519_pub_b64)?;
+    let peer_identity_x25519 = decode_b64_32(
+        "peer_identity_x25519_pub_b64",
+        &peer_identity_x25519_pub_b64,
+    )?;
+    let local_identity_pq_sig =
+        decode_b64("identity_pq_sig_pub_b64", &keys.identity_pq_sig_pub_b64)?;
+    let peer_identity_pq_sig = decode_b64(
+        "peer_identity_pq_sig_pub_b64",
+        &peer_identity_pq_sig_pub_b64,
+    )?;
+    Ok(compute_safety_number(
+        &keys.user_id,
+        &local_identity_x25519,
+        &local_identity_pq_sig,
+        &peer_user_id,
+        &peer_identity_x25519,
+        &peer_identity_pq_sig,
+    ))
+}
+
+#[uniffi::export]
 pub fn build_register_payload(keys_json: String) -> Result<RegisterPayload, PqmsgAndroidError> {
     let keys = read_keys_file(&keys_json)?;
     Ok(RegisterPayload {
@@ -1087,6 +1177,102 @@ pub fn build_identity_log_auth_headers(
         auth_timestamp: timestamp.to_string(),
         auth_nonce: nonce,
         auth_signature: B64.encode(signature),
+    })
+}
+
+fn parse_transparency_leaf(
+    record: TransparencyLeafRecord,
+) -> Result<TransparencyLeaf, PqmsgAndroidError> {
+    Ok(TransparencyLeaf {
+        user_id: record.user_id,
+        version: record.version,
+        identity_x25519_pub: decode_b64_32(
+            "transparency.leaf.identity_x25519_pub",
+            &record.identity_x25519_pub,
+        )?,
+        identity_sig_pub: decode_b64(
+            "transparency.leaf.identity_sig_pub",
+            &record.identity_sig_pub,
+        )?,
+        identity_pq_sig_pub: record
+            .identity_pq_sig_pub
+            .as_ref()
+            .map(|raw| decode_b64("transparency.leaf.identity_pq_sig_pub", raw))
+            .transpose()?,
+        timestamp: record.timestamp,
+    })
+}
+
+fn parse_transparency_sth(
+    record: TransparencySignedTreeHeadRecord,
+) -> Result<SignedTreeHead, PqmsgAndroidError> {
+    Ok(SignedTreeHead {
+        epoch: record.epoch,
+        tree_size: record.tree_size,
+        root_hash: decode_b64_32("transparency.signed_tree_head.root_hash", &record.root_hash)?,
+        signature: decode_b64("transparency.signed_tree_head.signature", &record.signature)?,
+    })
+}
+
+#[uniffi::export]
+pub fn verify_transparency_proof(
+    proof_json: String,
+    server_pub_key_b64: String,
+    previous_sth_json: Option<String>,
+) -> Result<TransparencyVerificationResult, PqmsgAndroidError> {
+    let document: TransparencyProofDocument = serde_json::from_str(&proof_json)?;
+    let leaf = parse_transparency_leaf(document.leaf)?;
+    let inclusion_proof = InclusionProof {
+        leaf_index: document.inclusion_proof.leaf_index,
+        path: document
+            .inclusion_proof
+            .path
+            .into_iter()
+            .map(|item| {
+                Ok((
+                    decode_b64_32("transparency.inclusion_proof.path.hash", &item.hash)?,
+                    item.is_left,
+                ))
+            })
+            .collect::<Result<Vec<_>, PqmsgAndroidError>>()?,
+    };
+    let sth = parse_transparency_sth(document.signed_tree_head)?;
+    let server_pub_key = VerifyingKey::from_bytes(&decode_b64_32(
+        "transparency.server_pub_key",
+        &server_pub_key_b64,
+    )?)
+    .map_err(|_| operation_failed("invalid transparency server public key"))?;
+    verify_inclusion_proof(&leaf.hash(), &inclusion_proof, &sth, &server_pub_key)
+        .map_err(|error| operation_failed(error.to_string()))?;
+
+    let mut consistency_verified = false;
+    if let Some(previous_sth_json) = previous_sth_json {
+        let previous_sth_record: TransparencySignedTreeHeadRecord =
+            serde_json::from_str(&previous_sth_json)?;
+        let previous_sth = parse_transparency_sth(previous_sth_record)?;
+        if let Some(consistency_record) = document.consistency_proof {
+            let proof = ConsistencyProof {
+                old_size: consistency_record.old_size,
+                new_size: consistency_record.new_size,
+                proof_hashes: consistency_record
+                    .proof_hashes
+                    .into_iter()
+                    .map(|hash| decode_b64_32("transparency.consistency_proof.hash", &hash))
+                    .collect::<Result<Vec<_>, PqmsgAndroidError>>()?,
+            };
+            verify_consistency_proof(&previous_sth, &sth, &proof, &server_pub_key)
+                .map_err(|error| operation_failed(error.to_string()))?;
+            consistency_verified = true;
+        }
+    }
+
+    Ok(TransparencyVerificationResult {
+        verified: true,
+        consistency_verified,
+        leaf_user_id: leaf.user_id,
+        leaf_version: leaf.version,
+        tree_size: sth.tree_size,
+        epoch: sth.epoch,
     })
 }
 
@@ -2667,6 +2853,28 @@ mod tests {
 
     fn tlv_transcript_from_records(records: Vec<TlvRecord>) -> Vec<u8> {
         encode(&records).expect("encode tlv transcript")
+    }
+
+    #[test]
+    fn compute_safety_number_with_peer_returns_numeric_groups() {
+        let keys_json = generate_identity_keys(
+            "alice".to_string(),
+            "alice-android-1".to_string(),
+            Suite::MlKem768,
+            8,
+        )
+        .expect("generate keys");
+        let safety_number = compute_safety_number_with_peer(
+            keys_json,
+            "bob".to_string(),
+            B64.encode([0x44; 32]),
+            B64.encode(vec![0x55; 1952]),
+        )
+        .expect("compute safety number");
+        assert_eq!(safety_number.split(' ').count(), 12);
+        assert!(safety_number
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == ' '));
     }
 
     #[test]

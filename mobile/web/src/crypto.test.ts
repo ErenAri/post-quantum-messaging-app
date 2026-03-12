@@ -25,6 +25,7 @@ vi.mock("./crypto-wasm", () => ({
   wrapSecret: vi.fn(),
   unwrapSecret: vi.fn(),
   conversationAd: vi.fn(),
+  computeSafetyNumber: vi.fn(() => "12345 12345 12345 12345 12345 12345 12345 12345 12345 12345 12345 12345"),
   initiateSessionAndEncrypt: vi.fn(),
   encryptWithSession: vi.fn(),
   decryptDirectMessage: vi.fn(),
@@ -69,6 +70,7 @@ import {
   openJsonWithPassphrase,
   encodeWireEnvelopeBase64,
   decodeWireEnvelopeBase64,
+  computeSafetyNumber,
   identityFingerprint,
   type GeneratedKeys,
   type WireEnvelope,
@@ -409,5 +411,14 @@ describe("identityFingerprint", () => {
     const keys = testKeys();
     expect(identityFingerprint(keys.identityX25519Pub))
       .not.toBe(identityFingerprint(keys.identityX25519Pub, keys.identityPqSigPub));
+  });
+});
+
+describe("computeSafetyNumber", () => {
+  it("delegates to the WASM safety-number implementation", () => {
+    const keys = testKeys();
+    expect(
+      computeSafetyNumber(keys, "bob", keys.identityX25519Pub, keys.identityPqSigPub)
+    ).toMatch(/^\d{5}( \d{5}){11}$/);
   });
 });
