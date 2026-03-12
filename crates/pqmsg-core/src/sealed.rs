@@ -99,12 +99,18 @@ impl SenderCertificate {
             "cert.sender_device_id",
         )?;
         let sender_identity_pub = parse_32(
-            require_from_map(&map, CERT_TAG_SENDER_IDENTITY_PUB, "cert.sender_identity_pub")?,
+            require_from_map(
+                &map,
+                CERT_TAG_SENDER_IDENTITY_PUB,
+                "cert.sender_identity_pub",
+            )?,
             "cert.sender_identity_pub",
         )?;
-        let expires_at = decode_u64(
-            require_from_map(&map, CERT_TAG_EXPIRES_AT, "cert.expires_at")?,
-        )?;
+        let expires_at = decode_u64(require_from_map(
+            &map,
+            CERT_TAG_EXPIRES_AT,
+            "cert.expires_at",
+        )?)?;
         let server_signature =
             require_from_map(&map, CERT_TAG_SERVER_SIGNATURE, "cert.server_signature")?.to_vec();
         Ok(Self {
@@ -748,9 +754,8 @@ mod tests {
         let alice_dh = generate_keypair(&mut rng);
         let bob_dh = generate_keypair(&mut rng);
         let suite_id = 1u16;
-        let key =
-            derive_pairwise_sealed_sender_key(&alice_dh.secret, &bob_dh.public, suite_id)
-                .expect("key");
+        let key = derive_pairwise_sealed_sender_key(&alice_dh.secret, &bob_dh.public, suite_id)
+            .expect("key");
 
         let server_key = SigningKey::generate(&mut rng);
         let cert = make_test_cert(&server_key, alice_dh.public.0, 1700000000);
@@ -790,9 +795,8 @@ mod tests {
         let alice_dh = generate_keypair(&mut rng);
         let bob_dh = generate_keypair(&mut rng);
         let suite_id = 1u16;
-        let key =
-            derive_pairwise_sealed_sender_key(&alice_dh.secret, &bob_dh.public, suite_id)
-                .expect("key");
+        let key = derive_pairwise_sealed_sender_key(&alice_dh.secret, &bob_dh.public, suite_id)
+            .expect("key");
 
         let server_key = SigningKey::generate(&mut rng);
         let cert = make_test_cert(&server_key, alice_dh.public.0, 1700000000);
@@ -826,13 +830,17 @@ mod tests {
         let alice_dh = generate_keypair(&mut rng);
         let bob_dh = generate_keypair(&mut rng);
         let suite_id = 1u16;
-        let key =
-            derive_pairwise_sealed_sender_key(&alice_dh.secret, &bob_dh.public, suite_id)
-                .expect("key");
+        let key = derive_pairwise_sealed_sender_key(&alice_dh.secret, &bob_dh.public, suite_id)
+            .expect("key");
 
         // Seal without cert
         let encoded = seal_message(
-            &key, suite_id, "bob", "alice", "alice-dev-1", b"no-cert-payload",
+            &key,
+            suite_id,
+            "bob",
+            "alice",
+            "alice-dev-1",
+            b"no-cert-payload",
         )
         .expect("seal");
 

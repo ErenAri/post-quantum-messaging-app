@@ -16,12 +16,22 @@ const MAX_TTL_SECONDS: u64 = 7 * 24 * 3600; // 1 week
 const DELIVERED_RELAY_RETENTION_DAYS: i64 = 7;
 const RECEIPT_RETENTION_DAYS: i64 = 30;
 
+fn ensure_ephemeral_messaging_supported(state: &AppState) -> Result<(), AppError> {
+    if state.ephemeral_messaging_supported() {
+        return Ok(());
+    }
+    Err(AppError::forbidden(
+        "ephemeral direct messaging is disabled pending a metadata-safe design",
+    ))
+}
+
 pub(crate) async fn relay_ephemeral_message(
     State(state): State<AppState>,
     Path(recipient_user_id): Path<String>,
     headers: HeaderMap,
     Json(request): Json<RelayEphemeralRequest>,
 ) -> Result<Json<RelayResponse>, AppError> {
+    ensure_ephemeral_messaging_supported(&state)?;
     check_rate_limit(&state, &format!("ephemeral-relay:{recipient_user_id}"))?;
     validate_id("recipient_user_id", &recipient_user_id)?;
     validate_id("sender_user_id", &request.sender_user_id)?;

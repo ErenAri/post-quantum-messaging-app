@@ -460,6 +460,18 @@ impl AppState {
         false
     }
 
+    pub fn group_messaging_supported(&self) -> bool {
+        false
+    }
+
+    pub fn sealed_sender_required(&self) -> bool {
+        true
+    }
+
+    pub fn ephemeral_messaging_supported(&self) -> bool {
+        false
+    }
+
     pub fn with_push_notifier(mut self, push_notifier: Arc<PushNotifier>) -> Self {
         self.push_notifier = push_notifier;
         self

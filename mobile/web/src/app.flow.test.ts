@@ -205,6 +205,9 @@ async function bootApp(options: BootOptions = {}) {
       calling_supported: false,
       stories_supported: false,
       channels_supported: false,
+      group_messaging_supported: false,
+      sealed_sender_required: true,
+      ephemeral_messaging_supported: false,
       web_client_policy: options.capabilities?.web_client_policy ?? "interop_candidate",
     },
   };
@@ -467,12 +470,19 @@ async function bootApp(options: BootOptions = {}) {
         return { message_id: apiState.relays.length, received_at: "2026-03-11T00:00:00Z" };
       }
 
-      async sealedRelay(peerId: string, request: { message_bytes_base64: string }) {
+      async sealedRelay(
+        peerId: string,
+        request: { sender_user_id: string; device_id: string; message_bytes_base64: string }
+      ) {
         apiState.relays.push({ peerId, body: request.message_bytes_base64 });
         return { delivered_device_count: 1 };
       }
 
       async inbox(userId: string) {
+        return { user_id: userId, messages: [] };
+      }
+
+      async sealedInbox(userId: string) {
         return { user_id: userId, messages: [] };
       }
 

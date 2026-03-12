@@ -173,12 +173,8 @@ impl InitialMessage {
             "ek_a_pub",
         )?;
         let pq_ct = require_from_map(&map, MSG_TAG_PQ_CT, "pq_ct")?.to_vec();
-        let pq_ratchet_pub_a = require_from_map(
-            &map,
-            MSG_TAG_PQ_RATCHET_PUB_A,
-            "pq_ratchet_pub_a",
-        )?
-        .to_vec();
+        let pq_ratchet_pub_a =
+            require_from_map(&map, MSG_TAG_PQ_RATCHET_PUB_A, "pq_ratchet_pub_a")?.to_vec();
         let nonce = parse_12(require_from_map(&map, MSG_TAG_NONCE, "nonce")?, "nonce")?;
         let ciphertext = require_from_map(&map, MSG_TAG_CIPHERTEXT, "ciphertext")?.to_vec();
         let otpk_id = map

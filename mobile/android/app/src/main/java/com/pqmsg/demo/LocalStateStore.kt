@@ -212,6 +212,15 @@ class LocalStateStore(context: Context) {
         removeLegacyKeys("cursor_$userId")
     }
 
+    fun readSealedCursor(userId: String): Long {
+        return getLong("sealed_cursor_$userId", 0L)
+    }
+
+    fun writeSealedCursor(userId: String, cursor: Long) {
+        prefs.edit().putLong("sealed_cursor_$userId", cursor).apply()
+        removeLegacyKeys("sealed_cursor_$userId")
+    }
+
     fun readPeerLastMessageId(userId: String, peerUserId: String): Long {
         return getLong("peer_last_${userId}_$peerUserId", 0L)
     }
@@ -777,6 +786,7 @@ class LocalStateStore(context: Context) {
             prefs,
             exactKeys = setOf(
                 "cursor_$userId",
+                "sealed_cursor_$userId",
                 conversationPeersKey(userId),
                 messageRequestPeersKey(userId),
                 acceptedPeersKey(userId),
@@ -795,6 +805,7 @@ class LocalStateStore(context: Context) {
             legacyPrefs,
             exactKeys = setOf(
                 "cursor_$userId",
+                "sealed_cursor_$userId",
                 conversationPeersKey(userId),
                 messageRequestPeersKey(userId),
                 acceptedPeersKey(userId),

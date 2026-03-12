@@ -16,9 +16,9 @@ use crate::error::AppError;
 use crate::types::*;
 use crate::validation::*;
 use crate::{
-    AppState, MAX_IDENTITY_LOG_ITEMS, MAX_PQ_KEY_LEN, MIN_PQ_KEY_LEN, PREKEY_REPLENISH_TARGET,
-    PQ_SIG_LEN, PQ_SIG_PUB_KEY_LEN, ROTATION_CHALLENGE_BYTES, ROTATION_CHALLENGE_TTL_MINUTES,
-    SIG_LEN, SIG_PUB_KEY_LEN, X25519_KEY_LEN,
+    AppState, MAX_IDENTITY_LOG_ITEMS, MAX_PQ_KEY_LEN, MIN_PQ_KEY_LEN, PQ_SIG_LEN,
+    PQ_SIG_PUB_KEY_LEN, PREKEY_REPLENISH_TARGET, ROTATION_CHALLENGE_BYTES,
+    ROTATION_CHALLENGE_TTL_MINUTES, SIG_LEN, SIG_PUB_KEY_LEN, X25519_KEY_LEN,
 };
 
 pub(crate) async fn publish_prekeys(
@@ -69,16 +69,10 @@ pub(crate) async fn publish_prekeys(
     )?;
     let sig_over_pqspk =
         decode_base64_range("sig_over_pqspk", &request.sig_over_pqspk, SIG_LEN, SIG_LEN)?;
-    let pq_sig_over_spk = decode_base64_exact(
-        "pq_sig_over_spk",
-        &request.pq_sig_over_spk,
-        PQ_SIG_LEN,
-    )?;
-    let pq_sig_over_pqspk = decode_base64_exact(
-        "pq_sig_over_pqspk",
-        &request.pq_sig_over_pqspk,
-        PQ_SIG_LEN,
-    )?;
+    let pq_sig_over_spk =
+        decode_base64_exact("pq_sig_over_spk", &request.pq_sig_over_spk, PQ_SIG_LEN)?;
+    let pq_sig_over_pqspk =
+        decode_base64_exact("pq_sig_over_pqspk", &request.pq_sig_over_pqspk, PQ_SIG_LEN)?;
 
     let mut one_time_x = Vec::with_capacity(request.one_time_prekeys_x25519.len());
     for key in &request.one_time_prekeys_x25519 {
@@ -99,12 +93,11 @@ pub(crate) async fn publish_prekeys(
         )?);
     }
 
-    let user_row = sqlx::query(
-        "SELECT identity_sig_pub, identity_pq_sig_pub FROM users WHERE user_id = $1",
-    )
-        .bind(&user_id)
-        .fetch_optional(&state.pool)
-        .await?;
+    let user_row =
+        sqlx::query("SELECT identity_sig_pub, identity_pq_sig_pub FROM users WHERE user_id = $1")
+            .bind(&user_id)
+            .fetch_optional(&state.pool)
+            .await?;
     let Some(user_row) = user_row else {
         return Err(AppError::not_found("user not found"));
     };
@@ -331,9 +324,7 @@ pub(crate) async fn get_bundle(
     let identity_pq_sig_pub_bytes = row
         .try_get::<Option<Vec<u8>>, _>("identity_pq_sig_pub")?
         .ok_or_else(|| {
-            AppError::conflict(
-                "bundle missing mandatory PQ identity key; user must re-register",
-            )
+            AppError::conflict("bundle missing mandatory PQ identity key; user must re-register")
         })?;
     validate_ml_dsa_public_key(&identity_pq_sig_pub_bytes)?;
     let pq_sig_over_spk_bytes = row
@@ -399,10 +390,8 @@ pub(crate) async fn get_bundle(
     tx.commit().await?;
 
     let identity_x25519_pub_bytes = row.try_get::<Vec<u8>, _>("identity_x25519_pub")?;
-    let identity_fingerprint = identity_fingerprint_sha256(
-        &identity_x25519_pub_bytes,
-        Some(&identity_pq_sig_pub_bytes),
-    );
+    let identity_fingerprint =
+        identity_fingerprint_sha256(&identity_x25519_pub_bytes, Some(&identity_pq_sig_pub_bytes));
     let identity_key_version_i64: i64 = row.try_get("identity_key_version")?;
     let identity_key_version = u32::try_from(identity_key_version_i64)
         .map_err(|_| AppError::internal("identity_key_version overflow"))?;
@@ -638,10 +627,11 @@ pub(crate) async fn rotate_confirm(
         AppError::conflict("rotation challenge missing PQ identity key; restart rotation")
     })?;
 
-    let user_row = sqlx::query("SELECT identity_sig_pub, identity_pq_sig_pub FROM users WHERE user_id = $1")
-        .bind(&user_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let user_row =
+        sqlx::query("SELECT identity_sig_pub, identity_pq_sig_pub FROM users WHERE user_id = $1")
+            .bind(&user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
     let Some(user_row) = user_row else {
         return Err(AppError::not_found("user not found"));
     };

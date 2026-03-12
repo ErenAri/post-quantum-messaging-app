@@ -103,6 +103,9 @@ class ServerApiTest {
               "calling_supported": false,
               "stories_supported": false,
               "channels_supported": false,
+              "group_messaging_supported": false,
+              "sealed_sender_required": true,
+              "ephemeral_messaging_supported": false,
               "web_client_policy": "demo_only"
             }
             """.trimIndent(),
@@ -117,6 +120,9 @@ class ServerApiTest {
         assertEquals(false, parsed.calling_supported)
         assertEquals(false, parsed.stories_supported)
         assertEquals(false, parsed.channels_supported)
+        assertEquals(false, parsed.group_messaging_supported)
+        assertEquals(true, parsed.sealed_sender_required)
+        assertEquals(false, parsed.ephemeral_messaging_supported)
     }
 
     @Test
@@ -152,6 +158,9 @@ class ServerApiTest {
               "calling_supported": false,
               "stories_supported": false,
               "channels_supported": false,
+              "group_messaging_supported": false,
+              "sealed_sender_required": true,
+              "ephemeral_messaging_supported": false,
               "web_client_policy": "demo_only"
             }
             """.trimIndent(),

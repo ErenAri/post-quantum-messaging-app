@@ -634,12 +634,14 @@ async fn e2e_full_message_and_receipts_disabled_flow() {
         &receipt_auth,
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "send receipt: {receipt_body}");
-    assert!(
-        receipt_body["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("read receipts are disabled"))
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "send receipt: {receipt_body}"
     );
+    assert!(receipt_body["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("read receipts are disabled")));
 
     // Alice cannot poll receipts either.
     let poll_auth = get_receipts_auth_headers(&alice.signing_key, "e2e-alice", "alice-d1", 0);
@@ -652,11 +654,9 @@ async fn e2e_full_message_and_receipts_disabled_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "poll receipts: {receipts}");
-    assert!(
-        receipts["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("read receipts are disabled"))
-    );
+    assert!(receipts["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("read receipts are disabled")));
 
     // Bob cannot upgrade to a "read" receipt while the feature is disabled.
     let read_auth = receipt_auth_headers(&bob.signing_key, "e2e-bob", "bob-d1", message_id, "read");
@@ -674,9 +674,9 @@ async fn e2e_full_message_and_receipts_disabled_flow() {
     assert_eq!(status, StatusCode::FORBIDDEN, "read receipt");
 }
 
-/// Ephemeral (disappearing) message relay with TTL.
+/// Ephemeral direct-message transport is explicitly disabled.
 #[tokio::test]
-async fn e2e_ephemeral_message_relay() {
+async fn e2e_ephemeral_message_transport_is_disabled() {
     let app = test_app().await;
 
     let alice = Client::new("eph-alice", "alice-d1", 40);
@@ -703,29 +703,16 @@ async fn e2e_ephemeral_message_relay() {
         &auth,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "ephemeral relay: {body}");
-    assert!(body["message_id"].as_i64().unwrap() > 0);
-    assert_eq!(body["delivered_device_count"].as_u64(), Some(1));
-
-    // Bob can retrieve the ephemeral message from inbox
-    let inbox_auth = inbox_auth_headers(&bob.signing_key, "eph-bob", "bob-d1", 0);
-    let (status, inbox) = json_request_with_headers(
-        app.clone(),
-        Method::GET,
-        "/v1/inbox/eph-bob?since=0",
-        json!({}),
-        &inbox_auth,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let msgs = inbox["messages"].as_array().unwrap();
-    assert_eq!(msgs.len(), 1);
-    assert_eq!(msgs[0]["sender_user_id"].as_str(), Some("eph-alice"));
+    assert_eq!(status, StatusCode::FORBIDDEN, "ephemeral relay: {body}");
+    assert!(body["detail"]
+        .as_str()
+        .unwrap_or("")
+        .contains("metadata-safe design"));
 }
 
-/// Ephemeral relay rejects TTL out of range (0 or > 7 days).
+/// Ephemeral direct-message transport rejects before TTL validation because the feature is disabled.
 #[tokio::test]
-async fn e2e_ephemeral_rejects_invalid_ttl() {
+async fn e2e_ephemeral_rejects_before_ttl_validation() {
     let app = test_app().await;
 
     let alice = Client::new("ettl-alice", "alice-d1", 60);
@@ -749,7 +736,7 @@ async fn e2e_ephemeral_rejects_invalid_ttl() {
         &auth,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
     // TTL = 8 days (too high)
     let big_ttl = 8 * 24 * 3600u64;
@@ -773,7 +760,7 @@ async fn e2e_ephemeral_rejects_invalid_ttl() {
         &auth2,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 /// Receipts are rejected before receipt_type validation because the feature is disabled.
@@ -905,11 +892,9 @@ async fn e2e_multi_device_message_and_receipts_disabled() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(
-        receipts["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("read receipts are disabled"))
-    );
+    assert!(receipts["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("read receipts are disabled")));
 }
 
 /// Security headers are present on all responses.
@@ -1063,12 +1048,15 @@ async fn e2e_ephemeral_multi_device_fan_out() {
         &auth,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "ephemeral multi-device: {body}");
     assert_eq!(
-        body["delivered_device_count"].as_u64(),
-        Some(2),
-        "ephemeral fanned out to 2 devices"
+        status,
+        StatusCode::FORBIDDEN,
+        "ephemeral multi-device: {body}"
     );
+    assert!(body["detail"]
+        .as_str()
+        .unwrap_or("")
+        .contains("metadata-safe design"));
 }
 
 /// Receipt endpoints remain consistently forbidden when disabled.
@@ -1111,7 +1099,11 @@ async fn e2e_receipt_endpoint_stays_forbidden() {
             &auth,
         )
         .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "receipt endpoint should stay forbidden");
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "receipt endpoint should stay forbidden"
+        );
     }
 
     // Alice cannot poll receipts either.
@@ -1125,11 +1117,9 @@ async fn e2e_receipt_endpoint_stays_forbidden() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(
-        receipts["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("read receipts are disabled"))
-    );
+    assert!(receipts["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("read receipts are disabled")));
 }
 
 // ── Call signaling auth helpers ──────────────────────────────────
@@ -1244,11 +1234,9 @@ async fn e2e_call_endpoints_are_disabled() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "offer: {offer_body}");
-    assert!(
-        offer_body["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("calling is disabled"))
-    );
+    assert!(offer_body["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("calling is disabled")));
 }
 
 /// Answering a non-existent call is still blocked by the calling feature gate.

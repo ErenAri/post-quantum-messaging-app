@@ -393,6 +393,16 @@ export function writeCursor(userId: string, cursor: number, deviceId?: string): 
   writeRecord(CURSORS_KEY, cursors);
 }
 
+export function readSealedCursor(userId: string, deviceId?: string): number {
+  const sealedKey = deviceId ? `sealed:${deviceId}` : "sealed";
+  return readCursor(userId, sealedKey);
+}
+
+export function writeSealedCursor(userId: string, cursor: number, deviceId?: string): void {
+  const sealedKey = deviceId ? `sealed:${deviceId}` : "sealed";
+  writeCursor(userId, cursor, sealedKey);
+}
+
 type PinRow = IdentityPin & { userId: string; peerUserId: string };
 
 export function readIdentityPin(userId: string, peerUserId: string): IdentityPin | null {

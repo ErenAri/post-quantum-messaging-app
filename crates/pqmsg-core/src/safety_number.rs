@@ -162,21 +162,17 @@ mod tests {
     #[test]
     fn safety_number_is_symmetric() {
         let (x25519_a, x25519_b, ml_dsa_a, ml_dsa_b) = test_keys();
-        let sn_ab = compute_safety_number(
-            "alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b,
-        );
-        let sn_ba = compute_safety_number(
-            "bob", &x25519_b, &ml_dsa_b, "alice", &x25519_a, &ml_dsa_a,
-        );
+        let sn_ab =
+            compute_safety_number("alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b);
+        let sn_ba =
+            compute_safety_number("bob", &x25519_b, &ml_dsa_b, "alice", &x25519_a, &ml_dsa_a);
         assert_eq!(sn_ab, sn_ba);
     }
 
     #[test]
     fn safety_number_is_60_digits() {
         let (x25519_a, x25519_b, ml_dsa_a, ml_dsa_b) = test_keys();
-        let sn = compute_safety_number(
-            "alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b,
-        );
+        let sn = compute_safety_number("alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b);
         let digits: String = sn.chars().filter(|c| c.is_ascii_digit()).collect();
         assert_eq!(digits.len(), 60);
         let groups: Vec<&str> = sn.split(' ').collect();
@@ -190,13 +186,16 @@ mod tests {
     #[test]
     fn changing_one_key_byte_changes_output() {
         let (x25519_a, x25519_b, ml_dsa_a, ml_dsa_b) = test_keys();
-        let sn1 = compute_safety_number(
-            "alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b,
-        );
+        let sn1 = compute_safety_number("alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b);
         let mut x25519_a_modified = x25519_a;
         x25519_a_modified[0] ^= 0x01;
         let sn2 = compute_safety_number(
-            "alice", &x25519_a_modified, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b,
+            "alice",
+            &x25519_a_modified,
+            &ml_dsa_a,
+            "bob",
+            &x25519_b,
+            &ml_dsa_b,
         );
         assert_ne!(sn1, sn2);
     }
@@ -204,13 +203,16 @@ mod tests {
     #[test]
     fn ml_dsa_key_affects_fingerprint() {
         let (x25519_a, x25519_b, ml_dsa_a, ml_dsa_b) = test_keys();
-        let sn1 = compute_safety_number(
-            "alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b,
-        );
+        let sn1 = compute_safety_number("alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b);
         let mut ml_dsa_a_modified = ml_dsa_a.clone();
         ml_dsa_a_modified[0] ^= 0x01;
         let sn2 = compute_safety_number(
-            "alice", &x25519_a, &ml_dsa_a_modified, "bob", &x25519_b, &ml_dsa_b,
+            "alice",
+            &x25519_a,
+            &ml_dsa_a_modified,
+            "bob",
+            &x25519_b,
+            &ml_dsa_b,
         );
         assert_ne!(sn1, sn2);
     }
@@ -222,13 +224,9 @@ mod tests {
         let x25519_b = [0xBB; 32];
         let ml_dsa_a = vec![0xCC; 64]; // Shortened for test — algorithm doesn't require specific sizes
         let ml_dsa_b = vec![0xDD; 64];
-        let sn = compute_safety_number(
-            "alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b,
-        );
+        let sn = compute_safety_number("alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b);
         // Just verify it's deterministic — run twice
-        let sn2 = compute_safety_number(
-            "alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b,
-        );
+        let sn2 = compute_safety_number("alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b);
         assert_eq!(sn, sn2);
         // Pin the exact value (regenerate if algorithm changes):
         assert!(!sn.is_empty());
@@ -237,21 +235,18 @@ mod tests {
     #[test]
     fn qr_payload_symmetric() {
         let (x25519_a, x25519_b, ml_dsa_a, ml_dsa_b) = test_keys();
-        let qr_ab = safety_number_qr_payload(
-            "alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b,
-        );
-        let qr_ba = safety_number_qr_payload(
-            "bob", &x25519_b, &ml_dsa_b, "alice", &x25519_a, &ml_dsa_a,
-        );
+        let qr_ab =
+            safety_number_qr_payload("alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b);
+        let qr_ba =
+            safety_number_qr_payload("bob", &x25519_b, &ml_dsa_b, "alice", &x25519_a, &ml_dsa_a);
         assert_eq!(qr_ab, qr_ba);
     }
 
     #[test]
     fn qr_payload_length() {
         let (x25519_a, x25519_b, ml_dsa_a, ml_dsa_b) = test_keys();
-        let qr = safety_number_qr_payload(
-            "alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b,
-        );
+        let qr =
+            safety_number_qr_payload("alice", &x25519_a, &ml_dsa_a, "bob", &x25519_b, &ml_dsa_b);
         assert_eq!(qr.len(), 2 + 32 + 32); // version + 2 fingerprints
     }
 
@@ -260,13 +255,9 @@ mod tests {
         let x25519 = [0x01u8; 32];
         let ml_dsa = vec![0x02u8; 64];
         // Same user on both sides
-        let sn_same = compute_safety_number(
-            "alice", &x25519, &ml_dsa, "alice", &x25519, &ml_dsa,
-        );
+        let sn_same = compute_safety_number("alice", &x25519, &ml_dsa, "alice", &x25519, &ml_dsa);
         // Different users
-        let sn_diff = compute_safety_number(
-            "alice", &x25519, &ml_dsa, "bob", &x25519, &ml_dsa,
-        );
+        let sn_diff = compute_safety_number("alice", &x25519, &ml_dsa, "bob", &x25519, &ml_dsa);
         assert_ne!(sn_same, sn_diff);
     }
 }

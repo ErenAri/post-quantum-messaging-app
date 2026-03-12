@@ -55,6 +55,9 @@ fn capabilities_response(state: &AppState) -> ServerCapabilitiesResponse {
         calling_supported: state.calling_supported(),
         stories_supported: state.stories_supported(),
         channels_supported: state.channels_supported(),
+        group_messaging_supported: state.group_messaging_supported(),
+        sealed_sender_required: state.sealed_sender_required(),
+        ephemeral_messaging_supported: state.ephemeral_messaging_supported(),
         web_client_policy: "demo_only",
     }
 }

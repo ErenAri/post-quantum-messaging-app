@@ -373,6 +373,8 @@ export type IdentityLogResponse = {
 };
 
 export type SealedRelayRequest = {
+  sender_user_id: string;
+  device_id: string;
   message_bytes_base64: string;
 };
 
@@ -384,6 +386,7 @@ export type SealedRelayResponse = {
 
 export type SealedInboxItem = {
   message_id: number;
+  sender_user_id: string;
   message_bytes_base64: string;
   received_at: string;
 };
@@ -567,6 +570,9 @@ export type ServerCapabilitiesResponse = {
   calling_supported: boolean;
   stories_supported: boolean;
   channels_supported: boolean;
+  group_messaging_supported: boolean;
+  sealed_sender_required: boolean;
+  ephemeral_messaging_supported: boolean;
   web_client_policy: string;
 };
 

@@ -196,6 +196,8 @@ export async function drainSupportedOutbox(
       );
       if (item.sealed) {
         await deps.sealedRelay(item.peerId, {
+          sender_user_id: params.keys.userId,
+          device_id: params.keys.deviceId,
           message_bytes_base64: messageBytesBase64,
         });
       } else if (item.ephemeralTtl > 0) {

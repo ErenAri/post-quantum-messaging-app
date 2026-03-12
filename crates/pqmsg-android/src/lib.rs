@@ -350,7 +350,10 @@ fn build_pq_signature_provider() -> Result<MlDsa65, PqmsgAndroidError> {
     MlDsa65::new().map_err(|_| operation_failed("pq signature backend is disabled"))
 }
 
-fn build_pq_signature_payload(secret_key: &[u8], message: &[u8]) -> Result<String, PqmsgAndroidError> {
+fn build_pq_signature_payload(
+    secret_key: &[u8],
+    message: &[u8],
+) -> Result<String, PqmsgAndroidError> {
     let provider = build_pq_signature_provider()?;
     Ok(B64.encode(provider.sign(secret_key, message)?))
 }
@@ -748,8 +751,10 @@ pub fn build_publish_prekeys_payload(
     let pq_spk_pub = decode_b64("pq_signed_prekey_pub_b64", &keys.pq_signed_prekey_pub_b64)?;
     let signing_key =
         decode_signing_key_b64("identity_sig_secret_b64", &keys.identity_sig_secret_b64)?;
-    let pq_sig_secret_key =
-        decode_b64("identity_pq_sig_secret_b64", &keys.identity_pq_sig_secret_b64)?;
+    let pq_sig_secret_key = decode_b64(
+        "identity_pq_sig_secret_b64",
+        &keys.identity_pq_sig_secret_b64,
+    )?;
     if B64.encode(signing_key.verifying_key().to_bytes()) != keys.identity_sig_pub_b64 {
         return Err(invalid_input(
             "identity_sig_pub_b64 does not match identity_sig_secret_b64",
@@ -936,10 +941,14 @@ pub fn build_rotate_confirm_payload(
     }
     let current_signing_key = auth_signing_key_for_user(&current_keys)?;
     let new_signing_key = auth_signing_key_for_user(&new_keys)?;
-    let current_pq_signing_key =
-        decode_b64("identity_pq_sig_secret_b64", &current_keys.identity_pq_sig_secret_b64)?;
-    let new_pq_signing_key =
-        decode_b64("identity_pq_sig_secret_b64", &new_keys.identity_pq_sig_secret_b64)?;
+    let current_pq_signing_key = decode_b64(
+        "identity_pq_sig_secret_b64",
+        &current_keys.identity_pq_sig_secret_b64,
+    )?;
+    let new_pq_signing_key = decode_b64(
+        "identity_pq_sig_secret_b64",
+        &new_keys.identity_pq_sig_secret_b64,
+    )?;
     let challenge_nonce = decode_b64("challenge_nonce_base64", &challenge_nonce_base64)?;
     let new_identity_x25519 =
         decode_b64("identity_x25519_pub_b64", &new_keys.identity_x25519_pub_b64)?;
@@ -1147,6 +1156,44 @@ pub fn build_inbox_auth_headers(
     });
     let transcript =
         encode(&records).map_err(|_| operation_failed("failed to encode inbox auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_sealed_inbox_auth_headers(
+    keys_json: String,
+    user_id: String,
+    since: i64,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records =
+        auth_common_records("sealed-inbox", &user_id, &keys.device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_SINCE,
+        value: since.to_be_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode sealed-inbox auth transcript"))?;
     let signature = signing_key.sign(&transcript).to_bytes();
     Ok(RequestAuthHeaders {
         auth_user: user_id,
@@ -2082,7 +2129,10 @@ pub fn initiate_session_and_encrypt(
         prekey_bundle.signed_prekey,
         prekey_bundle.suite.suite_id()?,
         512,
-        mandatory_pq_ratchet_state(&local_pq_signed_prekey, prekey_bundle.pq_signed_prekey.clone()),
+        mandatory_pq_ratchet_state(
+            &local_pq_signed_prekey,
+            prekey_bundle.pq_signed_prekey.clone(),
+        ),
         Box::new(kem),
     )?;
     let session_file = SessionFile {
@@ -2342,10 +2392,7 @@ fn bundle_to_core(bundle: &ServerBundle, suite: Suite) -> Result<PreKeyBundle, P
         &bundle.identity_pq_sig_pub,
     )?);
     out.pq_spk_signature = Some(decode_b64("pq_sig_over_spk", &bundle.pq_sig_over_spk)?);
-    out.pq_pqspk_signature = Some(decode_b64(
-        "pq_sig_over_pqspk",
-        &bundle.pq_sig_over_pqspk,
-    )?);
+    out.pq_pqspk_signature = Some(decode_b64("pq_sig_over_pqspk", &bundle.pq_sig_over_pqspk)?);
     out.one_time_prekey = bundle
         .one_time_prekey_x25519
         .as_ref()

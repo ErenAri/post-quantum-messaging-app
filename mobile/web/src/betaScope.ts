@@ -31,7 +31,7 @@ export function getWebBetaHoldback(
     messagingAllowed: false,
     title: "Web group messaging unavailable",
     detail:
-      `${policySuffix} Direct web messaging still uses the local PQ runtime. Group messaging and calling stay out of scope for the supported web beta.`,
+      `${policySuffix} Direct web messaging still uses the local PQ runtime. Group messaging is disabled pending a private group design, and calling stays out of scope for the supported web beta.`,
     tone: "warning",
   };
 }

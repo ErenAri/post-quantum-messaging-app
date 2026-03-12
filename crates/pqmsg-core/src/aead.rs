@@ -168,10 +168,21 @@ mod tests {
         for size in [0, 1, 2, 127, 255, 256, 257, 511, 512, 1000] {
             let input: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
             let padded = pad_plaintext(&input, 256);
-            assert_eq!(padded.len() % 256, 0, "padded size not block-aligned for input size {size}");
-            assert!(padded.len() > input.len(), "padded not longer than input for size {size}");
+            assert_eq!(
+                padded.len() % 256,
+                0,
+                "padded size not block-aligned for input size {size}"
+            );
+            assert!(
+                padded.len() > input.len(),
+                "padded not longer than input for size {size}"
+            );
             let recovered = unpad_plaintext(&padded).expect("unpad roundtrip");
-            assert_eq!(recovered, &input[..], "roundtrip failed for input size {size}");
+            assert_eq!(
+                recovered,
+                &input[..],
+                "roundtrip failed for input size {size}"
+            );
         }
     }
 

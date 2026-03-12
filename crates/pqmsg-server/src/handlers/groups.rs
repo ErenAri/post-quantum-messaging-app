@@ -14,11 +14,21 @@ use crate::types::*;
 use crate::validation::*;
 use crate::{AppState, MAX_GROUP_MEMBERS, MAX_MESSAGE_BYTES};
 
+fn ensure_group_messaging_supported(state: &AppState) -> Result<(), AppError> {
+    if state.group_messaging_supported() {
+        return Ok(());
+    }
+    Err(AppError::forbidden(
+        "group messaging is disabled pending a private group design",
+    ))
+}
+
 pub(crate) async fn list_user_groups(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<UserGroupsResponse>, AppError> {
+    ensure_group_messaging_supported(&state)?;
     check_rate_limit(&state, &format!("groups-list:{user_id}"))?;
     validate_id("user_id", &user_id)?;
 
@@ -71,6 +81,7 @@ pub(crate) async fn create_group(
     headers: HeaderMap,
     Json(request): Json<CreateGroupRequest>,
 ) -> Result<Json<CreateGroupResponse>, AppError> {
+    ensure_group_messaging_supported(&state)?;
     check_rate_limit(&state, "groups-create")?;
     validate_id("group_id", &request.group_id)?;
     let mut member_user_ids = normalize_group_members(&request.member_user_ids)?;
@@ -145,6 +156,7 @@ pub(crate) async fn list_group_members(
     Path(group_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<GroupMembersResponse>, AppError> {
+    ensure_group_messaging_supported(&state)?;
     check_rate_limit(&state, &format!("groups-members-list:{group_id}"))?;
     validate_id("group_id", &group_id)?;
 
@@ -183,6 +195,7 @@ pub(crate) async fn add_group_member(
     headers: HeaderMap,
     Json(request): Json<AddGroupMemberRequest>,
 ) -> Result<Json<GroupMemberMutationResponse>, AppError> {
+    ensure_group_messaging_supported(&state)?;
     check_rate_limit(&state, &format!("groups-members-add:{group_id}"))?;
     validate_id("group_id", &group_id)?;
     validate_id("member_user_id", &request.member_user_id)?;
@@ -250,6 +263,7 @@ pub(crate) async fn remove_group_member(
     headers: HeaderMap,
     Json(request): Json<RemoveGroupMemberRequest>,
 ) -> Result<Json<GroupMemberMutationResponse>, AppError> {
+    ensure_group_messaging_supported(&state)?;
     check_rate_limit(&state, &format!("groups-members-remove:{group_id}"))?;
     validate_id("group_id", &group_id)?;
     validate_id("member_user_id", &request.member_user_id)?;
@@ -302,6 +316,7 @@ pub(crate) async fn relay_group_message(
     headers: HeaderMap,
     Json(request): Json<GroupRelayRequest>,
 ) -> Result<Json<GroupRelayResponse>, AppError> {
+    ensure_group_messaging_supported(&state)?;
     check_rate_limit(&state, &format!("groups-relay:{group_id}"))?;
     validate_id("group_id", &group_id)?;
     validate_id("sender_user_id", &request.sender_user_id)?;

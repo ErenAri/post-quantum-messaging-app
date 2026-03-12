@@ -268,7 +268,11 @@ describe("PqmsgApi methods", () => {
 
   it("sealedRelay sends POST without auth headers", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ delivered_device_count: 1 }));
-    await api.sealedRelay("bob", { message_bytes_base64: "abc" });
+    await api.sealedRelay("bob", {
+      sender_user_id: "alice",
+      device_id: "alice-dev-1",
+      message_bytes_base64: "abc",
+    });
     const [url] = mockFetch.mock.calls[0];
     expect(url).toBe("http://localhost:8080/v1/sealed-relay/bob");
   });

@@ -14,8 +14,8 @@ use crate::{
     PushProvider, MAX_CONTACT_ALIAS_LEN, MAX_DEVICE_ID_LEN, MAX_DISCOVERY_HASHES, MAX_FILE_ID_LEN,
     MAX_GROUP_MEMBERS, MAX_MIME_TYPE_LEN, MAX_ONE_TIME_KEYS, MAX_PROFILE_DISPLAY_NAME_LEN,
     MAX_PUSH_TOKEN_LEN, MAX_ROTATION_CHALLENGE_ID_LEN, MAX_USER_ID_LEN, PQ_SIG_LEN,
-    PQ_SIG_PUB_KEY_LEN, PREKEY_LOW_WATERMARK,
-    ROTATE_SIG_TAG_CHALLENGE_ID, ROTATE_SIG_TAG_CHALLENGE_NONCE, ROTATE_SIG_TAG_NEW_DEVICE_ID,
+    PQ_SIG_PUB_KEY_LEN, PREKEY_LOW_WATERMARK, ROTATE_SIG_TAG_CHALLENGE_ID,
+    ROTATE_SIG_TAG_CHALLENGE_NONCE, ROTATE_SIG_TAG_NEW_DEVICE_ID,
     ROTATE_SIG_TAG_NEW_IDENTITY_PQ_SIG, ROTATE_SIG_TAG_NEW_IDENTITY_SIG,
     ROTATE_SIG_TAG_NEW_IDENTITY_X25519, ROTATE_SIG_TAG_USER_ID, SHA256_HEX_LEN, SIG_LEN,
     SIG_PUB_KEY_LEN, X25519_KEY_LEN,
@@ -477,8 +477,8 @@ pub(crate) fn verify_hybrid_prekey_signatures(
             "pq_sig_over_pqspk must be {PQ_SIG_LEN} bytes"
         )));
     }
-    let pq_verifier = MlDsa65::new()
-        .map_err(|_| AppError::internal("failed to initialize ML-DSA verifier"))?;
+    let pq_verifier =
+        MlDsa65::new().map_err(|_| AppError::internal("failed to initialize ML-DSA verifier"))?;
     pq_verifier
         .verify(identity_pq_sig_pub, &spk_message, pq_sig_over_spk)
         .map_err(|_| AppError::bad_request("pq_sig_over_spk verification failed"))?;

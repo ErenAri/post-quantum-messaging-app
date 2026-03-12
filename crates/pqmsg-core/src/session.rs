@@ -1,4 +1,7 @@
-use crate::aead::{decrypt, encrypt_with_rng, pad_plaintext, unpad_plaintext, CiphertextEnvelope, PADDING_BLOCK_SIZE};
+use crate::aead::{
+    decrypt, encrypt_with_rng, pad_plaintext, unpad_plaintext, CiphertextEnvelope,
+    PADDING_BLOCK_SIZE,
+};
 use crate::dh::{generate_keypair, DhKeyPair, DhPublicKey};
 use crate::kdf::hkdf_sha256_32;
 use crate::kem::KemProvider;
@@ -484,33 +487,41 @@ impl SessionState {
         let decoded = decode_wire_message(wire_bytes)?;
 
         // Extract common fields depending on wire version
-        let (wire_version, suite_id, sender_dh_pub_bytes, msg_num, prev_chain_len, pq_step_ct, aead_nonce, ciphertext) =
-            match &decoded {
-                DecodedWireMessage::V1(wire) => (
-                    wire.version,
+        let (
+            wire_version,
+            suite_id,
+            sender_dh_pub_bytes,
+            msg_num,
+            prev_chain_len,
+            pq_step_ct,
+            aead_nonce,
+            ciphertext,
+        ) = match &decoded {
+            DecodedWireMessage::V1(wire) => (
+                wire.version,
+                wire.suite_id,
+                wire.sender_dh_pub,
+                wire.msg_num,
+                wire.prev_chain_len,
+                wire.pq_step_ct.clone(),
+                wire.aead_nonce,
+                wire.ciphertext.clone(),
+            ),
+            DecodedWireMessage::V2(wire) => {
+                // Try decrypting the header with current and previous header keys.
+                let header = self.decrypt_v2_header(&wire.encrypted_header)?;
+                (
+                    WIRE_VERSION, // Use V1 version for AD compatibility
                     wire.suite_id,
-                    wire.sender_dh_pub,
-                    wire.msg_num,
-                    wire.prev_chain_len,
-                    wire.pq_step_ct.clone(),
+                    header.sender_dh_pub,
+                    header.msg_num,
+                    header.prev_chain_len,
+                    header.pq_step_ct,
                     wire.aead_nonce,
                     wire.ciphertext.clone(),
-                ),
-                DecodedWireMessage::V2(wire) => {
-                    // Try decrypting the header with current and previous header keys.
-                    let header = self.decrypt_v2_header(&wire.encrypted_header)?;
-                    (
-                        WIRE_VERSION, // Use V1 version for AD compatibility
-                        wire.suite_id,
-                        header.sender_dh_pub,
-                        header.msg_num,
-                        header.prev_chain_len,
-                        header.pq_step_ct,
-                        wire.aead_nonce,
-                        wire.ciphertext.clone(),
-                    )
-                }
-            };
+                )
+            }
+        };
 
         if suite_id != self.suite_id {
             return Err(CoreError::UnsupportedAlgorithm("wire.suite_id"));
@@ -1091,8 +1102,7 @@ mod tests {
 
         let wire = alice.encrypt(b"hello-v2", ad).expect("v2 encrypt");
         // V2 wire should decode as V2
-        let decoded =
-            crate::wire::decode_wire_message(&wire).expect("decode v2");
+        let decoded = crate::wire::decode_wire_message(&wire).expect("decode v2");
         assert_eq!(decoded.version(), WIRE_VERSION_V2);
         let plain = bob.decrypt(&wire, ad).expect("v2 decrypt");
         assert_eq!(plain, b"hello-v2");
@@ -1104,8 +1114,7 @@ mod tests {
         let ad = b"session-ad";
 
         let wire = alice.encrypt(b"tiny", ad).expect("v2 encrypt tiny");
-        let decoded =
-            crate::wire::decode_wire_message(&wire).expect("decode");
+        let decoded = crate::wire::decode_wire_message(&wire).expect("decode");
         if let crate::wire::DecodedWireMessage::V2(msg) = decoded {
             // AEAD ciphertext = padded_plaintext + 16-byte tag
             // padded_plaintext should be 256 bytes (one block for "tiny")

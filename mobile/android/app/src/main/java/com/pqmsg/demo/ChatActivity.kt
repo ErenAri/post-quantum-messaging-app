@@ -24,7 +24,6 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import uniffi.pqmsg_android.ServerBundle
 import uniffi.pqmsg_android.buildPresenceGetAuthHeaders
 import uniffi.pqmsg_android.buildPresenceUpdateAuthHeaders
-import uniffi.pqmsg_android.buildRelayAuthHeaders
 import uniffi.pqmsg_android.buildSendReceiptAuthHeaders
 import uniffi.pqmsg_android.buildTypingGetAuthHeaders
 import uniffi.pqmsg_android.buildTypingUpdateAuthHeaders
@@ -65,7 +64,7 @@ class ChatActivity : AppCompatActivity() {
     private var typingPollingJob: Job? = null
     private var peerPresenceOnline = false
     private var peerIsTyping = false
-    private var sealedSenderEnabled = false
+    private var sealedSenderEnabled = true
     private var ephemeralTtlSeconds: Long? = null
 
     private val pickAttachmentLauncher =
@@ -317,53 +316,15 @@ class ChatActivity : AppCompatActivity() {
 
         store.writeSession(context.profile.userId, activePeerUserId, sendResult.sessionJson)
 
-        if (ephemeralTtlSeconds != null) {
-            // Send as ephemeral message
-            context.api.relayEphemeralMessage(
-                recipientUserId = activePeerUserId,
-                headers = buildRelayAuthHeaders(
-                    keysJson = keysJson,
-                    senderUserId = context.profile.userId,
-                    recipientUserId = activePeerUserId,
-                    messageBytesBase64 = sendResult.messageBytesBase64,
-                ).toHeaderMap(),
-                request = RelayEphemeralRequest(
-                    sender_user_id = context.profile.userId,
-                    device_id = context.profile.deviceId,
-                    message_bytes_base64 = sendResult.messageBytesBase64,
-                    ttl_seconds = ephemeralTtlSeconds!!,
-                ),
-            )
-        } else if (sealedSenderEnabled) {
-            // Send as sealed sender (no sender metadata visible to server)
-            context.api.sealedRelay(
-                recipientUserId = activePeerUserId,
-                headers = buildRelayAuthHeaders(
-                    keysJson = keysJson,
-                    senderUserId = context.profile.userId,
-                    recipientUserId = activePeerUserId,
-                    messageBytesBase64 = sendResult.messageBytesBase64,
-                ).toHeaderMap(),
-                request = SealedRelayRequest(
-                    message_bytes_base64 = sendResult.messageBytesBase64,
-                ),
-            )
-        } else {
-            val relay = context.api.relay(
-                recipientUserId = activePeerUserId,
-                headers = buildRelayAuthHeaders(
-                    keysJson = keysJson,
-                    senderUserId = context.profile.userId,
-                    recipientUserId = activePeerUserId,
-                    messageBytesBase64 = sendResult.messageBytesBase64,
-                ).toHeaderMap(),
-                request = RelayRequest(
-                    sender_user_id = context.profile.userId,
-                    device_id = context.profile.deviceId,
-                    message_bytes_base64 = sendResult.messageBytesBase64,
-                ),
-            )
-        }
+        context.api.sealedRelay(
+            recipientUserId = activePeerUserId,
+            headers = emptyMap(),
+            request = SealedRelayRequest(
+                sender_user_id = context.profile.userId,
+                device_id = context.profile.deviceId,
+                message_bytes_base64 = sendResult.messageBytesBase64,
+            ),
+        )
         store.markPeerAccepted(context.profile.userId, activePeerUserId)
         store.upsertConversation(
             userId = context.profile.userId,
@@ -533,8 +494,7 @@ class ChatActivity : AppCompatActivity() {
         }
         val syncSummary = if (syncInFlight) "Refreshing..." else "Ready"
         val protectionSummary = buildList {
-            if (sealedSenderEnabled) add("Sealed sender")
-            ephemeralTtlSeconds?.let { add("${it}s auto-delete") }
+            add("Sealed sender required")
         }.joinToString(" | ")
         val statusSummary = buildString {
             append("Status: ")
@@ -803,22 +763,21 @@ class ChatActivity : AppCompatActivity() {
     // Sealed sender toggle
 
     fun toggleSealedSender() {
-        sealedSenderEnabled = !sealedSenderEnabled
+        sealedSenderEnabled = true
         refreshMeta()
     }
 
     // Ephemeral TTL
 
     fun showEphemeralDialog() {
-        val options = arrayOf("Off", "30 seconds", "5 minutes", "1 hour", "24 hours")
-        val values = arrayOf(null, 30L, 300L, 3600L, 86400L)
-        AlertDialog.Builder(this)
-            .setTitle(R.string.ephemeral_dialog_title)
-            .setItems(options) { _, which ->
-                ephemeralTtlSeconds = values[which]
-                refreshMeta()
-            }
-            .show()
+        ephemeralTtlSeconds = null
+        renderError(
+            UiError(
+                headline = "Disappearing messages are unavailable",
+                actionHint = "The privacy-hardened direct-messaging path now requires sealed sender only.",
+                technicalDetails = "Ephemeral relay remains disabled on the supported Android direct-message path until it has a metadata-safe design.",
+            )
+        )
     }
 
     private fun renderError(error: UiError?) {

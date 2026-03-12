@@ -289,6 +289,8 @@ data class GroupRelayResponse(
 // Sealed Sender
 
 data class SealedRelayRequest(
+    val sender_user_id: String,
+    val device_id: String,
     val message_bytes_base64: String,
 )
 
@@ -300,6 +302,7 @@ data class SealedRelayResponse(
 
 data class SealedInboxItem(
     val message_id: Long,
+    val sender_user_id: String,
     val message_bytes_base64: String,
     val received_at: String,
 )
@@ -528,6 +531,9 @@ data class ServerCapabilitiesResponse(
     val calling_supported: Boolean,
     val stories_supported: Boolean,
     val channels_supported: Boolean,
+    val group_messaging_supported: Boolean,
+    val sealed_sender_required: Boolean,
+    val ephemeral_messaging_supported: Boolean,
     val web_client_policy: String,
 )
 
@@ -1019,6 +1025,9 @@ object ApiClientFactory {
         }
         require(capabilities.pq_ratchet_interval > 0) {
             "Server is not advertising mandatory PQ ratchet support"
+        }
+        require(capabilities.sealed_sender_required) {
+            "Server is not advertising sealed-sender-only direct messaging"
         }
     }
 }

@@ -96,7 +96,7 @@ class ConversationsActivity : AppCompatActivity() {
         openSecurityButton.setOnClickListener {
             startActivity(Intent(this, SecurityInfoActivity::class.java))
         }
-        groupsButton.setOnClickListener { showGroupsDialog() }
+        groupsButton.setOnClickListener { showGroupMessagingUnavailable() }
         contactsButton.setOnClickListener {
             startActivity(Intent(this, ContactDiscoveryActivity::class.java))
         }
@@ -105,8 +105,13 @@ class ConversationsActivity : AppCompatActivity() {
     private fun renderHome() {
         val setup = store.loadSetup()
         profileText.text = "${setup.userId}\n${setup.serverUrl}"
+        groupsButton.alpha = 0.55f
         refreshConversations()
         updateRequestsButton()
+    }
+
+    private fun showGroupMessagingUnavailable() {
+        statusText.text = "Group messaging is disabled pending a private group design."
     }
 
     private fun refreshConversations() {

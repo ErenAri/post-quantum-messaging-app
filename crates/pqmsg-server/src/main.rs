@@ -5,8 +5,8 @@ use opentelemetry_otlp::WithExportConfig;
 use pqmsg_core::alg::{enforce_runtime_security_profile, RuntimeCryptoProfile, SecurityProfile};
 use pqmsg_server::{
     build_router, init_db, parse_db_backend, AppState, AuditLogger, AuthReplayCache, BlobStore,
-    DbBackend, DeploymentMode, DosHardeningPolicy, EphemeralStateStore, PushNotifier,
-    RateLimiter, RealtimeHub,
+    DbBackend, DeploymentMode, DosHardeningPolicy, EphemeralStateStore, PushNotifier, RateLimiter,
+    RealtimeHub,
 };
 use sentry::ClientOptions;
 use sqlx::any::AnyPoolOptions;
@@ -449,9 +449,10 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("failed to initialize blob store at '{blob_store_dir}'"))?,
     );
     let ephemeral_state = Arc::new(if let Some(redis_url) = &rate_limit_redis_url {
-        EphemeralStateStore::with_redis(redis_url, ephemeral_redis_key_prefix.clone()).with_context(
-            || format!("failed to initialize redis ephemeral state with url '{redis_url}'"),
-        )?
+        EphemeralStateStore::with_redis(redis_url, ephemeral_redis_key_prefix.clone())
+            .with_context(|| {
+                format!("failed to initialize redis ephemeral state with url '{redis_url}'")
+            })?
     } else {
         EphemeralStateStore::disabled()
     });

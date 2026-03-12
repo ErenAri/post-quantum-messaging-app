@@ -225,6 +225,8 @@ pub(crate) struct GroupRelayResponse {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SealedRelayRequest {
+    pub(crate) sender_user_id: String,
+    pub(crate) device_id: String,
     pub(crate) message_bytes_base64: String,
 }
 
@@ -238,6 +240,7 @@ pub(crate) struct SealedRelayResponse {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SealedInboxItem {
     pub(crate) message_id: i64,
+    pub(crate) sender_user_id: String,
     pub(crate) message_bytes_base64: String,
     pub(crate) received_at: String,
 }
@@ -609,6 +612,9 @@ pub(crate) struct ServerCapabilitiesResponse {
     pub(crate) calling_supported: bool,
     pub(crate) stories_supported: bool,
     pub(crate) channels_supported: bool,
+    pub(crate) group_messaging_supported: bool,
+    pub(crate) sealed_sender_required: bool,
+    pub(crate) ephemeral_messaging_supported: bool,
     pub(crate) web_client_policy: &'static str,
 }
 

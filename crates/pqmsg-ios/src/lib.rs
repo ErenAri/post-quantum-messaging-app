@@ -1387,7 +1387,10 @@ pub fn initiate_session_and_encrypt(
         prekey_bundle.signed_prekey,
         prekey_bundle.suite.suite_id()?,
         512,
-        mandatory_pq_ratchet_state(&local_pq_signed_prekey, prekey_bundle.pq_signed_prekey.clone()),
+        mandatory_pq_ratchet_state(
+            &local_pq_signed_prekey,
+            prekey_bundle.pq_signed_prekey.clone(),
+        ),
         Box::new(kem),
     )?;
     let session_file = SessionFile {

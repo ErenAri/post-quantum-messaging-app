@@ -9,6 +9,7 @@ import uniffi.pqmsg_android.buildPrekeysStatusAuthHeaders
 import uniffi.pqmsg_android.buildPublishPrekeysPayload
 import uniffi.pqmsg_android.buildPushTokenAuthHeaders
 import uniffi.pqmsg_android.buildRegisterPayload
+import uniffi.pqmsg_android.buildSealedInboxAuthHeaders
 import uniffi.pqmsg_android.buildUserGroupsListAuthHeaders
 import uniffi.pqmsg_android.decryptMessage
 import uniffi.pqmsg_android.generateIdentityKeys
@@ -145,15 +146,28 @@ object MessagingCoordinator {
         }
 
         if (!progress.serverVerified) {
-            api.inbox(
-                normalizedUser,
-                buildInboxAuthHeaders(
-                    keysJson = readyKeysJson,
-                    userId = normalizedUser,
-                    since = store.readCursor(normalizedUser),
-                ).toHeaderMap(),
-                store.readCursor(normalizedUser),
-            )
+            if (capabilities.sealed_sender_required) {
+                val sealedCursor = store.readSealedCursor(normalizedUser)
+                api.sealedInbox(
+                    normalizedUser,
+                    buildSealedInboxAuthHeaders(
+                        keysJson = readyKeysJson,
+                        userId = normalizedUser,
+                        since = sealedCursor,
+                    ).toHeaderMap(),
+                    sealedCursor,
+                )
+            } else {
+                api.inbox(
+                    normalizedUser,
+                    buildInboxAuthHeaders(
+                        keysJson = readyKeysJson,
+                        userId = normalizedUser,
+                        since = store.readCursor(normalizedUser),
+                    ).toHeaderMap(),
+                    store.readCursor(normalizedUser),
+                )
+            }
             val cleanPushToken = pushToken.trim()
             if (cleanPushToken.isNotEmpty()) {
                 api.registerPushToken(
@@ -207,120 +221,234 @@ object MessagingCoordinator {
             userId = userId,
             suiteLabel = suiteLabel,
         )
-        val discoveredGroups = syncUserGroups(store, context)
+        val discoveredGroups = if (context.capabilities.group_messaging_supported) {
+            syncUserGroups(store, context)
+        } else {
+            0
+        }
         val activePeerId = activePeer?.trim().orEmpty()
         val knownPeers = store.listConversations(context.profile.userId)
             .mapTo(mutableSetOf()) { it.peerUserId }
-        var cursor = store.readCursor(context.profile.userId)
-        val inbox = context.api.inbox(
-            context.profile.userId,
-            buildInboxAuthHeaders(
-                keysJson = context.keysJson,
-                userId = context.profile.userId,
-                since = cursor,
-            ).toHeaderMap(),
-            cursor,
-        )
-
-        if (inbox.messages.isEmpty()) {
-            return SyncOutcome(
-                deliveredMessages = 0,
-                pendingRequests = 0,
-                discoveredGroups = discoveredGroups,
-            )
-        }
-
         var deliveredMessages = 0
         var pendingRequests = 0
-        var workingKeysJson = ensurePrekeysReplenished(
-            store = store,
-            api = context.api,
-            userId = context.profile.userId,
-            keysJson = context.keysJson,
-        )
-        for (item in inbox.messages) {
-            val peer = item.sender_user_id
-            val peerLastMessageId = store.readPeerLastMessageId(context.profile.userId, peer)
-            if (item.message_id <= peerLastMessageId) {
-                cursor = maxOf(cursor, item.message_id)
-                continue
+        var workingKeysJson = context.keysJson
+        if (context.capabilities.sealed_sender_required) {
+            var sealedCursor = store.readSealedCursor(context.profile.userId)
+            val sealedInbox = context.api.sealedInbox(
+                context.profile.userId,
+                buildSealedInboxAuthHeaders(
+                    keysJson = context.keysJson,
+                    userId = context.profile.userId,
+                    since = sealedCursor,
+                ).toHeaderMap(),
+                sealedCursor,
+            )
+
+            if (sealedInbox.messages.isEmpty()) {
+                return SyncOutcome(
+                    deliveredMessages = 0,
+                    pendingRequests = 0,
+                    discoveredGroups = discoveredGroups,
+                )
             }
-            val cipherHash = sha256Hex(item.message_bytes_base64)
-            val seenCipherHashes = store.readPeerSeenCipherHashes(context.profile.userId, peer)
-            if (seenCipherHashes.contains(cipherHash)) {
+
+            workingKeysJson = ensurePrekeysReplenished(
+                store = store,
+                api = context.api,
+                userId = context.profile.userId,
+                keysJson = context.keysJson,
+            )
+            for (item in sealedInbox.messages) {
+                val peer = item.sender_user_id
+                val peerLastMessageId = store.readPeerLastMessageId(context.profile.userId, peer)
+                if (item.message_id <= peerLastMessageId) {
+                    sealedCursor = maxOf(sealedCursor, item.message_id)
+                    continue
+                }
+                val cipherHash = sha256Hex(item.message_bytes_base64)
+                val seenCipherHashes = store.readPeerSeenCipherHashes(context.profile.userId, peer)
+                if (seenCipherHashes.contains(cipherHash)) {
+                    store.writePeerLastMessageId(
+                        context.profile.userId,
+                        peer,
+                        maxOf(peerLastMessageId, item.message_id),
+                    )
+                    sealedCursor = maxOf(sealedCursor, item.message_id)
+                    continue
+                }
+
+                val existingSession = loadCompatibleSession(
+                    store = store,
+                    userId = context.profile.userId,
+                    peerUserId = peer,
+                    sessionJson = store.readSession(context.profile.userId, peer),
+                )
+                val result = decryptMessage(
+                    keysJson = workingKeysJson,
+                    recipientUserId = context.profile.userId,
+                    senderUserId = peer,
+                    messageBytesBase64 = item.message_bytes_base64,
+                    existingSessionJson = existingSession,
+                )
+                store.writeSession(context.profile.userId, peer, result.sessionJson)
+                val rendered = renderInboundPreview(result.plaintextUtf8)
+                store.appendThreadMessage(
+                    userId = context.profile.userId,
+                    peerUserId = peer,
+                    direction = "inbound",
+                    body = rendered,
+                    transportMessageId = item.message_id,
+                )
+                val isAcceptedPeer =
+                    peer == activePeerId ||
+                        knownPeers.contains(peer) ||
+                        store.isAcceptedPeer(context.profile.userId, peer)
+                if (isAcceptedPeer) {
+                    store.markPeerAccepted(context.profile.userId, peer)
+                    store.upsertConversation(
+                        userId = context.profile.userId,
+                        peerUserId = peer,
+                        lastPreview = "$peer: $rendered",
+                        incrementUnread = peer != activePeerId,
+                    )
+                    if (peer == activePeerId) {
+                        store.markConversationRead(context.profile.userId, peer)
+                    }
+                    knownPeers.add(peer)
+                    deliveredMessages += 1
+                } else {
+                    store.upsertMessageRequest(
+                        userId = context.profile.userId,
+                        peerUserId = peer,
+                        lastPreview = "$peer: $rendered",
+                    )
+                    pendingRequests += 1
+                }
+
+                seenCipherHashes.add(cipherHash)
+                while (seenCipherHashes.size > 512) {
+                    val first = seenCipherHashes.firstOrNull() ?: break
+                    seenCipherHashes.remove(first)
+                }
+                store.writePeerSeenCipherHashes(context.profile.userId, peer, seenCipherHashes)
+                store.writePeerLastMessageId(
+                    context.profile.userId,
+                    peer,
+                    maxOf(peerLastMessageId, item.message_id),
+                )
+                sealedCursor = maxOf(sealedCursor, item.message_id)
+                workingKeysJson = store.readKeys(context.profile.userId) ?: workingKeysJson
+            }
+            store.writeSealedCursor(context.profile.userId, sealedCursor)
+        } else {
+            var cursor = store.readCursor(context.profile.userId)
+            val inbox = context.api.inbox(
+                context.profile.userId,
+                buildInboxAuthHeaders(
+                    keysJson = context.keysJson,
+                    userId = context.profile.userId,
+                    since = cursor,
+                ).toHeaderMap(),
+                cursor,
+            )
+
+            if (inbox.messages.isEmpty()) {
+                return SyncOutcome(
+                    deliveredMessages = 0,
+                    pendingRequests = 0,
+                    discoveredGroups = discoveredGroups,
+                )
+            }
+
+            workingKeysJson = ensurePrekeysReplenished(
+                store = store,
+                api = context.api,
+                userId = context.profile.userId,
+                keysJson = context.keysJson,
+            )
+            for (item in inbox.messages) {
+                val peer = item.sender_user_id
+                val peerLastMessageId = store.readPeerLastMessageId(context.profile.userId, peer)
+                if (item.message_id <= peerLastMessageId) {
+                    cursor = maxOf(cursor, item.message_id)
+                    continue
+                }
+                val cipherHash = sha256Hex(item.message_bytes_base64)
+                val seenCipherHashes = store.readPeerSeenCipherHashes(context.profile.userId, peer)
+                if (seenCipherHashes.contains(cipherHash)) {
+                    store.writePeerLastMessageId(
+                        context.profile.userId,
+                        peer,
+                        maxOf(peerLastMessageId, item.message_id),
+                    )
+                    cursor = maxOf(cursor, item.message_id)
+                    continue
+                }
+
+                val existingSession = loadCompatibleSession(
+                    store = store,
+                    userId = context.profile.userId,
+                    peerUserId = peer,
+                    sessionJson = store.readSession(context.profile.userId, peer),
+                )
+                val result = decryptMessage(
+                    keysJson = workingKeysJson,
+                    recipientUserId = context.profile.userId,
+                    senderUserId = peer,
+                    messageBytesBase64 = item.message_bytes_base64,
+                    existingSessionJson = existingSession,
+                )
+                store.writeSession(context.profile.userId, peer, result.sessionJson)
+                val rendered = renderInboundPreview(result.plaintextUtf8)
+                store.appendThreadMessage(
+                    userId = context.profile.userId,
+                    peerUserId = peer,
+                    direction = "inbound",
+                    body = rendered,
+                    transportMessageId = item.message_id,
+                )
+                val isAcceptedPeer =
+                    peer == activePeerId ||
+                        knownPeers.contains(peer) ||
+                        store.isAcceptedPeer(context.profile.userId, peer)
+                if (isAcceptedPeer) {
+                    store.markPeerAccepted(context.profile.userId, peer)
+                    store.upsertConversation(
+                        userId = context.profile.userId,
+                        peerUserId = peer,
+                        lastPreview = "$peer: $rendered",
+                        incrementUnread = peer != activePeerId,
+                    )
+                    if (peer == activePeerId) {
+                        store.markConversationRead(context.profile.userId, peer)
+                    }
+                    knownPeers.add(peer)
+                    deliveredMessages += 1
+                } else {
+                    store.upsertMessageRequest(
+                        userId = context.profile.userId,
+                        peerUserId = peer,
+                        lastPreview = "$peer: $rendered",
+                    )
+                    pendingRequests += 1
+                }
+
+                seenCipherHashes.add(cipherHash)
+                while (seenCipherHashes.size > 512) {
+                    val first = seenCipherHashes.firstOrNull() ?: break
+                    seenCipherHashes.remove(first)
+                }
+                store.writePeerSeenCipherHashes(context.profile.userId, peer, seenCipherHashes)
                 store.writePeerLastMessageId(
                     context.profile.userId,
                     peer,
                     maxOf(peerLastMessageId, item.message_id),
                 )
                 cursor = maxOf(cursor, item.message_id)
-                continue
+                workingKeysJson = store.readKeys(context.profile.userId) ?: workingKeysJson
             }
-
-            val existingSession = loadCompatibleSession(
-                store = store,
-                userId = context.profile.userId,
-                peerUserId = peer,
-                sessionJson = store.readSession(context.profile.userId, peer),
-            )
-            val result = decryptMessage(
-                keysJson = workingKeysJson,
-                recipientUserId = context.profile.userId,
-                senderUserId = peer,
-                messageBytesBase64 = item.message_bytes_base64,
-                existingSessionJson = existingSession,
-            )
-            store.writeSession(context.profile.userId, peer, result.sessionJson)
-            val rendered = renderInboundPreview(result.plaintextUtf8)
-            store.appendThreadMessage(
-                userId = context.profile.userId,
-                peerUserId = peer,
-                direction = "inbound",
-                body = rendered,
-                transportMessageId = item.message_id,
-            )
-            val isAcceptedPeer =
-                peer == activePeerId ||
-                    knownPeers.contains(peer) ||
-                    store.isAcceptedPeer(context.profile.userId, peer)
-            if (isAcceptedPeer) {
-                store.markPeerAccepted(context.profile.userId, peer)
-                store.upsertConversation(
-                    userId = context.profile.userId,
-                    peerUserId = peer,
-                    lastPreview = "$peer: $rendered",
-                    incrementUnread = peer != activePeerId,
-                )
-                if (peer == activePeerId) {
-                    store.markConversationRead(context.profile.userId, peer)
-                }
-                knownPeers.add(peer)
-                deliveredMessages += 1
-            } else {
-                store.upsertMessageRequest(
-                    userId = context.profile.userId,
-                    peerUserId = peer,
-                    lastPreview = "$peer: $rendered",
-                )
-                pendingRequests += 1
-            }
-
-            seenCipherHashes.add(cipherHash)
-            while (seenCipherHashes.size > 512) {
-                val first = seenCipherHashes.firstOrNull() ?: break
-                seenCipherHashes.remove(first)
-            }
-            store.writePeerSeenCipherHashes(context.profile.userId, peer, seenCipherHashes)
-            store.writePeerLastMessageId(
-                context.profile.userId,
-                peer,
-                maxOf(peerLastMessageId, item.message_id),
-            )
-            cursor = maxOf(cursor, item.message_id)
-            workingKeysJson = store.readKeys(context.profile.userId) ?: workingKeysJson
+            store.writeCursor(context.profile.userId, cursor)
         }
-
-        store.writeCursor(context.profile.userId, cursor)
         return SyncOutcome(
             deliveredMessages = deliveredMessages,
             pendingRequests = pendingRequests,

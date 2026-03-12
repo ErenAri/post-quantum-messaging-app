@@ -598,10 +598,12 @@ fn bundle_to_core(bundle: &WasmServerBundle, suite: &str) -> Result<PreKeyBundle
         kem: suite_to_kem_algorithm(suite)?,
         ..AlgorithmSuite::default()
     };
-    out.pq_sig_public_key = Some(decode_b64("identity_pq_sig_pub", &bundle.identity_pq_sig_pub)?);
+    out.pq_sig_public_key = Some(decode_b64(
+        "identity_pq_sig_pub",
+        &bundle.identity_pq_sig_pub,
+    )?);
     out.pq_spk_signature = Some(decode_b64("pq_sig_over_spk", &bundle.pq_sig_over_spk)?);
-    out.pq_pqspk_signature =
-        Some(decode_b64("pq_sig_over_pqspk", &bundle.pq_sig_over_pqspk)?);
+    out.pq_pqspk_signature = Some(decode_b64("pq_sig_over_pqspk", &bundle.pq_sig_over_pqspk)?);
     out.one_time_prekey = bundle
         .one_time_prekey_x25519
         .as_ref()
@@ -707,7 +709,10 @@ pub fn wasm_initiate_session_and_encrypt(
             .suite_id()
             .map_err(|e| JsValue::from_str(&e.to_string()))?,
         512,
-        mandatory_pq_ratchet_state(&local_pq_signed_prekey, prekey_bundle.pq_signed_prekey.clone()),
+        mandatory_pq_ratchet_state(
+            &local_pq_signed_prekey,
+            prekey_bundle.pq_signed_prekey.clone(),
+        ),
         Box::new(kem),
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;

@@ -678,6 +678,8 @@ struct RelayRequest {
 
 #[derive(Debug, Serialize)]
 struct SealedRelayRequest {
+    sender_user_id: String,
+    device_id: String,
     message_bytes_base64: String,
 }
 
@@ -2468,7 +2470,10 @@ async fn send_message_flow(
         prekey_bundle.signed_prekey,
         prekey_bundle.suite.suite_id()?,
         512,
-        mandatory_pq_ratchet_state(&local_pq_signed_prekey, prekey_bundle.pq_signed_prekey.clone()),
+        mandatory_pq_ratchet_state(
+            &local_pq_signed_prekey,
+            prekey_bundle.pq_signed_prekey.clone(),
+        ),
         Box::new(kem),
     )?;
     save_session(
@@ -2538,7 +2543,15 @@ async fn send_sealed_message_flow(
         &sender_keys.device_id,
         plaintext,
     )?;
-    let response = relay_sealed_message(client, server, to, &sealed_payload).await?;
+    let response = relay_sealed_message(
+        client,
+        server,
+        from,
+        &sender_keys.device_id,
+        to,
+        &sealed_payload,
+    )
+    .await?;
 
     let text = String::from_utf8_lossy(plaintext).to_string();
     append_message_record(
@@ -3014,10 +3027,14 @@ async fn relay_message(
 async fn relay_sealed_message(
     client: &Client,
     server: &str,
+    sender_user_id: &str,
+    sender_device_id: &str,
     recipient: &str,
     message_bytes: &[u8],
 ) -> Result<SealedRelayResponse> {
     let req = SealedRelayRequest {
+        sender_user_id: sender_user_id.to_string(),
+        device_id: sender_device_id.to_string(),
         message_bytes_base64: B64.encode(message_bytes),
     };
     let response = client

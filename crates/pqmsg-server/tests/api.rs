@@ -21,8 +21,8 @@ use pqmsg_server::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::any::AnyPoolOptions;
-use std::ops::Deref;
 use std::fs;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -2153,6 +2153,9 @@ async fn capabilities_reports_client_contract() {
     assert_eq!(body["calling_supported"].as_bool(), Some(false));
     assert_eq!(body["stories_supported"].as_bool(), Some(false));
     assert_eq!(body["channels_supported"].as_bool(), Some(false));
+    assert_eq!(body["group_messaging_supported"].as_bool(), Some(false));
+    assert_eq!(body["sealed_sender_required"].as_bool(), Some(true));
+    assert_eq!(body["ephemeral_messaging_supported"].as_bool(), Some(false));
     assert_eq!(
         body["runtime_crypto_profile"]["protocol_version"].as_u64(),
         Some(PROTOCOL_VERSION_V1 as u64)
@@ -2448,6 +2451,8 @@ async fn current_device_retire_clears_device_scoped_server_state() {
         Method::POST,
         "/v1/sealed-relay/bob",
         json!({
+            "sender_user_id": "alice",
+            "device_id": "alice-dev-1",
             "message_bytes_base64": B64.encode(&sealed_blob)
         }),
     )
@@ -3737,7 +3742,7 @@ async fn discovery_disabled_and_contacts_flow() {
 }
 
 #[tokio::test]
-async fn group_membership_and_relay_flow() {
+async fn group_endpoints_are_disabled() {
     let app = test_app().await;
     let alice_sig = signing_key(141);
     let bob_sig = signing_key(142);
@@ -3778,13 +3783,11 @@ async fn group_membership_and_relay_flow() {
         &create_group_headers,
     )
     .await;
-    assert_eq!(status_create_group, StatusCode::OK);
-    assert_eq!(create_group_payload["group_id"].as_str(), Some("alpha"));
-    assert_eq!(
-        create_group_payload["owner_user_id"].as_str(),
-        Some("alice")
-    );
-    assert_eq!(create_group_payload["member_count"].as_u64(), Some(2));
+    assert_eq!(status_create_group, StatusCode::FORBIDDEN);
+    assert!(create_group_payload["detail"]
+        .as_str()
+        .unwrap_or("")
+        .contains("private group design"));
 
     let list_bob_groups_headers = groups_list_auth_headers(&bob_sig, "bob", "bob-dev-1");
     let (status_bob_groups, bob_groups_payload) = json_request_with_headers(
@@ -3795,12 +3798,11 @@ async fn group_membership_and_relay_flow() {
         &list_bob_groups_headers,
     )
     .await;
-    assert_eq!(status_bob_groups, StatusCode::OK);
-    let bob_groups = bob_groups_payload["groups"].as_array().expect("bob groups");
-    assert_eq!(bob_groups.len(), 1);
-    assert_eq!(bob_groups[0]["group_id"].as_str(), Some("alpha"));
-    assert_eq!(bob_groups[0]["owner_user_id"].as_str(), Some("alice"));
-    assert_eq!(bob_groups[0]["member_count"].as_u64(), Some(2));
+    assert_eq!(status_bob_groups, StatusCode::FORBIDDEN);
+    assert!(bob_groups_payload["detail"]
+        .as_str()
+        .unwrap_or("")
+        .contains("group messaging is disabled"));
 
     let list_members_headers =
         groups_members_list_auth_headers(&bob_sig, "bob", "bob-dev-1", "alpha");
@@ -3812,15 +3814,11 @@ async fn group_membership_and_relay_flow() {
         &list_members_headers,
     )
     .await;
-    assert_eq!(status_list_members, StatusCode::OK);
-    let members = list_members_payload["members"].as_array().expect("members");
-    assert_eq!(members.len(), 2);
-    assert!(members
-        .iter()
-        .any(|item| item["user_id"].as_str() == Some("alice")));
-    assert!(members
-        .iter()
-        .any(|item| item["user_id"].as_str() == Some("bob")));
+    assert_eq!(status_list_members, StatusCode::FORBIDDEN);
+    assert!(list_members_payload["detail"]
+        .as_str()
+        .unwrap_or("")
+        .contains("group messaging is disabled"));
 
     let add_member_body = json!({
         "member_user_id": "carol"
@@ -3835,26 +3833,11 @@ async fn group_membership_and_relay_flow() {
         &add_member_headers,
     )
     .await;
-    assert_eq!(status_add_member, StatusCode::OK);
-    assert_eq!(add_member_payload["changed"].as_bool(), Some(true));
-
-    let list_carol_groups_headers = groups_list_auth_headers(&carol_sig, "carol", "carol-dev-1");
-    let (status_carol_groups, carol_groups_payload) = json_request_with_headers(
-        app.clone(),
-        Method::GET,
-        "/v1/users/carol/groups",
-        json!({}),
-        &list_carol_groups_headers,
-    )
-    .await;
-    assert_eq!(status_carol_groups, StatusCode::OK);
-    let carol_groups = carol_groups_payload["groups"]
-        .as_array()
-        .expect("carol groups");
-    assert_eq!(carol_groups.len(), 1);
-    assert_eq!(carol_groups[0]["group_id"].as_str(), Some("alpha"));
-    assert_eq!(carol_groups[0]["owner_user_id"].as_str(), Some("alice"));
-    assert_eq!(carol_groups[0]["member_count"].as_u64(), Some(3));
+    assert_eq!(status_add_member, StatusCode::FORBIDDEN);
+    assert!(add_member_payload["detail"]
+        .as_str()
+        .unwrap_or("")
+        .contains("group messaging is disabled"));
 
     let group_message_1 = b"group-message-1".to_vec();
     let group_message_1_b64 = B64.encode(&group_message_1);
@@ -3893,59 +3876,11 @@ async fn group_membership_and_relay_flow() {
         &relay_group_headers_1,
     )
     .await;
-    assert_eq!(status_group_relay_1, StatusCode::OK);
-    assert_eq!(
-        group_relay_payload_1["delivered_user_count"].as_u64(),
-        Some(2)
-    );
-    assert_eq!(
-        group_relay_payload_1["delivered_message_count"].as_u64(),
-        Some(2)
-    );
-
-    let bob_inbox_headers = inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0);
-    let (status_bob_inbox, bob_inbox_payload) = json_request_with_headers(
-        app.clone(),
-        Method::GET,
-        "/v1/inbox/bob?since=0",
-        json!({}),
-        &bob_inbox_headers,
-    )
-    .await;
-    assert_eq!(status_bob_inbox, StatusCode::OK);
-    let bob_messages = bob_inbox_payload["messages"]
-        .as_array()
-        .expect("bob messages");
-    assert_eq!(bob_messages.len(), 1);
-    assert_eq!(
-        bob_messages[0]["message_bytes_base64"].as_str(),
-        Some(group_message_1_b64.as_str())
-    );
-    let bob_first_message_id = bob_messages[0]["message_id"]
-        .as_i64()
-        .expect("bob message id");
-
-    let carol_inbox_headers = inbox_auth_headers(&carol_sig, "carol", "carol-dev-1", 0);
-    let (status_carol_inbox, carol_inbox_payload) = json_request_with_headers(
-        app.clone(),
-        Method::GET,
-        "/v1/inbox/carol?since=0",
-        json!({}),
-        &carol_inbox_headers,
-    )
-    .await;
-    assert_eq!(status_carol_inbox, StatusCode::OK);
-    let carol_messages = carol_inbox_payload["messages"]
-        .as_array()
-        .expect("carol messages");
-    assert_eq!(carol_messages.len(), 1);
-    assert_eq!(
-        carol_messages[0]["message_bytes_base64"].as_str(),
-        Some(group_message_1_carol_b64.as_str())
-    );
-    let carol_first_message_id = carol_messages[0]["message_id"]
-        .as_i64()
-        .expect("carol message id");
+    assert_eq!(status_group_relay_1, StatusCode::FORBIDDEN);
+    assert!(group_relay_payload_1["detail"]
+        .as_str()
+        .unwrap_or("")
+        .contains("group messaging is disabled"));
 
     let remove_member_body = json!({
         "member_user_id": "bob"
@@ -3960,8 +3895,11 @@ async fn group_membership_and_relay_flow() {
         &remove_member_headers,
     )
     .await;
-    assert_eq!(status_remove_member, StatusCode::OK);
-    assert_eq!(remove_member_payload["changed"].as_bool(), Some(true));
+    assert_eq!(status_remove_member, StatusCode::FORBIDDEN);
+    assert!(remove_member_payload["detail"]
+        .as_str()
+        .unwrap_or("")
+        .contains("group messaging is disabled"));
 
     let group_message_2 = b"group-message-2".to_vec();
     let group_message_2_b64 = B64.encode(&group_message_2);
@@ -3991,56 +3929,11 @@ async fn group_membership_and_relay_flow() {
         &relay_group_headers_2,
     )
     .await;
-    assert_eq!(status_group_relay_2, StatusCode::OK);
-    assert_eq!(
-        group_relay_payload_2["delivered_user_count"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        group_relay_payload_2["delivered_message_count"].as_u64(),
-        Some(1)
-    );
-
-    let bob_after_headers = inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", bob_first_message_id);
-    let bob_after_uri = format!("/v1/inbox/bob?since={bob_first_message_id}");
-    let (status_bob_after, bob_after_payload) = json_request_with_headers(
-        app.clone(),
-        Method::GET,
-        &bob_after_uri,
-        json!({}),
-        &bob_after_headers,
-    )
-    .await;
-    assert_eq!(status_bob_after, StatusCode::OK);
-    assert_eq!(
-        bob_after_payload["messages"]
-            .as_array()
-            .map(|items| items.len()),
-        Some(0)
-    );
-
-    let carol_after_headers =
-        inbox_auth_headers(&carol_sig, "carol", "carol-dev-1", carol_first_message_id);
-    let carol_after_uri = format!("/v1/inbox/carol?since={carol_first_message_id}");
-    let (status_carol_after, carol_after_payload) = json_request_with_headers(
-        app.clone(),
-        Method::GET,
-        &carol_after_uri,
-        json!({}),
-        &carol_after_headers,
-    )
-    .await;
-    assert_eq!(status_carol_after, StatusCode::OK);
-    assert_eq!(
-        carol_after_payload["messages"]
-            .as_array()
-            .map(|items| items.len()),
-        Some(1)
-    );
-    assert_eq!(
-        carol_after_payload["messages"][0]["message_bytes_base64"].as_str(),
-        Some(group_message_2_b64.as_str())
-    );
+    assert_eq!(status_group_relay_2, StatusCode::FORBIDDEN);
+    assert!(group_relay_payload_2["detail"]
+        .as_str()
+        .unwrap_or("")
+        .contains("group messaging is disabled"));
 }
 
 #[tokio::test]
@@ -4070,11 +3963,11 @@ async fn inbox_auth_compatibility_accepts_mobile_secondary_flows() {
         &inbox_auth_headers(&alice_sig, "alice", "alice-dev-1", 0),
     )
     .await;
-    assert_eq!(status_create_group, StatusCode::OK);
-    assert_eq!(
-        create_group_payload["group_id"].as_str(),
-        Some("compat-alpha")
-    );
+    assert_eq!(status_create_group, StatusCode::FORBIDDEN);
+    assert!(create_group_payload["detail"]
+        .as_str()
+        .unwrap_or("")
+        .contains("group messaging is disabled"));
 
     let (status_contacts_upsert, _) = json_request_with_headers(
         app.clone(),
@@ -4125,11 +4018,9 @@ async fn inbox_auth_compatibility_accepts_mobile_secondary_flows() {
     )
     .await;
     assert_eq!(status_presence_get, StatusCode::FORBIDDEN);
-    assert!(
-        presence_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("presence is disabled"))
-    );
+    assert!(presence_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("presence is disabled")));
 
     let (status_typing_update, _) = json_request_with_headers(
         app.clone(),
@@ -4150,11 +4041,9 @@ async fn inbox_auth_compatibility_accepts_mobile_secondary_flows() {
     )
     .await;
     assert_eq!(status_typing_get, StatusCode::FORBIDDEN);
-    assert!(
-        typing_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("typing indicators are disabled"))
-    );
+    assert!(typing_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("typing indicators are disabled")));
 
     let (status_receipt_send, receipt_send_payload) = json_request_with_headers(
         app.clone(),
@@ -4168,11 +4057,9 @@ async fn inbox_auth_compatibility_accepts_mobile_secondary_flows() {
     )
     .await;
     assert_eq!(status_receipt_send, StatusCode::FORBIDDEN);
-    assert!(
-        receipt_send_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("read receipts are disabled"))
-    );
+    assert!(receipt_send_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("read receipts are disabled")));
 
     let (status_receipts_get, receipts_payload) = json_request_with_headers(
         app.clone(),
@@ -4183,11 +4070,9 @@ async fn inbox_auth_compatibility_accepts_mobile_secondary_flows() {
     )
     .await;
     assert_eq!(status_receipts_get, StatusCode::FORBIDDEN);
-    assert!(
-        receipts_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("read receipts are disabled"))
-    );
+    assert!(receipts_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("read receipts are disabled")));
 }
 
 #[tokio::test]
@@ -4236,6 +4121,8 @@ async fn sealed_sender_relay_and_inbox_flow() {
 
     let sealed_blob = b"sealed-ciphertext-placeholder".to_vec();
     let relay_body = json!({
+        "sender_user_id": "alice",
+        "device_id": "alice-dev-1",
         "message_bytes_base64": B64.encode(&sealed_blob)
     });
     let (status_relay, relay_payload) = json_request(
@@ -4265,7 +4152,7 @@ async fn sealed_sender_relay_and_inbox_flow() {
         messages[0]["message_bytes_base64"].as_str(),
         Some(sealed_blob_b64.as_str())
     );
-    assert!(messages[0].get("sender_user_id").is_none());
+    assert_eq!(messages[0]["sender_user_id"].as_str(), Some("alice"));
 }
 
 #[tokio::test]
@@ -4329,6 +4216,8 @@ async fn sealed_sender_uses_peer_ip_when_proxy_headers_are_untrusted() {
         .post(format!("{base_http_url}/v1/sealed-relay/bob"))
         .header("x-forwarded-for", "203.0.113.10")
         .json(&json!({
+            "sender_user_id": "carol",
+            "device_id": "carol-dev-1",
             "message_bytes_base64": B64.encode("sealed-one")
         }))
         .send()
@@ -4340,6 +4229,8 @@ async fn sealed_sender_uses_peer_ip_when_proxy_headers_are_untrusted() {
         .post(format!("{base_http_url}/v1/sealed-relay/carol"))
         .header("x-forwarded-for", "198.51.100.20")
         .json(&json!({
+            "sender_user_id": "bob",
+            "device_id": "bob-dev-1",
             "message_bytes_base64": B64.encode("sealed-two")
         }))
         .send()
@@ -4614,11 +4505,9 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
     )
     .await;
     assert_eq!(status_presence_update, StatusCode::FORBIDDEN);
-    assert!(
-        presence_update_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("presence is disabled"))
-    );
+    assert!(presence_update_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("presence is disabled")));
 
     let presence_get_headers = presence_get_auth_headers(&bob_sig, "bob", "bob-dev-1", "alice");
     let (status_presence_get, presence_get_payload) = json_request_with_headers(
@@ -4630,11 +4519,9 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
     )
     .await;
     assert_eq!(status_presence_get, StatusCode::FORBIDDEN);
-    assert!(
-        presence_get_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("presence is disabled"))
-    );
+    assert!(presence_get_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("presence is disabled")));
 
     let typing_on_headers =
         typing_update_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob", true);
@@ -4647,11 +4534,9 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
     )
     .await;
     assert_eq!(status_typing_on, StatusCode::FORBIDDEN);
-    assert!(
-        typing_on_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("typing indicators are disabled"))
-    );
+    assert!(typing_on_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("typing indicators are disabled")));
 
     let typing_get_headers = typing_get_auth_headers(&bob_sig, "bob", "bob-dev-1", "bob");
     let (status_typing_get, typing_get_payload) = json_request_with_headers(
@@ -4663,11 +4548,9 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
     )
     .await;
     assert_eq!(status_typing_get, StatusCode::FORBIDDEN);
-    assert!(
-        typing_get_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("typing indicators are disabled"))
-    );
+    assert!(typing_get_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("typing indicators are disabled")));
 
     let typing_off_headers =
         typing_update_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob", false);
@@ -4680,11 +4563,9 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
     )
     .await;
     assert_eq!(status_typing_off, StatusCode::FORBIDDEN);
-    assert!(
-        typing_off_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("typing indicators are disabled"))
-    );
+    assert!(typing_off_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("typing indicators are disabled")));
 
     let typing_get_headers_after_off = typing_get_auth_headers(&bob_sig, "bob", "bob-dev-1", "bob");
     let (status_typing_get_after_off, typing_get_payload_after_off) = json_request_with_headers(
@@ -4696,11 +4577,9 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
     )
     .await;
     assert_eq!(status_typing_get_after_off, StatusCode::FORBIDDEN);
-    assert!(
-        typing_get_payload_after_off["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("typing indicators are disabled"))
-    );
+    assert!(typing_get_payload_after_off["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("typing indicators are disabled")));
 }
 
 #[tokio::test]
@@ -5113,7 +4992,7 @@ async fn auth_rejects_stale_and_future_timestamps() {
 // ---- 2. Group owner-only enforcement -------------------------------------
 
 #[tokio::test]
-async fn group_non_owner_cannot_add_or_remove_members() {
+async fn group_member_mutation_endpoints_are_disabled_before_owner_checks() {
     let app = test_app().await;
     let alice_sig = signing_key(210);
     let bob_sig = signing_key(211);
@@ -5141,7 +5020,7 @@ async fn group_non_owner_cannot_add_or_remove_members() {
         &headers,
     )
     .await;
-    assert_eq!(s, StatusCode::OK);
+    assert_eq!(s, StatusCode::FORBIDDEN);
 
     // Bob (non-owner) tries to add carol → should fail
     let add_headers =
@@ -5154,10 +5033,13 @@ async fn group_non_owner_cannot_add_or_remove_members() {
         &add_headers,
     )
     .await;
-    assert_eq!(status_add, StatusCode::BAD_REQUEST);
+    assert_eq!(status_add, StatusCode::FORBIDDEN);
     assert!(
-        body_add["detail"].as_str().unwrap_or("").contains("owner"),
-        "non-owner add should mention owner: {body_add}"
+        body_add["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("group messaging is disabled"),
+        "group add should fail before owner checks: {body_add}"
     );
 
     // Bob (non-owner) tries to remove alice → should fail
@@ -5171,13 +5053,13 @@ async fn group_non_owner_cannot_add_or_remove_members() {
         &remove_headers,
     )
     .await;
-    assert_eq!(status_remove, StatusCode::BAD_REQUEST);
+    assert_eq!(status_remove, StatusCode::FORBIDDEN);
     assert!(
         body_remove["detail"]
             .as_str()
             .unwrap_or("")
-            .contains("owner"),
-        "non-owner remove should mention owner: {body_remove}"
+            .contains("group messaging is disabled"),
+        "group remove should fail before owner checks: {body_remove}"
     );
 
     // Owner cannot remove themselves
@@ -5191,10 +5073,13 @@ async fn group_non_owner_cannot_add_or_remove_members() {
         &self_remove_headers,
     )
     .await;
-    assert_eq!(status_self, StatusCode::BAD_REQUEST);
+    assert_eq!(status_self, StatusCode::FORBIDDEN);
     assert!(
-        body_self["detail"].as_str().unwrap_or("").contains("owner"),
-        "owner self-remove should mention owner: {body_self}"
+        body_self["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("group messaging is disabled"),
+        "group remove should fail before owner checks: {body_self}"
     );
 
     // Owner (alice) CAN add carol — sanity check
@@ -5208,7 +5093,7 @@ async fn group_non_owner_cannot_add_or_remove_members() {
         &owner_add_headers,
     )
     .await;
-    assert_eq!(status_owner_add, StatusCode::OK);
+    assert_eq!(status_owner_add, StatusCode::FORBIDDEN);
 }
 
 // ---- 3. Rate-limiter saturation ------------------------------------------
@@ -5310,7 +5195,7 @@ async fn publish_prekeys_rejects_exceeding_max_one_time_keys() {
 // ---- 5. Max group members boundary ---------------------------------------
 
 #[tokio::test]
-async fn group_rejects_exceeding_max_member_count() {
+async fn group_create_is_disabled_before_member_limit_validation() {
     let app = test_app().await;
     let owner_sig = signing_key(240);
     let reg_owner = register_payload("group-owner", "dev-1", [81u8; 32], &owner_sig);
@@ -5334,10 +5219,13 @@ async fn group_rejects_exceeding_max_member_count() {
         &headers,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(
-        body["detail"].as_str().unwrap_or("").contains("512"),
-        "should mention the 512 limit: {body}"
+        body["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("group messaging is disabled"),
+        "group create should fail before member-limit validation: {body}"
     );
 }
 
@@ -5503,11 +5391,9 @@ async fn postgres_channel_endpoints_are_disabled() {
     )
     .await;
     assert_eq!(status_create, StatusCode::FORBIDDEN);
-    assert!(
-        create_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("channels are disabled"))
-    );
+    assert!(create_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("channels are disabled")));
 
     let subscribe_message = format!(
         "channel-subscribe:{}:{}:{}",
@@ -5528,11 +5414,9 @@ async fn postgres_channel_endpoints_are_disabled() {
     )
     .await;
     assert_eq!(status_subscribe, StatusCode::FORBIDDEN);
-    assert!(
-        subscribe_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("channels are disabled"))
-    );
+    assert!(subscribe_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("channels are disabled")));
 
     let list_headers = format_string_auth_headers(
         &bob_sig,
@@ -5549,11 +5433,9 @@ async fn postgres_channel_endpoints_are_disabled() {
     )
     .await;
     assert_eq!(status_list, StatusCode::FORBIDDEN);
-    assert!(
-        list_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("channels are disabled"))
-    );
+    assert!(list_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("channels are disabled")));
 }
 
 #[tokio::test]
@@ -5600,11 +5482,9 @@ async fn postgres_story_endpoints_are_disabled() {
     )
     .await;
     assert_eq!(status_create, StatusCode::FORBIDDEN);
-    assert!(
-        create_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("stories are disabled"))
-    );
+    assert!(create_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("stories are disabled")));
 
     let view_message = format!(
         "story-view:{}:{}:{}",
@@ -5621,11 +5501,9 @@ async fn postgres_story_endpoints_are_disabled() {
     )
     .await;
     assert_eq!(status_view, StatusCode::FORBIDDEN);
-    assert!(
-        view_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("stories are disabled"))
-    );
+    assert!(view_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("stories are disabled")));
 
     let feed_headers = format_string_auth_headers(
         &bob_sig,
@@ -5642,11 +5520,9 @@ async fn postgres_story_endpoints_are_disabled() {
     )
     .await;
     assert_eq!(status_feed, StatusCode::FORBIDDEN);
-    assert!(
-        feed_payload["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("stories are disabled"))
-    );
+    assert!(feed_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("stories are disabled")));
 }
 
 // ---- 7. Negative identity-log queries ------------------------------------

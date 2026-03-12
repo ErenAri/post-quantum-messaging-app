@@ -39,11 +39,14 @@ describe("betaScope", () => {
       calling_supported: false,
       stories_supported: false,
       channels_supported: false,
+      group_messaging_supported: false,
+      sealed_sender_required: true,
+      ephemeral_messaging_supported: false,
       web_client_policy: "demo_only",
     });
     expect(holdback.messagingAllowed).toBe(false);
     expect(holdback.detail).toContain("demo_only");
-    expect(holdback.detail).toContain("Direct web messaging");
+    expect(holdback.detail).toContain("private group design");
   });
 
   it("still blocks group messaging when server policy looks interoperable", () => {
@@ -76,12 +79,15 @@ describe("betaScope", () => {
       calling_supported: false,
       stories_supported: false,
       channels_supported: false,
+      group_messaging_supported: false,
+      sealed_sender_required: true,
+      ephemeral_messaging_supported: false,
       web_client_policy: "interop_candidate",
     });
     expect(holdback.messagingAllowed).toBe(false);
     expect(holdback.title).toContain("group messaging unavailable");
     expect(holdback.detail).toContain("interop_candidate");
-    expect(holdback.detail).toContain("out of scope");
+    expect(holdback.detail).toContain("private group design");
   });
 
   it("exposes the shared scope summary", () => {

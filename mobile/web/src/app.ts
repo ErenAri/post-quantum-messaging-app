@@ -75,6 +75,7 @@ import {
   markGroupConversationRead,
   updateConversationMeta,
   readCursor,
+  readSealedCursor,
   saveKeys,
   saveDirectMessageSession,
   saveSetup,
@@ -83,6 +84,7 @@ import {
   wipeLocalState,
   writeProfileDisplayName,
   writeCursor,
+  writeSealedCursor,
   writeIdentityPin,
   type ConversationKind,
   type ConversationMeta,
@@ -250,6 +252,9 @@ async function ensureMandatoryPqRatchetPolicy(): Promise<void> {
   }
   if (capabilities.pq_ratchet_interval <= 0) {
     throw new Error("Server is not advertising mandatory PQ ratchet support.");
+  }
+  if (!capabilities.sealed_sender_required) {
+    throw new Error("Server is not advertising sealed-sender-only direct messaging.");
   }
 }
 
@@ -660,6 +665,10 @@ function noteIncomingGroupConversation(
 
 async function syncGroupsBackground(): Promise<void> {
   if (!setup.userId) {
+    return;
+  }
+  const capabilities = await loadServerCapabilitiesCached();
+  if (!capabilities?.group_messaging_supported) {
     return;
   }
   try {
@@ -1562,19 +1571,12 @@ async function renderChat(peerId: string): Promise<void> {
           <div class="chat-details-row"><span>Trust</span><strong>${escHtml(trustSummary)}</strong></div>
           <div class="chat-details-row column"><span>Identity fingerprint</span><span class="mono fingerprint">${escHtml(fingerprintSummary)}</span></div>
           <div class="chat-details-row">
-            <span>Sealed sender by default</span>
-            <label class="switch-inline"><input id="detail-sealed" type="checkbox" ${meta.sealedSenderDefault ? "checked" : ""} /><span>${meta.sealedSenderDefault ? "On" : "Off"}</span></label>
+            <span>Sealed sender</span>
+            <strong>Required</strong>
           </div>
           <div class="chat-details-row">
             <span>Disappearing messages</span>
-            <select id="detail-ttl" class="ephem-select">
-              <option value="0">Off</option>
-              <option value="30" ${meta.ephemeralTtlDefault === 30 ? "selected" : ""}>30s</option>
-              <option value="300" ${meta.ephemeralTtlDefault === 300 ? "selected" : ""}>5m</option>
-              <option value="3600" ${meta.ephemeralTtlDefault === 3600 ? "selected" : ""}>1h</option>
-              <option value="86400" ${meta.ephemeralTtlDefault === 86400 ? "selected" : ""}>24h</option>
-              <option value="604800" ${meta.ephemeralTtlDefault === 604800 ? "selected" : ""}>7d</option>
-            </select>
+            <strong>Unavailable</strong>
           </div>
           <div class="chat-details-actions">
             <button id="detail-pin" class="btn-secondary">${meta.pinnedAt ? "Unpin Chat" : "Pin Chat"}</button>
@@ -1695,8 +1697,7 @@ async function renderChat(peerId: string): Promise<void> {
   const attachmentPreview = q("#attachment-preview");
   const emojiTray = q("#chat-emoji-tray");
   let sendInFlight = false;
-  let useSealed = meta.sealedSenderDefault;
-  let ephTtl = meta.ephemeralTtlDefault;
+  const useSealed = true;
   let pendingAttachmentFile: File | null = null;
   let pendingAttachmentPreviewUrl: string | null = null;
   const syncSendAvailability = (): void => {
@@ -1796,14 +1797,6 @@ async function renderChat(peerId: string): Promise<void> {
     if (e.target === detailsSheet) {
       detailsSheet.classList.add("hidden");
     }
-  });
-  q<HTMLInputElement>("#detail-sealed").addEventListener("change", (e) => {
-    useSealed = (e.currentTarget as HTMLInputElement).checked;
-    setConversationSendDefaults(peerId, { sealedSenderDefault: useSealed });
-  });
-  q<HTMLSelectElement>("#detail-ttl").addEventListener("change", (e) => {
-    ephTtl = Number((e.currentTarget as HTMLSelectElement).value || 0);
-    setConversationSendDefaults(peerId, { ephemeralTtlDefault: ephTtl });
   });
   q("#detail-pin").addEventListener("click", () => {
     const next = toggleConversationPinned("dm", peerId);
@@ -1972,29 +1965,12 @@ async function renderChat(peerId: string): Promise<void> {
         const api = new PqmsgApi(setup.serverUrl);
         const messageBytesBase64 = await encryptDirectPayload(k, peerId, text);
 
-        if (useSealed) {
-          await api.sealedRelay(peerId, { message_bytes_base64: messageBytesBase64 });
-        } else if (ephTtl > 0) {
-          const headers = buildEphemeralRelayAuthHeaders(k, peerId, ephTtl);
-          await api.relayEphemeral(peerId, {
-            sender_user_id: k.userId,
-            device_id: k.deviceId,
-            message_bytes_base64: messageBytesBase64,
-            ttl_seconds: ephTtl,
-          }, headers);
-        } else {
-          const headers = buildRelayAuthHeaders(k, peerId, messageBytesBase64);
-          const relay = await api.relay(peerId, {
-            sender_user_id: k.userId,
-            device_id: k.deviceId,
-            message_bytes_base64: messageBytesBase64,
-          }, headers);
-          await updateMessageStatus(tempId, "sent", relay.message_id);
-        }
-
-        if (useSealed || ephTtl > 0) {
-          await updateMessageStatus(tempId, "sent");
-        }
+        await api.sealedRelay(peerId, {
+          sender_user_id: k.userId,
+          device_id: k.deviceId,
+          message_bytes_base64: messageBytesBase64,
+        });
+        await updateMessageStatus(tempId, "sent");
         upsertConversation(setup.userId, peerId, `You: ${text}`, false);
         markConversationRead(setup.userId, peerId);
         refreshConversationsIfVisible();
@@ -2476,6 +2452,12 @@ async function renderGroupChat(groupId: string): Promise<void> {
 }
 
 async function loadGroupMembersCount(groupId: string): Promise<void> {
+  const capabilities = await loadServerCapabilitiesCached();
+  if (!capabilities?.group_messaging_supported) {
+    const countEl = document.getElementById("gc-member-count");
+    if (countEl) countEl.textContent = "group messaging unavailable";
+    return;
+  }
   try {
     const k = await ensureKeys();
     const api = new PqmsgApi(setup.serverUrl);
@@ -2494,6 +2476,33 @@ async function loadGroupMembersCount(groupId: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function renderGroupInfo(groupId: string): Promise<void> {
+  const capabilities = await loadServerCapabilitiesCached();
+  if (!capabilities?.group_messaging_supported) {
+    app.innerHTML = `
+      <div class="app-shell">
+        <header class="topbar">
+          <button id="gi-back" class="icon-btn" aria-label="Back to conversations">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 12H5M12 19l-7-7 7-7"/>
+            </svg>
+          </button>
+          <h1 class="topbar-title">Group Info</h1>
+        </header>
+        <div class="settings-body">
+          <div class="settings-section">
+            <h3>${escHtml(groupId)}</h3>
+            <div class="beta-banner beta-banner-warning">
+              <strong>Group messaging is unavailable</strong>
+              <p>Private groups are disabled in the current privacy profile pending a private group design.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    q("#gi-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
+    return;
+  }
+
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
@@ -2509,12 +2518,12 @@ async function renderGroupInfo(groupId: string): Promise<void> {
           <h3>${escHtml(groupId)}</h3>
           <div class="beta-banner beta-banner-warning">
             <strong>Web group management is unavailable</strong>
-            <p>Group membership changes are outside the supported web beta path. Use Android for supported group messaging and member management.</p>
+            <p>Group membership changes are outside the supported web beta path.</p>
           </div>
           <div id="gi-members"><p class="text-secondary">Loading members…</p></div>
         </div>
         <div class="settings-section">
-          <p class="text-secondary">Add and remove member actions stay on Android in this beta.</p>
+          <p class="text-secondary">Add and remove member actions stay unavailable until a private-group design is in place.</p>
         </div>
       </div>
     </div>
@@ -2573,7 +2582,7 @@ function renderCreateGroup(): void {
       <div class="settings-body">
         <div class="beta-banner beta-banner-warning">
           <strong>Web group creation is unavailable</strong>
-          <p>The supported web beta path covers direct messaging only. Create and manage groups from Android.</p>
+          <p>Private groups are disabled in the current privacy profile pending a private group design.</p>
         </div>
         <label class="field">
           <span>Group Name</span>
@@ -3422,6 +3431,11 @@ async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
 
 async function pollInboxSilent(): Promise<void> {
   try {
+    const capabilities = await loadServerCapabilitiesCached();
+    if (capabilities?.sealed_sender_required && !capabilities.group_messaging_supported) {
+      await pollSealedInbox();
+      return;
+    }
     const k = await ensureKeys();
     const api = new PqmsgApi(setup.serverUrl);
     const since = readCursor(k.userId);
@@ -3811,22 +3825,13 @@ async function drainOutbox(): Promise<void> {
           await updateMessageStatus(item.id, "failed");
           updateBubbleStatus(item.id, "failed");
           continue;
-        } else if (item.sealed) {
-          const messageBytesBase64 = await encryptDirectPayload(k, item.peerId, item.text);
-          await api.sealedRelay(item.peerId, { message_bytes_base64: messageBytesBase64 });
-        } else if (item.ephemeralTtl > 0) {
-          const messageBytesBase64 = await encryptDirectPayload(k, item.peerId, item.text);
-          const headers = buildEphemeralRelayAuthHeaders(k, item.peerId, item.ephemeralTtl);
-          await api.relayEphemeral(item.peerId, {
-            sender_user_id: k.userId, device_id: k.deviceId,
-            message_bytes_base64: messageBytesBase64, ttl_seconds: item.ephemeralTtl,
-          }, headers);
         } else {
           const messageBytesBase64 = await encryptDirectPayload(k, item.peerId, item.text);
-          const headers = buildRelayAuthHeaders(k, item.peerId, messageBytesBase64);
-          await api.relay(item.peerId, {
-            sender_user_id: k.userId, device_id: k.deviceId, message_bytes_base64: messageBytesBase64,
-          }, headers);
+          await api.sealedRelay(item.peerId, {
+            sender_user_id: k.userId,
+            device_id: k.deviceId,
+            message_bytes_base64: messageBytesBase64,
+          });
         }
         await removeOutboxMessage(item.id);
         await updateMessageStatus(item.id, "sent");
@@ -4082,31 +4087,57 @@ async function pollSealedInbox(): Promise<void> {
   if (!keys) return;
   try {
     const k = await ensureKeys();
+    const storedCursor = readSealedCursor(k.userId, k.deviceId);
+    if (storedCursor > sealedInboxCursor) {
+      sealedInboxCursor = storedCursor;
+    }
     const api = new PqmsgApi(setup.serverUrl);
     const headers = buildSealedInboxAuthHeaders(k, sealedInboxCursor);
     const res = await api.sealedInbox(k.userId, sealedInboxCursor, headers);
+    let nextCursor = sealedInboxCursor;
     let conversationListChanged = false;
     for (const item of res.messages) {
       try {
-        const plaintext = (await decryptIncomingPayload(k, item.sender_user_id, item.message_bytes_base64)).plaintext;
         const senderId = item.sender_user_id;
-        const msgId = String(item.message_id);
+        const plaintext = (await decryptIncomingPayload(k, senderId, item.message_bytes_base64)).plaintext;
+        const conversationId = convId(k.userId, senderId);
+        const existing = await getMessages(conversationId);
+        if (existing.some((msg) => msg.serverMessageId === item.message_id)) {
+          nextCursor = Math.max(nextCursor, item.message_id);
+          continue;
+        }
         const msg: StoredMessage = {
-          id: msgId,
-          conversationId: convId(k.userId, senderId),
+          id: `sealed-${item.message_id}`,
+          conversationId,
           sender: senderId,
           recipient: k.userId,
           text: "🕶️ " + plaintext,
           timestamp: new Date(item.received_at).getTime(),
           status: "delivered",
         };
+        msg.text = plaintext;
+        msg.serverMessageId = item.message_id;
         await saveMessage(msg);
-        noteIncomingConversation(senderId, plaintext, true);
+        void loadProfileNameBackground(senderId);
+        const isActivePeer = activeChatPeer === senderId;
+        noteIncomingConversation(senderId, plaintext, !isActivePeer);
+        if (isActivePeer) {
+          markConversationRead(k.userId, senderId);
+          const msgList = document.getElementById("messages-list");
+          const container = document.getElementById("messages-container");
+          if (msgList && container) {
+            appendBubble(msgList, msg, container);
+          }
+        }
         conversationListChanged = true;
-        sealedInboxCursor = Math.max(sealedInboxCursor, Number(msgId) || sealedInboxCursor + 1);
+        nextCursor = Math.max(nextCursor, item.message_id);
       } catch {
         // Skip malformed sealed messages
       }
+    }
+    if (nextCursor > sealedInboxCursor) {
+      sealedInboxCursor = nextCursor;
+      writeSealedCursor(k.userId, sealedInboxCursor, k.deviceId);
     }
     if (conversationListChanged) {
       refreshConversationsIfVisible();
@@ -4334,6 +4365,9 @@ async function renderServerInfo(): Promise<void> {
           <div class="settings-row"><span>Calling</span><span>${caps.calling_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Stories</span><span>${caps.stories_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Channels</span><span>${caps.channels_supported ? "Enabled" : "Disabled"}</span></div>
+          <div class="settings-row"><span>Group Messaging</span><span>${caps.group_messaging_supported ? "Enabled" : "Disabled"}</span></div>
+          <div class="settings-row"><span>Sealed Sender</span><span>${caps.sealed_sender_required ? "Required" : "Optional"}</span></div>
+          <div class="settings-row"><span>Ephemeral DM</span><span>${caps.ephemeral_messaging_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Contact Discovery</span><span>${caps.contact_discovery_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Prod Baseline</span><span>${caps.production_baseline_met ? "✓ Met" : "✗ Not met"}</span></div>
         </div>

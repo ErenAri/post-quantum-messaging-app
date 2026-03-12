@@ -22,6 +22,7 @@ import java.text.DateFormat
 import java.util.Date
 
 class GroupChatActivity : AppCompatActivity() {
+    private val groupMessagingSupported = false
     private lateinit var store: LocalStateStore
     private lateinit var titleText: TextView
     private lateinit var metaText: TextView
@@ -65,6 +66,11 @@ class GroupChatActivity : AppCompatActivity() {
         infoButton.setOnClickListener { showGroupInfo() }
         backButton.setOnClickListener { finish() }
 
+        if (!groupMessagingSupported) {
+            renderUnavailableState()
+            return
+        }
+
         renderChatLog()
         refreshMeta()
         syncActions()
@@ -72,8 +78,23 @@ class GroupChatActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (!groupMessagingSupported) {
+            return
+        }
         renderChatLog()
         refreshMeta()
+    }
+
+    private fun renderUnavailableState() {
+        titleText.text = groupName
+        messageInput.setText("")
+        messageInput.hint = "Group messaging unavailable"
+        messageInput.isEnabled = false
+        sendButton.isEnabled = false
+        syncButton.isEnabled = false
+        infoButton.isEnabled = false
+        chatLog.text = "This build supports direct private messaging only."
+        metaText.text = "Group messaging is disabled pending a private group design."
     }
 
     private suspend fun runAction(label: String, block: suspend () -> Unit) {

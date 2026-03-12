@@ -131,7 +131,9 @@ pub fn verify_inclusion_proof(
     }
 
     if current != sth.root_hash {
-        return Err(CoreError::PolicyViolation("key_transparency.inclusion_proof_invalid"));
+        return Err(CoreError::PolicyViolation(
+            "key_transparency.inclusion_proof_invalid",
+        ));
     }
     Ok(())
 }
@@ -160,19 +162,25 @@ pub fn verify_consistency_proof(
 
     // Basic sanity checks
     if new_sth.epoch < old_sth.epoch {
-        return Err(CoreError::PolicyViolation("key_transparency.epoch_regression"));
+        return Err(CoreError::PolicyViolation(
+            "key_transparency.epoch_regression",
+        ));
     }
     if new_sth.tree_size < old_sth.tree_size {
         return Err(CoreError::PolicyViolation("key_transparency.tree_shrunk"));
     }
     if proof.old_size != old_sth.tree_size || proof.new_size != new_sth.tree_size {
-        return Err(CoreError::PolicyViolation("key_transparency.proof_size_mismatch"));
+        return Err(CoreError::PolicyViolation(
+            "key_transparency.proof_size_mismatch",
+        ));
     }
 
     // If the tree didn't grow, the roots must match directly
     if old_sth.tree_size == new_sth.tree_size {
         if old_sth.root_hash != new_sth.root_hash {
-            return Err(CoreError::PolicyViolation("key_transparency.root_hash_mismatch"));
+            return Err(CoreError::PolicyViolation(
+                "key_transparency.root_hash_mismatch",
+            ));
         }
         return Ok(());
     }
@@ -180,17 +188,18 @@ pub fn verify_consistency_proof(
     // For non-trivial consistency proofs, we verify by reconstructing both
     // old and new roots from the proof hashes. This implements RFC 6962 §2.1.2
     // consistency proof verification.
-    let (old_root, new_root) = evaluate_consistency_proof(
-        old_sth.tree_size,
-        new_sth.tree_size,
-        &proof.proof_hashes,
-    )?;
+    let (old_root, new_root) =
+        evaluate_consistency_proof(old_sth.tree_size, new_sth.tree_size, &proof.proof_hashes)?;
 
     if old_root != old_sth.root_hash {
-        return Err(CoreError::PolicyViolation("key_transparency.old_root_mismatch"));
+        return Err(CoreError::PolicyViolation(
+            "key_transparency.old_root_mismatch",
+        ));
     }
     if new_root != new_sth.root_hash {
-        return Err(CoreError::PolicyViolation("key_transparency.new_root_mismatch"));
+        return Err(CoreError::PolicyViolation(
+            "key_transparency.new_root_mismatch",
+        ));
     }
 
     Ok(())
@@ -204,7 +213,9 @@ fn evaluate_consistency_proof(
     proof_hashes: &[[u8; 32]],
 ) -> Result<([u8; 32], [u8; 32]), CoreError> {
     if old_size == 0 || old_size > new_size || proof_hashes.is_empty() {
-        return Err(CoreError::PolicyViolation("key_transparency.invalid_consistency_params"));
+        return Err(CoreError::PolicyViolation(
+            "key_transparency.invalid_consistency_params",
+        ));
     }
 
     // The first proof hash seeds both old and new root reconstruction.
@@ -262,7 +273,10 @@ pub fn build_tree_root(leaf_hashes: &[[u8; 32]]) -> Option<[u8; 32]> {
 /// Build an inclusion proof for the leaf at `leaf_index` in a tree of `leaf_hashes`.
 ///
 /// Utility for testing and server-side proof generation.
-pub fn build_inclusion_proof(leaf_hashes: &[[u8; 32]], leaf_index: usize) -> Option<InclusionProof> {
+pub fn build_inclusion_proof(
+    leaf_hashes: &[[u8; 32]],
+    leaf_index: usize,
+) -> Option<InclusionProof> {
     if leaf_index >= leaf_hashes.len() || leaf_hashes.is_empty() {
         return None;
     }
@@ -312,7 +326,12 @@ mod tests {
         }
     }
 
-    fn sign_sth(key: &SigningKey, epoch: u64, tree_size: u64, root_hash: [u8; 32]) -> SignedTreeHead {
+    fn sign_sth(
+        key: &SigningKey,
+        epoch: u64,
+        tree_size: u64,
+        root_hash: [u8; 32],
+    ) -> SignedTreeHead {
         let mut sth = SignedTreeHead {
             epoch,
             tree_size,
@@ -385,7 +404,9 @@ mod tests {
 
     #[test]
     fn build_tree_root_four_leaves() {
-        let leaves: Vec<[u8; 32]> = (0..4).map(|i| make_leaf(&format!("u{i}"), i as u64).hash()).collect();
+        let leaves: Vec<[u8; 32]> = (0..4)
+            .map(|i| make_leaf(&format!("u{i}"), i as u64).hash())
+            .collect();
         let root = build_tree_root(&leaves).unwrap();
         let left = hash_node(&leaves[0], &leaves[1]);
         let right = hash_node(&leaves[2], &leaves[3]);
@@ -396,7 +417,9 @@ mod tests {
     fn inclusion_proof_verifies_for_all_leaves() {
         let mut rng = OsRng;
         let key = SigningKey::generate(&mut rng);
-        let leaves: Vec<[u8; 32]> = (0..8).map(|i| make_leaf(&format!("u{i}"), i as u64).hash()).collect();
+        let leaves: Vec<[u8; 32]> = (0..8)
+            .map(|i| make_leaf(&format!("u{i}"), i as u64).hash())
+            .collect();
         let root = build_tree_root(&leaves).unwrap();
         let sth = sign_sth(&key, 1, leaves.len() as u64, root);
 
@@ -411,7 +434,9 @@ mod tests {
     fn inclusion_proof_fails_for_wrong_leaf() {
         let mut rng = OsRng;
         let key = SigningKey::generate(&mut rng);
-        let leaves: Vec<[u8; 32]> = (0..4).map(|i| make_leaf(&format!("u{i}"), i as u64).hash()).collect();
+        let leaves: Vec<[u8; 32]> = (0..4)
+            .map(|i| make_leaf(&format!("u{i}"), i as u64).hash())
+            .collect();
         let root = build_tree_root(&leaves).unwrap();
         let sth = sign_sth(&key, 1, 4, root);
 
@@ -426,7 +451,9 @@ mod tests {
         let mut rng = OsRng;
         let key = SigningKey::generate(&mut rng);
         // 5 leaves (not a power of 2)
-        let leaves: Vec<[u8; 32]> = (0..5).map(|i| make_leaf(&format!("u{i}"), i as u64).hash()).collect();
+        let leaves: Vec<[u8; 32]> = (0..5)
+            .map(|i| make_leaf(&format!("u{i}"), i as u64).hash())
+            .collect();
         let root = build_tree_root(&leaves).unwrap();
         let sth = sign_sth(&key, 1, 5, root);
 
@@ -441,27 +468,34 @@ mod tests {
     fn tree_mutation_invalidates_proof() {
         let mut rng = OsRng;
         let key = SigningKey::generate(&mut rng);
-        let mut leaves: Vec<[u8; 32]> = (0..4).map(|i| make_leaf(&format!("u{i}"), i as u64).hash()).collect();
+        let mut leaves: Vec<[u8; 32]> = (0..4)
+            .map(|i| make_leaf(&format!("u{i}"), i as u64).hash())
+            .collect();
         let root = build_tree_root(&leaves).unwrap();
         let sth = sign_sth(&key, 1, 4, root);
         let proof = build_inclusion_proof(&leaves, 2).unwrap();
 
         // Verify proof works before mutation
-        verify_inclusion_proof(&leaves[2], &proof, &sth, &key.verifying_key()).expect("should work");
+        verify_inclusion_proof(&leaves[2], &proof, &sth, &key.verifying_key())
+            .expect("should work");
 
         // Mutate a leaf — the old proof should now fail against the new tree
         leaves[0] = [0xFF; 32];
         let new_root = build_tree_root(&leaves).unwrap();
         let new_sth = sign_sth(&key, 2, 4, new_root);
         // Old proof against new STH should fail
-        assert!(verify_inclusion_proof(&leaves[2], &proof, &new_sth, &key.verifying_key()).is_err());
+        assert!(
+            verify_inclusion_proof(&leaves[2], &proof, &new_sth, &key.verifying_key()).is_err()
+        );
     }
 
     #[test]
     fn consistency_same_tree() {
         let mut rng = OsRng;
         let key = SigningKey::generate(&mut rng);
-        let leaves: Vec<[u8; 32]> = (0..4).map(|i| make_leaf(&format!("u{i}"), i as u64).hash()).collect();
+        let leaves: Vec<[u8; 32]> = (0..4)
+            .map(|i| make_leaf(&format!("u{i}"), i as u64).hash())
+            .collect();
         let root = build_tree_root(&leaves).unwrap();
         let sth = sign_sth(&key, 1, 4, root);
 
@@ -486,7 +520,9 @@ mod tests {
             new_size: 4,
             proof_hashes: vec![],
         };
-        assert!(verify_consistency_proof(&sth_big, &sth_small, &proof, &key.verifying_key()).is_err());
+        assert!(
+            verify_consistency_proof(&sth_big, &sth_small, &proof, &key.verifying_key()).is_err()
+        );
     }
 
     #[test]
@@ -501,7 +537,9 @@ mod tests {
             new_size: 4,
             proof_hashes: vec![],
         };
-        assert!(verify_consistency_proof(&sth_old, &sth_new, &proof, &key.verifying_key()).is_err());
+        assert!(
+            verify_consistency_proof(&sth_old, &sth_new, &proof, &key.verifying_key()).is_err()
+        );
     }
 
     #[test]

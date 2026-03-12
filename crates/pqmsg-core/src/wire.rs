@@ -1,9 +1,9 @@
-use aes::cipher::{KeyIvInit, StreamCipher};
 use crate::alg::{AlgorithmSuite, SecurityProfile};
 use crate::tlv::{
     build_record_map, critical_type, decode_strict, encode, require_from_map, TlvRecord,
 };
 use crate::CoreError;
+use aes::cipher::{KeyIvInit, StreamCipher};
 
 type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
 
@@ -234,7 +234,12 @@ impl HeaderPlaintext {
 
     /// Deserialize header fields from decrypted bytes.
     pub fn decode(input: &[u8]) -> Result<Self, CoreError> {
-        let known_types = [TAG_SENDER_DH_PUB, TAG_MSG_NUM, TAG_PREV_CHAIN_LEN, TAG_PQ_STEP_CT];
+        let known_types = [
+            TAG_SENDER_DH_PUB,
+            TAG_MSG_NUM,
+            TAG_PREV_CHAIN_LEN,
+            TAG_PQ_STEP_CT,
+        ];
         let records = decode_strict(input, &known_types)?;
         let map = build_record_map(&records);
         let sender_dh_pub = parse_32(
@@ -347,14 +352,12 @@ impl WireMessageV2 {
             "wire_v2.suite_id",
         )?;
         let encrypted_header =
-            require_from_map(&map, TAG_V2_ENCRYPTED_HEADER, "wire_v2.encrypted_header")?
-                .to_vec();
+            require_from_map(&map, TAG_V2_ENCRYPTED_HEADER, "wire_v2.encrypted_header")?.to_vec();
         let aead_nonce = parse_12(
             require_from_map(&map, TAG_V2_AEAD_NONCE, "wire_v2.aead_nonce")?,
             "wire_v2.aead_nonce",
         )?;
-        let ciphertext =
-            require_from_map(&map, TAG_V2_CIPHERTEXT, "wire_v2.ciphertext")?.to_vec();
+        let ciphertext = require_from_map(&map, TAG_V2_CIPHERTEXT, "wire_v2.ciphertext")?.to_vec();
         Ok(Self {
             version,
             suite_id,
@@ -436,10 +439,7 @@ impl SupportedWireVersions {
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        self.versions
-            .iter()
-            .flat_map(|v| v.to_be_bytes())
-            .collect()
+        self.versions.iter().flat_map(|v| v.to_be_bytes()).collect()
     }
 
     pub fn decode(input: &[u8]) -> Result<Self, CoreError> {
@@ -761,7 +761,10 @@ mod tests {
         };
         let plaintext = header.encode().expect("encode header");
         let encrypted = encrypt_header(&hk, &plaintext);
-        assert_ne!(encrypted, plaintext, "encrypted should differ from plaintext");
+        assert_ne!(
+            encrypted, plaintext,
+            "encrypted should differ from plaintext"
+        );
         let decrypted = decrypt_header(&hk, &encrypted);
         assert_eq!(decrypted, plaintext);
         let parsed = HeaderPlaintext::decode(&decrypted).expect("parse decrypted header");
