@@ -1,9 +1,7 @@
 import "./app.css";
 import {
-  buildInboxAuthHeaders,
   buildPrekeysAuthHeaders,
   buildPublishPrekeysPayload,
-  buildRelayAuthHeaders,
   buildRetireDeviceAuthHeaders,
   buildProfileGetAuthHeaders,
   buildProfileUpsertAuthHeaders,
@@ -28,7 +26,6 @@ import {
   buildIdentityLogAuthHeaders,
   buildSealedInboxAuthHeaders,
   buildSenderCertificateAuthHeaders,
-  buildEphemeralRelayAuthHeaders,
   buildDiscoveryHandlesAuthHeaders,
   buildDiscoveryMatchAuthHeaders,
   buildPushTokenAuthHeaders,
@@ -1275,7 +1272,7 @@ function renderConversations(): void {
     });
   }
 
-  // Start realtime connection and supported metadata timers
+  // Start realtime delivery on the active inbox path.
   void connectRealtime();
   if (presenceSupported()) {
     void startPresenceHeartbeat();
@@ -3423,7 +3420,11 @@ async function renderIncomingCall(
 async function connectRealtime(): Promise<void> {
   if (realtimeInbox) return;
   try {
+    const capabilities = await loadServerCapabilitiesCached();
     const k = await ensureKeys();
+    if (capabilities?.sealed_sender_required !== true) {
+      return;
+    }
     realtimeInbox = new RealtimeInbox(setup.serverUrl, k);
     realtimeInbox.onMessage(handleRealtimeMessage);
     realtimeInbox.connect();
@@ -3435,25 +3436,42 @@ async function connectRealtime(): Promise<void> {
 async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
   try {
     const k = await ensureKeys();
-        const decrypted = await decryptIncomingPayload(
-          k,
-          wsMsg.message_bytes_base64,
-          wsMsg.sender_user_id
-        );
+    const decrypted = await decryptIncomingPayload(
+      k,
+      wsMsg.message_bytes_base64,
+      wsMsg.sender_user_id,
+      wsMsg.sender_identity_x25519_pub
+    );
     const plaintext = decrypted.plaintext;
+    const senderId = decrypted.senderUserId;
     const isDirectMessage = decrypted.kind === "dm";
     const groupId = isDirectMessage ? null : decrypted.recipient;
     const conversationId = isDirectMessage
-      ? convId(k.userId, wsMsg.sender_user_id)
+      ? convId(k.userId, senderId)
       : `group:${groupId}`;
+    const existing = await getMessages(conversationId);
+    if (existing.some((msg) => msg.serverMessageId === wsMsg.message_id)) {
+      if (wsMsg.sender_identity_x25519_pub) {
+        const cursor = readSealedCursor(k.userId, k.deviceId);
+        if (wsMsg.message_id > cursor) {
+          writeSealedCursor(k.userId, wsMsg.message_id, k.deviceId);
+        }
+      } else {
+        const cursor = readCursor(k.userId);
+        if (wsMsg.message_id > cursor) {
+          writeCursor(k.userId, wsMsg.message_id);
+        }
+      }
+      return;
+    }
     const msg: StoredMessage = {
       id: `srv-${wsMsg.message_id}`,
       conversationId,
-      sender: wsMsg.sender_user_id,
+      sender: senderId,
       recipient: isDirectMessage ? k.userId : decrypted.recipient,
       text: isDirectMessage
         ? plaintext
-        : `${resolvePeerIdentity(wsMsg.sender_user_id).primaryLabel}: ${plaintext}`,
+        : `${resolvePeerIdentity(senderId).primaryLabel}: ${plaintext}`,
       timestamp: new Date(wsMsg.received_at).getTime() || Date.now(),
       status: "delivered",
       serverMessageId: wsMsg.message_id,
@@ -3464,28 +3482,36 @@ async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
       void sendDeliveredReceipt(wsMsg.message_id);
     }
 
-    const cursor = readCursor(k.userId);
-    if (wsMsg.message_id > cursor) {
-      writeCursor(k.userId, wsMsg.message_id);
+    if (wsMsg.sender_identity_x25519_pub) {
+      const cursor = readSealedCursor(k.userId, k.deviceId);
+      if (wsMsg.message_id > cursor) {
+        writeSealedCursor(k.userId, wsMsg.message_id, k.deviceId);
+      }
+    } else {
+      const cursor = readCursor(k.userId);
+      if (wsMsg.message_id > cursor) {
+        writeCursor(k.userId, wsMsg.message_id);
+      }
     }
 
     if (isDirectMessage) {
-      const isActivePeer = activeChatPeer === wsMsg.sender_user_id;
-      noteIncomingConversation(wsMsg.sender_user_id, plaintext, !isActivePeer);
+      const isActivePeer = activeChatPeer === senderId;
+      noteIncomingConversation(senderId, plaintext, !isActivePeer);
       if (isActivePeer) {
-        markConversationRead(k.userId, wsMsg.sender_user_id);
+        markConversationRead(k.userId, senderId);
         const msgList = document.getElementById("messages-list");
         const container = document.getElementById("messages-container");
         if (msgList && container) {
           appendBubble(msgList, msg, container);
         }
       } else {
-        notify(`${resolvePeerIdentity(wsMsg.sender_user_id).primaryLabel}: ${plaintext.slice(0, 50)}`, "info");
+        notify(`${resolvePeerIdentity(senderId).primaryLabel}: ${plaintext.slice(0, 50)}`, "info");
       }
     } else if (groupId) {
+      const groupSenderId = wsMsg.sender_user_id ?? senderId;
       const isActiveGroup = activeGroupId === groupId;
-      noteIncomingGroupConversation(groupId, wsMsg.sender_user_id, plaintext, !isActiveGroup);
-      void loadProfileNameBackground(wsMsg.sender_user_id);
+      noteIncomingGroupConversation(groupId, groupSenderId, plaintext, !isActiveGroup);
+      void loadProfileNameBackground(groupSenderId);
       if (isActiveGroup) {
         markGroupConversationRead(k.userId, groupId);
         const msgList = document.getElementById("messages-list");
@@ -3496,9 +3522,9 @@ async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
       } else {
         const ownerUserId =
           loadGroupConversations(k.userId).find((item) => item.groupId === groupId)?.ownerUserId ||
-          wsMsg.sender_user_id;
+          groupSenderId;
         const groupLabel = resolveGroupIdentity(groupId, ownerUserId).primaryLabel;
-        notify(`${groupLabel} · ${resolvePeerIdentity(wsMsg.sender_user_id).primaryLabel}: ${plaintext.slice(0, 50)}`, "info");
+        notify(`${groupLabel} · ${resolvePeerIdentity(groupSenderId).primaryLabel}: ${plaintext.slice(0, 50)}`, "info");
       }
     }
 
@@ -3514,84 +3540,10 @@ async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
 async function pollInboxSilent(): Promise<void> {
   try {
     const capabilities = await loadServerCapabilitiesCached();
-    if (capabilities?.sealed_sender_required && !capabilities.group_messaging_supported) {
-      await pollSealedInbox();
+    if (capabilities?.sealed_sender_required !== true) {
       return;
     }
-    const k = await ensureKeys();
-    const api = new PqmsgApi(setup.serverUrl);
-    const since = readCursor(k.userId);
-    const headers = buildInboxAuthHeaders(k, since);
-    const inbox = await api.inbox(k.userId, since, headers);
-    if (inbox.messages.length === 0) return;
-
-    let cursor = since;
-    let conversationListChanged = false;
-    for (const message of inbox.messages) {
-      cursor = Math.max(cursor, message.message_id);
-      try {
-        const decrypted = await decryptIncomingPayload(
-          k,
-          message.message_bytes_base64,
-          message.sender_user_id
-        );
-        const plaintext = decrypted.plaintext;
-        const isDirectMessage = decrypted.kind === "dm";
-        const groupId = isDirectMessage ? null : decrypted.recipient;
-        const conversationId = isDirectMessage
-          ? convId(k.userId, message.sender_user_id)
-          : `group:${groupId}`;
-        const existing = await getMessages(conversationId);
-        const alreadyStored = existing.some((m) => m.serverMessageId === message.message_id);
-        if (alreadyStored) continue;
-
-        const msg: StoredMessage = {
-          id: `srv-${message.message_id}`,
-          conversationId,
-          sender: message.sender_user_id,
-          recipient: isDirectMessage ? k.userId : decrypted.recipient,
-          text: isDirectMessage
-            ? plaintext
-            : `${resolvePeerIdentity(message.sender_user_id).primaryLabel}: ${plaintext}`,
-          timestamp: new Date(message.received_at).getTime() || Date.now(),
-          status: "delivered",
-          serverMessageId: message.message_id,
-        };
-        await saveMessage(msg);
-
-        if (isDirectMessage) {
-          const isActivePeer = activeChatPeer === message.sender_user_id;
-          noteIncomingConversation(message.sender_user_id, plaintext, !isActivePeer);
-          if (isActivePeer) {
-            markConversationRead(k.userId, message.sender_user_id);
-            const msgList = document.getElementById("messages-list");
-            const container = document.getElementById("messages-container");
-            if (msgList && container) {
-              appendBubble(msgList, msg, container);
-            }
-          }
-        } else if (groupId) {
-          const isActiveGroup = activeGroupId === groupId;
-          noteIncomingGroupConversation(groupId, message.sender_user_id, plaintext, !isActiveGroup);
-          void loadProfileNameBackground(message.sender_user_id);
-          if (isActiveGroup) {
-            markGroupConversationRead(k.userId, groupId);
-            const msgList = document.getElementById("messages-list");
-            const container = document.getElementById("messages-container");
-            if (msgList && container) {
-              appendBubble(msgList, msg, container);
-            }
-          }
-        }
-        conversationListChanged = true;
-      } catch {
-        // Skip un-decryptable messages
-      }
-    }
-    writeCursor(k.userId, cursor);
-    if (conversationListChanged) {
-      refreshConversationsIfVisible();
-    }
+    await pollSealedInbox();
   } catch {
     // Silent failure for background polling
   }

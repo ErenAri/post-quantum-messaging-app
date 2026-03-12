@@ -1,16 +1,18 @@
 /**
  * WebSocket real-time inbox delivery.
- * Fetches a short-lived ticket, then connects to /v1/ws/inbox/:user_id.
+ * Fetches a short-lived ticket, then connects to the sealed inbox websocket
+ * path used by the supported web messaging profile.
  */
 
 import type { GeneratedKeys } from "./crypto";
-import { buildInboxAuthHeaders } from "./crypto";
+import { buildSealedInboxAuthHeaders } from "./crypto";
 import { PqmsgApi } from "./server";
-import { readCursor } from "./storage";
+import { readSealedCursor } from "./storage";
 
 export type WsInboxMessage = {
   message_id: number;
-  sender_user_id: string;
+  sender_user_id?: string;
+  sender_identity_x25519_pub?: string;
   message_bytes_base64: string;
   received_at: string;
 };
@@ -69,12 +71,12 @@ export class RealtimeInbox {
       this.ws = null;
     }
 
-    const since = readCursor(this.keys.userId);
-    const headers = buildInboxAuthHeaders(this.keys, since);
+    const since = readSealedCursor(this.keys.userId, this.keys.deviceId);
+    const headers = buildSealedInboxAuthHeaders(this.keys, since);
     const api = new PqmsgApi(this.serverUrl);
     let ticket: string;
     try {
-      const issued = await api.createInboxWsTicket(this.keys.userId, since, headers);
+      const issued = await api.createSealedInboxWsTicket(this.keys.userId, since, headers);
       ticket = issued.ticket;
     } catch (error) {
       console.warn("[ws] failed to create inbox ticket", error);
@@ -84,7 +86,7 @@ export class RealtimeInbox {
 
     const base = this.serverUrl.replace(/^http/, "ws");
     const url =
-      `${base}/v1/ws/inbox/${encodeURIComponent(this.keys.userId)}` +
+      `${base}/v1/ws/sealed-inbox/${encodeURIComponent(this.keys.userId)}` +
       `?ticket=${encodeURIComponent(ticket)}`;
 
     const ws = new WebSocket(url);

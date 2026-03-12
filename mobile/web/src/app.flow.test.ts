@@ -169,6 +169,9 @@ async function bootApp(options: BootOptions = {}) {
   const sessionCache = new Map<string, string>();
   const metadataRecords = new Map<string, string>();
   const keyRecords = new Map<string, string>();
+  const realtimeState = {
+    connectCalls: 0,
+  };
   const apiState = {
     existingUsers: new Set(options.existingUsers ?? ["test1", "test2"]),
     bundleUsers: new Set(options.bundleUsers ?? options.existingUsers ?? ["test1", "test2"]),
@@ -332,7 +335,9 @@ async function bootApp(options: BootOptions = {}) {
     RealtimeInbox: class {
       onMessage() {}
       onReconnect() {}
-      connect() {}
+      connect() {
+        realtimeState.connectCalls += 1;
+      }
       disconnect() {}
     },
   }));
@@ -574,7 +579,7 @@ async function bootApp(options: BootOptions = {}) {
     await flushPromises();
   }
 
-  return { dom, storage, router, apiState, messagesByConversation };
+  return { dom, storage, router, apiState, messagesByConversation, realtimeState };
 }
 
 beforeEach(() => {
@@ -763,6 +768,25 @@ describe("web app flow coverage", () => {
     expect(apiState.presenceCalls).toBe(0);
     expect(apiState.typingCalls).toBe(0);
     expect(apiState.receiptCalls).toBe(0);
+  });
+
+  it("connects realtime on the sealed-sender web profile", async () => {
+    const { realtimeState } = await bootApp({
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    expect(realtimeState.connectCalls).toBe(1);
   });
 
   it("logs out from settings and returns to onboarding while preserving the saved server URL", async () => {

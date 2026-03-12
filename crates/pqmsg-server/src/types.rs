@@ -245,7 +245,7 @@ pub(crate) struct SenderCertificateResponse {
     pub(crate) expires_at: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SealedInboxItem {
     pub(crate) message_id: i64,
     pub(crate) sender_identity_x25519_pub: String,
@@ -567,6 +567,13 @@ pub(crate) struct WsInboxEnvelope {
     pub(crate) event: &'static str,
     pub(crate) user_id: String,
     pub(crate) messages: Vec<InboxItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct WsSealedInboxEnvelope {
+    pub(crate) event: &'static str,
+    pub(crate) user_id: String,
+    pub(crate) messages: Vec<SealedInboxItem>,
 }
 
 #[derive(Debug, Serialize)]

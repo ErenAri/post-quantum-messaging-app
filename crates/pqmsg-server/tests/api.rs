@@ -176,6 +176,30 @@ async fn test_app_with_profile(profile: SecurityProfile) -> axum::Router {
     build_router(state)
 }
 
+async fn test_app_with_authenticated_dm_compat() -> axum::Router {
+    sqlx::any::install_default_drivers();
+    let database_url = "sqlite::memory:";
+    let db_backend = parse_db_backend(database_url).expect("sqlite backend");
+    let pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .expect("connect sqlite memory");
+    init_db(&pool, db_backend).await.expect("migrate");
+    let state = AppState::new(
+        pool,
+        db_backend,
+        Arc::new(RateLimiter::new(
+            1_000.0,
+            1_000.0,
+            100_000,
+            StdDuration::from_secs(600),
+        )),
+    )
+    .with_authenticated_direct_messaging_supported(true);
+    build_router(state)
+}
+
 async fn test_app_with_dos_policy(dos_policy: DosHardeningPolicy) -> axum::Router {
     sqlx::any::install_default_drivers();
     let database_url = "sqlite::memory:";
@@ -1868,7 +1892,7 @@ fn rotate_confirm_auth_headers(
 
 #[tokio::test]
 async fn happy_path_register_publish_bundle_relay_inbox() {
-    let app = test_app().await;
+    let app = test_app_with_authenticated_dm_compat().await;
     let bob_sig = signing_key(7);
     let alice_sig = signing_key(11);
 
@@ -1966,7 +1990,7 @@ async fn happy_path_register_publish_bundle_relay_inbox() {
 
 #[tokio::test]
 async fn invalid_inputs_are_rejected() {
-    let app = test_app().await;
+    let app = test_app_with_authenticated_dm_compat().await;
     let bob_sig = signing_key(7);
     let alice_sig = signing_key(11);
 
@@ -2376,7 +2400,7 @@ async fn identity_rotation_happy_path_and_log() {
 
 #[tokio::test]
 async fn current_device_retire_clears_device_scoped_server_state() {
-    let app = test_app().await;
+    let app = test_app_with_authenticated_dm_compat().await;
     let alice_sig = signing_key(201);
     let bob_sig = signing_key(202);
 
@@ -2626,8 +2650,59 @@ async fn identity_rotation_rejects_invalid_signature() {
 }
 
 #[tokio::test]
-async fn relay_and_inbox_require_authenticated_headers() {
+async fn legacy_authenticated_direct_message_routes_are_disabled_by_default() {
     let app = test_app().await;
+    let bob_sig = signing_key(69);
+    let alice_sig = signing_key(70);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [1u8; 32], &bob_sig);
+    let (status_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_bob, StatusCode::OK);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", [2u8; 32], &alice_sig);
+    let (status_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_alice, StatusCode::OK);
+
+    let relay = json!({
+        "sender_user_id": "alice",
+        "device_id": "alice-dev-1",
+        "message_bytes_base64": B64.encode("ciphertext")
+    });
+    let relay_headers =
+        relay_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob", b"ciphertext");
+    let (status_relay, relay_body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob",
+        relay,
+        &relay_headers,
+    )
+    .await;
+    assert_eq!(status_relay, StatusCode::FORBIDDEN);
+    assert!(relay_body["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("sealed relay/inbox")));
+
+    let inbox_headers = inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0);
+    let (status_inbox, inbox_body) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/inbox/bob?since=0",
+        json!({}),
+        &inbox_headers,
+    )
+    .await;
+    assert_eq!(status_inbox, StatusCode::FORBIDDEN);
+    assert!(inbox_body["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("sealed relay/inbox")));
+}
+
+#[tokio::test]
+async fn relay_and_inbox_require_authenticated_headers() {
+    let app = test_app_with_authenticated_dm_compat().await;
     let bob_sig = signing_key(71);
     let alice_sig = signing_key(72);
 
@@ -2711,7 +2786,7 @@ async fn relay_and_inbox_require_authenticated_headers() {
 
 #[tokio::test]
 async fn relay_dedup_rejects_duplicate_ciphertext_with_fresh_auth_nonce() {
-    let app = test_app().await;
+    let app = test_app_with_authenticated_dm_compat().await;
     let bob_sig = signing_key(74);
     let alice_sig = signing_key(75);
 
@@ -2769,7 +2844,7 @@ async fn relay_dedup_rejects_duplicate_ciphertext_with_fresh_auth_nonce() {
 
 #[tokio::test]
 async fn inbox_since_must_be_monotonic_for_authenticated_device_session() {
-    let app = test_app().await;
+    let app = test_app_with_authenticated_dm_compat().await;
     let bob_sig = signing_key(76);
     let alice_sig = signing_key(77);
 
@@ -3004,8 +3079,30 @@ async fn prekeys_status_reports_low_inventory_and_last_resort_fallback() {
 }
 
 #[tokio::test]
-async fn websocket_inbox_requires_authenticated_headers() {
+async fn legacy_authenticated_websocket_inbox_is_disabled_by_default() {
     let app = test_app().await;
+    let bob_sig = signing_key(81);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [1u8; 32], &bob_sig);
+    let (status_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_bob, StatusCode::OK);
+
+    let (base_ws_url, server_handle) = spawn_http_server(app.clone()).await;
+    let connect = connect_async(format!("{base_ws_url}/v1/ws/inbox/bob?since=0")).await;
+    match connect {
+        Ok(_) => panic!("legacy websocket inbox should be disabled"),
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        Err(err) => panic!("unexpected websocket error: {err}"),
+    }
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn websocket_inbox_requires_authenticated_headers() {
+    let app = test_app_with_authenticated_dm_compat().await;
     let bob_sig = signing_key(81);
 
     let reg_bob = register_payload("bob", "bob-dev-1", [1u8; 32], &bob_sig);
@@ -3027,7 +3124,7 @@ async fn websocket_inbox_requires_authenticated_headers() {
 
 #[tokio::test]
 async fn websocket_inbox_streams_relay_messages() {
-    let app = test_app().await;
+    let app = test_app_with_authenticated_dm_compat().await;
     let bob_sig = signing_key(91);
     let alice_sig = signing_key(92);
 
@@ -3101,7 +3198,7 @@ async fn websocket_inbox_streams_relay_messages() {
 
 #[tokio::test]
 async fn websocket_inbox_accepts_one_time_ticket_query() {
-    let app = test_app().await;
+    let app = test_app_with_authenticated_dm_compat().await;
     let bob_sig = signing_key(93);
     let alice_sig = signing_key(94);
 
@@ -3185,8 +3282,103 @@ async fn websocket_inbox_accepts_one_time_ticket_query() {
 }
 
 #[tokio::test]
-async fn multi_device_link_list_revoke_and_bundle_selection() {
+async fn sealed_websocket_inbox_accepts_one_time_ticket_query() {
     let app = test_app().await;
+    let bob_sig = signing_key(95);
+    let alice_sig = signing_key(96);
+    let bob_identity = [5u8; 32];
+    let alice_identity = [6u8; 32];
+
+    let reg_bob = register_payload("bob", "bob-dev-1", bob_identity, &bob_sig);
+    let (status_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_bob, StatusCode::OK);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", alice_identity, &alice_sig);
+    let (status_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_alice, StatusCode::OK);
+
+    let ticket_headers = sealed_inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0);
+    let (status_ticket, ticket_body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/ws/sealed-inbox/bob/ticket?since=0",
+        json!({}),
+        &ticket_headers,
+    )
+    .await;
+    assert_eq!(status_ticket, StatusCode::OK);
+    let ticket = ticket_body["ticket"].as_str().expect("ticket").to_string();
+
+    let (base_ws_url, server_handle) = spawn_http_server(app.clone()).await;
+    let (mut ws_stream, _) = connect_async(format!(
+        "{base_ws_url}/v1/ws/sealed-inbox/bob?ticket={ticket}"
+    ))
+    .await
+    .expect("sealed ws connect");
+
+    let replay_connect = connect_async(format!(
+        "{base_ws_url}/v1/ws/sealed-inbox/bob?ticket={ticket}"
+    ))
+    .await;
+    match replay_connect {
+        Ok(_) => panic!("ticket reuse should fail"),
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        Err(err) => panic!("unexpected websocket error: {err}"),
+    }
+
+    let sealed_blob = b"sealed-ws-ticket-ciphertext".to_vec();
+    let relay = json!({
+        "sender_user_id": "alice",
+        "device_id": "alice-dev-1",
+        "message_bytes_base64": B64.encode(&sealed_blob)
+    });
+    let (status_relay, relay_body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/sealed-relay/bob",
+        relay,
+        &[],
+    )
+    .await;
+    assert_eq!(status_relay, StatusCode::OK);
+    let expected_message_id = relay_body["first_message_id"]
+        .as_i64()
+        .expect("first message id");
+
+    let inbound = timeout(Duration::from_secs(3), ws_stream.next())
+        .await
+        .expect("timeout waiting for websocket frame");
+    let Some(Ok(Message::Text(frame))) = inbound else {
+        panic!("expected websocket text frame");
+    };
+    let payload: Value = serde_json::from_str(&frame).expect("ws payload json");
+    assert_eq!(payload["event"].as_str(), Some("relay"));
+    let messages = payload["messages"].as_array().expect("messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0]["message_id"].as_i64(),
+        Some(expected_message_id)
+    );
+    assert_eq!(
+        messages[0]["message_bytes_base64"].as_str(),
+        Some(B64.encode(&sealed_blob).as_str())
+    );
+    assert_eq!(
+        messages[0]["sender_identity_x25519_pub"].as_str(),
+        Some(B64.encode(alice_identity).as_str())
+    );
+    assert!(messages[0].get("sender_user_id").is_none());
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn multi_device_link_list_revoke_and_bundle_selection() {
+    let app = test_app_with_authenticated_dm_compat().await;
     let bob_sig = signing_key(101);
 
     let reg_bob = register_payload("bob", "bob-dev-1", [1u8; 32], &bob_sig);
@@ -3326,7 +3518,7 @@ async fn multi_device_link_list_revoke_and_bundle_selection() {
 
 #[tokio::test]
 async fn relay_fans_out_to_all_active_recipient_devices() {
-    let app = test_app().await;
+    let app = test_app_with_authenticated_dm_compat().await;
     let bob_sig = signing_key(111);
     let alice_sig = signing_key(112);
 
@@ -3473,7 +3665,7 @@ async fn relay_fans_out_to_all_active_recipient_devices() {
 
 #[tokio::test]
 async fn inbox_delete_endpoint_removes_remote_messages_for_device() {
-    let app = test_app().await;
+    let app = test_app_with_authenticated_dm_compat().await;
     let bob_sig = signing_key(121);
     let alice_sig = signing_key(122);
 
@@ -4895,7 +5087,7 @@ fn relay_auth_headers_with_timestamp(
 
 #[tokio::test]
 async fn auth_rejects_stale_and_future_timestamps() {
-    let app = test_app().await;
+    let app = test_app_with_authenticated_dm_compat().await;
     let alice_sig = signing_key(200);
     let bob_sig = signing_key(201);
 
@@ -5233,7 +5425,7 @@ async fn group_create_is_disabled_before_member_limit_validation() {
 
 #[tokio::test]
 async fn websocket_inbox_disconnect_and_reconnect_delivers_messages() {
-    let app = test_app().await;
+    let app = test_app_with_authenticated_dm_compat().await;
     let bob_sig = signing_key(250);
     let alice_sig = signing_key(251);
 

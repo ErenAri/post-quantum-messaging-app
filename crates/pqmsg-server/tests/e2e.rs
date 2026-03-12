@@ -82,7 +82,8 @@ async fn test_app() -> axum::Router {
             100_000,
             StdDuration::from_secs(600),
         )),
-    );
+    )
+    .with_authenticated_direct_messaging_supported(true);
     build_router(state)
 }
 

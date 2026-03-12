@@ -9,7 +9,7 @@ use pqmsg_core::alg::{enforce_runtime_security_profile, RuntimeCryptoProfile, Se
 use pqmsg_server::{
     build_router, init_db, parse_db_backend, AppState, AuditLogger, AuthReplayCache, BlobStore,
     DbBackend, DeploymentMode, DosHardeningPolicy, EphemeralStateStore, PushNotifier, RateLimiter,
-    RealtimeHub,
+    RealtimeHub, SealedRealtimeHub,
 };
 use sentry::ClientOptions;
 use sqlx::any::AnyPoolOptions;
@@ -459,15 +459,17 @@ async fn main() -> anyhow::Result<()> {
         redis_enabled: rate_limit_redis_url.is_some(),
         structured_logging,
     })?;
-    let realtime_hub = if let Some(redis_url) = &rate_limit_redis_url {
+    let (realtime_hub, sealed_realtime_hub) = if let Some(redis_url) = &rate_limit_redis_url {
         let client = redis::Client::open(redis_url.as_str()).with_context(|| {
             format!("failed to create redis client for realtime hub: '{redis_url}'")
         })?;
-        let hub = RealtimeHub::with_redis(client);
+        let hub = RealtimeHub::with_redis(client.clone());
         hub.spawn_redis_subscriber();
-        hub
+        let sealed_hub = SealedRealtimeHub::with_redis(client);
+        sealed_hub.spawn_redis_subscriber();
+        (hub, sealed_hub)
     } else {
-        RealtimeHub::new()
+        (RealtimeHub::new(), SealedRealtimeHub::new())
     };
     let blob_store = Arc::new(
         BlobStore::local_fs(&blob_store_dir)
@@ -495,6 +497,7 @@ async fn main() -> anyhow::Result<()> {
             .with_cors_allowed_origins(cors_allowed_origins)
             .with_trusted_proxies(trusted_proxies)
             .with_realtime_hub(realtime_hub)
+            .with_sealed_realtime_hub(sealed_realtime_hub)
             .with_blob_store(blob_store)
             .with_ephemeral_state(ephemeral_state)
             .with_sender_certificate_signing_key(sender_certificate_signing_key);

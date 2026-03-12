@@ -113,16 +113,6 @@ export async function startDirectConversationFlow(
   return resolvedPeer;
 }
 
-type DirectRelayRequest = {
-  sender_user_id: string;
-  device_id: string;
-  message_bytes_base64: string;
-};
-
-type EphemeralRelayRequest = DirectRelayRequest & {
-  ttl_seconds: number;
-};
-
 export type DrainOutboxDeps = {
   isDirectMessagingAllowed: () => Promise<boolean>;
   listOutboxMessages: (userId: string) => Promise<OutboxMessage[]>;
@@ -134,23 +124,14 @@ export type DrainOutboxDeps = {
     peerId: string,
     plaintext: string
   ) => Promise<string>;
-  sealedRelay: (peerId: string, request: { message_bytes_base64: string }) => Promise<void>;
-  relayEphemeral: (
+  sealedRelay: (
     peerId: string,
-    request: EphemeralRelayRequest,
-    headers: unknown
+    request: {
+      sender_user_id: string;
+      device_id: string;
+      message_bytes_base64: string;
+    }
   ) => Promise<void>;
-  relay: (peerId: string, request: DirectRelayRequest, headers: unknown) => Promise<void>;
-  buildEphemeralRelayAuthHeaders: (
-    keys: GeneratedKeys,
-    peerId: string,
-    ttlSeconds: number
-  ) => unknown;
-  buildRelayAuthHeaders: (
-    keys: GeneratedKeys,
-    peerId: string,
-    messageBytesBase64: string
-  ) => unknown;
 };
 
 export type DrainOutboxSummary = {
@@ -194,38 +175,11 @@ export async function drainSupportedOutbox(
         item.peerId,
         item.text
       );
-      if (item.sealed) {
-        await deps.sealedRelay(item.peerId, {
-          sender_user_id: params.keys.userId,
-          device_id: params.keys.deviceId,
-          message_bytes_base64: messageBytesBase64,
-        });
-      } else if (item.ephemeralTtl > 0) {
-        await deps.relayEphemeral(
-          item.peerId,
-          {
-            sender_user_id: params.keys.userId,
-            device_id: params.keys.deviceId,
-            message_bytes_base64: messageBytesBase64,
-            ttl_seconds: item.ephemeralTtl,
-          },
-          deps.buildEphemeralRelayAuthHeaders(
-            params.keys,
-            item.peerId,
-            item.ephemeralTtl
-          )
-        );
-      } else {
-        await deps.relay(
-          item.peerId,
-          {
-            sender_user_id: params.keys.userId,
-            device_id: params.keys.deviceId,
-            message_bytes_base64: messageBytesBase64,
-          },
-          deps.buildRelayAuthHeaders(params.keys, item.peerId, messageBytesBase64)
-        );
-      }
+      await deps.sealedRelay(item.peerId, {
+        sender_user_id: params.keys.userId,
+        device_id: params.keys.deviceId,
+        message_bytes_base64: messageBytesBase64,
+      });
       await deps.removeOutboxMessage(item.id);
       await deps.markMessageSent(item.id);
       summary.sentIds.push(item.id);

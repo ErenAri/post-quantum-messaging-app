@@ -294,6 +294,7 @@ pub struct AppState {
     rate_limiter: Arc<RateLimiter>,
     auth_replay: Arc<AuthReplayCache>,
     realtime_hub: RealtimeHub,
+    sealed_realtime_hub: SealedRealtimeHub,
     push_notifier: Arc<PushNotifier>,
     security_profile: SecurityProfile,
     deployment_mode: DeploymentMode,
@@ -309,6 +310,7 @@ pub struct AppState {
     blob_store: Arc<BlobStore>,
     ephemeral_state: Arc<EphemeralStateStore>,
     sender_certificate_signing_key: Arc<SigningKey>,
+    authenticated_direct_messaging_supported: bool,
 }
 
 impl AppState {
@@ -323,6 +325,7 @@ impl AppState {
                 StdDuration::from_secs(AUTH_REPLAY_WINDOW_SECONDS),
             )),
             realtime_hub: RealtimeHub::new(),
+            sealed_realtime_hub: SealedRealtimeHub::new(),
             push_notifier: Arc::new(PushNotifier::disabled()),
             security_profile,
             deployment_mode: DeploymentMode::Development,
@@ -338,6 +341,7 @@ impl AppState {
             blob_store: Arc::new(BlobStore::in_memory()),
             ephemeral_state: Arc::new(EphemeralStateStore::disabled()),
             sender_certificate_signing_key: Arc::new(default_sender_certificate_signing_key()),
+            authenticated_direct_messaging_supported: false,
         }
     }
 
@@ -356,6 +360,7 @@ impl AppState {
                 StdDuration::from_secs(AUTH_REPLAY_WINDOW_SECONDS),
             )),
             realtime_hub: RealtimeHub::new(),
+            sealed_realtime_hub: SealedRealtimeHub::new(),
             push_notifier: Arc::new(PushNotifier::disabled()),
             security_profile,
             deployment_mode: DeploymentMode::Development,
@@ -371,6 +376,7 @@ impl AppState {
             blob_store: Arc::new(BlobStore::in_memory()),
             ephemeral_state: Arc::new(EphemeralStateStore::disabled()),
             sender_certificate_signing_key: Arc::new(default_sender_certificate_signing_key()),
+            authenticated_direct_messaging_supported: false,
         }
     }
 
@@ -410,6 +416,10 @@ impl AppState {
         &self.realtime_hub
     }
 
+    pub fn sealed_realtime_hub(&self) -> &SealedRealtimeHub {
+        &self.sealed_realtime_hub
+    }
+
     pub fn push_notifier(&self) -> &PushNotifier {
         &self.push_notifier
     }
@@ -433,6 +443,8 @@ impl AppState {
             && self.rate_limiter.is_distributed()
             && self.auth_replay.is_distributed()
             && self.realtime_hub.is_distributed()
+            && self.sealed_realtime_hub.is_distributed()
+            && !self.authenticated_direct_messaging_supported
     }
 
     pub fn supported_suite_ids(&self) -> Vec<u16> {
@@ -491,6 +503,10 @@ impl AppState {
         )
     }
 
+    pub fn authenticated_direct_messaging_supported(&self) -> bool {
+        self.authenticated_direct_messaging_supported
+    }
+
     pub fn ephemeral_messaging_supported(&self) -> bool {
         false
     }
@@ -515,6 +531,11 @@ impl AppState {
 
     pub fn with_transport_security(mut self, tls_enabled: bool) -> Self {
         self.tls_enabled = tls_enabled;
+        self
+    }
+
+    pub fn with_authenticated_direct_messaging_supported(mut self, supported: bool) -> Self {
+        self.authenticated_direct_messaging_supported = supported;
         self
     }
 
@@ -569,6 +590,11 @@ impl AppState {
         self
     }
 
+    pub fn with_sealed_realtime_hub(mut self, hub: SealedRealtimeHub) -> Self {
+        self.sealed_realtime_hub = hub;
+        self
+    }
+
     pub fn with_blob_store(mut self, blob_store: Arc<BlobStore>) -> Self {
         self.blob_store = blob_store;
         self
@@ -601,6 +627,14 @@ pub struct RealtimeHub {
 }
 
 #[derive(Clone)]
+pub struct SealedRealtimeHub {
+    inner: Arc<Mutex<HashMap<String, Vec<SealedRealtimeSubscriber>>>>,
+    next_id: Arc<AtomicU64>,
+    redis_client: Option<redis::Client>,
+    instance_id: Arc<String>,
+}
+
+#[derive(Clone)]
 struct RealtimeSubscriber {
     id: u64,
     sender: mpsc::Sender<InboxItem>,
@@ -610,6 +644,18 @@ struct RealtimeSubscriber {
 struct RealtimePubSubEnvelope {
     origin_instance_id: Option<String>,
     message: InboxItem,
+}
+
+#[derive(Clone)]
+struct SealedRealtimeSubscriber {
+    id: u64,
+    sender: mpsc::Sender<SealedInboxItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SealedRealtimePubSubEnvelope {
+    origin_instance_id: Option<String>,
+    message: SealedInboxItem,
 }
 
 #[allow(dead_code)]
@@ -1452,6 +1498,199 @@ impl Default for RealtimeHub {
     }
 }
 
+impl SealedRealtimeHub {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Arc::new(AtomicU64::new(1)),
+            redis_client: None,
+            instance_id: Arc::new(Uuid::new_v4().to_string()),
+        }
+    }
+
+    pub fn with_redis(redis_client: redis::Client) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Arc::new(AtomicU64::new(1)),
+            redis_client: Some(redis_client),
+            instance_id: Arc::new(Uuid::new_v4().to_string()),
+        }
+    }
+
+    pub fn is_distributed(&self) -> bool {
+        self.redis_client.is_some()
+    }
+
+    const SUBSCRIBER_CHANNEL_CAPACITY: usize = 256;
+
+    fn subscribe(&self, user_id: &str, device_id: &str) -> (u64, mpsc::Receiver<SealedInboxItem>) {
+        let (sender, receiver) = mpsc::channel(Self::SUBSCRIBER_CHANNEL_CAPACITY);
+        let subscriber_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let key = inbox_stream_key(user_id, device_id);
+        if let Ok(mut map) = self.inner.lock() {
+            map.entry(key).or_default().push(SealedRealtimeSubscriber {
+                id: subscriber_id,
+                sender,
+            });
+        }
+        (subscriber_id, receiver)
+    }
+
+    fn unsubscribe(&self, user_id: &str, device_id: &str, subscriber_id: u64) {
+        let Ok(mut map) = self.inner.lock() else {
+            return;
+        };
+        let key = inbox_stream_key(user_id, device_id);
+        let Some(subscribers) = map.get_mut(&key) else {
+            return;
+        };
+        subscribers.retain(|subscriber| subscriber.id != subscriber_id);
+        if subscribers.is_empty() {
+            map.remove(&key);
+        }
+    }
+
+    fn publish(&self, user_id: &str, device_id: &str, message: SealedInboxItem) {
+        if let Some(ref client) = self.redis_client {
+            let channel = redis_sealed_inbox_channel(user_id, device_id);
+            if let Ok(payload) = serde_json::to_string(&SealedRealtimePubSubEnvelope {
+                origin_instance_id: Some(self.instance_id.as_ref().clone()),
+                message: message.clone(),
+            }) {
+                if let Ok(mut conn) = client.get_connection() {
+                    let _: redis::RedisResult<i64> = redis::cmd("PUBLISH")
+                        .arg(&channel)
+                        .arg(&payload)
+                        .query(&mut conn);
+                }
+            }
+        }
+
+        self.dispatch_local(user_id, device_id, message);
+    }
+
+    fn dispatch_local(&self, user_id: &str, device_id: &str, message: SealedInboxItem) {
+        let Ok(mut map) = self.inner.lock() else {
+            return;
+        };
+        let key = inbox_stream_key(user_id, device_id);
+        let Some(subscribers) = map.get_mut(&key) else {
+            return;
+        };
+        subscribers.retain(|subscriber| subscriber.sender.try_send(message.clone()).is_ok());
+        if subscribers.is_empty() {
+            map.remove(&key);
+        }
+    }
+
+    pub fn spawn_redis_subscriber(&self) {
+        self.spawn_redis_subscriber_with_subscription(RedisSubscription::Pattern(
+            "pqmsg:sealed-inbox:*".to_string(),
+        ));
+    }
+
+    fn spawn_redis_subscriber_with_subscription(
+        &self,
+        subscription: RedisSubscription,
+    ) -> Arc<AtomicBool> {
+        let Some(ref client) = self.redis_client else {
+            return Arc::new(AtomicBool::new(true));
+        };
+        let client = client.clone();
+        let inner = self.inner.clone();
+        let instance_id = self.instance_id.as_ref().clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_signal = stop.clone();
+        std::thread::spawn(move || loop {
+            if stop_signal.load(Ordering::Relaxed) {
+                break;
+            }
+            let mut conn = match client.get_connection() {
+                Ok(c) => c,
+                Err(e) => {
+                    if stop_signal.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    tracing::warn!("sealed realtime redis subscriber connection failed: {e}");
+                    std::thread::sleep(StdDuration::from_secs(2));
+                    continue;
+                }
+            };
+            let mut pubsub = conn.as_pubsub();
+            let _ = pubsub.set_read_timeout(Some(StdDuration::from_millis(250)));
+            let subscribe_result = match &subscription {
+                RedisSubscription::Pattern(pattern) => pubsub.psubscribe(pattern.as_str()),
+                RedisSubscription::Channels(channels) => {
+                    let mut result = Ok(());
+                    for channel in channels {
+                        if let Err(err) = pubsub.subscribe(channel.as_str()) {
+                            result = Err(err);
+                            break;
+                        }
+                    }
+                    result
+                }
+            };
+            if let Err(e) = subscribe_result {
+                if stop_signal.load(Ordering::Relaxed) {
+                    break;
+                }
+                tracing::warn!("sealed realtime redis subscribe failed: {e}");
+                std::thread::sleep(StdDuration::from_secs(2));
+                continue;
+            }
+            loop {
+                let msg: redis::Msg = match pubsub.get_message() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        if stop_signal.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        if e.is_timeout() {
+                            continue;
+                        }
+                        tracing::warn!("sealed realtime redis get_message error: {e}");
+                        break;
+                    }
+                };
+                let channel: String = match msg.get_channel() {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let payload: String = match msg.get_payload() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                let key = channel
+                    .strip_prefix("pqmsg:sealed-inbox:")
+                    .unwrap_or(&channel);
+                let Some(envelope) = decode_sealed_realtime_pubsub_envelope(&payload) else {
+                    continue;
+                };
+                if envelope.origin_instance_id.as_deref() == Some(instance_id.as_str()) {
+                    continue;
+                }
+                let item = envelope.message;
+                if let Ok(mut map) = inner.lock() {
+                    if let Some(subscribers) = map.get_mut(key) {
+                        subscribers.retain(|sub| sub.sender.try_send(item.clone()).is_ok());
+                        if subscribers.is_empty() {
+                            map.remove(key);
+                        }
+                    }
+                }
+            }
+        });
+        stop
+    }
+}
+
+impl Default for SealedRealtimeHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn decode_realtime_pubsub_envelope(payload: &str) -> Option<RealtimePubSubEnvelope> {
     serde_json::from_str::<RealtimePubSubEnvelope>(payload)
         .ok()
@@ -1465,8 +1704,28 @@ fn decode_realtime_pubsub_envelope(payload: &str) -> Option<RealtimePubSubEnvelo
         })
 }
 
+fn decode_sealed_realtime_pubsub_envelope(payload: &str) -> Option<SealedRealtimePubSubEnvelope> {
+    serde_json::from_str::<SealedRealtimePubSubEnvelope>(payload)
+        .ok()
+        .or_else(|| {
+            serde_json::from_str::<SealedInboxItem>(payload)
+                .ok()
+                .map(|message| SealedRealtimePubSubEnvelope {
+                    origin_instance_id: None,
+                    message,
+                })
+        })
+}
+
 fn redis_inbox_channel(user_id: &str, device_id: &str) -> String {
     format!("pqmsg:inbox:{}", inbox_stream_key(user_id, device_id))
+}
+
+fn redis_sealed_inbox_channel(user_id: &str, device_id: &str) -> String {
+    format!(
+        "pqmsg:sealed-inbox:{}",
+        inbox_stream_key(user_id, device_id)
+    )
 }
 
 fn inbox_stream_key(user_id: &str, device_id: &str) -> String {
@@ -1731,6 +1990,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/inbox/:user_id/delete", post(delete_inbox_messages))
         .route("/v1/ws/inbox/:user_id/ticket", post(create_ws_inbox_ticket))
         .route("/v1/ws/inbox/:user_id", get(ws_inbox))
+        .route(
+            "/v1/ws/sealed-inbox/:user_id/ticket",
+            post(create_ws_sealed_inbox_ticket),
+        )
+        .route("/v1/ws/sealed-inbox/:user_id", get(ws_sealed_inbox))
         .route("/v1/users/:user_id/receipts", post(send_receipt))
         .route("/v1/users/:user_id/receipts/poll", get(get_receipts))
         .route(

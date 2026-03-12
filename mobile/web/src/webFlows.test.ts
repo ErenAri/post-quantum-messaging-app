@@ -213,10 +213,6 @@ describe("drainSupportedOutbox", () => {
         markMessageSent: async () => {},
         encryptDirectPayload: async () => "cipher",
         sealedRelay: async () => {},
-        relayEphemeral: async () => {},
-        relay: async () => {},
-        buildEphemeralRelayAuthHeaders: () => ({}),
-        buildRelayAuthHeaders: () => ({}),
       }
     );
 
@@ -233,7 +229,6 @@ describe("drainSupportedOutbox", () => {
     const removed: string[] = [];
     const failed: string[] = [];
     const sent: string[] = [];
-    const relayed: string[] = [];
     const sealed: string[] = [];
 
     const summary = await drainSupportedOutbox(
@@ -253,14 +248,10 @@ describe("drainSupportedOutbox", () => {
         encryptDirectPayload: async (_keys, peerId) => `cipher-for-${peerId}`,
         sealedRelay: async (peerId) => {
           sealed.push(peerId);
-          throw new Error("temporary failure");
+          if (peerId === "test3") {
+            throw new Error("temporary failure");
+          }
         },
-        relayEphemeral: async () => {},
-        relay: async (peerId) => {
-          relayed.push(peerId);
-        },
-        buildEphemeralRelayAuthHeaders: () => ({}),
-        buildRelayAuthHeaders: () => ({}),
       }
     );
 
@@ -269,8 +260,7 @@ describe("drainSupportedOutbox", () => {
       failedIds: ["group-1"],
       retainedIds: ["sealed-1"],
     });
-    expect(relayed).toEqual(["test2"]);
-    expect(sealed).toEqual(["test3"]);
+    expect(sealed).toEqual(["test2", "test3"]);
     expect(removed).toEqual(["dm-1", "group-1"]);
     expect(sent).toEqual(["dm-1"]);
     expect(failed).toEqual(["group-1"]);

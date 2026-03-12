@@ -823,6 +823,19 @@ export class PqmsgApi {
     );
   }
 
+  async createSealedInboxWsTicket(
+    userId: string,
+    since: number,
+    headers: RequestAuthHeaders
+  ): Promise<WsInboxTicketResponse> {
+    return this.request<WsInboxTicketResponse>(
+      "POST",
+      `/v1/ws/sealed-inbox/${encodeURIComponent(userId)}/ticket?since=${encodeURIComponent(String(since))}`,
+      undefined,
+      headers
+    );
+  }
+
   async listContacts(
     userId: string,
     headers: RequestAuthHeaders
