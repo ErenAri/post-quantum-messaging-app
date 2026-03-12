@@ -12,6 +12,7 @@ import {
   buildSendReceiptAuthHeaders,
   buildGetReceiptsAuthHeaders,
   buildContactsListAuthHeaders,
+  buildContactInviteCreateAuthHeaders,
   buildContactsUpsertAuthHeaders,
   buildContactsRemoveAuthHeaders,
   buildUserGroupsListAuthHeaders,
@@ -48,6 +49,7 @@ import {
 } from "./crypto";
 import {
   PqmsgApi,
+  type BundleResponse,
   type ContactEntry,
   type GroupMembershipRecord,
   type GroupMemberRecord,
@@ -125,6 +127,7 @@ import {
 } from "./router";
 import { getWebBetaHoldback, WEB_BETA_SCOPE_SUMMARY } from "./betaScope";
 import {
+  extractInviteToken,
   normalizeBrowserUserId,
   parseDirectChatTarget,
   startDirectConversationFlow,
@@ -156,6 +159,7 @@ let receiptCursor = 0;
 let cachedContacts: ContactEntry[] = [];
 let cachedProfileNames: Record<string, string> = {};
 let cachedSealedDeliveryTokens: Record<string, string> = {};
+let cachedInviteBundles: Record<string, BundleResponse> = {};
 let peerPresenceCache: Record<string, { status: string; updated: number }> = {};
 let activeInboxFilter: InboxFilter = "all";
 
@@ -193,7 +197,8 @@ async function bootstrapApp(): Promise<void> {
   if (setup.userId && hasLocalKeys(setup.userId)) {
     const params = new URLSearchParams(location.search);
     const invite = params.get("invite");
-    if (invite && invite !== setup.userId) {
+    const inviteToken = params.get("invite_token") || params.get("token");
+    if ((invite && invite !== setup.userId) || inviteToken) {
       navigateTo({ screen: "new-chat" });
     } else {
       navigateTo({ screen: "conversations" });
@@ -348,7 +353,8 @@ async function encryptDirectPayload(
     );
   }
 
-  const bundle = await api.getBundle(peerUserId);
+  const bundle = cachedInviteBundles[peerUserId] ?? await api.getBundle(peerUserId);
+  delete cachedInviteBundles[peerUserId];
   const fingerprint =
     bundle.identity_fingerprint_sha256
     || identityFingerprint(bundle.identity_x25519_pub, bundle.identity_pq_sig_pub);
@@ -921,7 +927,7 @@ async function syncGroupsBackground(): Promise<void> {
 }
 
 async function ensureDirectChatPeerExists(peerId: string): Promise<void> {
-  const normalizedPeer = parseDirectChatTarget(peerId).replace(/^@/, "").trim();
+  const normalizedPeer = await resolvePeerUserIdFromTarget(peerId);
   if (!normalizedPeer) {
     throw new Error("User ID is required");
   }
@@ -952,12 +958,50 @@ async function ensureDirectChatPeerExists(peerId: string): Promise<void> {
   await api.getBundle(normalizedPeer);
 }
 
+async function resolvePeerUserIdFromTarget(rawTarget: string, api?: PqmsgApi): Promise<string> {
+  const inviteToken = extractInviteToken(rawTarget);
+  if (inviteToken) {
+    return loadInvitePeerFromToken(inviteToken, api);
+  }
+  return parseDirectChatTarget(rawTarget).replace(/^@/, "").trim();
+}
+
 function describePeerLookupError(peerId: string, err: unknown): string {
   const message = errorMsg(err);
   if (message.includes("HTTP 404")) {
+    if (peerId === "private invite") {
+      return "Private invite link was not found or has expired";
+    }
     return `User @${peerId} was not found on this server`;
   }
   return message;
+}
+
+function rememberInviteBundle(bundle: BundleResponse): string {
+  const peerUserId = bundle.user_id.trim().replace(/^@/, "");
+  if (!peerUserId) {
+    throw new Error("Invite bundle did not contain a user ID");
+  }
+  cachedInviteBundles[peerUserId] = bundle;
+  const fingerprint =
+    bundle.identity_fingerprint_sha256
+    || identityFingerprint(bundle.identity_x25519_pub, bundle.identity_pq_sig_pub);
+  enforceIdentityPin(
+    peerUserId,
+    bundle.identity_x25519_pub,
+    bundle.identity_sig_pub,
+    bundle.identity_pq_sig_pub,
+    fingerprint,
+    bundle.identity_key_version,
+    bundle.bundle_generated_at
+  );
+  return peerUserId;
+}
+
+async function loadInvitePeerFromToken(inviteToken: string, api?: PqmsgApi): Promise<string> {
+  const resolvedApi = api ?? new PqmsgApi(setup.serverUrl);
+  const bundle = await resolvedApi.getContactInviteBundle(inviteToken);
+  return rememberInviteBundle(bundle);
 }
 
 // ---------------------------------------------------------------------------
@@ -2583,23 +2627,41 @@ function renderNewChat(): void {
     startBtn.disabled = true;
     startBtn.textContent = "Checking...";
     try {
-      const resolvedPeer = await startDirectConversationFlow(
-        {
-          rawTarget: peer,
-          currentUserId: setup.userId,
-        },
-        {
-          ensureDirectChatPeerExists,
-          addContactSilent,
-          markConversationAccepted,
-          setConversationArchived,
-          upsertConversation,
-          markConversationRead,
+      const inviteToken = extractInviteToken(peer);
+      let resolvedPeer: string;
+      if (inviteToken) {
+        const api = new PqmsgApi(setup.serverUrl);
+        resolvedPeer = await loadInvitePeerFromToken(inviteToken, api);
+        if (resolvedPeer === setup.userId) {
+          throw new Error("You can't chat with yourself");
         }
-      );
+        await addContactSilent(resolvedPeer);
+        markConversationAccepted(resolvedPeer);
+        setConversationArchived("dm", resolvedPeer, false);
+        upsertConversation(setup.userId, resolvedPeer, "New conversation", false);
+        markConversationRead(setup.userId, resolvedPeer);
+      } else {
+        resolvedPeer = await startDirectConversationFlow(
+          {
+            rawTarget: peer,
+            currentUserId: setup.userId,
+          },
+          {
+            ensureDirectChatPeerExists,
+            resolveInviteToken: async (token: string) => loadInvitePeerFromToken(token),
+            addContactSilent,
+            markConversationAccepted,
+            setConversationArchived,
+            upsertConversation,
+            markConversationRead,
+          }
+        );
+      }
       navigateTo({ screen: "chat", peerId: resolvedPeer });
     } catch (e) {
-      const resolvedPeer = parseDirectChatTarget(peer).replace(/^@/, "");
+      const resolvedPeer = extractInviteToken(peer)
+        ? "private invite"
+        : parseDirectChatTarget(peer).replace(/^@/, "");
       const message = describePeerLookupError(resolvedPeer || "unknown", e);
       statusEl.textContent = message;
       statusEl.classList.add("error-text");
@@ -2621,18 +2683,28 @@ function renderNewChat(): void {
 
   // Invite link
   q("#nc-invite").addEventListener("click", () => {
-    const link = `${location.origin}/?invite=${encodeURIComponent(setup.userId)}`;
-    void navigator.clipboard.writeText(link).then(() => {
-      notify("Invite link copied!", "success");
-    }).catch(() => {
-      notify("Could not copy link", "error");
-    });
+    void (async () => {
+      try {
+        const k = await ensureKeys();
+        const api = new PqmsgApi(setup.serverUrl);
+        const headers = buildContactInviteCreateAuthHeaders(k);
+        const invite = await api.createContactInvite(k.userId, headers);
+        const link = `${location.origin}/?invite_token=${encodeURIComponent(invite.invite_token)}&server=${encodeURIComponent(setup.serverUrl)}`;
+        await navigator.clipboard.writeText(link);
+        notify("Private invite link copied!", "success");
+      } catch {
+        notify("Could not create invite link", "error");
+      }
+    })();
   });
 
   // Check for invite param in URL
   const params = new URLSearchParams(location.search);
+  const inviteToken = params.get("invite_token") || params.get("token");
   const invitee = params.get("invite");
-  if (invitee && invitee !== setup.userId) {
+  if (inviteToken) {
+    peerInput.value = location.href;
+  } else if (invitee && invitee !== setup.userId) {
     peerInput.value = invitee;
   }
 
@@ -3077,10 +3149,15 @@ async function renderSettings(): Promise<void> {
     const alias = q<HTMLInputElement>("#set-add-contact-alias").value.trim();
     if (!rawTarget) { q<HTMLInputElement>("#set-add-contact-id").focus(); return; }
     try {
-      const contactId = parseDirectChatTarget(rawTarget).replace(/^@/, "").trim();
-      await ensureDirectChatPeerExists(rawTarget);
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
+      const inviteToken = extractInviteToken(rawTarget);
+      const contactId = inviteToken
+        ? await loadInvitePeerFromToken(inviteToken, api)
+        : await resolvePeerUserIdFromTarget(rawTarget, api);
+      if (!inviteToken) {
+        await ensureDirectChatPeerExists(rawTarget);
+      }
       const headers = buildContactsUpsertAuthHeaders(k, contactId, alias || contactId, false, "");
       await api.upsertContact(k.userId, { contact_user_id: contactId, alias: alias || undefined }, headers);
       notify("Contact added", "success");
@@ -4706,6 +4783,7 @@ async function logoutCurrentSession(): Promise<void> {
   cachedContacts = [];
   cachedProfileNames = {};
   cachedSealedDeliveryTokens = {};
+  cachedInviteBundles = {};
   cachedGroupMembers = {};
   peerPresenceCache = {};
   receiptCursor = 0;
@@ -4794,7 +4872,7 @@ async function ensurePeerIdentityPinForTrust(peerUserId: string, api: PqmsgApi):
   if (existing?.identityPqSigPub?.trim()) {
     return existing;
   }
-  const bundle = await api.getBundle(peerUserId);
+  const bundle = cachedInviteBundles[peerUserId] ?? await api.getBundle(peerUserId);
   const fingerprint =
     bundle.identity_fingerprint_sha256
     || identityFingerprint(bundle.identity_x25519_pub, bundle.identity_pq_sig_pub);

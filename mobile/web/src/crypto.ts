@@ -480,6 +480,14 @@ export function buildContactsListAuthHeaders(keys: GeneratedKeys): RequestAuthHe
   return signAuthHeaders(keys, timestamp, nonce, records);
 }
 
+export function buildContactInviteCreateAuthHeaders(keys: GeneratedKeys): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("contact-invite-create", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
 export function buildContactsUpsertAuthHeaders(
   keys: GeneratedKeys,
   contactUserId: string,

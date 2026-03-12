@@ -138,19 +138,30 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                     userId = setup.userId,
                     suiteLabel = setup.suiteLabel,
                 )
-                context.api.getBundle(target.peerUserId)
+                val validatedBundle = target.inviteToken?.trim()?.takeIf { it.isNotBlank() }?.let {
+                    context.api.getContactInviteBundle(it)
+                }
+                val resolvedPeerUserId = validatedBundle?.user_id?.trim()?.removePrefix("@")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: MessagingCoordinator.resolvePeerUserId(
+                        context.api,
+                        target,
+                    )
+                if (validatedBundle == null) {
+                    context.api.getBundle(resolvedPeerUserId)
+                }
                 context.api.upsertContact(
                     userId = context.profile.userId,
                     headers = buildContactsUpsertAuthHeaders(
                         keysJson = context.keysJson,
                         userId = context.profile.userId,
-                        contactUserId = target.peerUserId,
-                        alias = alias ?: target.peerUserId,
+                        contactUserId = resolvedPeerUserId,
+                        alias = alias ?: resolvedPeerUserId,
                         verifiedByQr = false,
                         verifiedFingerprintSha256 = null,
                     ).toHeaderMap(),
                     request = UpsertContactRequest(
-                        contact_user_id = target.peerUserId,
+                        contact_user_id = resolvedPeerUserId,
                         alias = alias,
                         verified_by_qr = null,
                         verified_fingerprint_sha256 = null,
@@ -158,7 +169,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 )
                 contactUserIdInput.setText("")
                 contactAliasInput.setText("")
-                statusText.text = getString(R.string.contacts_added_status, target.peerUserId)
+                statusText.text = getString(R.string.contacts_added_status, resolvedPeerUserId)
                 loadContacts()
             }.onFailure {
                 statusText.text = UiErrorMapper.fromThrowable(it, "Add contact").headline

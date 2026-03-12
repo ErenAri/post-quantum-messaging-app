@@ -37,6 +37,7 @@ data class SyncOutcome(
 data class ComposeTarget(
     val peerUserId: String,
     val serverUrl: String,
+    val inviteToken: String? = null,
 )
 
 data class PeerTransparencyStatus(
@@ -566,19 +567,39 @@ object MessagingCoordinator {
         }
     }
 
-    fun buildInviteLink(serverUrl: String, userId: String): String {
+    fun buildInviteLink(serverUrl: String, inviteToken: String): String {
         return Uri.Builder()
             .scheme("pqmsg")
             .authority("chat")
-            .appendQueryParameter("user", userId.trim())
+            .appendQueryParameter("token", inviteToken.trim())
             .appendQueryParameter("server", ApiClientFactory.normalizeBaseUrl(serverUrl).trimEnd('/'))
             .build()
             .toString()
     }
 
+    suspend fun resolvePeerUserId(api: PqmsgApi, target: ComposeTarget): String {
+        val inviteToken = target.inviteToken?.trim().orEmpty()
+        return if (inviteToken.isNotBlank()) {
+            normalizePeerUserId(api.resolveContactInvite(inviteToken).user_id)
+        } else {
+            normalizePeerUserId(target.peerUserId)
+        }
+    }
+
     fun parseComposeTarget(input: String, fallbackServerUrl: String): ComposeTarget {
         val trimmed = input.trim()
         require(trimmed.isNotBlank()) { "username or invite is empty" }
+        val webInviteToken = extractQueryParameterFallback(trimmed, "invite_token")
+            .ifBlank { extractQueryParameterFallback(trimmed, "token") }
+        if (webInviteToken.isNotBlank()) {
+            val inviteServer = extractQueryParameterFallback(trimmed, "server")
+            val resolvedInviteServer = if (inviteServer.isBlank()) fallbackServerUrl else inviteServer
+            return ComposeTarget(
+                peerUserId = "",
+                serverUrl = ApiClientFactory.normalizeBaseUrl(resolvedInviteServer),
+                inviteToken = webInviteToken,
+            )
+        }
         val webInvitePeer = normalizePeerUserId(extractQueryParameterFallback(trimmed, "invite"))
         if (webInvitePeer.isNotBlank()) {
             val inviteServer = extractQueryParameterFallback(trimmed, "server")
@@ -590,6 +611,20 @@ object MessagingCoordinator {
         }
         val parsed = runCatching { Uri.parse(trimmed) }.getOrNull()
         if (parsed != null) {
+            val inviteToken = parsed.getQueryParameter("invite_token")?.trim().orEmpty().ifBlank {
+                parsed.getQueryParameter("token")?.trim().orEmpty()
+            }
+            if (inviteToken.isNotBlank()) {
+                val inviteServer = parsed.getQueryParameter("server")?.trim().orEmpty().ifBlank {
+                    extractQueryParameterFallback(trimmed, "server")
+                }
+                val resolvedInviteServer = if (inviteServer.isBlank()) fallbackServerUrl else inviteServer
+                return ComposeTarget(
+                    peerUserId = "",
+                    serverUrl = ApiClientFactory.normalizeBaseUrl(resolvedInviteServer),
+                    inviteToken = inviteToken,
+                )
+            }
             val invitePeer = normalizePeerUserId(
                 parsed.getQueryParameter("invite").orEmpty().ifBlank {
                     extractQueryParameterFallback(trimmed, "invite")
@@ -608,12 +643,14 @@ object MessagingCoordinator {
         }
         if (parsed != null && parsed.scheme == "pqmsg") {
             val peer = normalizePeerUserId(parsed.getQueryParameter("user").orEmpty())
+            val inviteToken = parsed.getQueryParameter("token")?.trim().orEmpty()
             val server = parsed.getQueryParameter("server")?.trim().orEmpty()
-            require(peer.isNotBlank()) { "invite is missing user" }
+            require(peer.isNotBlank() || inviteToken.isNotBlank()) { "invite is missing target" }
             val resolvedServer = if (server.isBlank()) fallbackServerUrl else server
             return ComposeTarget(
                 peerUserId = peer,
                 serverUrl = ApiClientFactory.normalizeBaseUrl(resolvedServer),
+                inviteToken = inviteToken.ifBlank { null },
             )
         }
         val peerUserId = normalizePeerUserId(trimmed)

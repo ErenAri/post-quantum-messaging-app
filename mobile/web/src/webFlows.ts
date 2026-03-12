@@ -23,6 +23,21 @@ export function parseDirectChatTarget(rawValue: string): string {
   return trimmed;
 }
 
+export function extractInviteToken(rawValue: string): string {
+  const trimmed = rawValue.trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.searchParams.get("invite_token")?.trim()
+      || parsed.searchParams.get("token")?.trim()
+      || "";
+  } catch {
+    return "";
+  }
+}
+
 export type UnlockBrowserAccountDeps = {
   ensureRuntime: () => Promise<void>;
   hasLocalKeys: (userId: string) => boolean;
@@ -73,6 +88,7 @@ export async function unlockBrowserAccount(
 
 export type StartDirectConversationDeps = {
   ensureDirectChatPeerExists: (peerId: string) => Promise<void>;
+  resolveInviteToken: (inviteToken: string) => Promise<string>;
   addContactSilent: (peerId: string) => Promise<void>;
   markConversationAccepted: (peerId: string) => void;
   setConversationArchived: (
@@ -96,7 +112,10 @@ export async function startDirectConversationFlow(
   },
   deps: StartDirectConversationDeps
 ): Promise<string> {
-  const resolvedPeer = parseDirectChatTarget(params.rawTarget).replace(/^@/, "");
+  const inviteToken = extractInviteToken(params.rawTarget);
+  const resolvedPeer = inviteToken
+    ? (await deps.resolveInviteToken(inviteToken)).replace(/^@/, "")
+    : parseDirectChatTarget(params.rawTarget).replace(/^@/, "");
   if (!resolvedPeer) {
     throw new Error("User ID is required");
   }

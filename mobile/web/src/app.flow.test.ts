@@ -513,6 +513,11 @@ async function bootApp(options: BootOptions = {}) {
         };
       }
 
+      async getContactInviteBundle(inviteToken: string) {
+        const mappedUserId = inviteToken === "opaque-token-123" ? "test2" : "test2";
+        return this.getBundle(mappedUserId);
+      }
+
       async getIdentityLog(userId: string) {
         return {
           user_id: userId,

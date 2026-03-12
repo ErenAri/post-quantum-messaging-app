@@ -10,10 +10,13 @@ import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.google.gson.Gson
 import kotlinx.coroutines.launch
+import uniffi.pqmsg_android.buildContactInviteCreateAuthHeaders
 import uniffi.pqmsg_android.buildGroupCreateAuthHeaders
 
 class ConversationsActivity : AppCompatActivity() {
+    private val gson = Gson()
     private lateinit var store: LocalStateStore
     private lateinit var composeButton: Button
     private lateinit var requestsButton: Button
@@ -207,14 +210,23 @@ class ConversationsActivity : AppCompatActivity() {
                             suiteLabel = setup.suiteLabel,
                             deviceId = setup.deviceId,
                         )
-                        context.api.getBundle(target.peerUserId)
+                        val validatedBundle = target.inviteToken?.trim()?.takeIf { it.isNotBlank() }?.let {
+                            context.api.getContactInviteBundle(it)
+                        }
+                        val resolvedPeerUserId = validatedBundle?.user_id?.trim()?.removePrefix("@")
+                            ?.takeIf { it.isNotBlank() }
+                            ?: MessagingCoordinator.resolvePeerUserId(
+                                context.api,
+                                target,
+                            )
+                        val peerBundle = validatedBundle ?: context.api.getBundle(resolvedPeerUserId)
                         val updatedSetup = setup.copy(
                             serverUrl = target.serverUrl,
-                            peerUserId = target.peerUserId,
+                            peerUserId = resolvedPeerUserId,
                         )
                         store.saveSetup(updatedSetup)
-                        store.markPeerAccepted(updatedSetup.userId, target.peerUserId)
-                        openChat(target.peerUserId)
+                        store.markPeerAccepted(updatedSetup.userId, resolvedPeerUserId)
+                        openChat(resolvedPeerUserId, peerBundle)
                     }.onFailure {
                         val mapped = UiErrorMapper.fromThrowable(it, "Compose conversation")
                         statusText.text = mapped.headline
@@ -257,12 +269,35 @@ class ConversationsActivity : AppCompatActivity() {
 
     private fun shareInvite() {
         val setup = store.loadSetup()
-        val invite = MessagingCoordinator.buildInviteLink(setup.serverUrl, setup.userId)
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_TEXT, invite)
+        lifecycleScope.launch {
+            runCatching {
+                val context = MessagingCoordinator.ensureReady(
+                    store = store,
+                    serverUrl = setup.serverUrl,
+                    userId = setup.userId,
+                    suiteLabel = setup.suiteLabel,
+                    deviceId = setup.deviceId,
+                )
+                val invite = context.api.createContactInvite(
+                    userId = context.profile.userId,
+                    headers = buildContactInviteCreateAuthHeaders(
+                        context.keysJson,
+                        context.profile.userId,
+                    ).toHeaderMap(),
+                )
+                val link = MessagingCoordinator.buildInviteLink(setup.serverUrl, invite.invite_token)
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, link)
+                }
+                statusText.text = "Private invite link ready to share"
+                startActivity(
+                    Intent.createChooser(intent, getString(R.string.share_invite_chooser_title)),
+                )
+            }.onFailure {
+                statusText.text = UiErrorMapper.fromThrowable(it, "Share invite").headline
+            }
         }
-        startActivity(Intent.createChooser(intent, getString(R.string.share_invite_chooser_title)))
     }
 
     private fun showGroupsDialog() {
@@ -366,13 +401,14 @@ class ConversationsActivity : AppCompatActivity() {
         }
     }
 
-    private fun openChat(peerUserId: String) {
+    private fun openChat(peerUserId: String, initialBundle: BundleResponse? = null) {
         val setup = store.loadSetup()
         store.markPeerAccepted(setup.userId, peerUserId)
         store.markConversationRead(setup.userId, peerUserId)
         startActivity(
             Intent(this, ChatActivity::class.java).apply {
                 putExtra("peer", peerUserId)
+                initialBundle?.let { putExtra("peer_bundle_json", gson.toJson(it)) }
             },
         )
     }

@@ -128,6 +128,20 @@ pub(crate) struct ContactListResponse {
     pub(crate) contacts: Vec<ContactListItem>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct ContactInviteCreateResponse {
+    pub(crate) user_id: String,
+    pub(crate) invite_token: String,
+    pub(crate) expires_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ContactInviteResolveResponse {
+    pub(crate) invite_token: String,
+    pub(crate) user_id: String,
+    pub(crate) expires_at: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct RemoveContactRequest {
     pub(crate) contact_user_id: String,

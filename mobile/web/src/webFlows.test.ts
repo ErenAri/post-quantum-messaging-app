@@ -4,6 +4,7 @@ import type { SetupConfig } from "./storage";
 import type { OutboxMessage } from "./db";
 import {
   drainSupportedOutbox,
+  extractInviteToken,
   normalizeBrowserUserId,
   parseDirectChatTarget,
   startDirectConversationFlow,
@@ -50,6 +51,13 @@ describe("parseDirectChatTarget", () => {
 
   it("returns the raw value for direct usernames", () => {
     expect(parseDirectChatTarget("@carol")).toBe("@carol");
+  });
+});
+
+describe("extractInviteToken", () => {
+  it("extracts opaque invite tokens from URLs", () => {
+    expect(extractInviteToken("https://app.test/?invite_token=opaque-token-123")).toBe("opaque-token-123");
+    expect(extractInviteToken("pqmsg://chat?token=opaque-token-456")).toBe("opaque-token-456");
   });
 });
 
@@ -113,6 +121,7 @@ describe("unlockBrowserAccount", () => {
 describe("startDirectConversationFlow", () => {
   it("validates and prepares a new direct conversation", async () => {
     const ensureDirectChatPeerExists = vi.fn(async () => {});
+    const resolveInviteToken = vi.fn(async () => "test2");
     const addContactSilent = vi.fn(async () => {});
     const markConversationAccepted = vi.fn();
     const setConversationArchived = vi.fn();
@@ -124,11 +133,12 @@ describe("startDirectConversationFlow", () => {
         rawTarget: "https://app.test/?invite=test2",
         currentUserId: "test1",
       },
-      {
-        ensureDirectChatPeerExists,
-        addContactSilent,
-        markConversationAccepted,
-        setConversationArchived,
+        {
+          ensureDirectChatPeerExists,
+          resolveInviteToken,
+          addContactSilent,
+          markConversationAccepted,
+          setConversationArchived,
         upsertConversation,
         markConversationRead,
       }
@@ -136,6 +146,7 @@ describe("startDirectConversationFlow", () => {
 
     expect(peerId).toBe("test2");
     expect(ensureDirectChatPeerExists).toHaveBeenCalledWith("test2");
+    expect(resolveInviteToken).not.toHaveBeenCalled();
     expect(addContactSilent).toHaveBeenCalledWith("test2");
     expect(markConversationAccepted).toHaveBeenCalledWith("test2");
     expect(setConversationArchived).toHaveBeenCalledWith("dm", "test2", false);
@@ -152,6 +163,7 @@ describe("startDirectConversationFlow", () => {
         },
         {
           ensureDirectChatPeerExists: async () => {},
+          resolveInviteToken: async () => "test1",
           addContactSilent: async () => {},
           markConversationAccepted: () => {},
           setConversationArchived: () => {},
@@ -160,6 +172,33 @@ describe("startDirectConversationFlow", () => {
         }
       )
     ).rejects.toThrow("You can't chat with yourself");
+  });
+
+  it("redeems opaque invite tokens before opening a conversation", async () => {
+    const ensureDirectChatPeerExists = vi.fn(async () => {});
+    const resolveInviteToken = vi.fn(async () => "test2");
+    const addContactSilent = vi.fn(async () => {});
+
+    const peerId = await startDirectConversationFlow(
+      {
+        rawTarget: "https://app.test/?invite_token=opaque-token-123",
+        currentUserId: "test1",
+      },
+      {
+        ensureDirectChatPeerExists,
+        resolveInviteToken,
+        addContactSilent,
+        markConversationAccepted: () => {},
+        setConversationArchived: () => {},
+        upsertConversation: () => {},
+        markConversationRead: () => {},
+      }
+    );
+
+    expect(peerId).toBe("test2");
+    expect(resolveInviteToken).toHaveBeenCalledWith("opaque-token-123");
+    expect(ensureDirectChatPeerExists).toHaveBeenCalledWith("test2");
+    expect(addContactSilent).toHaveBeenCalledWith("test2");
   });
 });
 

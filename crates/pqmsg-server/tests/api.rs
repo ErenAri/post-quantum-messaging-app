@@ -1176,6 +1176,38 @@ fn contacts_list_auth_headers(
     ]
 }
 
+fn contact_invite_create_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "contact-invite-create-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records(
+        "contact-invite-create",
+        user_id,
+        device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("contact-invite-create auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
 fn contacts_upsert_auth_headers(
     signing_key: &SigningKey,
     user_id: &str,
@@ -4242,6 +4274,136 @@ async fn discovery_disabled_and_contacts_flow() {
     .await;
     assert_eq!(status_contact_remove, StatusCode::OK);
     assert_eq!(contact_remove_payload["removed"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+async fn opaque_contact_invites_resolve_and_rotate() {
+    let app = test_app().await;
+    let alice_sig = signing_key(151);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", [21u8; 32], &alice_sig);
+    let (status_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_alice, StatusCode::OK);
+
+    let create_headers = contact_invite_create_auth_headers(&alice_sig, "alice", "alice-dev-1");
+    let (status_create, create_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/contact-invites",
+        json!({}),
+        &create_headers,
+    )
+    .await;
+    assert_eq!(status_create, StatusCode::OK);
+    assert_eq!(create_payload["user_id"].as_str(), Some("alice"));
+    let first_token = create_payload["invite_token"]
+        .as_str()
+        .expect("first invite token")
+        .to_string();
+    assert!(!first_token.is_empty());
+
+    let publish = publish_prekeys_payload(
+        &alice_sig,
+        [22u8; 32],
+        vec![23u8; 64],
+        vec![[24u8; 32]],
+        vec![vec![25u8; 64]],
+    );
+    let publish_auth = prekeys_auth_headers(&alice_sig, "alice", "alice-dev-1", &publish);
+    let (status_publish, publish_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/prekeys",
+        publish,
+        &publish_auth,
+    )
+    .await;
+    assert_eq!(
+        status_publish,
+        StatusCode::OK,
+        "prekey publish failed: {publish_payload}"
+    );
+
+    let (status_resolve_first, resolve_first_payload) = json_request(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/contact-invites/{first_token}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_resolve_first, StatusCode::OK);
+    assert_eq!(resolve_first_payload["user_id"].as_str(), Some("alice"));
+    assert_eq!(
+        resolve_first_payload["invite_token"].as_str(),
+        Some(first_token.as_str())
+    );
+
+    let (status_bundle, bundle_payload) = json_request(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/contact-invites/{first_token}/bundle"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_bundle, StatusCode::OK);
+    assert_eq!(bundle_payload["user_id"].as_str(), Some("alice"));
+    assert_eq!(bundle_payload["identity_key_version"].as_u64(), Some(1));
+    assert!(bundle_payload["identity_pq_sig_pub"].as_str().is_some());
+
+    let rotate_headers = contact_invite_create_auth_headers(&alice_sig, "alice", "alice-dev-1");
+    let (status_rotate, rotate_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/contact-invites",
+        json!({}),
+        &rotate_headers,
+    )
+    .await;
+    assert_eq!(status_rotate, StatusCode::OK);
+    let second_token = rotate_payload["invite_token"]
+        .as_str()
+        .expect("second invite token")
+        .to_string();
+    assert_ne!(first_token, second_token);
+
+    let (status_old_token, old_token_payload) = json_request(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/contact-invites/{first_token}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_old_token, StatusCode::NOT_FOUND);
+    assert!(old_token_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("not found or expired")));
+
+    let (status_old_bundle, old_bundle_payload) = json_request(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/contact-invites/{first_token}/bundle"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_old_bundle, StatusCode::NOT_FOUND);
+    assert!(old_bundle_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("not found or expired")));
+
+    let (status_resolve_second, resolve_second_payload) = json_request(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/contact-invites/{second_token}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_resolve_second, StatusCode::OK);
+    assert_eq!(resolve_second_payload["user_id"].as_str(), Some("alice"));
+    assert_eq!(
+        resolve_second_payload["invite_token"].as_str(),
+        Some(second_token.as_str())
+    );
 }
 
 #[tokio::test]

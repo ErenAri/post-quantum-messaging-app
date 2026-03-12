@@ -630,6 +630,61 @@ Request:
 }
 ```
 
+`POST /v1/users/{user_id}/contact-invites`
+
+Authenticated request with no body. Returns a single active opaque invite token for the user.
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "invite_token": "4d7f8d1c7f2042d9b2f7e98c6d3f0a12",
+  "expires_at": "2026-03-26T12:00:00Z"
+}
+```
+
+`GET /v1/contact-invites/{invite_token}`
+
+Resolves an opaque invite token to the underlying user ID.
+
+Response:
+
+```json
+{
+  "invite_token": "4d7f8d1c7f2042d9b2f7e98c6d3f0a12",
+  "user_id": "alice",
+  "expires_at": "2026-03-26T12:00:00Z"
+}
+```
+
+`GET /v1/contact-invites/{invite_token}/bundle`
+
+Returns the current prekey bundle for an opaque invite token so invite-based bootstrap does not need to fall back to `/v1/users/{user_id}/bundle`.
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "device_id": "alice-dev-1",
+  "identity_x25519_pub": "base64...",
+  "identity_sig_pub": "base64...",
+  "identity_pq_sig_pub": "base64...",
+  "signed_prekey_x25519_pub": "base64...",
+  "sig_over_spk": "base64...",
+  "pq_signed_prekey_pub_mlkem768": "base64...",
+  "sig_over_pqspk": "base64...",
+  "pq_sig_over_spk": "base64...",
+  "pq_sig_over_pqspk": "base64...",
+  "one_time_prekey_x25519": "base64...",
+  "one_time_prekey_mlkem768": "base64...",
+  "identity_key_version": 1,
+  "identity_fingerprint_sha256": "hex...",
+  "bundle_generated_at": "2026-03-12T12:00:00Z"
+}
+```
+
 ### 4.8B Group Membership and Fan-Out Relay
 
 `POST /v1/groups`

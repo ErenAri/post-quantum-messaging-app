@@ -446,6 +446,19 @@ pub(crate) fn contacts_list_auth_message(
         .map_err(|_| AppError::internal("failed to encode contacts-list auth transcript"))
 }
 
+pub(crate) fn contact_invite_create_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+) -> Result<Vec<u8>, AppError> {
+    let mut records = auth_common_records(auth, "contact-invite-create");
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    encode(&records)
+        .map_err(|_| AppError::internal("failed to encode contact-invite-create auth transcript"))
+}
+
 pub(crate) fn contacts_upsert_auth_message(
     auth: &RequestAuth,
     user_id: &str,

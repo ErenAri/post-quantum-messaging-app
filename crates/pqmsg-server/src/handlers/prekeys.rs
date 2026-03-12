@@ -254,6 +254,19 @@ pub(crate) async fn get_bundle(
         validate_id("device_id", device_id)?;
     }
 
+    let response = load_bundle_response(&state, &user_id, &query).await?;
+    Ok(Json(response))
+}
+
+pub(crate) async fn load_bundle_response(
+    state: &AppState,
+    user_id: &str,
+    query: &BundleQuery,
+) -> Result<BundleResponse, AppError> {
+    if let Some(device_id) = &query.device_id {
+        validate_id("device_id", device_id)?;
+    }
+
     let mut tx = state.pool.begin().await?;
 
     let row = if let Some(target_device_id) = &query.device_id {
@@ -349,11 +362,11 @@ pub(crate) async fn get_bundle(
                 let age = Utc::now().signed_duration_since(updated_at).num_seconds();
                 if age > crate::SIGNED_PREKEY_MAX_AGE_SECONDS {
                     record_security_event(
-                        &state,
+                        state,
                         "signed_prekey_stale",
                         "warn",
                         None,
-                        Some(&user_id),
+                        Some(user_id),
                         Some(&device_id),
                         Some(format!("age_seconds={age}")),
                     );
@@ -400,17 +413,17 @@ pub(crate) async fn get_bundle(
 
     if last_resort_prekey_only && state.dos_policy().pq_ratchet_interval() > 0 {
         record_security_event(
-            &state,
+            state,
             "pq_bundle_last_resort_served",
             "warn",
             None,
-            Some(&user_id),
+            Some(user_id),
             Some(&device_id),
             None,
         );
     }
 
-    Ok(Json(BundleResponse {
+    Ok(BundleResponse {
         user_id: row.try_get("user_id")?,
         device_id,
         identity_x25519_pub: B64.encode(identity_x25519_pub_bytes),
@@ -437,7 +450,7 @@ pub(crate) async fn get_bundle(
         identity_key_version,
         identity_fingerprint_sha256: identity_fingerprint,
         bundle_generated_at: Utc::now().to_rfc3339(),
-    }))
+    })
 }
 
 pub(crate) async fn rotate_init(

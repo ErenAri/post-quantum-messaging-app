@@ -35,6 +35,18 @@ class MessagingCoordinatorTest {
     }
 
     @Test
+    fun parse_compose_target_extracts_opaque_invite_tokens() {
+        val target = MessagingCoordinator.parseComposeTarget(
+            "https://app.test/chat?invite_token=opaque-token-123&server=https%3A%2F%2Frelay.example",
+            "http://10.0.2.2:3000",
+        )
+
+        assertEquals("", target.peerUserId)
+        assertEquals("opaque-token-123", target.inviteToken)
+        assertEquals("https://relay.example/", target.serverUrl)
+    }
+
+    @Test
     fun normalized_device_id_defaults_from_user() {
         val deviceId = MessagingCoordinator.normalizedDeviceId("alice", "")
 

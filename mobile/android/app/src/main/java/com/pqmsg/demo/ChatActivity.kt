@@ -15,6 +15,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.NestedScrollView
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
+import com.google.gson.Gson
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -42,6 +43,7 @@ import java.util.Date
 import kotlin.coroutines.resume
 
 class ChatActivity : AppCompatActivity() {
+    private val gson = Gson()
     private val maxAttachmentBytes = 128 * 1024
     private lateinit var store: LocalStateStore
     private lateinit var messageInput: EditText
@@ -108,6 +110,9 @@ class ChatActivity : AppCompatActivity() {
         store = LocalStateStore(this)
         val setup = store.loadSetup()
         activePeerUserId = (intent.getStringExtra("peer") ?: setup.peerUserId).trim()
+        latestBundle = intent.getStringExtra("peer_bundle_json")?.let { serialized ->
+            runCatching { gson.fromJson(serialized, BundleResponse::class.java) }.getOrNull()
+        }
         if (setup.userId.isBlank() || setup.serverUrl.isBlank() || activePeerUserId.isBlank()) {
             redirectToHome()
             return

@@ -1953,7 +1953,19 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/users/:user_id/contacts",
             get(list_contacts).post(upsert_contact),
         )
+        .route(
+            "/v1/users/:user_id/contact-invites",
+            post(create_contact_invite),
+        )
         .route("/v1/users/:user_id/contacts/remove", post(remove_contact))
+        .route(
+            "/v1/contact-invites/:invite_token",
+            get(resolve_contact_invite),
+        )
+        .route(
+            "/v1/contact-invites/:invite_token/bundle",
+            get(get_contact_invite_bundle),
+        )
         .route("/v1/users/:user_id/groups", get(list_user_groups))
         .route("/v1/groups", post(create_group))
         .route("/v1/groups/:group_id/members", get(list_group_members))

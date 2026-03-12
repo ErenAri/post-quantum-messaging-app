@@ -213,6 +213,18 @@ export type RemoveContactRequest = {
   contact_user_id: string;
 };
 
+export type ContactInviteCreateResponse = {
+  user_id: string;
+  invite_token: string;
+  expires_at: string;
+};
+
+export type ContactInviteResolveResponse = {
+  invite_token: string;
+  user_id: string;
+  expires_at: string;
+};
+
 // --- Phase 3 types ---
 
 export type CreateGroupRequest = {
@@ -931,6 +943,40 @@ export class PqmsgApi {
       `/v1/users/${encodeURIComponent(userId)}/contacts/remove`,
       payload,
       headers
+    );
+  }
+
+  async createContactInvite(
+    userId: string,
+    headers: RequestAuthHeaders
+  ): Promise<ContactInviteCreateResponse> {
+    return this.request<ContactInviteCreateResponse>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/contact-invites`,
+      undefined,
+      headers
+    );
+  }
+
+  async resolveContactInvite(
+    inviteToken: string
+  ): Promise<ContactInviteResolveResponse> {
+    return this.request<ContactInviteResolveResponse>(
+      "GET",
+      `/v1/contact-invites/${encodeURIComponent(inviteToken)}`,
+      undefined,
+      {}
+    );
+  }
+
+  async getContactInviteBundle(
+    inviteToken: string
+  ): Promise<BundleResponse> {
+    return this.request<BundleResponse>(
+      "GET",
+      `/v1/contact-invites/${encodeURIComponent(inviteToken)}/bundle`,
+      undefined,
+      {}
     );
   }
 

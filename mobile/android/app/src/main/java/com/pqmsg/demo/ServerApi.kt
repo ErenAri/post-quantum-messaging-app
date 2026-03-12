@@ -430,6 +430,18 @@ data class RemoveContactResponse(
     val removed_at: String,
 )
 
+data class ContactInviteCreateResponse(
+    val user_id: String,
+    val invite_token: String,
+    val expires_at: String,
+)
+
+data class ContactInviteResolveResponse(
+    val invite_token: String,
+    val user_id: String,
+    val expires_at: String,
+)
+
 // Profile & Presence & Typing
 
 data class UpsertProfileRequest(
@@ -854,6 +866,22 @@ interface PqmsgApi {
         @HeaderMap headers: Map<String, String>,
         @Body request: RemoveContactRequest,
     ): RemoveContactResponse
+
+    @POST("/v1/users/{user_id}/contact-invites")
+    suspend fun createContactInvite(
+        @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
+    ): ContactInviteCreateResponse
+
+    @GET("/v1/contact-invites/{invite_token}")
+    suspend fun resolveContactInvite(
+        @Path("invite_token") inviteToken: String,
+    ): ContactInviteResolveResponse
+
+    @GET("/v1/contact-invites/{invite_token}/bundle")
+    suspend fun getContactInviteBundle(
+        @Path("invite_token") inviteToken: String,
+    ): BundleResponse
 
     // Profile & Presence
 
