@@ -207,6 +207,8 @@ async function bootApp(options: BootOptions = {}) {
       channels_supported: false,
       group_messaging_supported: false,
       sealed_sender_required: true,
+      sender_certificate_supported: true,
+      sender_certificate_issuer_ed25519_pub: "issuer-ed25519-pub",
       ephemeral_messaging_supported: false,
       web_client_policy: options.capabilities?.web_client_policy ?? "interop_candidate",
     },
@@ -380,6 +382,7 @@ async function bootApp(options: BootOptions = {}) {
       })),
       buildIdentityLogAuthHeaders: emptyHeaders,
       buildSealedInboxAuthHeaders: emptyHeaders,
+      buildSenderCertificateAuthHeaders: emptyHeaders,
       buildEphemeralRelayAuthHeaders: emptyHeaders,
       buildDiscoveryHandlesAuthHeaders: emptyHeaders,
       buildDiscoveryMatchAuthHeaders: emptyHeaders,
@@ -408,7 +411,18 @@ async function bootApp(options: BootOptions = {}) {
         usedHandshake: true,
       })),
       isPqSessionMessagingAvailable: vi.fn(() => true),
+      openTransportEnvelopeWithSenderCert: vi.fn(
+        (_activeKeys: MockKeys, expectedSenderUserId: string, _senderIdentityX25519Pub: string, sealedMessageBytesBase64: string) => ({
+          senderUserId: expectedSenderUserId,
+          senderDeviceId: `${expectedSenderUserId}-device`,
+          payloadMessageBytesBase64: sealedMessageBytesBase64,
+        })
+      ),
       regeneratePublishedPrekeys: vi.fn((activeKeys: MockKeys) => activeKeys),
+      sealTransportEnvelopeWithSenderCert: vi.fn(
+        (_activeKeys: MockKeys, _recipientUserId: string, _recipientIdentityX25519Pub: string, payloadMessageBytesBase64: string) =>
+          payloadMessageBytesBase64
+      ),
       sealJsonWithPassphrase: vi.fn(async (value: unknown) => JSON.stringify(value)),
       openJsonWithPassphrase: vi.fn(async (sealed: string) => JSON.parse(sealed)),
     };
@@ -484,6 +498,15 @@ async function bootApp(options: BootOptions = {}) {
 
       async sealedInbox(userId: string) {
         return { user_id: userId, messages: [] };
+      }
+
+      async getSenderCertificate(userId: string) {
+        return {
+          user_id: userId,
+          device_id: `${userId}-device`,
+          certificate_base64: `cert:${userId}`,
+          expires_at: "2026-03-12T12:00:00Z",
+        };
       }
 
       async getTyping() {

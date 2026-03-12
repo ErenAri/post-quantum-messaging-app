@@ -60,6 +60,7 @@ export type ProfileDisplayName = {
 export type IdentityPin = {
   fingerprintSha256: string;
   identityKeyVersion: number;
+  identityX25519Pub: string;
   identitySigPub: string;
   observedAt: string;
 };
@@ -414,6 +415,7 @@ export function readIdentityPin(userId: string, peerUserId: string): IdentityPin
   return {
     fingerprintSha256: found.fingerprintSha256,
     identityKeyVersion: found.identityKeyVersion,
+    identityX25519Pub: found.identityX25519Pub,
     identitySigPub: found.identitySigPub,
     observedAt: found.observedAt
   };
@@ -440,6 +442,7 @@ export function listIdentityPins(userId: string): Array<{ peerUserId: string; pi
       pin: {
         fingerprintSha256: item.fingerprintSha256,
         identityKeyVersion: item.identityKeyVersion,
+        identityX25519Pub: item.identityX25519Pub,
         identitySigPub: item.identitySigPub,
         observedAt: item.observedAt
       }

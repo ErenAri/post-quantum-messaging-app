@@ -39,6 +39,11 @@ use crate::pq_sig::MlDsa65;
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::ratchet::pq::{PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+use crate::sealed::{
+    derive_pairwise_sealed_sender_key, open_message_with_cert, seal_message_with_cert,
+    SenderCertificate,
+};
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::session::{SessionRole, SessionSnapshot, SessionState};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::CoreError;
@@ -48,6 +53,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
 // Types (serialized to/from JS via serde-wasm-bindgen)
@@ -417,6 +424,14 @@ struct WasmDecryptResult {
 }
 
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[derive(Clone, Debug, Serialize)]
+struct WasmOpenedCertifiedSealedMessage {
+    sender_user_id: String,
+    sender_device_id: String,
+    payload_message_bytes_base64: String,
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 struct WasmEd25519SignatureVerifier;
 
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
@@ -466,6 +481,15 @@ fn suite_id_to_label(suite_id: u16) -> Result<&'static str, JsValue> {
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 fn build_kem_for_suite(suite: &str) -> Result<MlKem768, JsValue> {
     MlKem768::new(suite_to_kem_algorithm(suite)?).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+fn suite_label_to_id(suite: &str) -> Result<u16, JsValue> {
+    match suite.trim().to_ascii_lowercase().as_str() {
+        "ml-kem-768" => Ok(SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305),
+        "kyber768" => Ok(SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305),
+        other => Err(JsValue::from_str(&format!("unsupported suite '{other}'"))),
+    }
 }
 
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
@@ -646,6 +670,108 @@ fn remove_consumed_one_time_keys(keys: &mut WasmGeneratedKeysFile, index: usize)
     if index < keys.one_time_prekeys_mlkem768_secret.len() {
         keys.one_time_prekeys_mlkem768_secret.remove(index);
     }
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[wasm_bindgen]
+pub fn wasm_seal_message_with_sender_cert(
+    keys: JsValue,
+    recipient_user_id: &str,
+    recipient_identity_x25519_pub: &str,
+    payload_message_bytes_base64: &str,
+    sender_certificate_base64: &str,
+) -> Result<String, JsValue> {
+    let keys: WasmGeneratedKeysFile =
+        serde_wasm_bindgen::from_value(keys).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let identity = to_identity_keypair(&keys)?;
+    let local_secret = identity
+        .require_secret_key()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let recipient_identity_pub = DhPublicKey(decode_b64_32(
+        "recipient_identity_x25519_pub",
+        recipient_identity_x25519_pub,
+    )?);
+    let suite_id = suite_label_to_id(&keys.suite)?;
+    let sealed_key =
+        derive_pairwise_sealed_sender_key(&local_secret, &recipient_identity_pub, suite_id)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let payload = decode_b64("payload_message_bytes_base64", payload_message_bytes_base64)?;
+    let sender_certificate = SenderCertificate::decode(&decode_b64(
+        "sender_certificate_base64",
+        sender_certificate_base64,
+    )?)
+    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let sealed = seal_message_with_cert(
+        &sealed_key,
+        suite_id,
+        recipient_user_id,
+        &keys.user_id,
+        &keys.device_id,
+        &payload,
+        &sender_certificate,
+    )
+    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(B64.encode(sealed))
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[wasm_bindgen]
+pub fn wasm_open_sealed_message_with_sender_cert(
+    keys: JsValue,
+    expected_sender_user_id: &str,
+    sender_identity_x25519_pub: &str,
+    sealed_message_bytes_base64: &str,
+    server_issuer_ed25519_pub: &str,
+) -> Result<JsValue, JsValue> {
+    let keys: WasmGeneratedKeysFile =
+        serde_wasm_bindgen::from_value(keys).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let identity = to_identity_keypair(&keys)?;
+    let local_secret = identity
+        .require_secret_key()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let sender_identity_pub = DhPublicKey(decode_b64_32(
+        "sender_identity_x25519_pub",
+        sender_identity_x25519_pub,
+    )?);
+    let suite_id = suite_label_to_id(&keys.suite)?;
+    let sealed_key =
+        derive_pairwise_sealed_sender_key(&local_secret, &sender_identity_pub, suite_id)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let server_pub_key = VerifyingKey::from_bytes(&decode_b64_32(
+        "server_issuer_ed25519_pub",
+        server_issuer_ed25519_pub,
+    )?)
+    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let now_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| JsValue::from_str("system clock before unix epoch"))?
+        .as_secs();
+    let opened = open_message_with_cert(
+        &sealed_key,
+        &decode_b64("sealed_message_bytes_base64", sealed_message_bytes_base64)?,
+        suite_id,
+        &keys.user_id,
+        Some(&server_pub_key),
+        now_unix_secs,
+    )
+    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    if opened.sender_cert.is_none() {
+        return Err(JsValue::from_str(
+            "sealed sender certificate missing from transport envelope",
+        ));
+    }
+    if opened.sender_user_id != expected_sender_user_id {
+        return Err(JsValue::from_str(&format!(
+            "expected sender '{expected_sender_user_id}' but envelope opened as '{}'",
+            opened.sender_user_id
+        )));
+    }
+    serde_wasm_bindgen::to_value(&WasmOpenedCertifiedSealedMessage {
+        sender_user_id: opened.sender_user_id,
+        sender_device_id: opened.sender_device_id,
+        payload_message_bytes_base64: B64.encode(opened.payload),
+    })
+    .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]

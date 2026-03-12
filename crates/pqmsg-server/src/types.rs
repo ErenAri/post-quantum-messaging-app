@@ -237,10 +237,19 @@ pub(crate) struct SealedRelayResponse {
     pub(crate) received_at: String,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct SenderCertificateResponse {
+    pub(crate) user_id: String,
+    pub(crate) device_id: String,
+    pub(crate) certificate_base64: String,
+    pub(crate) expires_at: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SealedInboxItem {
     pub(crate) message_id: i64,
     pub(crate) sender_user_id: String,
+    pub(crate) sender_identity_x25519_pub: String,
     pub(crate) message_bytes_base64: String,
     pub(crate) received_at: String,
 }
@@ -614,6 +623,8 @@ pub(crate) struct ServerCapabilitiesResponse {
     pub(crate) channels_supported: bool,
     pub(crate) group_messaging_supported: bool,
     pub(crate) sealed_sender_required: bool,
+    pub(crate) sender_certificate_supported: bool,
+    pub(crate) sender_certificate_issuer_ed25519_pub: String,
     pub(crate) ephemeral_messaging_supported: bool,
     pub(crate) web_client_policy: &'static str,
 }

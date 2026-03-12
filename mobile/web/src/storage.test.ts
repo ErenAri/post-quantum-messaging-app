@@ -309,6 +309,7 @@ describe("identity pins", () => {
   const pin: IdentityPin = {
     fingerprintSha256: "abc123",
     identityKeyVersion: 1,
+    identityX25519Pub: "x25519-pub",
     identitySigPub: "pubkey",
     observedAt: "2025-01-01T00:00:00Z",
   };
@@ -480,6 +481,7 @@ describe("wipeLocalState", () => {
     const pin: IdentityPin = {
       fingerprintSha256: "abc",
       identityKeyVersion: 1,
+      identityX25519Pub: "x25519-pub",
       identitySigPub: "pub",
       observedAt: "now",
     };

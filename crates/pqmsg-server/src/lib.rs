@@ -3,7 +3,10 @@ use axum::http::{header, HeaderValue, Method};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use chrono::Utc;
+use ed25519_dalek::SigningKey;
 use tower_http::cors::CorsLayer;
 
 use pqmsg_core::alg::{runtime_crypto_profile, RuntimeCryptoProfile, SecurityProfile};
@@ -139,6 +142,7 @@ pub(crate) const AUTH_TAG_PRESENCE_STATUS: u16 = critical_type(0x3229);
 pub(crate) const AUTH_TAG_TYPING_PEER_ID: u16 = critical_type(0x322A);
 pub(crate) const AUTH_TAG_TYPING_STATE_FLAG: u16 = critical_type(0x322B);
 pub(crate) const AUTH_TAG_GROUP_RECIPIENTS_HASH: u16 = critical_type(0x322C);
+const DEVELOPMENT_SENDER_CERT_SIGNING_KEY_BYTES: [u8; 32] = [0x53; 32];
 pub(crate) const AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH: u16 = critical_type(0x3230);
 pub(crate) const AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH: u16 = critical_type(0x3231);
 pub(crate) const AUTH_TAG_ROTATE_PQ_SIG_NEW_HASH: u16 = critical_type(0x3232);
@@ -304,6 +308,7 @@ pub struct AppState {
     push_spawn_semaphore: Arc<Semaphore>,
     blob_store: Arc<BlobStore>,
     ephemeral_state: Arc<EphemeralStateStore>,
+    sender_certificate_signing_key: Arc<SigningKey>,
 }
 
 impl AppState {
@@ -332,6 +337,7 @@ impl AppState {
             push_spawn_semaphore: Arc::new(Semaphore::new(64)),
             blob_store: Arc::new(BlobStore::in_memory()),
             ephemeral_state: Arc::new(EphemeralStateStore::disabled()),
+            sender_certificate_signing_key: Arc::new(default_sender_certificate_signing_key()),
         }
     }
 
@@ -364,6 +370,7 @@ impl AppState {
             push_spawn_semaphore: Arc::new(Semaphore::new(64)),
             blob_store: Arc::new(BlobStore::in_memory()),
             ephemeral_state: Arc::new(EphemeralStateStore::disabled()),
+            sender_certificate_signing_key: Arc::new(default_sender_certificate_signing_key()),
         }
     }
 
@@ -468,6 +475,22 @@ impl AppState {
         true
     }
 
+    pub fn sender_certificate_supported(&self) -> bool {
+        true
+    }
+
+    pub fn sender_certificate_signing_key(&self) -> &SigningKey {
+        self.sender_certificate_signing_key.as_ref()
+    }
+
+    pub fn sender_certificate_issuer_public_key_b64(&self) -> String {
+        B64.encode(
+            self.sender_certificate_signing_key()
+                .verifying_key()
+                .to_bytes(),
+        )
+    }
+
     pub fn ephemeral_messaging_supported(&self) -> bool {
         false
     }
@@ -555,6 +578,18 @@ impl AppState {
         self.ephemeral_state = ephemeral_state;
         self
     }
+
+    pub fn with_sender_certificate_signing_key(
+        mut self,
+        sender_certificate_signing_key: Arc<SigningKey>,
+    ) -> Self {
+        self.sender_certificate_signing_key = sender_certificate_signing_key;
+        self
+    }
+}
+
+fn default_sender_certificate_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&DEVELOPMENT_SENDER_CERT_SIGNING_KEY_BYTES)
 }
 
 #[derive(Clone)]
@@ -1682,6 +1717,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/users/:user_id/rotate/init", post(rotate_init))
         .route("/v1/users/:user_id/rotate/confirm", post(rotate_confirm))
         .route("/v1/users/:user_id/identity-log", get(get_identity_log))
+        .route(
+            "/v1/users/:user_id/sender-certificate",
+            get(issue_sender_certificate),
+        )
         .route("/v1/relay/:recipient_user_id", post(relay_message))
         .route(
             "/v1/sealed-relay/:recipient_user_id",

@@ -384,9 +384,17 @@ export type SealedRelayResponse = {
   received_at: string;
 };
 
+export type SenderCertificateResponse = {
+  user_id: string;
+  device_id: string;
+  certificate_base64: string;
+  expires_at: string;
+};
+
 export type SealedInboxItem = {
   message_id: number;
   sender_user_id: string;
+  sender_identity_x25519_pub: string;
   message_bytes_base64: string;
   received_at: string;
 };
@@ -572,6 +580,8 @@ export type ServerCapabilitiesResponse = {
   channels_supported: boolean;
   group_messaging_supported: boolean;
   sealed_sender_required: boolean;
+  sender_certificate_supported: boolean;
+  sender_certificate_issuer_ed25519_pub: string;
   ephemeral_messaging_supported: boolean;
   web_client_policy: string;
 };
@@ -1038,6 +1048,18 @@ export class PqmsgApi {
     return this.request<SealedInboxResponse>(
       "GET",
       `/v1/sealed-inbox/${encodeURIComponent(userId)}?since=${encodeURIComponent(String(since))}`,
+      undefined,
+      headers
+    );
+  }
+
+  async getSenderCertificate(
+    userId: string,
+    headers: RequestAuthHeaders
+  ): Promise<SenderCertificateResponse> {
+    return this.request<SenderCertificateResponse>(
+      "GET",
+      `/v1/users/${encodeURIComponent(userId)}/sender-certificate`,
       undefined,
       headers
     );

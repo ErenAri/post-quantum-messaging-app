@@ -75,6 +75,12 @@ export interface WasmDirectDecryptResult {
   updated_keys: WasmSessionKeys;
 }
 
+export interface WasmOpenedCertifiedSealedMessage {
+  sender_user_id: string;
+  sender_device_id: string;
+  payload_message_bytes_base64: string;
+}
+
 export interface KemKeyPair {
   public_key: Uint8Array;
   secret_key: Uint8Array;
@@ -303,4 +309,42 @@ export function decryptDirectMessage(
     messageBytesBase64,
     existingSessionJson ?? undefined
   ) as WasmDirectDecryptResult;
+}
+
+export function sealMessageWithSenderCert(
+  keys: WasmSessionKeys,
+  recipientUserId: string,
+  recipientIdentityX25519Pub: string,
+  payloadMessageBytesBase64: string,
+  senderCertificateBase64: string
+): string {
+  if (!wasmModule || typeof wasmModule.wasm_seal_message_with_sender_cert !== "function") {
+    throw new Error("WASM certified sealed sender transport is not available");
+  }
+  return wasmModule.wasm_seal_message_with_sender_cert(
+    keys,
+    recipientUserId,
+    recipientIdentityX25519Pub,
+    payloadMessageBytesBase64,
+    senderCertificateBase64
+  ) as string;
+}
+
+export function openSealedMessageWithSenderCert(
+  keys: WasmSessionKeys,
+  expectedSenderUserId: string,
+  senderIdentityX25519Pub: string,
+  sealedMessageBytesBase64: string,
+  serverIssuerEd25519Pub: string
+): WasmOpenedCertifiedSealedMessage {
+  if (!wasmModule || typeof wasmModule.wasm_open_sealed_message_with_sender_cert !== "function") {
+    throw new Error("WASM certified sealed sender transport is not available");
+  }
+  return wasmModule.wasm_open_sealed_message_with_sender_cert(
+    keys,
+    expectedSenderUserId,
+    senderIdentityX25519Pub,
+    sealedMessageBytesBase64,
+    serverIssuerEd25519Pub
+  ) as WasmOpenedCertifiedSealedMessage;
 }

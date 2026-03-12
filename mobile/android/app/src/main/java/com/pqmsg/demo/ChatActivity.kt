@@ -25,10 +25,12 @@ import uniffi.pqmsg_android.ServerBundle
 import uniffi.pqmsg_android.buildPresenceGetAuthHeaders
 import uniffi.pqmsg_android.buildPresenceUpdateAuthHeaders
 import uniffi.pqmsg_android.buildSendReceiptAuthHeaders
+import uniffi.pqmsg_android.buildSenderCertificateAuthHeaders
 import uniffi.pqmsg_android.buildTypingGetAuthHeaders
 import uniffi.pqmsg_android.buildTypingUpdateAuthHeaders
 import uniffi.pqmsg_android.encryptWithSession
 import uniffi.pqmsg_android.initiateSessionAndEncrypt
+import uniffi.pqmsg_android.sealMessageWithSenderCert
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.text.DateFormat
@@ -286,6 +288,10 @@ class ChatActivity : AppCompatActivity() {
             peerUserId = activePeerUserId,
             sessionJson = store.readSession(context.profile.userId, activePeerUserId),
         )
+        var peerTransportIdentityX25519Pub: String? =
+            store.readIdentityPin(context.profile.userId, activePeerUserId)
+                ?.identityX25519Pub
+                ?.takeIf { it.isNotBlank() }
 
         val sendResult = if (existingSession.isNullOrBlank()) {
             val fetched = latestBundle ?: context.api.getBundle(activePeerUserId).also {
@@ -297,6 +303,7 @@ class ChatActivity : AppCompatActivity() {
                 )
             }
             enforceIdentityPin(context.profile.userId, activePeerUserId, fetched)
+            peerTransportIdentityX25519Pub = fetched.identity_x25519_pub
             initiateSessionAndEncrypt(
                 keysJson = keysJson,
                 fromUserId = context.profile.userId,
@@ -315,6 +322,25 @@ class ChatActivity : AppCompatActivity() {
         }
 
         store.writeSession(context.profile.userId, activePeerUserId, sendResult.sessionJson)
+        val resolvedPeerIdentityX25519Pub = peerTransportIdentityX25519Pub ?: resolvePeerTransportIdentityX25519(
+            context = context,
+            localUserId = context.profile.userId,
+            peerUserId = activePeerUserId,
+        )
+        val senderCertificateBase64 = context.api.getSenderCertificate(
+            context.profile.userId,
+            buildSenderCertificateAuthHeaders(
+                keysJson = keysJson,
+                userId = context.profile.userId,
+            ).toHeaderMap(),
+        ).certificate_base64
+        val sealedMessageBytesBase64 = sealMessageWithSenderCert(
+            keysJson = keysJson,
+            recipientUserId = activePeerUserId,
+            recipientIdentityX25519Pub = resolvedPeerIdentityX25519Pub,
+            payloadMessageBytesBase64 = sendResult.messageBytesBase64,
+            senderCertificateBase64 = senderCertificateBase64,
+        )
 
         context.api.sealedRelay(
             recipientUserId = activePeerUserId,
@@ -322,7 +348,7 @@ class ChatActivity : AppCompatActivity() {
             request = SealedRelayRequest(
                 sender_user_id = context.profile.userId,
                 device_id = context.profile.deviceId,
-                message_bytes_base64 = sendResult.messageBytesBase64,
+                message_bytes_base64 = sealedMessageBytesBase64,
             ),
         )
         store.markPeerAccepted(context.profile.userId, activePeerUserId)
@@ -343,6 +369,23 @@ class ChatActivity : AppCompatActivity() {
         messageInput.setText("")
         pendingAttachment = null
         renderAttachmentInfo()
+    }
+
+    private suspend fun resolvePeerTransportIdentityX25519(
+        context: ReadyMessagingContext,
+        localUserId: String,
+        peerUserId: String,
+    ): String {
+        val pinned = store.readIdentityPin(localUserId, peerUserId)
+        if (pinned?.identityX25519Pub?.isNotBlank() == true) {
+            return pinned.identityX25519Pub
+        }
+        val fetched = latestBundle ?: context.api.getBundle(peerUserId).also {
+            latestBundle = it
+            store.writeBundleFetchedAt(localUserId, peerUserId, it.bundle_generated_at)
+        }
+        enforceIdentityPin(localUserId, peerUserId, fetched)
+        return fetched.identity_x25519_pub
     }
 
     private fun syncThread() {
@@ -377,6 +420,7 @@ class ChatActivity : AppCompatActivity() {
     private suspend fun enforceIdentityPin(localUser: String, peerUser: String, bundle: BundleResponse) {
         val observedFingerprint = bundleIdentityFingerprint(bundle)
         val observedVersion = bundle.identity_key_version ?: 1
+        val observedX25519Pub = bundle.identity_x25519_pub
         val observedSigPub = bundle.identity_sig_pub
         val observedAt = bundle.bundle_generated_at
         val existing = store.readIdentityPin(localUser, peerUser)
@@ -387,6 +431,7 @@ class ChatActivity : AppCompatActivity() {
                 IdentityPin(
                     fingerprintSha256 = observedFingerprint,
                     identityKeyVersion = observedVersion,
+                    identityX25519Pub = observedX25519Pub,
                     identitySigPub = observedSigPub,
                     observedAt = observedAt,
                 ),
@@ -395,13 +440,18 @@ class ChatActivity : AppCompatActivity() {
         }
 
         if (existing.fingerprintSha256 == observedFingerprint) {
-            if (existing.identityKeyVersion != observedVersion || existing.identitySigPub != observedSigPub) {
+            if (
+                existing.identityKeyVersion != observedVersion ||
+                    existing.identityX25519Pub != observedX25519Pub ||
+                    existing.identitySigPub != observedSigPub
+            ) {
                 store.writeIdentityPin(
                     localUser,
                     peerUser,
                     IdentityPin(
                         fingerprintSha256 = observedFingerprint,
                         identityKeyVersion = observedVersion,
+                        identityX25519Pub = observedX25519Pub,
                         identitySigPub = observedSigPub,
                         observedAt = observedAt,
                     ),
@@ -420,6 +470,7 @@ class ChatActivity : AppCompatActivity() {
             IdentityPin(
                 fingerprintSha256 = observedFingerprint,
                 identityKeyVersion = observedVersion,
+                identityX25519Pub = observedX25519Pub,
                 identitySigPub = observedSigPub,
                 observedAt = observedAt,
             ),

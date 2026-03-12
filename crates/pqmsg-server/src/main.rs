@@ -1,5 +1,8 @@
 use anyhow::Context;
 use axum_server::tls_rustls::RustlsConfig;
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
+use ed25519_dalek::SigningKey;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
 use pqmsg_core::alg::{enforce_runtime_security_profile, RuntimeCryptoProfile, SecurityProfile};
@@ -64,6 +67,28 @@ fn parse_env_optional_f64(name: &str) -> anyhow::Result<Option<f64>> {
             .with_context(|| format!("invalid {name}='{value}': expected floating-point number"))
             .map(Some),
         Err(_) => Ok(None),
+    }
+}
+
+fn load_sender_certificate_signing_key(
+    deployment_mode: DeploymentMode,
+) -> anyhow::Result<Arc<SigningKey>> {
+    match env::var("PQMSG_SENDER_CERT_SIGNING_KEY") {
+        Ok(value) => {
+            let key_bytes = B64.decode(value.trim()).with_context(|| {
+                "invalid PQMSG_SENDER_CERT_SIGNING_KEY: expected base64-encoded 32-byte seed"
+            })?;
+            let key_bytes: [u8; 32] = key_bytes.try_into().map_err(|_| {
+                anyhow::anyhow!(
+                    "invalid PQMSG_SENDER_CERT_SIGNING_KEY: expected base64-encoded 32-byte seed"
+                )
+            })?;
+            Ok(Arc::new(SigningKey::from_bytes(&key_bytes)))
+        }
+        Err(_) if deployment_mode.requires_production_baseline() => {
+            anyhow::bail!("PQMSG_SENDER_CERT_SIGNING_KEY is required outside development mode")
+        }
+        Err(_) => Ok(Arc::new(SigningKey::from_bytes(&[0x53; 32]))),
     }
 }
 
@@ -456,6 +481,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         EphemeralStateStore::disabled()
     });
+    let sender_certificate_signing_key = load_sender_certificate_signing_key(deployment_mode)?;
     let state =
         AppState::with_security_profile(pool, db_backend, rate_limiter.clone(), security_profile)
             .with_deployment_mode(deployment_mode)
@@ -470,7 +496,8 @@ async fn main() -> anyhow::Result<()> {
             .with_trusted_proxies(trusted_proxies)
             .with_realtime_hub(realtime_hub)
             .with_blob_store(blob_store)
-            .with_ephemeral_state(ephemeral_state);
+            .with_ephemeral_state(ephemeral_state)
+            .with_sender_certificate_signing_key(sender_certificate_signing_key);
 
     // Spawn the ephemeral message expiry reaper
     tokio::spawn(pqmsg_server::run_message_expiry_reaper(state.clone()));

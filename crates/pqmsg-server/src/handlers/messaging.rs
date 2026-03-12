@@ -8,7 +8,9 @@ use axum::Json;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::{Duration, Utc};
+use ed25519_dalek::Signer;
 use futures_util::{SinkExt, StreamExt};
+use pqmsg_core::sealed::{SenderCertificate, SENDER_CERT_VALIDITY_SECS};
 use sha2::{Digest, Sha256};
 use sqlx::{AnyPool, Row};
 
@@ -350,6 +352,12 @@ pub(crate) async fn relay_sealed_message(
 
     ensure_user_exists(&state.pool, &recipient_user_id).await?;
     ensure_user_exists(&state.pool, &request.sender_user_id).await?;
+    let sender_identity_x25519_pub: Vec<u8> =
+        sqlx::query_scalar("SELECT identity_x25519_pub FROM users WHERE user_id = $1")
+            .bind(&request.sender_user_id)
+            .fetch_optional(state.pool())
+            .await?
+            .ok_or_else(|| AppError::not_found("sender not found"))?;
     let recipient_devices = load_active_device_ids(state.pool(), &recipient_user_id).await?;
     if recipient_devices.is_empty() {
         return Err(AppError::not_found(
@@ -366,14 +374,16 @@ pub(crate) async fn relay_sealed_message(
                 recipient_user_id,
                 recipient_device_id,
                 sender_user_id,
+                sender_identity_x25519_pub,
                 message_blob,
                 received_at
-            ) VALUES ($1, $2, $3, $4, $5)
+            ) VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING message_id",
         )
         .bind(&recipient_user_id)
         .bind(recipient_device_id)
         .bind(&request.sender_user_id)
+        .bind(&sender_identity_x25519_pub)
         .bind(&blob)
         .bind(&now)
         .fetch_one(&mut *tx)
@@ -409,6 +419,62 @@ pub(crate) async fn relay_sealed_message(
         delivered_device_count: recipient_devices.len(),
         first_message_id,
         received_at: now,
+    }))
+}
+
+pub(crate) async fn issue_sender_certificate(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<SenderCertificateResponse>, AppError> {
+    check_rate_limit(&state, &format!("sender-certificate:{user_id}"))?;
+    validate_id("user_id", &user_id)?;
+    ensure_user_exists(&state.pool, &user_id).await?;
+
+    let auth = parse_request_auth(&headers)?;
+    if auth.user_id != user_id {
+        return Err(AppError::bad_request("auth user_id mismatch"));
+    }
+    let auth_message = sender_certificate_auth_message(&auth, &user_id)?;
+    verify_request_auth(&state, &auth, &auth_message).await?;
+
+    let sender_identity_x25519_pub: Vec<u8> =
+        sqlx::query_scalar("SELECT identity_x25519_pub FROM users WHERE user_id = $1")
+            .bind(&user_id)
+            .fetch_optional(state.pool())
+            .await?
+            .ok_or_else(|| AppError::not_found("user not found"))?;
+    let sender_identity_pub: [u8; 32] = sender_identity_x25519_pub
+        .as_slice()
+        .try_into()
+        .map_err(|_| AppError::internal("stored identity_x25519_pub has invalid length"))?;
+
+    let now = Utc::now();
+    let expires_at = now + Duration::seconds(SENDER_CERT_VALIDITY_SECS as i64);
+    let mut certificate = SenderCertificate {
+        sender_user_id: user_id.clone(),
+        sender_device_id: auth.device_id.clone(),
+        sender_identity_pub,
+        expires_at: expires_at.timestamp() as u64,
+        server_signature: Vec::new(),
+    };
+    let body = certificate
+        .signing_body()
+        .map_err(|_| AppError::internal("failed to encode sender certificate"))?;
+    certificate.server_signature = state
+        .sender_certificate_signing_key()
+        .sign(&body)
+        .to_bytes()
+        .to_vec();
+    let certificate_bytes = certificate
+        .encode()
+        .map_err(|_| AppError::internal("failed to encode sender certificate"))?;
+
+    Ok(Json(SenderCertificateResponse {
+        user_id,
+        device_id: auth.device_id,
+        certificate_base64: B64.encode(certificate_bytes),
+        expires_at: expires_at.to_rfc3339(),
     }))
 }
 
@@ -753,12 +819,13 @@ pub(crate) async fn load_sealed_inbox_messages(
     since: i64,
 ) -> Result<Vec<SealedInboxItem>, AppError> {
     let rows = sqlx::query(
-        "SELECT message_id, sender_user_id, message_blob, received_at
+        "SELECT message_id, sender_user_id, sender_identity_x25519_pub, message_blob, received_at
          FROM sealed_relay_messages
          WHERE recipient_user_id = $1
            AND recipient_device_id = $2
            AND message_id > $3
            AND sender_user_id IS NOT NULL
+           AND sender_identity_x25519_pub IS NOT NULL
          ORDER BY message_id ASC
          LIMIT $4",
     )
@@ -774,6 +841,8 @@ pub(crate) async fn load_sealed_inbox_messages(
         messages.push(SealedInboxItem {
             message_id: row.try_get("message_id")?,
             sender_user_id: row.try_get("sender_user_id")?,
+            sender_identity_x25519_pub: B64
+                .encode(row.try_get::<Vec<u8>, _>("sender_identity_x25519_pub")?),
             message_bytes_base64: B64.encode(row.try_get::<Vec<u8>, _>("message_blob")?),
             received_at: row.try_get("received_at")?,
         });

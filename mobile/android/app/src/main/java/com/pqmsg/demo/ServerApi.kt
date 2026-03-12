@@ -300,9 +300,17 @@ data class SealedRelayResponse(
     val received_at: String,
 )
 
+data class SenderCertificateResponse(
+    val user_id: String,
+    val device_id: String,
+    val certificate_base64: String,
+    val expires_at: String,
+)
+
 data class SealedInboxItem(
     val message_id: Long,
     val sender_user_id: String,
+    val sender_identity_x25519_pub: String,
     val message_bytes_base64: String,
     val received_at: String,
 )
@@ -533,6 +541,8 @@ data class ServerCapabilitiesResponse(
     val channels_supported: Boolean,
     val group_messaging_supported: Boolean,
     val sealed_sender_required: Boolean,
+    val sender_certificate_supported: Boolean,
+    val sender_certificate_issuer_ed25519_pub: String,
     val ephemeral_messaging_supported: Boolean,
     val web_client_policy: String,
 )
@@ -753,6 +763,12 @@ interface PqmsgApi {
         @HeaderMap headers: Map<String, String>,
         @Query("since") since: Long,
     ): SealedInboxResponse
+
+    @GET("/v1/users/{user_id}/sender-certificate")
+    suspend fun getSenderCertificate(
+        @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
+    ): SenderCertificateResponse
 
     // Contact discovery
 
@@ -1028,6 +1044,12 @@ object ApiClientFactory {
         }
         require(capabilities.sealed_sender_required) {
             "Server is not advertising sealed-sender-only direct messaging"
+        }
+        require(capabilities.sender_certificate_supported) {
+            "Server is not advertising sender certificate support"
+        }
+        require(capabilities.sender_certificate_issuer_ed25519_pub.isNotBlank()) {
+            "Server is missing the sender certificate issuer public key"
         }
     }
 }

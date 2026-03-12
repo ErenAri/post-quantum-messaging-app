@@ -267,6 +267,19 @@ pub(crate) fn sealed_inbox_auth_message(
         .map_err(|_| AppError::internal("failed to encode sealed-inbox auth transcript"))
 }
 
+pub(crate) fn sender_certificate_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+) -> Result<Vec<u8>, AppError> {
+    let mut records = auth_common_records(auth, "sender-certificate");
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    encode(&records)
+        .map_err(|_| AppError::internal("failed to encode sender-certificate auth transcript"))
+}
+
 pub(crate) fn inbox_delete_auth_message(
     auth: &RequestAuth,
     user_id: &str,

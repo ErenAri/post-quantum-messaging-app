@@ -150,6 +150,12 @@ export type DirectMessageSessionDecryptResult = {
   updatedKeys: GeneratedKeys;
 };
 
+export type CertifiedSealedTransportResult = {
+  senderUserId: string;
+  senderDeviceId: string;
+  payloadMessageBytesBase64: string;
+};
+
 export function generateIdentityKeys(
   userId: string,
   deviceId: string,
@@ -732,6 +738,14 @@ export function buildSealedInboxAuthHeaders(keys: GeneratedKeys, since: number):
   return signAuthHeaders(keys, timestamp, nonce, records);
 }
 
+export function buildSenderCertificateAuthHeaders(keys: GeneratedKeys): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("sender-certificate", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
 // --- Phase 4: Ephemeral relay auth (format-string, not TLV) ---
 
 export function buildEphemeralRelayAuthHeaders(
@@ -1034,6 +1048,43 @@ export function decryptDirectMessage(
     sessionJson: result.session_json,
     usedHandshake: result.used_handshake,
     updatedKeys: result.updated_keys as GeneratedKeys,
+  };
+}
+
+export function sealTransportEnvelopeWithSenderCert(
+  keys: GeneratedKeys,
+  recipientUserId: string,
+  recipientIdentityX25519Pub: string,
+  payloadMessageBytesBase64: string,
+  senderCertificateBase64: string
+): string {
+  return wasmCrypto.sealMessageWithSenderCert(
+    keys,
+    recipientUserId,
+    recipientIdentityX25519Pub,
+    payloadMessageBytesBase64,
+    senderCertificateBase64
+  );
+}
+
+export function openTransportEnvelopeWithSenderCert(
+  keys: GeneratedKeys,
+  expectedSenderUserId: string,
+  senderIdentityX25519Pub: string,
+  sealedMessageBytesBase64: string,
+  serverIssuerEd25519Pub: string
+): CertifiedSealedTransportResult {
+  const result = wasmCrypto.openSealedMessageWithSenderCert(
+    keys,
+    expectedSenderUserId,
+    senderIdentityX25519Pub,
+    sealedMessageBytesBase64,
+    serverIssuerEd25519Pub
+  );
+  return {
+    senderUserId: result.sender_user_id,
+    senderDeviceId: result.sender_device_id,
+    payloadMessageBytesBase64: result.payload_message_bytes_base64,
   };
 }
 

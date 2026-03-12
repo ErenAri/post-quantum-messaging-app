@@ -22,6 +22,7 @@ data class SetupConfig(
 data class IdentityPin(
     val fingerprintSha256: String,
     val identityKeyVersion: Int,
+    val identityX25519Pub: String,
     val identitySigPub: String,
     val observedAt: String,
 )
@@ -261,6 +262,7 @@ class LocalStateStore(context: Context) {
         return IdentityPin(
             fingerprintSha256 = fingerprint,
             identityKeyVersion = getInt("${keyBase}_ver", 1),
+            identityX25519Pub = getString("${keyBase}_x25519", ""),
             identitySigPub = getString("${keyBase}_sig", ""),
             observedAt = getString("${keyBase}_at", ""),
         )
@@ -271,12 +273,14 @@ class LocalStateStore(context: Context) {
         prefs.edit()
             .putString("${keyBase}_fp", pin.fingerprintSha256)
             .putInt("${keyBase}_ver", pin.identityKeyVersion)
+            .putString("${keyBase}_x25519", pin.identityX25519Pub)
             .putString("${keyBase}_sig", pin.identitySigPub)
             .putString("${keyBase}_at", pin.observedAt)
             .apply()
         removeLegacyKeys(
             "${keyBase}_fp",
             "${keyBase}_ver",
+            "${keyBase}_x25519",
             "${keyBase}_sig",
             "${keyBase}_at",
         )

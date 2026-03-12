@@ -19,6 +19,10 @@ use pqmsg_core::kem::MlKem768;
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
 use pqmsg_core::pq_sig::{MlDsa65, PqSignatureProvider};
 use pqmsg_core::ratchet::pq::{PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL};
+use pqmsg_core::sealed::{
+    derive_pairwise_sealed_sender_key, open_message_with_cert, seal_message_with_cert,
+    SenderCertificate,
+};
 use pqmsg_core::session::{SessionRole, SessionSnapshot, SessionState};
 use pqmsg_core::storage::{
     unwrap_bytes as unwrap_wrapped_bytes, wrap_bytes as wrap_wrapped_bytes, WrappedSecret,
@@ -242,6 +246,13 @@ pub struct DecryptResult {
     pub used_handshake: bool,
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct OpenedCertifiedSealedMessage {
+    pub sender_user_id: String,
+    pub sender_device_id: String,
+    pub payload_message_bytes_base64: String,
+}
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum PqmsgAndroidError {
     #[error("invalid input: {reason}")]
@@ -303,6 +314,13 @@ fn suite_from_suite_id(suite_id: u16) -> Result<Suite, PqmsgAndroidError> {
             "unsupported suite_id '{}'",
             suite_id
         ))),
+    }
+}
+
+fn suite_id_for_user_keys(suite: Suite) -> u16 {
+    match suite {
+        Suite::MlKem768 => SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305,
+        Suite::Kyber768 => SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305,
     }
 }
 
@@ -1194,6 +1212,44 @@ pub fn build_sealed_inbox_auth_headers(
     });
     let transcript = encode(&records)
         .map_err(|_| operation_failed("failed to encode sealed-inbox auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_sender_certificate_auth_headers(
+    keys_json: String,
+    user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "sender-certificate",
+        &user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode sender-certificate auth transcript"))?;
     let signature = signing_key.sign(&transcript).to_bytes();
     Ok(RequestAuthHeaders {
         auth_user: user_id,
@@ -2296,6 +2352,98 @@ pub fn decrypt_message(
         plaintext_base64,
         session_json: serde_json::to_string_pretty(&session_file)?,
         used_handshake: false,
+    })
+}
+
+#[uniffi::export]
+pub fn seal_message_with_sender_cert(
+    keys_json: String,
+    recipient_user_id: String,
+    recipient_identity_x25519_pub: String,
+    payload_message_bytes_base64: String,
+    sender_certificate_base64: String,
+) -> Result<String, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    let identity = to_identity_keypair(&keys)?;
+    let local_secret = identity.require_secret_key()?;
+    let recipient_identity_pub = DhPublicKey(decode_b64_32(
+        "recipient_identity_x25519_pub",
+        &recipient_identity_x25519_pub,
+    )?);
+    let suite_id = suite_id_for_user_keys(keys.suite);
+    let sealed_key =
+        derive_pairwise_sealed_sender_key(&local_secret, &recipient_identity_pub, suite_id)?;
+    let payload = decode_b64(
+        "payload_message_bytes_base64",
+        &payload_message_bytes_base64,
+    )?;
+    let sender_certificate = SenderCertificate::decode(&decode_b64(
+        "sender_certificate_base64",
+        &sender_certificate_base64,
+    )?)
+    .map_err(|error| operation_failed(error.to_string()))?;
+    let sealed = seal_message_with_cert(
+        &sealed_key,
+        suite_id,
+        &recipient_user_id,
+        &keys.user_id,
+        &keys.device_id,
+        &payload,
+        &sender_certificate,
+    )?;
+    Ok(B64.encode(sealed))
+}
+
+#[uniffi::export]
+pub fn open_sealed_message_with_sender_cert(
+    keys_json: String,
+    expected_sender_user_id: String,
+    sender_identity_x25519_pub: String,
+    sealed_message_bytes_base64: String,
+    server_issuer_ed25519_pub: String,
+) -> Result<OpenedCertifiedSealedMessage, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    let identity = to_identity_keypair(&keys)?;
+    let local_secret = identity.require_secret_key()?;
+    let sender_identity_pub = DhPublicKey(decode_b64_32(
+        "sender_identity_x25519_pub",
+        &sender_identity_x25519_pub,
+    )?);
+    let suite_id = suite_id_for_user_keys(keys.suite);
+    let sealed_key =
+        derive_pairwise_sealed_sender_key(&local_secret, &sender_identity_pub, suite_id)?;
+    let server_pub_key = VerifyingKey::from_bytes(&decode_b64_32(
+        "server_issuer_ed25519_pub",
+        &server_issuer_ed25519_pub,
+    )?)
+    .map_err(|_| operation_failed("invalid server issuer ed25519 public key"))?;
+    let now_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| operation_failed("system clock before unix epoch"))?
+        .as_secs();
+    let opened = open_message_with_cert(
+        &sealed_key,
+        &decode_b64("sealed_message_bytes_base64", &sealed_message_bytes_base64)?,
+        suite_id,
+        &keys.user_id,
+        Some(&server_pub_key),
+        now_unix_secs,
+    )?;
+    if opened.sender_cert.is_none() {
+        return Err(operation_failed(
+            "sealed sender certificate missing from transport envelope",
+        ));
+    }
+    if opened.sender_user_id != expected_sender_user_id {
+        return Err(operation_failed(format!(
+            "expected sender '{}' but envelope opened as '{}'",
+            expected_sender_user_id, opened.sender_user_id
+        )));
+    }
+    Ok(OpenedCertifiedSealedMessage {
+        sender_user_id: opened.sender_user_id,
+        sender_device_id: opened.sender_device_id,
+        payload_message_bytes_base64: B64.encode(opened.payload),
     })
 }
 

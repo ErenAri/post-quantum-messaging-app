@@ -27,6 +27,7 @@ import {
   buildRotateConfirmPayload,
   buildIdentityLogAuthHeaders,
   buildSealedInboxAuthHeaders,
+  buildSenderCertificateAuthHeaders,
   buildEphemeralRelayAuthHeaders,
   buildDiscoveryHandlesAuthHeaders,
   buildDiscoveryMatchAuthHeaders,
@@ -41,7 +42,9 @@ import {
   initWasmCrypto,
   initiateDirectMessageSession,
   isPqSessionMessagingAvailable,
+  openTransportEnvelopeWithSenderCert,
   regeneratePublishedPrekeys,
+  sealTransportEnvelopeWithSenderCert,
   type GeneratedKeys,
 } from "./crypto";
 import {
@@ -245,7 +248,7 @@ async function ensureWebPqRuntime(): Promise<void> {
   }
 }
 
-async function ensureMandatoryPqRatchetPolicy(): Promise<void> {
+async function ensureMandatoryPqRatchetPolicy(): Promise<ServerCapabilitiesResponse> {
   const capabilities = await loadServerCapabilitiesCached();
   if (!capabilities) {
     throw new Error("Server capabilities could not be verified.");
@@ -256,6 +259,13 @@ async function ensureMandatoryPqRatchetPolicy(): Promise<void> {
   if (!capabilities.sealed_sender_required) {
     throw new Error("Server is not advertising sealed-sender-only direct messaging.");
   }
+  if (!capabilities.sender_certificate_supported) {
+    throw new Error("Server is not advertising sender certificate support.");
+  }
+  if (!capabilities.sender_certificate_issuer_ed25519_pub) {
+    throw new Error("Server is not advertising the sender certificate issuer key.");
+  }
+  return capabilities;
 }
 
 async function persistDirectSession(peerUserId: string, sessionJson: string): Promise<void> {
@@ -301,19 +311,28 @@ async function encryptDirectPayload(
   await ensureWebPqRuntime();
   await ensureMandatoryPqRatchetPolicy();
   const { sessionJson: existingSession } = await loadCompatibleDirectSession(peerUserId);
+  const api = new PqmsgApi(setup.serverUrl);
   if (existingSession) {
     const result = encryptDirectMessageWithSession(existingSession, k.userId, peerUserId, plaintext);
     await persistDirectSession(peerUserId, result.sessionJson);
-    return result.messageBytesBase64;
+    const peerIdentityX25519Pub = await loadPeerTransportIdentityX25519(peerUserId, api);
+    const senderCertificateBase64 = await issueSenderCertificate(k, api);
+    return sealTransportEnvelopeWithSenderCert(
+      k,
+      peerUserId,
+      peerIdentityX25519Pub,
+      result.messageBytesBase64,
+      senderCertificateBase64
+    );
   }
 
-  const api = new PqmsgApi(setup.serverUrl);
   const bundle = await api.getBundle(peerUserId);
   const fingerprint =
     bundle.identity_fingerprint_sha256
     || identityFingerprint(bundle.identity_x25519_pub, bundle.identity_pq_sig_pub);
   enforceIdentityPin(
     peerUserId,
+    bundle.identity_x25519_pub,
     bundle.identity_sig_pub,
     fingerprint,
     bundle.identity_key_version,
@@ -321,7 +340,14 @@ async function encryptDirectPayload(
   );
   const result = initiateDirectMessageSession(k, bundle, plaintext);
   await persistDirectSession(peerUserId, result.sessionJson);
-  return result.messageBytesBase64;
+  const senderCertificateBase64 = await issueSenderCertificate(k, api);
+  return sealTransportEnvelopeWithSenderCert(
+    k,
+    peerUserId,
+    bundle.identity_x25519_pub,
+    result.messageBytesBase64,
+    senderCertificateBase64
+  );
 }
 
 type DecryptedIncomingPayload = {
@@ -333,18 +359,30 @@ type DecryptedIncomingPayload = {
 async function decryptIncomingPayload(
   k: GeneratedKeys,
   senderUserId: string,
-  messageBytesBase64: string
+  messageBytesBase64: string,
+  senderIdentityX25519Pub?: string
 ): Promise<DecryptedIncomingPayload> {
   const activeKeys = keys ?? k;
   await ensureWebPqRuntime();
-  await ensureMandatoryPqRatchetPolicy();
+  const capabilities = await ensureMandatoryPqRatchetPolicy();
+  let transportPayloadBase64 = messageBytesBase64;
+  if (senderIdentityX25519Pub) {
+    const opened = openTransportEnvelopeWithSenderCert(
+      activeKeys,
+      senderUserId,
+      senderIdentityX25519Pub,
+      messageBytesBase64,
+      capabilities.sender_certificate_issuer_ed25519_pub
+    );
+    transportPayloadBase64 = opened.payloadMessageBytesBase64;
+  }
   const {
     sessionJson: existingSession,
     clearedLegacy,
   } = await loadCompatibleDirectSession(senderUserId);
   let result: ReturnType<typeof decryptDirectMessage>;
   try {
-    result = decryptDirectMessage(activeKeys, senderUserId, messageBytesBase64, existingSession);
+    result = decryptDirectMessage(activeKeys, senderUserId, transportPayloadBase64, existingSession);
   } catch (error) {
     if (clearedLegacy) {
       throw new Error("Stored session was reset for mandatory PQ ratchet rollout; peer must start a fresh session.");
@@ -358,6 +396,35 @@ async function decryptIncomingPayload(
     recipient: activeKeys.userId,
     plaintext: result.plaintextUtf8,
   };
+}
+
+async function loadPeerTransportIdentityX25519(
+  peerUserId: string,
+  api: PqmsgApi
+): Promise<string> {
+  const pinned = readIdentityPin(setup.userId, peerUserId);
+  if (pinned?.identityX25519Pub) {
+    return pinned.identityX25519Pub;
+  }
+  const bundle = await api.getBundle(peerUserId);
+  const fingerprint =
+    bundle.identity_fingerprint_sha256
+    || identityFingerprint(bundle.identity_x25519_pub, bundle.identity_pq_sig_pub);
+  enforceIdentityPin(
+    peerUserId,
+    bundle.identity_x25519_pub,
+    bundle.identity_sig_pub,
+    fingerprint,
+    bundle.identity_key_version,
+    bundle.bundle_generated_at
+  );
+  return bundle.identity_x25519_pub;
+}
+
+async function issueSenderCertificate(k: GeneratedKeys, api: PqmsgApi): Promise<string> {
+  const headers = buildSenderCertificateAuthHeaders(k);
+  const response = await api.getSenderCertificate(k.userId, headers);
+  return response.certificate_base64;
 }
 
 async function ensureWebMessagingAllowed(kind: "direct" | "group"): Promise<boolean> {
@@ -4099,7 +4166,14 @@ async function pollSealedInbox(): Promise<void> {
     for (const item of res.messages) {
       try {
         const senderId = item.sender_user_id;
-        const plaintext = (await decryptIncomingPayload(k, senderId, item.message_bytes_base64)).plaintext;
+        const plaintext = (
+          await decryptIncomingPayload(
+            k,
+            senderId,
+            item.message_bytes_base64,
+            item.sender_identity_x25519_pub
+          )
+        ).plaintext;
         const conversationId = convId(k.userId, senderId);
         const existing = await getMessages(conversationId);
         if (existing.some((msg) => msg.serverMessageId === item.message_id)) {
@@ -4367,6 +4441,7 @@ async function renderServerInfo(): Promise<void> {
           <div class="settings-row"><span>Channels</span><span>${caps.channels_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Group Messaging</span><span>${caps.group_messaging_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Sealed Sender</span><span>${caps.sealed_sender_required ? "Required" : "Optional"}</span></div>
+          <div class="settings-row"><span>Sender Certs</span><span>${caps.sender_certificate_supported ? "Required" : "Disabled"}</span></div>
           <div class="settings-row"><span>Ephemeral DM</span><span>${caps.ephemeral_messaging_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Contact Discovery</span><span>${caps.contact_discovery_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Prod Baseline</span><span>${caps.production_baseline_met ? "✓ Met" : "✗ Not met"}</span></div>
@@ -4481,6 +4556,7 @@ async function loadPrekeyStatus(): Promise<void> {
 
 function enforceIdentityPin(
   peerUserId: string,
+  identityX25519Pub: string,
   identitySigPub: string,
   fingerprint: string,
   identityVersion: number,
@@ -4491,6 +4567,7 @@ function enforceIdentityPin(
     writeIdentityPin(setup.userId, peerUserId, {
       fingerprintSha256: fingerprint,
       identityKeyVersion: identityVersion,
+      identityX25519Pub,
       identitySigPub,
       observedAt,
     });
@@ -4504,6 +4581,7 @@ function enforceIdentityPin(
   writeIdentityPin(setup.userId, peerUserId, {
     fingerprintSha256: fingerprint,
     identityKeyVersion: identityVersion,
+    identityX25519Pub,
     identitySigPub,
     observedAt,
   });

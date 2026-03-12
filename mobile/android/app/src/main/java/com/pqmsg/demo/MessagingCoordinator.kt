@@ -14,6 +14,7 @@ import uniffi.pqmsg_android.buildUserGroupsListAuthHeaders
 import uniffi.pqmsg_android.decryptMessage
 import uniffi.pqmsg_android.generateIdentityKeys
 import uniffi.pqmsg_android.loadUserProfile
+import uniffi.pqmsg_android.openSealedMessageWithSenderCert
 import uniffi.pqmsg_android.replenishOneTimePrekeys
 import java.security.MessageDigest
 
@@ -283,11 +284,19 @@ object MessagingCoordinator {
                     peerUserId = peer,
                     sessionJson = store.readSession(context.profile.userId, peer),
                 )
+                val openedTransport = openSealedMessageWithSenderCert(
+                    keysJson = workingKeysJson,
+                    expectedSenderUserId = peer,
+                    senderIdentityX25519Pub = item.sender_identity_x25519_pub,
+                    sealedMessageBytesBase64 = item.message_bytes_base64,
+                    serverIssuerEd25519Pub =
+                        context.capabilities.sender_certificate_issuer_ed25519_pub,
+                )
                 val result = decryptMessage(
                     keysJson = workingKeysJson,
                     recipientUserId = context.profile.userId,
                     senderUserId = peer,
-                    messageBytesBase64 = item.message_bytes_base64,
+                    messageBytesBase64 = openedTransport.payloadMessageBytesBase64,
                     existingSessionJson = existingSession,
                 )
                 store.writeSession(context.profile.userId, peer, result.sessionJson)
