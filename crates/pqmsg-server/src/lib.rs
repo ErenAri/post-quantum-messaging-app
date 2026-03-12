@@ -71,6 +71,7 @@ pub(crate) const MAX_GROUP_MEMBERS: usize = 512;
 pub(crate) const MAX_FILE_BLOB_BYTES: usize = 900_000;
 pub(crate) const MAX_BACKUP_BLOB_BYTES: usize = 5_000_000;
 pub(crate) const MAX_AVATAR_BLOB_BYTES: usize = 262_144;
+pub(crate) const SEALED_DELIVERY_TOKEN_LEN: usize = 12;
 pub(crate) const MAX_TYPING_EVENTS: i64 = 128;
 pub(crate) const PRESENCE_TTL_SECONDS: i64 = 180;
 pub(crate) const TYPING_TTL_SECONDS: i64 = 15;

@@ -274,17 +274,20 @@ async fn main() -> anyhow::Result<()> {
     .execute(&pool)
     .await?;
 
-    let app = build_router(AppState::with_security_profile(
-        pool,
-        db_backend,
-        Arc::new(RateLimiter::new(
-            1_000.0,
-            1_000.0,
-            100_000,
-            StdDuration::from_secs(600),
-        )),
-        SecurityProfile::Research,
-    ));
+    let app = build_router(
+        AppState::with_security_profile(
+            pool,
+            db_backend,
+            Arc::new(RateLimiter::new(
+                1_000.0,
+                1_000.0,
+                100_000,
+                StdDuration::from_secs(600),
+            )),
+            SecurityProfile::Research,
+        )
+        .with_authenticated_direct_messaging_supported(true),
+    );
 
     let alice_sig = signing_key(11);
     let bob_sig = signing_key(22);

@@ -106,7 +106,9 @@ class ServerApiTest {
               "group_messaging_supported": false,
               "sealed_sender_required": true,
               "sender_certificate_supported": true,
+              "sealed_delivery_tokens_supported": true,
               "sender_certificate_issuer_ed25519_pub": "issuer-ed25519-pub",
+              "authenticated_direct_messaging_supported": false,
               "ephemeral_messaging_supported": false,
               "web_client_policy": "demo_only"
             }
@@ -125,7 +127,9 @@ class ServerApiTest {
         assertEquals(false, parsed.group_messaging_supported)
         assertEquals(true, parsed.sealed_sender_required)
         assertEquals(true, parsed.sender_certificate_supported)
+        assertEquals(true, parsed.sealed_delivery_tokens_supported)
         assertEquals("issuer-ed25519-pub", parsed.sender_certificate_issuer_ed25519_pub)
+        assertEquals(false, parsed.authenticated_direct_messaging_supported)
         assertEquals(false, parsed.ephemeral_messaging_supported)
     }
 
@@ -165,7 +169,9 @@ class ServerApiTest {
               "group_messaging_supported": false,
               "sealed_sender_required": true,
               "sender_certificate_supported": true,
+              "sealed_delivery_tokens_supported": true,
               "sender_certificate_issuer_ed25519_pub": "issuer-ed25519-pub",
+              "authenticated_direct_messaging_supported": false,
               "ephemeral_messaging_supported": false,
               "web_client_policy": "demo_only"
             }

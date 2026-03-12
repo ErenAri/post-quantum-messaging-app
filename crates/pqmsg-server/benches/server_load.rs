@@ -179,7 +179,8 @@ async fn setup_app() -> axum::Router {
             10_000_000,
             Duration::from_secs(600),
         )),
-    );
+    )
+    .with_authenticated_direct_messaging_supported(true);
     build_router(state)
 }
 

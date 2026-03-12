@@ -124,11 +124,14 @@ export type DrainOutboxDeps = {
     peerId: string,
     plaintext: string
   ) => Promise<string>;
+  loadPeerSealedDeliveryToken: (
+    keys: GeneratedKeys,
+    peerId: string
+  ) => Promise<string>;
   sealedRelay: (
     peerId: string,
     request: {
-      sender_user_id: string;
-      device_id: string;
+      delivery_token: string;
       message_bytes_base64: string;
     }
   ) => Promise<void>;
@@ -175,9 +178,9 @@ export async function drainSupportedOutbox(
         item.peerId,
         item.text
       );
+      const deliveryToken = await deps.loadPeerSealedDeliveryToken(params.keys, item.peerId);
       await deps.sealedRelay(item.peerId, {
-        sender_user_id: params.keys.userId,
-        device_id: params.keys.deviceId,
+        delivery_token: deliveryToken,
         message_bytes_base64: messageBytesBase64,
       });
       await deps.removeOutboxMessage(item.id);

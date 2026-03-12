@@ -318,11 +318,14 @@ pub(crate) async fn upsert_user_profile(
     }
 
     let avatar_bytes_base64 = avatar_blob.as_ref().map(|value| B64.encode(value));
+    let sealed_delivery_token =
+        encode_sealed_delivery_token(&ensure_sealed_delivery_token(state.pool(), &user_id).await?);
     Ok(Json(UserProfileResponse {
         user_id,
         display_name,
         avatar_mime,
         avatar_bytes_base64,
+        sealed_delivery_token: Some(sealed_delivery_token),
         updated_at: Some(now),
     }))
 }
@@ -351,11 +354,15 @@ pub(crate) async fn get_user_profile(
     .await?;
 
     let Some(row) = row else {
+        let sealed_delivery_token = encode_sealed_delivery_token(
+            &ensure_sealed_delivery_token(state.pool(), &user_id).await?,
+        );
         return Ok(Json(UserProfileResponse {
             user_id,
             display_name: None,
             avatar_mime: None,
             avatar_bytes_base64: None,
+            sealed_delivery_token: Some(sealed_delivery_token),
             updated_at: None,
         }));
     };
@@ -372,11 +379,14 @@ pub(crate) async fn get_user_profile(
     } else {
         row.try_get("avatar_blob")?
     };
+    let sealed_delivery_token =
+        encode_sealed_delivery_token(&ensure_sealed_delivery_token(state.pool(), &user_id).await?);
     Ok(Json(UserProfileResponse {
         user_id,
         display_name: row.try_get("display_name")?,
         avatar_mime: row.try_get("avatar_mime")?,
         avatar_bytes_base64: avatar_blob.map(|value| B64.encode(value)),
+        sealed_delivery_token: Some(sealed_delivery_token),
         updated_at: row.try_get("updated_at")?,
     }))
 }

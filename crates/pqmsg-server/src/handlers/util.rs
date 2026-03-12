@@ -1,11 +1,17 @@
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use chrono::{DateTime, Utc};
+use rand::rngs::OsRng;
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::{AnyPool, Row};
 use tracing::warn;
 
 use crate::error::AppError;
 use crate::types::*;
-use crate::{AppState, PushProvider, MAX_POW_NONCE_LEN, RELAY_DEDUP_TTL_SECONDS};
+use crate::{
+    AppState, PushProvider, MAX_POW_NONCE_LEN, RELAY_DEDUP_TTL_SECONDS, SEALED_DELIVERY_TOKEN_LEN,
+};
 
 pub(crate) fn record_security_event(
     state: &AppState,
@@ -192,6 +198,63 @@ pub(crate) fn has_leading_zero_bits(bytes: &[u8], bits: u8) -> bool {
     }
     let mask = 0xFFu8 << (8 - remaining_bits);
     bytes[full_bytes] & mask == 0
+}
+
+pub(crate) fn generate_sealed_delivery_token() -> Vec<u8> {
+    let mut token = vec![0u8; SEALED_DELIVERY_TOKEN_LEN];
+    OsRng.fill_bytes(&mut token);
+    token
+}
+
+pub(crate) async fn ensure_sealed_delivery_token(
+    pool: &AnyPool,
+    user_id: &str,
+) -> Result<Vec<u8>, AppError> {
+    let existing = sqlx::query_scalar::<_, Option<Vec<u8>>>(
+        "SELECT sealed_delivery_token
+         FROM users
+         WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(existing) = existing else {
+        return Err(AppError::not_found("user not found"));
+    };
+    if let Some(existing) = existing {
+        return Ok(existing);
+    }
+
+    let generated = generate_sealed_delivery_token();
+    let now = Utc::now().to_rfc3339();
+    let updated = sqlx::query(
+        "UPDATE users
+         SET sealed_delivery_token = $1, updated_at = $2
+         WHERE user_id = $3 AND sealed_delivery_token IS NULL",
+    )
+    .bind(&generated)
+    .bind(&now)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    if updated.rows_affected() > 0 {
+        return Ok(generated);
+    }
+
+    let token = sqlx::query_scalar::<_, Option<Vec<u8>>>(
+        "SELECT sealed_delivery_token
+         FROM users
+         WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?
+    .ok_or_else(|| AppError::internal("sealed delivery token generation race"))?;
+    Ok(token)
+}
+
+pub(crate) fn encode_sealed_delivery_token(token: &[u8]) -> String {
+    B64.encode(token)
 }
 
 pub(crate) async fn observe_relay_dedup(

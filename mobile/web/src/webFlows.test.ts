@@ -212,6 +212,7 @@ describe("drainSupportedOutbox", () => {
         },
         markMessageSent: async () => {},
         encryptDirectPayload: async () => "cipher",
+        loadPeerSealedDeliveryToken: async () => "delivery-token",
         sealedRelay: async () => {},
       }
     );
@@ -246,6 +247,7 @@ describe("drainSupportedOutbox", () => {
           sent.push(id);
         },
         encryptDirectPayload: async (_keys, peerId) => `cipher-for-${peerId}`,
+        loadPeerSealedDeliveryToken: async (_keys, peerId) => `delivery-token-${peerId}`,
         sealedRelay: async (peerId) => {
           sealed.push(peerId);
           if (peerId === "test3") {

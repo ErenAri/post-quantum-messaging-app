@@ -19,10 +19,7 @@ use pqmsg_core::kem::MlKem768;
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
 use pqmsg_core::pq_sig::{MlDsa65, PqSignatureProvider};
 use pqmsg_core::ratchet::pq::{PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL};
-use pqmsg_core::sealed::{
-    derive_pairwise_sealed_sender_key, open_message_with_cert, seal_message_with_cert,
-    SenderCertificate,
-};
+use pqmsg_core::sealed::{open_message_with_cert, seal_message_with_cert, SenderCertificate};
 use pqmsg_core::session::{SessionRole, SessionSnapshot, SessionState};
 use pqmsg_core::storage::{
     unwrap_bytes as unwrap_wrapped_bytes, wrap_bytes as wrap_wrapped_bytes, WrappedSecret,
@@ -1632,6 +1629,38 @@ pub fn build_group_relay_auth_headers(
 }
 
 #[uniffi::export]
+pub fn build_profile_get_auth_headers(
+    keys_json: String,
+    user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "profile-get",
+        &keys.user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode profile-get auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: keys.user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
 pub fn build_presence_update_auth_headers(
     keys_json: String,
     user_id: String,
@@ -2371,8 +2400,6 @@ pub fn seal_message_with_sender_cert(
         &recipient_identity_x25519_pub,
     )?);
     let suite_id = suite_id_for_user_keys(keys.suite);
-    let sealed_key =
-        derive_pairwise_sealed_sender_key(&local_secret, &recipient_identity_pub, suite_id)?;
     let payload = decode_b64(
         "payload_message_bytes_base64",
         &payload_message_bytes_base64,
@@ -2383,7 +2410,8 @@ pub fn seal_message_with_sender_cert(
     )?)
     .map_err(|error| operation_failed(error.to_string()))?;
     let sealed = seal_message_with_cert(
-        &sealed_key,
+        &local_secret,
+        &recipient_identity_pub,
         suite_id,
         &recipient_user_id,
         &keys.user_id,
@@ -2397,20 +2425,19 @@ pub fn seal_message_with_sender_cert(
 #[uniffi::export]
 pub fn open_sealed_message_with_sender_cert(
     keys_json: String,
-    sender_identity_x25519_pub: String,
+    sender_identity_x25519_pub: Option<String>,
     sealed_message_bytes_base64: String,
     server_issuer_ed25519_pub: String,
 ) -> Result<OpenedCertifiedSealedMessage, PqmsgAndroidError> {
     let keys = read_keys_file(&keys_json)?;
     let identity = to_identity_keypair(&keys)?;
     let local_secret = identity.require_secret_key()?;
-    let sender_identity_pub = DhPublicKey(decode_b64_32(
-        "sender_identity_x25519_pub",
-        &sender_identity_x25519_pub,
-    )?);
     let suite_id = suite_id_for_user_keys(keys.suite);
-    let sealed_key =
-        derive_pairwise_sealed_sender_key(&local_secret, &sender_identity_pub, suite_id)?;
+    let legacy_sender_identity_pub = sender_identity_x25519_pub
+        .as_deref()
+        .map(|value| decode_b64_32("sender_identity_x25519_pub", value))
+        .transpose()?
+        .map(DhPublicKey);
     let server_pub_key = VerifyingKey::from_bytes(&decode_b64_32(
         "server_issuer_ed25519_pub",
         &server_issuer_ed25519_pub,
@@ -2421,12 +2448,13 @@ pub fn open_sealed_message_with_sender_cert(
         .map_err(|_| operation_failed("system clock before unix epoch"))?
         .as_secs();
     let opened = open_message_with_cert(
-        &sealed_key,
+        &local_secret,
         &decode_b64("sealed_message_bytes_base64", &sealed_message_bytes_base64)?,
         suite_id,
         &keys.user_id,
         Some(&server_pub_key),
         now_unix_secs,
+        legacy_sender_identity_pub.as_ref(),
     )?;
     if opened.sender_cert.is_none() {
         return Err(operation_failed(
@@ -2872,6 +2900,23 @@ mod tests {
         });
         let presence_transcript = tlv_transcript_from_records(presence_records);
         verify_auth_signature(&keys_json, &presence_headers, &presence_transcript);
+
+        let profile_headers = build_profile_get_auth_headers(keys_json.clone(), "bob".to_string())
+            .expect("profile get headers");
+        let profile_timestamp = auth_timestamp_from_headers(&profile_headers);
+        let mut profile_records = auth_common_records(
+            "profile-get",
+            "alice",
+            "alice-android-1",
+            profile_timestamp,
+            &profile_headers.auth_nonce,
+        );
+        profile_records.push(TlvRecord {
+            ty: AUTH_TAG_RECIPIENT_ID,
+            value: b"bob".to_vec(),
+        });
+        let profile_transcript = tlv_transcript_from_records(profile_records);
+        verify_auth_signature(&keys_json, &profile_headers, &profile_transcript);
 
         let receipt_headers = build_send_receipt_auth_headers(
             keys_json.clone(),

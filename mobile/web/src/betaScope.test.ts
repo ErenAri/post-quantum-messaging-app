@@ -41,6 +41,8 @@ describe("betaScope", () => {
       channels_supported: false,
       group_messaging_supported: false,
       sealed_sender_required: true,
+      sealed_delivery_tokens_supported: true,
+      authenticated_direct_messaging_supported: false,
       ephemeral_messaging_supported: false,
       web_client_policy: "demo_only",
     });
@@ -81,6 +83,8 @@ describe("betaScope", () => {
       channels_supported: false,
       group_messaging_supported: false,
       sealed_sender_required: true,
+      sealed_delivery_tokens_supported: true,
+      authenticated_direct_messaging_supported: false,
       ephemeral_messaging_supported: false,
       web_client_policy: "interop_candidate",
     });

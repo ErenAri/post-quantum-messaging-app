@@ -289,8 +289,7 @@ data class GroupRelayResponse(
 // Sealed Sender
 
 data class SealedRelayRequest(
-    val sender_user_id: String,
-    val device_id: String,
+    val delivery_token: String,
     val message_bytes_base64: String,
 )
 
@@ -309,7 +308,7 @@ data class SenderCertificateResponse(
 
 data class SealedInboxItem(
     val message_id: Long,
-    val sender_identity_x25519_pub: String,
+    val sender_identity_x25519_pub: String?,
     val message_bytes_base64: String,
     val received_at: String,
 )
@@ -404,6 +403,7 @@ data class UserProfileResponse(
     val display_name: String?,
     val avatar_mime: String?,
     val avatar_bytes_base64: String?,
+    val sealed_delivery_token: String?,
     val updated_at: String?,
 )
 
@@ -541,7 +541,9 @@ data class ServerCapabilitiesResponse(
     val group_messaging_supported: Boolean,
     val sealed_sender_required: Boolean,
     val sender_certificate_supported: Boolean,
+    val sealed_delivery_tokens_supported: Boolean,
     val sender_certificate_issuer_ed25519_pub: String,
+    val authenticated_direct_messaging_supported: Boolean,
     val ephemeral_messaging_supported: Boolean,
     val web_client_policy: String,
 )
@@ -810,6 +812,7 @@ interface PqmsgApi {
     @GET("/v1/users/{user_id}/profile")
     suspend fun getUserProfile(
         @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
     ): UserProfileResponse
 
     @POST("/v1/users/{user_id}/profile")
@@ -1047,8 +1050,14 @@ object ApiClientFactory {
         require(capabilities.sender_certificate_supported) {
             "Server is not advertising sender certificate support"
         }
+        require(capabilities.sealed_delivery_tokens_supported) {
+            "Server is not advertising sealed delivery token support"
+        }
         require(capabilities.sender_certificate_issuer_ed25519_pub.isNotBlank()) {
             "Server is missing the sender certificate issuer public key"
+        }
+        require(!capabilities.authenticated_direct_messaging_supported) {
+            "Server still exposes legacy authenticated direct messaging"
         }
     }
 }

@@ -656,6 +656,8 @@ struct ServerCapabilitiesResponse {
     registration_pow_bits: u8,
     prekey_bundle_reserve_count: i64,
     pq_ratchet_interval: u32,
+    #[serde(default)]
+    authenticated_direct_messaging_supported: bool,
     web_client_policy: String,
 }
 
@@ -1036,6 +1038,13 @@ fn validate_server_capabilities_for_cli(
         }
     }
     Ok(())
+}
+
+fn cli_direct_messaging_disabled(command: &str) -> anyhow::Error {
+    anyhow!(
+        "cli command '{}' is disabled on the sealed-only direct-message profile; use the Android or web client for direct messaging",
+        command
+    )
 }
 
 async fn fetch_server_capabilities(
@@ -1567,133 +1576,10 @@ async fn main() -> Result<()> {
             write_json_file(&out, &keys)?;
             println!("restored keys for '{}': {}", keys.user_id, out.display());
         }
-        Commands::Send {
-            from,
-            to,
-            text,
-            keys,
-            suite,
-            accept_key_change,
-        } => {
-            let keys_path = keys.unwrap_or_else(|| default_keys_path(&from));
-            let mut keys_file = read_keys_file(&keys_path)?;
-            if keys_file.user_id != from {
-                return Err(anyhow!(
-                    "from mismatch: command from '{}' vs keys file user '{}'",
-                    from,
-                    keys_file.user_id
-                ));
-            }
-            if let Some(override_suite) = suite {
-                keys_file.suite = override_suite;
-            }
-            let suite_id = suite_to_suite_id(keys_file.suite);
-            security_profile.enforce_suite_id(suite_id)?;
-            preflight_server_command(&client, &cli.server, security_profile, Some(suite_id))
-                .await?;
-            ensure_prekeys_replenished(&client, &cli.server, &keys_path, &mut keys_file).await?;
-            send_message_flow(
-                &client,
-                &cli.server,
-                &cli.state_dir,
-                SendOptions {
-                    security_profile,
-                    accept_key_change,
-                    message_retention_seconds,
-                },
-                &keys_file,
-                &to,
-                text.as_bytes(),
-            )
-            .await?;
-        }
-        Commands::SendSealed {
-            from,
-            to,
-            text,
-            keys,
-            suite,
-            accept_key_change,
-        } => {
-            let keys_path = keys.unwrap_or_else(|| default_keys_path(&from));
-            let mut keys_file = read_keys_file(&keys_path)?;
-            if keys_file.user_id != from {
-                return Err(anyhow!(
-                    "from mismatch: command from '{}' vs keys file user '{}'",
-                    from,
-                    keys_file.user_id
-                ));
-            }
-            if let Some(override_suite) = suite {
-                keys_file.suite = override_suite;
-            }
-            let suite_id = suite_to_suite_id(keys_file.suite);
-            security_profile.enforce_suite_id(suite_id)?;
-            preflight_server_command(&client, &cli.server, security_profile, Some(suite_id))
-                .await?;
-            ensure_prekeys_replenished(&client, &cli.server, &keys_path, &mut keys_file).await?;
-            send_sealed_message_flow(
-                &client,
-                &cli.server,
-                &cli.state_dir,
-                SendOptions {
-                    security_profile,
-                    accept_key_change,
-                    message_retention_seconds,
-                },
-                &keys_file,
-                &to,
-                text.as_bytes(),
-            )
-            .await?;
-        }
-        Commands::Poll { user, keys } => {
-            let mut keys_file = read_keys_file(&keys)?;
-            if keys_file.user_id != user {
-                return Err(anyhow!(
-                    "user mismatch: command user '{}' vs keys file user '{}'",
-                    user,
-                    keys_file.user_id
-                ));
-            }
-            let suite_id = suite_to_suite_id(keys_file.suite);
-            security_profile.enforce_suite_id(suite_id)?;
-            preflight_server_command(&client, &cli.server, security_profile, Some(suite_id))
-                .await?;
-            ensure_prekeys_replenished(&client, &cli.server, &keys, &mut keys_file).await?;
-            poll_inbox_flow(
-                &client,
-                &cli.server,
-                &cli.state_dir,
-                message_retention_seconds,
-                security_profile,
-                &keys_file,
-            )
-            .await?;
-        }
-        Commands::PollSealed { user, keys } => {
-            let keys_file = read_keys_file(&keys)?;
-            if keys_file.user_id != user {
-                return Err(anyhow!(
-                    "user mismatch: command user '{}' vs keys file user '{}'",
-                    user,
-                    keys_file.user_id
-                ));
-            }
-            let suite_id = suite_to_suite_id(keys_file.suite);
-            security_profile.enforce_suite_id(suite_id)?;
-            preflight_server_command(&client, &cli.server, security_profile, Some(suite_id))
-                .await?;
-            poll_sealed_inbox_flow(
-                &client,
-                &cli.server,
-                &cli.state_dir,
-                message_retention_seconds,
-                security_profile,
-                &keys_file,
-            )
-            .await?;
-        }
+        Commands::Send { .. } => return Err(cli_direct_messaging_disabled("send")),
+        Commands::SendSealed { .. } => return Err(cli_direct_messaging_disabled("send-sealed")),
+        Commands::Poll { .. } => return Err(cli_direct_messaging_disabled("poll")),
+        Commands::PollSealed { .. } => return Err(cli_direct_messaging_disabled("poll-sealed")),
         Commands::DeleteMessages {
             user,
             keys,
@@ -1710,7 +1596,9 @@ async fn main() -> Result<()> {
                 ));
             }
             if remote {
-                preflight_server_command(&client, &cli.server, security_profile, None).await?;
+                return Err(anyhow!(
+                    "remote delete-messages is disabled on the sealed-only direct-message profile; local archive deletion still works"
+                ));
             }
             delete_messages_flow(
                 &client,
@@ -4999,6 +4887,7 @@ mod tests {
             registration_pow_bits: 0,
             prekey_bundle_reserve_count: 2,
             pq_ratchet_interval: 4,
+            authenticated_direct_messaging_supported: false,
             web_client_policy: "demo_only".to_string(),
         }
     }

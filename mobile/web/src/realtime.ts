@@ -12,7 +12,7 @@ import { readSealedCursor } from "./storage";
 export type WsInboxMessage = {
   message_id: number;
   sender_user_id?: string;
-  sender_identity_x25519_pub?: string;
+  sender_identity_x25519_pub?: string | null;
   message_bytes_base64: string;
   received_at: string;
 };

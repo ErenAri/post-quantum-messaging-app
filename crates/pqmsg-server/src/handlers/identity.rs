@@ -41,16 +41,18 @@ pub(crate) async fn register_user(
     validate_ml_dsa_public_key(&identity_pq_sig)?;
 
     let now = Utc::now().to_rfc3339();
+    let sealed_delivery_token = generate_sealed_delivery_token();
     let insert_result = sqlx::query(
         "INSERT INTO users (
-            user_id, identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, created_at, updated_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $6)",
+            user_id, identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, sealed_delivery_token, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)",
     )
     .bind(&request.user_id)
     .bind(&identity_x25519)
     .bind(&identity_sig)
     .bind(&identity_pq_sig)
     .bind(&request.device_id)
+    .bind(&sealed_delivery_token)
     .bind(&now)
     .execute(&state.pool)
     .await;
@@ -59,7 +61,7 @@ pub(crate) async fn register_user(
         Ok(_) => {}
         Err(sqlx::Error::Database(db_error)) if db_error.is_unique_violation() => {
             let existing = sqlx::query(
-                "SELECT identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, created_at
+                "SELECT identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, sealed_delivery_token, created_at
                  FROM users
                  WHERE user_id = $1",
             )
@@ -77,6 +79,8 @@ pub(crate) async fn register_user(
             let existing_identity_pq_sig: Option<Vec<u8>> =
                 existing.try_get("identity_pq_sig_pub")?;
             let existing_device_id: String = existing.try_get("device_id")?;
+            let existing_delivery_token: Option<Vec<u8>> =
+                existing.try_get("sealed_delivery_token")?;
             let existing_created_at: String = existing.try_get("created_at")?;
 
             if existing_identity_x25519 != identity_x25519
@@ -94,10 +98,22 @@ pub(crate) async fn register_user(
             if existing_identity_pq_sig.is_none() {
                 sqlx::query(
                     "UPDATE users
-                     SET identity_pq_sig_pub = $1, updated_at = $2
-                     WHERE user_id = $3 AND identity_pq_sig_pub IS NULL",
+                     SET identity_pq_sig_pub = $1, sealed_delivery_token = COALESCE(sealed_delivery_token, $2), updated_at = $3
+                     WHERE user_id = $4 AND identity_pq_sig_pub IS NULL",
                 )
                 .bind(&identity_pq_sig)
+                .bind(&sealed_delivery_token)
+                .bind(&now)
+                .bind(&request.user_id)
+                .execute(&state.pool)
+                .await?;
+            } else if existing_delivery_token.is_none() {
+                sqlx::query(
+                    "UPDATE users
+                     SET sealed_delivery_token = $1, updated_at = $2
+                     WHERE user_id = $3 AND sealed_delivery_token IS NULL",
+                )
+                .bind(&sealed_delivery_token)
                 .bind(&now)
                 .bind(&request.user_id)
                 .execute(&state.pool)

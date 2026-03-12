@@ -211,7 +211,9 @@ async function bootApp(options: BootOptions = {}) {
       group_messaging_supported: false,
       sealed_sender_required: true,
       sender_certificate_supported: true,
+      sealed_delivery_tokens_supported: true,
       sender_certificate_issuer_ed25519_pub: "issuer-ed25519-pub",
+      authenticated_direct_messaging_supported: false,
       ephemeral_messaging_supported: false,
       web_client_policy: options.capabilities?.web_client_policy ?? "interop_candidate",
     },
@@ -453,7 +455,11 @@ async function bootApp(options: BootOptions = {}) {
         if (!apiState.existingUsers.has(userId)) {
           throw new Error("HTTP 404: user not found");
         }
-        return { user_id: userId, display_name: userId };
+        return {
+          user_id: userId,
+          display_name: userId,
+          sealed_delivery_token: `delivery-token:${userId}`,
+        };
       }
 
       async getBundle(userId: string) {
@@ -491,7 +497,7 @@ async function bootApp(options: BootOptions = {}) {
 
       async sealedRelay(
         peerId: string,
-        request: { sender_user_id: string; device_id: string; message_bytes_base64: string }
+        request: { delivery_token: string; message_bytes_base64: string }
       ) {
         apiState.relays.push({ peerId, body: request.message_bytes_base64 });
         return { delivered_device_count: 1 };

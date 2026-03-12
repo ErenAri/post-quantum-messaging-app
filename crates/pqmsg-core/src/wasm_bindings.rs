@@ -39,10 +39,7 @@ use crate::pq_sig::MlDsa65;
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::ratchet::pq::{PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
-use crate::sealed::{
-    derive_pairwise_sealed_sender_key, open_message_with_cert, seal_message_with_cert,
-    SenderCertificate,
-};
+use crate::sealed::{open_message_with_cert, seal_message_with_cert, SenderCertificate};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::session::{SessionRole, SessionSnapshot, SessionState};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
@@ -692,9 +689,6 @@ pub fn wasm_seal_message_with_sender_cert(
         recipient_identity_x25519_pub,
     )?);
     let suite_id = suite_label_to_id(&keys.suite)?;
-    let sealed_key =
-        derive_pairwise_sealed_sender_key(&local_secret, &recipient_identity_pub, suite_id)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let payload = decode_b64("payload_message_bytes_base64", payload_message_bytes_base64)?;
     let sender_certificate = SenderCertificate::decode(&decode_b64(
         "sender_certificate_base64",
@@ -702,7 +696,8 @@ pub fn wasm_seal_message_with_sender_cert(
     )?)
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let sealed = seal_message_with_cert(
-        &sealed_key,
+        &local_secret,
+        &recipient_identity_pub,
         suite_id,
         recipient_user_id,
         &keys.user_id,
@@ -718,7 +713,7 @@ pub fn wasm_seal_message_with_sender_cert(
 #[wasm_bindgen]
 pub fn wasm_open_sealed_message_with_sender_cert(
     keys: JsValue,
-    sender_identity_x25519_pub: &str,
+    sender_identity_x25519_pub: Option<String>,
     sealed_message_bytes_base64: &str,
     server_issuer_ed25519_pub: &str,
 ) -> Result<JsValue, JsValue> {
@@ -728,14 +723,12 @@ pub fn wasm_open_sealed_message_with_sender_cert(
     let local_secret = identity
         .require_secret_key()
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let sender_identity_pub = DhPublicKey(decode_b64_32(
-        "sender_identity_x25519_pub",
-        sender_identity_x25519_pub,
-    )?);
     let suite_id = suite_label_to_id(&keys.suite)?;
-    let sealed_key =
-        derive_pairwise_sealed_sender_key(&local_secret, &sender_identity_pub, suite_id)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let legacy_sender_identity_pub = sender_identity_x25519_pub
+        .as_deref()
+        .map(|value| decode_b64_32("sender_identity_x25519_pub", value))
+        .transpose()?
+        .map(DhPublicKey);
     let server_pub_key = VerifyingKey::from_bytes(&decode_b64_32(
         "server_issuer_ed25519_pub",
         server_issuer_ed25519_pub,
@@ -746,12 +739,13 @@ pub fn wasm_open_sealed_message_with_sender_cert(
         .map_err(|_| JsValue::from_str("system clock before unix epoch"))?
         .as_secs();
     let opened = open_message_with_cert(
-        &sealed_key,
+        &local_secret,
         &decode_b64("sealed_message_bytes_base64", sealed_message_bytes_base64)?,
         suite_id,
         &keys.user_id,
         Some(&server_pub_key),
         now_unix_secs,
+        legacy_sender_identity_pub.as_ref(),
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
     if opened.sender_cert.is_none() {

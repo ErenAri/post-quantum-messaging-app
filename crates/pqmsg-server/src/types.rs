@@ -225,8 +225,7 @@ pub(crate) struct GroupRelayResponse {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SealedRelayRequest {
-    pub(crate) sender_user_id: String,
-    pub(crate) device_id: String,
+    pub(crate) delivery_token: String,
     pub(crate) message_bytes_base64: String,
 }
 
@@ -248,7 +247,8 @@ pub(crate) struct SenderCertificateResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SealedInboxItem {
     pub(crate) message_id: i64,
-    pub(crate) sender_identity_x25519_pub: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sender_identity_x25519_pub: Option<String>,
     pub(crate) message_bytes_base64: String,
     pub(crate) received_at: String,
 }
@@ -464,6 +464,7 @@ pub(crate) struct UserProfileResponse {
     pub(crate) display_name: Option<String>,
     pub(crate) avatar_mime: Option<String>,
     pub(crate) avatar_bytes_base64: Option<String>,
+    pub(crate) sealed_delivery_token: Option<String>,
     pub(crate) updated_at: Option<String>,
 }
 
@@ -630,7 +631,9 @@ pub(crate) struct ServerCapabilitiesResponse {
     pub(crate) group_messaging_supported: bool,
     pub(crate) sealed_sender_required: bool,
     pub(crate) sender_certificate_supported: bool,
+    pub(crate) sealed_delivery_tokens_supported: bool,
     pub(crate) sender_certificate_issuer_ed25519_pub: String,
+    pub(crate) authenticated_direct_messaging_supported: bool,
     pub(crate) ephemeral_messaging_supported: bool,
     pub(crate) web_client_policy: &'static str,
 }

@@ -45,15 +45,11 @@ sequenceDiagram
     C->>S: POST /groups/{group}/members/add
     C->>S: POST /groups/{group}/members/remove
     C->>S: POST /groups/{group}/relay
-    C->>S: POST /relay/{peer}
     C->>S: POST /sealed-relay/{peer}
-    C->>S: GET /inbox/{id}?since=n
     C->>S: GET /sealed-inbox/{id}?since=n
-    C->>S: POST /inbox/{id}/delete
     C->>S: POST /users/{id}/receipts
     C->>S: GET /users/{id}/receipts/poll?since_id=n
     C->>S: POST /ephemeral-relay/{peer}
-    C->>S: GET /ws/inbox/{id}?since=n (WebSocket)
     C->>S: POST /call/offer
     C->>S: POST /call/{call_id}/answer
     C->>S: POST /call/{call_id}/ice
@@ -139,7 +135,6 @@ The following endpoints require request authentication headers:
 - `POST /v1/groups/{group_id}/members/add`
 - `POST /v1/groups/{group_id}/members/remove`
 - `POST /v1/groups/{group_id}/relay`
-- `POST /v1/relay/{recipient_user_id}`
 - `POST /v1/files/upload`
 - `GET /v1/files/{file_id}`
 - `POST /v1/users/{user_id}/profile`
@@ -148,10 +143,7 @@ The following endpoints require request authentication headers:
 - `GET /v1/users/{user_id}/presence`
 - `POST /v1/typing/{peer_user_id}`
 - `GET /v1/typing/{user_id}`
-- `GET /v1/inbox/{user_id}`
 - `GET /v1/sealed-inbox/{user_id}`
-- `POST /v1/inbox/{user_id}/delete`
-- `GET /v1/ws/inbox/{user_id}`
 - `POST /v1/users/{user_id}/push-token`
 - `POST /v1/call/offer`
 - `POST /v1/call/{call_id}/answer`
@@ -180,6 +172,8 @@ Optional correlation header:
 - `x-request-id` (if omitted, server generates one and echoes it in response headers)
 
 The server verifies signatures under registered `identity_sig_pub`, enforces authenticated device binding against active `user_devices` records, applies timestamp skew checks, rejects nonce replay, enforces monotonic inbox cursors per authenticated `user_id` + `device_id`, and applies relay ciphertext deduplication with TTL.
+
+Legacy authenticated direct-message endpoints (`/v1/relay`, `/v1/inbox`, `/v1/inbox/{user_id}/delete`, and `/v1/ws/inbox`) remain compatibility-only and are disabled by default on the hardened profile.
 
 ## 4. Endpoint Definitions
 
@@ -728,6 +722,8 @@ The relay payload remains opaque to the server. Delivery fan-out is computed fro
 
 ### 4.8C Sealed Sender Transport
 
+This is the supported direct-message transport on the hardened profile.
+
 `GET /v1/anon/users/{user_id}/bundle[?device_id=<device_id>]`
 
 This endpoint is an anonymous bundle-fetch alias to the standard bundle endpoint and returns the same response schema as `GET /v1/users/{user_id}/bundle`.
@@ -738,6 +734,7 @@ Request:
 
 ```json
 {
+  "delivery_token": "base64(12-byte recipient delivery token)",
   "message_bytes_base64": "base64(sealed_sender_envelope_bytes)"
 }
 ```
@@ -755,8 +752,13 @@ Response:
 Server behavior:
 
 - payload remains opaque blob storage only,
+- request uses the recipient's delivery token instead of explicit sender identity fields,
 - sender identity is not provided in request body or persistence schema,
 - routing is recipient-only fan-out to active recipient devices.
+
+Recipients obtain the delivery token from an authenticated profile read:
+
+`GET /v1/users/{user_id}/profile`
 
 `GET /v1/sealed-inbox/{user_id}?since=<message_id>`
 
@@ -873,6 +875,7 @@ Response:
   "display_name": "Alice Example",
   "avatar_mime": "image/png",
   "avatar_bytes_base64": "base64(opaque_avatar_blob)",
+  "sealed_delivery_token": "base64(12-byte recipient delivery token)",
   "updated_at": "2026-03-05T12:00:00Z"
 }
 ```
@@ -942,9 +945,11 @@ Response:
 }
 ```
 
-### 4.9 Relay Message
+### 4.9 Legacy Authenticated Relay (Compatibility Only)
 
 `POST /v1/relay/{recipient_user_id}`
+
+Disabled by default. Supported Android/web clients do not use this path.
 
 Requires authenticated transport headers (Section 3.1).
 
@@ -984,9 +989,11 @@ Success response:
 }
 ```
 
-### 4.10 Poll Inbox
+### 4.10 Legacy Authenticated Inbox Poll (Compatibility Only)
 
 `GET /v1/inbox/{user_id}?since=<message_id>`
+
+Disabled by default. Supported Android/web clients do not use this path.
 
 Requires authenticated transport headers (Section 3.1).
 
@@ -1020,9 +1027,11 @@ Response:
 }
 ```
 
-### 4.11 WebSocket Inbox
+### 4.11 Legacy Authenticated WebSocket Inbox (Compatibility Only)
 
 `GET /v1/ws/inbox/{user_id}?since=<message_id>`
+
+Disabled by default. Supported Android/web clients do not use this path.
 
 Requires authenticated transport headers (Section 3.1) and a standard WebSocket handshake.
 
@@ -1057,11 +1066,11 @@ Server messages are JSON text frames:
 
 - `event = "sync"` carries the initial catch-up window from `since`.
 - `event = "relay"` carries newly relayed ciphertexts in near real time.
-- Clients should still keep HTTP polling (`GET /v1/inbox/{user_id}`) as degraded/offline fallback.
-
-### 4.11A Delete Inbox Messages
+### 4.11A Legacy Inbox Deletion (Compatibility Only)
 
 `POST /v1/inbox/{user_id}/delete`
+
+Disabled by default. Supported Android/web clients do not use this path.
 
 Requires authenticated transport headers (Section 3.1).
 
@@ -1140,7 +1149,16 @@ Response:
   "registration_pow_bits": 0,
   "prekey_publish_min_interval_seconds": 0,
   "prekey_bundle_reserve_count": 0,
-  "pq_ratchet_interval": 0
+  "pq_ratchet_interval": 0,
+  "contact_discovery_supported": false,
+  "group_messaging_supported": false,
+  "sealed_sender_required": true,
+  "sender_certificate_supported": true,
+  "sealed_delivery_tokens_supported": true,
+  "sender_certificate_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
+  "authenticated_direct_messaging_supported": false,
+  "ephemeral_messaging_supported": false,
+  "web_client_policy": "demo_only"
 }
 ```
 
@@ -1173,9 +1191,24 @@ Response:
   "registration_pow_bits": 18,
   "prekey_bundle_reserve_count": 2,
   "pq_ratchet_interval": 4,
+  "contact_discovery_supported": false,
+  "group_messaging_supported": false,
+  "sealed_sender_required": true,
+  "sender_certificate_supported": true,
+  "sealed_delivery_tokens_supported": true,
+  "sender_certificate_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
+  "authenticated_direct_messaging_supported": false,
+  "ephemeral_messaging_supported": false,
   "web_client_policy": "demo_only"
 }
 ```
+
+Important capability flags:
+
+- `sealed_sender_required`: supported direct messaging must use sealed transport.
+- `sender_certificate_supported`: certified sealed-sender envelopes are available.
+- `sealed_delivery_tokens_supported`: sealed-relay ingress requires recipient delivery tokens.
+- `authenticated_direct_messaging_supported`: legacy authenticated DM compatibility surface. Hardened deployments report `false`.
 
 ### 4.14 Prometheus Metrics
 

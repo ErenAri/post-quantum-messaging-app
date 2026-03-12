@@ -1,6 +1,7 @@
 use axum::body::Body;
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
+use axum::Router;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::Utc;
@@ -1600,6 +1601,34 @@ fn profile_get_auth_headers(
     ]
 }
 
+async fn fetch_sealed_delivery_token(
+    app: Router,
+    signing_key: &SigningKey,
+    requester_user_id: &str,
+    requester_device_id: &str,
+    target_user_id: &str,
+) -> String {
+    let headers = profile_get_auth_headers(
+        signing_key,
+        requester_user_id,
+        requester_device_id,
+        target_user_id,
+    );
+    let (status, body) = json_request_with_headers(
+        app,
+        Method::GET,
+        &format!("/v1/users/{target_user_id}/profile"),
+        json!({}),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    body["sealed_delivery_token"]
+        .as_str()
+        .expect("sealed_delivery_token")
+        .to_string()
+}
+
 fn backup_upload_auth_headers(
     signing_key: &SigningKey,
     user_id: &str,
@@ -2173,12 +2202,20 @@ async fn capabilities_reports_client_contract() {
     assert_eq!(body["contact_discovery_supported"].as_bool(), Some(false));
     assert_eq!(body["presence_supported"].as_bool(), Some(false));
     assert_eq!(body["typing_indicators_supported"].as_bool(), Some(false));
+    assert_eq!(
+        body["authenticated_direct_messaging_supported"].as_bool(),
+        Some(false)
+    );
     assert_eq!(body["read_receipts_supported"].as_bool(), Some(false));
     assert_eq!(body["calling_supported"].as_bool(), Some(false));
     assert_eq!(body["stories_supported"].as_bool(), Some(false));
     assert_eq!(body["channels_supported"].as_bool(), Some(false));
     assert_eq!(body["group_messaging_supported"].as_bool(), Some(false));
     assert_eq!(body["sealed_sender_required"].as_bool(), Some(true));
+    assert_eq!(
+        body["sealed_delivery_tokens_supported"].as_bool(),
+        Some(true)
+    );
     assert_eq!(body["ephemeral_messaging_supported"].as_bool(), Some(false));
     assert_eq!(
         body["runtime_crypto_profile"]["protocol_version"].as_u64(),
@@ -2470,13 +2507,14 @@ async fn current_device_retire_clears_device_scoped_server_state() {
     assert_eq!(status_relay, StatusCode::OK);
 
     let sealed_blob = b"retire-test-sealed".to_vec();
+    let bob_delivery_token =
+        fetch_sealed_delivery_token(app.clone(), &alice_sig, "alice", "alice-dev-1", "bob").await;
     let (status_sealed_relay, _) = json_request(
         app.clone(),
         Method::POST,
         "/v1/sealed-relay/bob",
         json!({
-            "sender_user_id": "alice",
-            "device_id": "alice-dev-1",
+            "delivery_token": bob_delivery_token,
             "message_bytes_base64": B64.encode(&sealed_blob)
         }),
     )
@@ -3331,9 +3369,10 @@ async fn sealed_websocket_inbox_accepts_one_time_ticket_query() {
     }
 
     let sealed_blob = b"sealed-ws-ticket-ciphertext".to_vec();
+    let bob_delivery_token =
+        fetch_sealed_delivery_token(app.clone(), &alice_sig, "alice", "alice-dev-1", "bob").await;
     let relay = json!({
-        "sender_user_id": "alice",
-        "device_id": "alice-dev-1",
+        "delivery_token": bob_delivery_token,
         "message_bytes_base64": B64.encode(&sealed_blob)
     });
     let (status_relay, relay_body) = json_request_with_headers(
@@ -3367,10 +3406,7 @@ async fn sealed_websocket_inbox_accepts_one_time_ticket_query() {
         messages[0]["message_bytes_base64"].as_str(),
         Some(B64.encode(&sealed_blob).as_str())
     );
-    assert_eq!(
-        messages[0]["sender_identity_x25519_pub"].as_str(),
-        Some(B64.encode(alice_identity).as_str())
-    );
+    assert!(messages[0].get("sender_identity_x25519_pub").is_none());
     assert!(messages[0].get("sender_user_id").is_none());
 
     server_handle.abort();
@@ -4312,9 +4348,10 @@ async fn sealed_sender_relay_and_inbox_flow() {
     assert_eq!(bundle_payload["user_id"].as_str(), Some("bob"));
 
     let sealed_blob = b"sealed-ciphertext-placeholder".to_vec();
+    let bob_delivery_token =
+        fetch_sealed_delivery_token(app.clone(), &alice_sig, "alice", "alice-dev-1", "bob").await;
     let relay_body = json!({
-        "sender_user_id": "alice",
-        "device_id": "alice-dev-1",
+        "delivery_token": bob_delivery_token,
         "message_bytes_base64": B64.encode(&sealed_blob)
     });
     let (status_relay, relay_payload) = json_request(
@@ -4345,6 +4382,59 @@ async fn sealed_sender_relay_and_inbox_flow() {
         Some(sealed_blob_b64.as_str())
     );
     assert!(messages[0].get("sender_user_id").is_none());
+}
+
+#[tokio::test]
+async fn sealed_sender_rejects_wrong_delivery_token() {
+    let app = test_app().await;
+    let bob_sig = signing_key(153);
+    let alice_sig = signing_key(154);
+    let carol_sig = signing_key(155);
+
+    let (status_bob, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/users/register",
+        register_payload("bob", "bob-dev-1", [33u8; 32], &bob_sig),
+    )
+    .await;
+    assert_eq!(status_bob, StatusCode::OK);
+
+    let (status_alice, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/users/register",
+        register_payload("alice", "alice-dev-1", [34u8; 32], &alice_sig),
+    )
+    .await;
+    assert_eq!(status_alice, StatusCode::OK);
+
+    let (status_carol, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/users/register",
+        register_payload("carol", "carol-dev-1", [35u8; 32], &carol_sig),
+    )
+    .await;
+    assert_eq!(status_carol, StatusCode::OK);
+
+    let carol_delivery_token =
+        fetch_sealed_delivery_token(app.clone(), &alice_sig, "alice", "alice-dev-1", "carol")
+            .await;
+    let (status_relay, relay_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/sealed-relay/bob",
+        json!({
+            "delivery_token": carol_delivery_token,
+            "message_bytes_base64": B64.encode(b"sealed-ciphertext-placeholder"),
+        }),
+    )
+    .await;
+    assert_eq!(status_relay, StatusCode::FORBIDDEN);
+    assert!(relay_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("invalid sealed delivery token")));
 }
 
 #[tokio::test]
@@ -4400,6 +4490,11 @@ async fn sealed_sender_uses_peer_ip_when_proxy_headers_are_untrusted() {
         assert_eq!(status_prekeys, StatusCode::OK);
     }
 
+    let bob_delivery_token =
+        fetch_sealed_delivery_token(app.clone(), &carol_sig, "carol", "carol-dev-1", "bob").await;
+    let carol_delivery_token =
+        fetch_sealed_delivery_token(app.clone(), &bob_sig, "bob", "bob-dev-1", "carol").await;
+
     let (base_ws_url, server_handle) = spawn_http_server(app).await;
     let base_http_url = base_ws_url.replacen("ws://", "http://", 1);
     let client = reqwest::Client::new();
@@ -4408,8 +4503,7 @@ async fn sealed_sender_uses_peer_ip_when_proxy_headers_are_untrusted() {
         .post(format!("{base_http_url}/v1/sealed-relay/bob"))
         .header("x-forwarded-for", "203.0.113.10")
         .json(&json!({
-            "sender_user_id": "carol",
-            "device_id": "carol-dev-1",
+            "delivery_token": bob_delivery_token,
             "message_bytes_base64": B64.encode("sealed-one")
         }))
         .send()
@@ -4421,8 +4515,7 @@ async fn sealed_sender_uses_peer_ip_when_proxy_headers_are_untrusted() {
         .post(format!("{base_http_url}/v1/sealed-relay/carol"))
         .header("x-forwarded-for", "198.51.100.20")
         .json(&json!({
-            "sender_user_id": "bob",
-            "device_id": "bob-dev-1",
+            "delivery_token": carol_delivery_token,
             "message_bytes_base64": B64.encode("sealed-two")
         }))
         .send()

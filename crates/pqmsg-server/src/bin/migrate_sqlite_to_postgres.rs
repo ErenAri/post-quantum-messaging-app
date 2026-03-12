@@ -63,6 +63,21 @@ async fn sqlite_table_exists(pool: &sqlx::SqlitePool, table: &str) -> anyhow::Re
     Ok(exists)
 }
 
+async fn sqlite_table_has_column(
+    pool: &sqlx::SqlitePool,
+    table: &str,
+    column: &str,
+) -> anyhow::Result<bool> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|name| name == column)
+            .unwrap_or(false)
+    }))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     sqlx::any::install_default_drivers();
@@ -94,13 +109,23 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to run postgres migrations")?;
 
-    let users = sqlx::query(
-        "SELECT user_id, identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, created_at, updated_at
-         FROM users
-         ORDER BY user_id ASC",
-    )
-    .fetch_all(&sqlite)
-    .await?;
+    let users = if sqlite_table_has_column(&sqlite, "users", "sealed_delivery_token").await? {
+        sqlx::query(
+            "SELECT user_id, identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, sealed_delivery_token, created_at, updated_at
+             FROM users
+             ORDER BY user_id ASC",
+        )
+        .fetch_all(&sqlite)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT user_id, identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, NULL AS sealed_delivery_token, created_at, updated_at
+             FROM users
+             ORDER BY user_id ASC",
+        )
+        .fetch_all(&sqlite)
+        .await?
+    };
 
     let prekeys = sqlx::query(
         "SELECT user_id, signed_prekey_x25519_pub, sig_over_spk, pq_signed_prekey_pub_mlkem768, sig_over_pqspk, pq_sig_over_spk, pq_sig_over_pqspk, updated_at
@@ -200,13 +225,14 @@ async fn main() -> anyhow::Result<()> {
 
     for row in &users {
         sqlx::query(
-            "INSERT INTO users (user_id, identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "INSERT INTO users (user_id, identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, sealed_delivery_token, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (user_id) DO UPDATE SET
                identity_x25519_pub = EXCLUDED.identity_x25519_pub,
                identity_sig_pub = EXCLUDED.identity_sig_pub,
                identity_pq_sig_pub = EXCLUDED.identity_pq_sig_pub,
                device_id = EXCLUDED.device_id,
+               sealed_delivery_token = EXCLUDED.sealed_delivery_token,
                updated_at = EXCLUDED.updated_at",
         )
         .bind(row.try_get::<String, _>("user_id")?)
@@ -214,6 +240,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(row.try_get::<Vec<u8>, _>("identity_sig_pub")?)
         .bind(row.try_get::<Option<Vec<u8>>, _>("identity_pq_sig_pub")?)
         .bind(row.try_get::<String, _>("device_id")?)
+        .bind(row.try_get::<Option<Vec<u8>>, _>("sealed_delivery_token")?)
         .bind(row.try_get::<String, _>("created_at")?)
         .bind(row.try_get::<String, _>("updated_at")?)
         .execute(&mut *tx)

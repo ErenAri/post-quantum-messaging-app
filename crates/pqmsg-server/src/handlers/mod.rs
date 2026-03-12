@@ -58,7 +58,9 @@ fn capabilities_response(state: &AppState) -> ServerCapabilitiesResponse {
         group_messaging_supported: state.group_messaging_supported(),
         sealed_sender_required: state.sealed_sender_required(),
         sender_certificate_supported: state.sender_certificate_supported(),
+        sealed_delivery_tokens_supported: true,
         sender_certificate_issuer_ed25519_pub: state.sender_certificate_issuer_public_key_b64(),
+        authenticated_direct_messaging_supported: state.authenticated_direct_messaging_supported(),
         ephemeral_messaging_supported: state.ephemeral_messaging_supported(),
         web_client_policy: "demo_only",
     }

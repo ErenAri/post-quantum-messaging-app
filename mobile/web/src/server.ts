@@ -131,6 +131,7 @@ export type ProfileResponse = {
   display_name: string | null;
   avatar_mime: string | null;
   avatar_bytes_base64: string | null;
+  sealed_delivery_token: string | null;
   updated_at: string | null;
 };
 
@@ -373,8 +374,7 @@ export type IdentityLogResponse = {
 };
 
 export type SealedRelayRequest = {
-  sender_user_id: string;
-  device_id: string;
+  delivery_token: string;
   message_bytes_base64: string;
 };
 
@@ -393,7 +393,7 @@ export type SenderCertificateResponse = {
 
 export type SealedInboxItem = {
   message_id: number;
-  sender_identity_x25519_pub: string;
+  sender_identity_x25519_pub?: string | null;
   message_bytes_base64: string;
   received_at: string;
 };
@@ -580,7 +580,9 @@ export type ServerCapabilitiesResponse = {
   group_messaging_supported: boolean;
   sealed_sender_required: boolean;
   sender_certificate_supported: boolean;
+  sealed_delivery_tokens_supported: boolean;
   sender_certificate_issuer_ed25519_pub: string;
+  authenticated_direct_messaging_supported: boolean;
   ephemeral_messaging_supported: boolean;
   web_client_policy: string;
 };

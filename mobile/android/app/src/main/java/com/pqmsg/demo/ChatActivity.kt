@@ -22,6 +22,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import uniffi.pqmsg_android.ServerBundle
+import uniffi.pqmsg_android.buildProfileGetAuthHeaders
 import uniffi.pqmsg_android.buildPresenceGetAuthHeaders
 import uniffi.pqmsg_android.buildPresenceUpdateAuthHeaders
 import uniffi.pqmsg_android.buildSendReceiptAuthHeaders
@@ -334,6 +335,10 @@ class ChatActivity : AppCompatActivity() {
                 userId = context.profile.userId,
             ).toHeaderMap(),
         ).certificate_base64
+        val deliveryToken = resolvePeerSealedDeliveryToken(
+            context = context,
+            peerUserId = activePeerUserId,
+        )
         val sealedMessageBytesBase64 = sealMessageWithSenderCert(
             keysJson = keysJson,
             recipientUserId = activePeerUserId,
@@ -346,8 +351,7 @@ class ChatActivity : AppCompatActivity() {
             recipientUserId = activePeerUserId,
             headers = emptyMap(),
             request = SealedRelayRequest(
-                sender_user_id = context.profile.userId,
-                device_id = context.profile.deviceId,
+                delivery_token = deliveryToken,
                 message_bytes_base64 = sealedMessageBytesBase64,
             ),
         )
@@ -386,6 +390,20 @@ class ChatActivity : AppCompatActivity() {
         }
         enforceIdentityPin(localUserId, peerUserId, fetched)
         return fetched.identity_x25519_pub
+    }
+
+    private suspend fun resolvePeerSealedDeliveryToken(
+        context: ReadyMessagingContext,
+        peerUserId: String,
+    ): String {
+        val headers = buildProfileGetAuthHeaders(
+            keysJson = context.keysJson,
+            userId = peerUserId,
+        ).toHeaderMap()
+        val profile = context.api.getUserProfile(peerUserId, headers)
+        return profile.sealed_delivery_token
+            ?.takeIf { it.isNotBlank() }
+            ?: error("Peer is missing a sealed delivery token")
     }
 
     private fun syncThread() {
@@ -536,7 +554,7 @@ class ChatActivity : AppCompatActivity() {
 
     private fun refreshMeta() {
         val setup = currentSetup()
-        val cursor = store.readCursor(setup.userId)
+        val cursor = store.readSealedCursor(setup.userId)
         val bundleFetched = store.readBundleFetchedAt(setup.userId, activePeerUserId)
         val bundleLine = if (bundleFetched.isNullOrBlank()) {
             "Peer bundle is fetched automatically on first send."
@@ -550,7 +568,7 @@ class ChatActivity : AppCompatActivity() {
         val statusSummary = buildString {
             append("Status: ")
             append(syncSummary)
-            append(" | Cursor ")
+            append(" | Sealed cursor ")
             append(cursor)
             if (protectionSummary.isNotBlank()) {
                 append(" | ")

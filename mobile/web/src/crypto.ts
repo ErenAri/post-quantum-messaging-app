@@ -1069,7 +1069,7 @@ export function sealTransportEnvelopeWithSenderCert(
 
 export function openTransportEnvelopeWithSenderCert(
   keys: GeneratedKeys,
-  senderIdentityX25519Pub: string,
+  senderIdentityX25519Pub: string | null | undefined,
   sealedMessageBytesBase64: string,
   serverIssuerEd25519Pub: string
 ): CertifiedSealedTransportResult {

@@ -21,7 +21,9 @@ use crate::ephemeral_state::WsInboxTicketRecord;
 use crate::error::AppError;
 use crate::types::*;
 use crate::validation::*;
-use crate::{AppState, MAX_DELETE_MESSAGE_IDS, MAX_INBOX_PAGE, MAX_MESSAGE_BYTES};
+use crate::{
+    AppState, MAX_DELETE_MESSAGE_IDS, MAX_INBOX_PAGE, MAX_MESSAGE_BYTES, SEALED_DELIVERY_TOKEN_LEN,
+};
 
 fn ensure_authenticated_direct_messaging_supported(state: &AppState) -> Result<(), AppError> {
     if state.authenticated_direct_messaging_supported() {
@@ -465,8 +467,11 @@ pub(crate) async fn relay_sealed_message(
     }
     check_rate_limit(&state, &format!("sealed-relay:{recipient_user_id}"))?;
     validate_id("recipient_user_id", &recipient_user_id)?;
-    validate_id("sender_user_id", &request.sender_user_id)?;
-    validate_id("device_id", &request.device_id)?;
+    let delivery_token = decode_base64_exact(
+        "delivery_token",
+        &request.delivery_token,
+        SEALED_DELIVERY_TOKEN_LEN,
+    )?;
     let blob = decode_base64_range(
         "message_bytes_base64",
         &request.message_bytes_base64,
@@ -478,7 +483,7 @@ pub(crate) async fn relay_sealed_message(
     dedup_hasher.update(b"sealed:");
     dedup_hasher.update(recipient_user_id.as_bytes());
     dedup_hasher.update(b":");
-    dedup_hasher.update(request.sender_user_id.as_bytes());
+    dedup_hasher.update(&delivery_token);
     dedup_hasher.update(b":");
     dedup_hasher.update(&blob);
     let dedup_key = hex::encode(dedup_hasher.finalize());
@@ -487,13 +492,23 @@ pub(crate) async fn relay_sealed_message(
     }
 
     ensure_user_exists(&state.pool, &recipient_user_id).await?;
-    ensure_user_exists(&state.pool, &request.sender_user_id).await?;
-    let sender_identity_x25519_pub: Vec<u8> =
-        sqlx::query_scalar("SELECT identity_x25519_pub FROM users WHERE user_id = $1")
-            .bind(&request.sender_user_id)
-            .fetch_optional(state.pool())
-            .await?
-            .ok_or_else(|| AppError::not_found("sender not found"))?;
+    let stored_delivery_token: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT sealed_delivery_token
+         FROM users
+         WHERE user_id = $1",
+    )
+    .bind(&recipient_user_id)
+    .fetch_optional(state.pool())
+    .await?
+    .flatten();
+    let Some(stored_delivery_token) = stored_delivery_token else {
+        return Err(AppError::conflict(
+            "recipient is missing a sealed delivery token",
+        ));
+    };
+    if stored_delivery_token != delivery_token {
+        return Err(AppError::forbidden("invalid sealed delivery token"));
+    }
     let recipient_devices = load_active_device_ids(state.pool(), &recipient_user_id).await?;
     if recipient_devices.is_empty() {
         return Err(AppError::not_found(
@@ -503,7 +518,6 @@ pub(crate) async fn relay_sealed_message(
 
     let now = Utc::now().to_rfc3339();
     let encoded_blob = B64.encode(&blob);
-    let sender_identity_x25519_pub_b64 = B64.encode(&sender_identity_x25519_pub);
     let mut tx = state.pool.begin().await?;
     let mut first_message_id: Option<i64> = None;
     let mut deliveries: Vec<(String, SealedInboxItem)> =
@@ -513,15 +527,13 @@ pub(crate) async fn relay_sealed_message(
             "INSERT INTO sealed_relay_messages (
                 recipient_user_id,
                 recipient_device_id,
-                sender_identity_x25519_pub,
                 message_blob,
                 received_at
-            ) VALUES ($1, $2, $3, $4, $5)
+            ) VALUES ($1, $2, $3, $4)
             RETURNING message_id",
         )
         .bind(&recipient_user_id)
         .bind(recipient_device_id)
-        .bind(&sender_identity_x25519_pub)
         .bind(&blob)
         .bind(&now)
         .fetch_one(&mut *tx)
@@ -533,7 +545,7 @@ pub(crate) async fn relay_sealed_message(
             recipient_device_id.clone(),
             SealedInboxItem {
                 message_id,
-                sender_identity_x25519_pub: sender_identity_x25519_pub_b64.clone(),
+                sender_identity_x25519_pub: None,
                 message_bytes_base64: encoded_blob.clone(),
                 received_at: now.clone(),
             },
@@ -549,18 +561,10 @@ pub(crate) async fn relay_sealed_message(
 
     let push_state = state.clone();
     let push_recipient = recipient_user_id.clone();
-    let push_excluded_device = if request.sender_user_id == recipient_user_id {
-        request.device_id.clone()
-    } else {
-        String::new()
-    };
     if let Ok(permit) = state.push_spawn_semaphore().clone().try_acquire_owned() {
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(error) =
-                dispatch_push_wake_signals(&push_state, &push_recipient, &push_excluded_device)
-                    .await
-            {
+            if let Err(error) = dispatch_push_wake_signals(&push_state, &push_recipient, "").await {
                 tracing::warn!("sealed push wake dispatch failed reason={}", error);
             }
         });
@@ -1135,7 +1139,6 @@ pub(crate) async fn load_sealed_inbox_messages(
          WHERE recipient_user_id = $1
            AND recipient_device_id = $2
            AND message_id > $3
-           AND sender_identity_x25519_pub IS NOT NULL
          ORDER BY message_id ASC
          LIMIT $4",
     )
@@ -1150,8 +1153,9 @@ pub(crate) async fn load_sealed_inbox_messages(
     for row in rows {
         messages.push(SealedInboxItem {
             message_id: row.try_get("message_id")?,
-            sender_identity_x25519_pub: B64
-                .encode(row.try_get::<Vec<u8>, _>("sender_identity_x25519_pub")?),
+            sender_identity_x25519_pub: row
+                .try_get::<Option<Vec<u8>>, _>("sender_identity_x25519_pub")?
+                .map(|value| B64.encode(value)),
             message_bytes_base64: B64.encode(row.try_get::<Vec<u8>, _>("message_blob")?),
             received_at: row.try_get("received_at")?,
         });

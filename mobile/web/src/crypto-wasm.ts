@@ -332,7 +332,7 @@ export function sealMessageWithSenderCert(
 
 export function openSealedMessageWithSenderCert(
   keys: WasmSessionKeys,
-  senderIdentityX25519Pub: string,
+  senderIdentityX25519Pub: string | null | undefined,
   sealedMessageBytesBase64: string,
   serverIssuerEd25519Pub: string
 ): WasmOpenedCertifiedSealedMessage {
@@ -341,7 +341,7 @@ export function openSealedMessageWithSenderCert(
   }
   return wasmModule.wasm_open_sealed_message_with_sender_cert(
     keys,
-    senderIdentityX25519Pub,
+    senderIdentityX25519Pub ?? null,
     sealedMessageBytesBase64,
     serverIssuerEd25519Pub
   ) as WasmOpenedCertifiedSealedMessage;

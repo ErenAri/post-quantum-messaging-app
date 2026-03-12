@@ -149,6 +149,7 @@ let receiptPollTimer: ReturnType<typeof setInterval> | null = null;
 let receiptCursor = 0;
 let cachedContacts: ContactEntry[] = [];
 let cachedProfileNames: Record<string, string> = {};
+let cachedSealedDeliveryTokens: Record<string, string> = {};
 let peerPresenceCache: Record<string, { status: string; updated: number }> = {};
 let activeInboxFilter: InboxFilter = "all";
 
@@ -259,6 +260,9 @@ async function ensureMandatoryPqRatchetPolicy(): Promise<ServerCapabilitiesRespo
   if (!capabilities.sender_certificate_supported) {
     throw new Error("Server is not advertising sender certificate support.");
   }
+  if (!capabilities.sealed_delivery_tokens_supported) {
+    throw new Error("Server is not advertising sealed delivery token support.");
+  }
   if (!capabilities.sender_certificate_issuer_ed25519_pub) {
     throw new Error("Server is not advertising the sender certificate issuer key.");
   }
@@ -358,14 +362,14 @@ async function decryptIncomingPayload(
   k: GeneratedKeys,
   messageBytesBase64: string,
   senderUserId?: string,
-  senderIdentityX25519Pub?: string
+  senderIdentityX25519Pub?: string | null
 ): Promise<DecryptedIncomingPayload> {
   const activeKeys = keys ?? k;
   await ensureWebPqRuntime();
   const capabilities = await ensureMandatoryPqRatchetPolicy();
   let transportPayloadBase64 = messageBytesBase64;
   let resolvedSenderUserId = senderUserId ?? "";
-  if (senderIdentityX25519Pub) {
+  if (capabilities.sealed_sender_required) {
     const opened = openTransportEnvelopeWithSenderCert(
       activeKeys,
       senderIdentityX25519Pub,
@@ -433,6 +437,30 @@ async function issueSenderCertificate(k: GeneratedKeys, api: PqmsgApi): Promise<
   const headers = buildSenderCertificateAuthHeaders(k);
   const response = await api.getSenderCertificate(k.userId, headers);
   return response.certificate_base64;
+}
+
+async function loadPeerSealedDeliveryToken(
+  k: GeneratedKeys,
+  peerUserId: string,
+  api: PqmsgApi
+): Promise<string> {
+  const cached = cachedSealedDeliveryTokens[peerUserId]?.trim();
+  if (cached) {
+    return cached;
+  }
+  const headers = buildProfileGetAuthHeaders(k, peerUserId);
+  const profile = await api.getProfile(peerUserId, headers);
+  const sealedDeliveryToken = profile.sealed_delivery_token?.trim() || "";
+  if (!sealedDeliveryToken) {
+    throw new Error("Peer is missing a sealed delivery token.");
+  }
+  cachedSealedDeliveryTokens[peerUserId] = sealedDeliveryToken;
+  const displayName = profile.display_name?.trim() || "";
+  if (displayName) {
+    cachedProfileNames[peerUserId] = displayName;
+    writeProfileDisplayName(k.userId, peerUserId, displayName);
+  }
+  return sealedDeliveryToken;
 }
 
 async function ensureWebMessagingAllowed(kind: "direct" | "group"): Promise<boolean> {
@@ -681,6 +709,10 @@ async function loadProfileNameBackground(targetUserId: string): Promise<void> {
     const api = new PqmsgApi(setup.serverUrl);
     const headers = buildProfileGetAuthHeaders(k, targetUserId);
     const profile = await api.getProfile(targetUserId, headers);
+    const sealedDeliveryToken = profile.sealed_delivery_token?.trim() || "";
+    if (sealedDeliveryToken) {
+      cachedSealedDeliveryTokens[targetUserId] = sealedDeliveryToken;
+    }
     const displayName = profile.display_name?.trim() || "";
     if (!displayName) {
       return;
@@ -787,7 +819,16 @@ async function ensureDirectChatPeerExists(peerId: string): Promise<void> {
   const api = new PqmsgApi(setup.serverUrl);
   const headers = buildProfileGetAuthHeaders(k, normalizedPeer);
   try {
-    await api.getProfile(normalizedPeer, headers);
+    const profile = await api.getProfile(normalizedPeer, headers);
+    const sealedDeliveryToken = profile.sealed_delivery_token?.trim() || "";
+    if (sealedDeliveryToken) {
+      cachedSealedDeliveryTokens[normalizedPeer] = sealedDeliveryToken;
+    }
+    const displayName = profile.display_name?.trim() || "";
+    if (displayName) {
+      cachedProfileNames[normalizedPeer] = displayName;
+      writeProfileDisplayName(k.userId, normalizedPeer, displayName);
+    }
     return;
   } catch (err) {
     if (!errorMsg(err).includes("HTTP 404")) {
@@ -2039,10 +2080,10 @@ async function renderChat(peerId: string): Promise<void> {
         const k = await ensureKeys();
         const api = new PqmsgApi(setup.serverUrl);
         const messageBytesBase64 = await encryptDirectPayload(k, peerId, text);
+        const deliveryToken = await loadPeerSealedDeliveryToken(k, peerId, api);
 
         await api.sealedRelay(peerId, {
-          sender_user_id: k.userId,
-          device_id: k.deviceId,
+          delivery_token: deliveryToken,
           message_bytes_base64: messageBytesBase64,
         });
         await updateMessageStatus(tempId, "sent");
@@ -3451,16 +3492,9 @@ async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
       : `group:${groupId}`;
     const existing = await getMessages(conversationId);
     if (existing.some((msg) => msg.serverMessageId === wsMsg.message_id)) {
-      if (wsMsg.sender_identity_x25519_pub) {
-        const cursor = readSealedCursor(k.userId, k.deviceId);
-        if (wsMsg.message_id > cursor) {
-          writeSealedCursor(k.userId, wsMsg.message_id, k.deviceId);
-        }
-      } else {
-        const cursor = readCursor(k.userId);
-        if (wsMsg.message_id > cursor) {
-          writeCursor(k.userId, wsMsg.message_id);
-        }
+      const cursor = readSealedCursor(k.userId, k.deviceId);
+      if (wsMsg.message_id > cursor) {
+        writeSealedCursor(k.userId, wsMsg.message_id, k.deviceId);
       }
       return;
     }
@@ -3482,16 +3516,9 @@ async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
       void sendDeliveredReceipt(wsMsg.message_id);
     }
 
-    if (wsMsg.sender_identity_x25519_pub) {
-      const cursor = readSealedCursor(k.userId, k.deviceId);
-      if (wsMsg.message_id > cursor) {
-        writeSealedCursor(k.userId, wsMsg.message_id, k.deviceId);
-      }
-    } else {
-      const cursor = readCursor(k.userId);
-      if (wsMsg.message_id > cursor) {
-        writeCursor(k.userId, wsMsg.message_id);
-      }
+    const cursor = readSealedCursor(k.userId, k.deviceId);
+    if (wsMsg.message_id > cursor) {
+      writeSealedCursor(k.userId, wsMsg.message_id, k.deviceId);
     }
 
     if (isDirectMessage) {
@@ -3865,9 +3892,9 @@ async function drainOutbox(): Promise<void> {
           continue;
         } else {
           const messageBytesBase64 = await encryptDirectPayload(k, item.peerId, item.text);
+          const deliveryToken = await loadPeerSealedDeliveryToken(k, item.peerId, api);
           await api.sealedRelay(item.peerId, {
-            sender_user_id: k.userId,
-            device_id: k.deviceId,
+            delivery_token: deliveryToken,
             message_bytes_base64: messageBytesBase64,
           });
         }
@@ -4477,6 +4504,7 @@ async function logoutCurrentSession(): Promise<void> {
   activeGroupId = null;
   cachedContacts = [];
   cachedProfileNames = {};
+  cachedSealedDeliveryTokens = {};
   cachedGroupMembers = {};
   peerPresenceCache = {};
   receiptCursor = 0;
