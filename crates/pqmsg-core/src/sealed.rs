@@ -21,7 +21,162 @@ const OUTER_TAG_CIPHERTEXT: u16 = critical_type(0xA205);
 const INNER_TAG_SENDER_USER_ID: u16 = critical_type(0xA301);
 const INNER_TAG_SENDER_DEVICE_ID: u16 = critical_type(0xA302);
 const INNER_TAG_PAYLOAD: u16 = critical_type(0xA303);
+const INNER_TAG_SENDER_CERT: u16 = critical_type(0xA304);
 const MAX_ID_LEN: usize = 128;
+
+/// Sender certificate validity duration: 24 hours in seconds.
+pub const SENDER_CERT_VALIDITY_SECS: u64 = 24 * 60 * 60;
+/// Clock skew tolerance for certificate expiration checks: 5 minutes.
+pub const SENDER_CERT_CLOCK_SKEW_SECS: u64 = 5 * 60;
+
+// Sender certificate TLV tags
+const CERT_TAG_SENDER_USER_ID: u16 = critical_type(0xA401);
+const CERT_TAG_SENDER_DEVICE_ID: u16 = critical_type(0xA402);
+const CERT_TAG_SENDER_IDENTITY_PUB: u16 = critical_type(0xA403);
+const CERT_TAG_EXPIRES_AT: u16 = critical_type(0xA404);
+const CERT_TAG_SERVER_SIGNATURE: u16 = critical_type(0xA405);
+
+/// A short-lived sender certificate issued by the server. The certificate
+/// binds a sender's identity public key to their user ID and device ID.
+/// Recipients verify the server's signature and expiration before accepting
+/// sealed-sender messages.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SenderCertificate {
+    pub sender_user_id: String,
+    pub sender_device_id: String,
+    /// Sender's X25519 identity public key (32 bytes).
+    pub sender_identity_pub: [u8; 32],
+    /// Certificate expiration as Unix timestamp (seconds since epoch).
+    pub expires_at: u64,
+    /// Ed25519 signature over the certificate body, created by the server.
+    pub server_signature: Vec<u8>,
+}
+
+impl SenderCertificate {
+    /// Encode the certificate to TLV bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, CoreError> {
+        encode(&[
+            TlvRecord {
+                ty: CERT_TAG_SENDER_USER_ID,
+                value: self.sender_user_id.as_bytes().to_vec(),
+            },
+            TlvRecord {
+                ty: CERT_TAG_SENDER_DEVICE_ID,
+                value: self.sender_device_id.as_bytes().to_vec(),
+            },
+            TlvRecord {
+                ty: CERT_TAG_SENDER_IDENTITY_PUB,
+                value: self.sender_identity_pub.to_vec(),
+            },
+            TlvRecord {
+                ty: CERT_TAG_EXPIRES_AT,
+                value: self.expires_at.to_be_bytes().to_vec(),
+            },
+            TlvRecord {
+                ty: CERT_TAG_SERVER_SIGNATURE,
+                value: self.server_signature.clone(),
+            },
+        ])
+    }
+
+    /// Decode a certificate from TLV bytes.
+    pub fn decode(input: &[u8]) -> Result<Self, CoreError> {
+        let known_types = [
+            CERT_TAG_SENDER_USER_ID,
+            CERT_TAG_SENDER_DEVICE_ID,
+            CERT_TAG_SENDER_IDENTITY_PUB,
+            CERT_TAG_EXPIRES_AT,
+            CERT_TAG_SERVER_SIGNATURE,
+        ];
+        let records = decode_strict(input, &known_types)?;
+        let map = build_record_map(&records);
+        let sender_user_id = decode_id(
+            require_from_map(&map, CERT_TAG_SENDER_USER_ID, "cert.sender_user_id")?,
+            "cert.sender_user_id",
+        )?;
+        let sender_device_id = decode_id(
+            require_from_map(&map, CERT_TAG_SENDER_DEVICE_ID, "cert.sender_device_id")?,
+            "cert.sender_device_id",
+        )?;
+        let sender_identity_pub = parse_32(
+            require_from_map(&map, CERT_TAG_SENDER_IDENTITY_PUB, "cert.sender_identity_pub")?,
+            "cert.sender_identity_pub",
+        )?;
+        let expires_at = decode_u64(
+            require_from_map(&map, CERT_TAG_EXPIRES_AT, "cert.expires_at")?,
+        )?;
+        let server_signature =
+            require_from_map(&map, CERT_TAG_SERVER_SIGNATURE, "cert.server_signature")?.to_vec();
+        Ok(Self {
+            sender_user_id,
+            sender_device_id,
+            sender_identity_pub,
+            expires_at,
+            server_signature,
+        })
+    }
+
+    /// The body bytes that the server signs. This is the TLV encoding of
+    /// user_id, device_id, identity_pub, and expires_at (without the signature).
+    pub fn signing_body(&self) -> Result<Vec<u8>, CoreError> {
+        encode(&[
+            TlvRecord {
+                ty: CERT_TAG_SENDER_USER_ID,
+                value: self.sender_user_id.as_bytes().to_vec(),
+            },
+            TlvRecord {
+                ty: CERT_TAG_SENDER_DEVICE_ID,
+                value: self.sender_device_id.as_bytes().to_vec(),
+            },
+            TlvRecord {
+                ty: CERT_TAG_SENDER_IDENTITY_PUB,
+                value: self.sender_identity_pub.to_vec(),
+            },
+            TlvRecord {
+                ty: CERT_TAG_EXPIRES_AT,
+                value: self.expires_at.to_be_bytes().to_vec(),
+            },
+        ])
+    }
+}
+
+/// Validate a sender certificate against the server's public key and current time.
+pub fn validate_sender_certificate(
+    cert: &SenderCertificate,
+    server_pub_key: &ed25519_dalek::VerifyingKey,
+    now_unix_secs: u64,
+) -> Result<(), CoreError> {
+    // Check expiration with clock skew tolerance
+    if now_unix_secs > cert.expires_at + SENDER_CERT_CLOCK_SKEW_SECS {
+        return Err(CoreError::PolicyViolation("sender_cert.expired"));
+    }
+    // Verify server signature
+    let body = cert.signing_body()?;
+    let signature = ed25519_dalek::Signature::from_slice(&cert.server_signature)
+        .map_err(|_| CoreError::SignatureVerificationFailed)?;
+    use ed25519_dalek::Verifier;
+    server_pub_key
+        .verify(&body, &signature)
+        .map_err(|_| CoreError::SignatureVerificationFailed)?;
+    Ok(())
+}
+
+fn parse_32(value: &[u8], field: &'static str) -> Result<[u8; 32], CoreError> {
+    value.try_into().map_err(|_| CoreError::InvalidLength {
+        field,
+        expected: 32,
+        actual: value.len(),
+    })
+}
+
+fn decode_u64(value: &[u8]) -> Result<u64, CoreError> {
+    let bytes: [u8; 8] = value.try_into().map_err(|_| CoreError::InvalidLength {
+        field: "sealed.u64",
+        expected: 8,
+        actual: value.len(),
+    })?;
+    Ok(u64::from_be_bytes(bytes))
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SealedEnvelope {
@@ -248,6 +403,164 @@ pub fn open_message(
     })
 }
 
+/// Seal a message with an attached sender certificate. The certificate is
+/// included as an additional TLV record inside the encrypted inner payload,
+/// allowing the recipient to verify the sender's identity and certificate
+/// validity after decryption.
+pub fn seal_message_with_cert(
+    key: &[u8; 32],
+    suite_id: u16,
+    recipient_user_id: &str,
+    sender_user_id: &str,
+    sender_device_id: &str,
+    payload: &[u8],
+    sender_cert: &SenderCertificate,
+) -> Result<Vec<u8>, CoreError> {
+    if payload.is_empty() {
+        return Err(CoreError::InvalidLength {
+            field: "sealed.payload",
+            expected: 1,
+            actual: 0,
+        });
+    }
+    validate_id("sealed.recipient_user_id", recipient_user_id)?;
+    validate_id("sealed.sender_user_id", sender_user_id)?;
+    validate_id("sealed.sender_device_id", sender_device_id)?;
+
+    let cert_bytes = sender_cert.encode()?;
+
+    let ad = sealed_associated_data(SEALED_VERSION, suite_id, recipient_user_id)?;
+    let inner = encode(&[
+        TlvRecord {
+            ty: INNER_TAG_SENDER_USER_ID,
+            value: sender_user_id.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: INNER_TAG_SENDER_DEVICE_ID,
+            value: sender_device_id.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: INNER_TAG_PAYLOAD,
+            value: payload.to_vec(),
+        },
+        TlvRecord {
+            ty: INNER_TAG_SENDER_CERT,
+            value: cert_bytes,
+        },
+    ])?;
+    let mut rng = OsRng;
+    let envelope = encrypt_with_rng(key, &inner, &ad, &mut rng)?;
+    SealedEnvelope {
+        version: SEALED_VERSION,
+        suite_id,
+        recipient_user_id: recipient_user_id.to_string(),
+        aead_nonce: envelope.nonce,
+        ciphertext: envelope.ciphertext,
+    }
+    .encode()
+}
+
+/// Opened sealed message that includes an optional sender certificate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenedCertifiedSealedMessage {
+    pub sender_user_id: String,
+    pub sender_device_id: String,
+    pub payload: Vec<u8>,
+    pub sender_cert: Option<SenderCertificate>,
+}
+
+/// Open a sealed message and validate the sender certificate if present.
+///
+/// If a certificate is found inside the payload and `server_pub_key` is
+/// provided, the certificate is validated. If the certificate is expired or
+/// the signature is invalid, an error is returned.
+pub fn open_message_with_cert(
+    key: &[u8; 32],
+    envelope_bytes: &[u8],
+    expected_suite_id: u16,
+    expected_recipient_user_id: &str,
+    server_pub_key: Option<&ed25519_dalek::VerifyingKey>,
+    now_unix_secs: u64,
+) -> Result<OpenedCertifiedSealedMessage, CoreError> {
+    validate_id(
+        "sealed.expected_recipient_user_id",
+        expected_recipient_user_id,
+    )?;
+    let envelope = SealedEnvelope::decode(envelope_bytes)?;
+    if envelope.version != SEALED_VERSION {
+        return Err(CoreError::UnsupportedAlgorithm("sealed.version"));
+    }
+    if envelope.suite_id != expected_suite_id {
+        return Err(CoreError::UnsupportedAlgorithm("sealed.suite_id"));
+    }
+    if envelope.recipient_user_id != expected_recipient_user_id {
+        return Err(CoreError::PolicyViolation("sealed.recipient_mismatch"));
+    }
+
+    let ad = sealed_associated_data(
+        envelope.version,
+        envelope.suite_id,
+        &envelope.recipient_user_id,
+    )?;
+    let inner = decrypt(
+        key,
+        &CiphertextEnvelope {
+            nonce: envelope.aead_nonce,
+            ciphertext: envelope.ciphertext,
+            aad: ad,
+        },
+    )?;
+    let known_types = [
+        INNER_TAG_SENDER_USER_ID,
+        INNER_TAG_SENDER_DEVICE_ID,
+        INNER_TAG_PAYLOAD,
+        INNER_TAG_SENDER_CERT,
+    ];
+    let records = decode_strict(&inner, &known_types)?;
+    let map = build_record_map(&records);
+    let sender_user_id = decode_id(
+        require_from_map(&map, INNER_TAG_SENDER_USER_ID, "sealed.sender_user_id")?,
+        "sealed.sender_user_id",
+    )?;
+    let sender_device_id = decode_id(
+        require_from_map(&map, INNER_TAG_SENDER_DEVICE_ID, "sealed.sender_device_id")?,
+        "sealed.sender_device_id",
+    )?;
+    let payload = require_from_map(&map, INNER_TAG_PAYLOAD, "sealed.payload")?.to_vec();
+    if payload.is_empty() {
+        return Err(CoreError::InvalidLength {
+            field: "sealed.payload",
+            expected: 1,
+            actual: 0,
+        });
+    }
+
+    let sender_cert = if let Some(cert_bytes) = map.get(&INNER_TAG_SENDER_CERT) {
+        let cert = SenderCertificate::decode(cert_bytes)?;
+        // Validate certificate if server key is provided
+        if let Some(server_key) = server_pub_key {
+            validate_sender_certificate(&cert, server_key, now_unix_secs)?;
+        }
+        // Verify the certificate's sender_user_id matches the inner sender_user_id
+        if cert.sender_user_id != sender_user_id {
+            return Err(CoreError::PolicyViolation("sender_cert.user_id_mismatch"));
+        }
+        if cert.sender_device_id != sender_device_id {
+            return Err(CoreError::PolicyViolation("sender_cert.device_id_mismatch"));
+        }
+        Some(cert)
+    } else {
+        None
+    };
+
+    Ok(OpenedCertifiedSealedMessage {
+        sender_user_id,
+        sender_device_id,
+        payload,
+        sender_cert,
+    })
+}
+
 fn sealed_associated_data(
     version: u16,
     suite_id: u16,
@@ -298,8 +611,9 @@ fn validate_id(field: &'static str, value: &str) -> Result<(), CoreError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_pairwise_sealed_sender_key, open_message, seal_message};
+    use super::*;
     use crate::dh::generate_keypair;
+    use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
 
     #[test]
@@ -357,5 +671,183 @@ mod tests {
             seal_message(&key, suite_id, "bob", "alice", "alice-dev-1", b"payload").expect("seal");
         let result = open_message(&key, &encoded, suite_id, "carol");
         assert!(result.is_err());
+    }
+
+    fn make_test_cert(
+        server_signing_key: &SigningKey,
+        sender_identity_pub: [u8; 32],
+        expires_at: u64,
+    ) -> SenderCertificate {
+        let mut cert = SenderCertificate {
+            sender_user_id: "alice".to_string(),
+            sender_device_id: "alice-dev-1".to_string(),
+            sender_identity_pub,
+            expires_at,
+            server_signature: vec![],
+        };
+        let body = cert.signing_body().expect("signing body");
+        cert.server_signature = server_signing_key.sign(&body).to_bytes().to_vec();
+        cert
+    }
+
+    #[test]
+    fn sender_certificate_encode_decode_roundtrip() {
+        let mut rng = OsRng;
+        let server_key = SigningKey::generate(&mut rng);
+        let cert = make_test_cert(&server_key, [0xAA; 32], 1700000000);
+        let encoded = cert.encode().expect("encode cert");
+        let decoded = SenderCertificate::decode(&encoded).expect("decode cert");
+        assert_eq!(cert, decoded);
+    }
+
+    #[test]
+    fn sender_certificate_validates_with_correct_key() {
+        let mut rng = OsRng;
+        let server_key = SigningKey::generate(&mut rng);
+        let cert = make_test_cert(&server_key, [0xAA; 32], 1700000000);
+        let now = 1700000000 - 3600; // 1 hour before expiry
+        validate_sender_certificate(&cert, &server_key.verifying_key(), now)
+            .expect("should validate");
+    }
+
+    #[test]
+    fn sender_certificate_rejects_expired() {
+        let mut rng = OsRng;
+        let server_key = SigningKey::generate(&mut rng);
+        let cert = make_test_cert(&server_key, [0xAA; 32], 1700000000);
+        // Well past expiration + clock skew
+        let now = 1700000000 + SENDER_CERT_CLOCK_SKEW_SECS + 1;
+        let result = validate_sender_certificate(&cert, &server_key.verifying_key(), now);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sender_certificate_allows_clock_skew() {
+        let mut rng = OsRng;
+        let server_key = SigningKey::generate(&mut rng);
+        let cert = make_test_cert(&server_key, [0xAA; 32], 1700000000);
+        // Just within clock skew tolerance
+        let now = 1700000000 + SENDER_CERT_CLOCK_SKEW_SECS;
+        validate_sender_certificate(&cert, &server_key.verifying_key(), now)
+            .expect("within clock skew tolerance");
+    }
+
+    #[test]
+    fn sender_certificate_rejects_wrong_server_key() {
+        let mut rng = OsRng;
+        let server_key = SigningKey::generate(&mut rng);
+        let wrong_key = SigningKey::generate(&mut rng);
+        let cert = make_test_cert(&server_key, [0xAA; 32], 1700000000);
+        let result = validate_sender_certificate(&cert, &wrong_key.verifying_key(), 1700000000);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sealed_message_with_cert_roundtrip() {
+        let mut rng = OsRng;
+        let alice_dh = generate_keypair(&mut rng);
+        let bob_dh = generate_keypair(&mut rng);
+        let suite_id = 1u16;
+        let key =
+            derive_pairwise_sealed_sender_key(&alice_dh.secret, &bob_dh.public, suite_id)
+                .expect("key");
+
+        let server_key = SigningKey::generate(&mut rng);
+        let cert = make_test_cert(&server_key, alice_dh.public.0, 1700000000);
+
+        let encoded = seal_message_with_cert(
+            &key,
+            suite_id,
+            "bob",
+            "alice",
+            "alice-dev-1",
+            b"certified-payload",
+            &cert,
+        )
+        .expect("seal with cert");
+
+        let opened = open_message_with_cert(
+            &key,
+            &encoded,
+            suite_id,
+            "bob",
+            Some(&server_key.verifying_key()),
+            1700000000 - 3600,
+        )
+        .expect("open with cert");
+
+        assert_eq!(opened.sender_user_id, "alice");
+        assert_eq!(opened.sender_device_id, "alice-dev-1");
+        assert_eq!(opened.payload, b"certified-payload");
+        assert!(opened.sender_cert.is_some());
+        let returned_cert = opened.sender_cert.unwrap();
+        assert_eq!(returned_cert.sender_identity_pub, alice_dh.public.0);
+    }
+
+    #[test]
+    fn sealed_message_with_cert_rejects_expired_cert() {
+        let mut rng = OsRng;
+        let alice_dh = generate_keypair(&mut rng);
+        let bob_dh = generate_keypair(&mut rng);
+        let suite_id = 1u16;
+        let key =
+            derive_pairwise_sealed_sender_key(&alice_dh.secret, &bob_dh.public, suite_id)
+                .expect("key");
+
+        let server_key = SigningKey::generate(&mut rng);
+        let cert = make_test_cert(&server_key, alice_dh.public.0, 1700000000);
+
+        let encoded = seal_message_with_cert(
+            &key,
+            suite_id,
+            "bob",
+            "alice",
+            "alice-dev-1",
+            b"payload",
+            &cert,
+        )
+        .expect("seal");
+
+        // Open well past expiration
+        let result = open_message_with_cert(
+            &key,
+            &encoded,
+            suite_id,
+            "bob",
+            Some(&server_key.verifying_key()),
+            1700000000 + SENDER_CERT_CLOCK_SKEW_SECS + 1,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn open_without_cert_still_works() {
+        let mut rng = OsRng;
+        let alice_dh = generate_keypair(&mut rng);
+        let bob_dh = generate_keypair(&mut rng);
+        let suite_id = 1u16;
+        let key =
+            derive_pairwise_sealed_sender_key(&alice_dh.secret, &bob_dh.public, suite_id)
+                .expect("key");
+
+        // Seal without cert
+        let encoded = seal_message(
+            &key, suite_id, "bob", "alice", "alice-dev-1", b"no-cert-payload",
+        )
+        .expect("seal");
+
+        // Open with cert-aware function — should work, cert will be None
+        let server_key = SigningKey::generate(&mut rng);
+        let opened = open_message_with_cert(
+            &key,
+            &encoded,
+            suite_id,
+            "bob",
+            Some(&server_key.verifying_key()),
+            1700000000,
+        )
+        .expect("open");
+        assert_eq!(opened.payload, b"no-cert-payload");
+        assert!(opened.sender_cert.is_none());
     }
 }

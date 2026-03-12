@@ -378,7 +378,7 @@ impl AppState {
     }
 
     pub fn runtime_crypto_profile(&self) -> RuntimeCryptoProfile {
-        self.runtime_crypto_profile
+        self.runtime_crypto_profile.clone()
     }
 
     pub fn tls_enabled(&self) -> bool {

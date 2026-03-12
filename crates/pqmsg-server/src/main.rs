@@ -422,10 +422,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
+    let runtime_suite_id = runtime_crypto_profile.suite_id;
+    let runtime_pq_enabled = runtime_crypto_profile.pq_oqs_enabled;
     enforce_deployment_contract(DeploymentContract {
         deployment_mode,
         security_profile,
-        runtime_crypto_profile,
+        runtime_crypto_profile: runtime_crypto_profile.clone(),
         db_backend,
         tls_enabled,
         audit_enabled,
@@ -496,8 +498,8 @@ async fn main() -> anyhow::Result<()> {
                 deployment_mode.as_str(),
                 security_profile.as_str(),
                 db_backend.as_str(),
-                runtime_crypto_profile.suite_id,
-                runtime_crypto_profile.pq_oqs_enabled,
+                runtime_suite_id,
+                runtime_pq_enabled,
                 db_max_connections,
                 db_min_connections,
                 push_enabled,
@@ -535,8 +537,8 @@ async fn main() -> anyhow::Result<()> {
                 deployment_mode.as_str(),
                 security_profile.as_str(),
                 db_backend.as_str(),
-                runtime_crypto_profile.suite_id,
-                runtime_crypto_profile.pq_oqs_enabled,
+                runtime_suite_id,
+                runtime_pq_enabled,
                 db_max_connections,
                 db_min_connections,
                 push_enabled,

@@ -6,7 +6,10 @@
       "Bash(cargo clippy:*)",
       "Bash(cargo doc:*)",
       "Bash(grep:*)",
-      "Bash(cargo bench:*)"
+      "Bash(cargo bench:*)",
+      "Bash(cat:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo tree:*)"
     ]
   }
 }

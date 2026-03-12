@@ -149,12 +149,16 @@ impl Drop for SkippedMessageKeys {
 pub struct RootStepOutput {
     pub root_key: [u8; 32],
     pub chain_key: [u8; 32],
+    /// Header encryption key derived alongside the chain key. Used to encrypt
+    /// ratchet header metadata (sender DH pub, message number, etc.) in V2.
+    pub header_key: [u8; 32],
 }
 
 impl Drop for RootStepOutput {
     fn drop(&mut self) {
         self.root_key.zeroize();
         self.chain_key.zeroize();
+        self.header_key.zeroize();
     }
 }
 
@@ -162,14 +166,18 @@ pub fn kdf_root_step(
     root_key: &[u8; 32],
     dh_output: &[u8; 32],
 ) -> Result<RootStepOutput, CoreError> {
-    let okm = Zeroizing::new(hkdf_sha256(dh_output, Some(root_key), INFO_ROOT_STEP, 64)?);
+    // Expand to 96 bytes: root_key(32) || chain_key(32) || header_key(32)
+    let okm = Zeroizing::new(hkdf_sha256(dh_output, Some(root_key), INFO_ROOT_STEP, 96)?);
     let mut next_root = [0u8; 32];
     next_root.copy_from_slice(&okm[..32]);
     let mut chain_key = [0u8; 32];
-    chain_key.copy_from_slice(&okm[32..]);
+    chain_key.copy_from_slice(&okm[32..64]);
+    let mut header_key = [0u8; 32];
+    header_key.copy_from_slice(&okm[64..96]);
     Ok(RootStepOutput {
         root_key: next_root,
         chain_key,
+        header_key,
     })
 }
 

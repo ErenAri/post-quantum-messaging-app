@@ -2781,12 +2781,14 @@ dependencies = [
 name = "pqmsg-core"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "aes-gcm",
  "argon2",
  "base64",
  "chacha20poly1305",
  "criterion",
  "cryptoki",
+ "ctr",
  "ed25519-dalek",
  "fips203",
  "fips204",

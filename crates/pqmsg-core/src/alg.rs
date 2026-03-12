@@ -233,7 +233,7 @@ impl AlgorithmSuite {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct RuntimeCryptoProfile {
     pub protocol_version: u16,
     pub suite_id: u16,
@@ -244,6 +244,13 @@ pub struct RuntimeCryptoProfile {
     pub signature: SignatureAlgorithm,
     pub pq_oqs_enabled: bool,
     pub fips_mode: bool,
+    /// Supported wire format versions, preference-ordered (highest first).
+    #[serde(default = "default_supported_wire_versions")]
+    pub supported_wire_versions: Vec<u16>,
+}
+
+fn default_supported_wire_versions() -> Vec<u16> {
+    vec![crate::wire::WIRE_VERSION_V2, crate::wire::WIRE_VERSION]
 }
 
 pub fn runtime_crypto_profile() -> Result<RuntimeCryptoProfile, CoreError> {
@@ -258,6 +265,7 @@ pub fn runtime_crypto_profile() -> Result<RuntimeCryptoProfile, CoreError> {
         signature: suite.signature,
         pq_oqs_enabled: cfg!(any(feature = "pq-oqs", feature = "pq-rust")),
         fips_mode: is_fips_mode(),
+        supported_wire_versions: default_supported_wire_versions(),
     })
 }
 

@@ -1,11 +1,11 @@
-use crate::aead::{decrypt, encrypt_with_rng, CiphertextEnvelope};
+use crate::aead::{decrypt, encrypt_with_rng, pad_plaintext, unpad_plaintext, CiphertextEnvelope, PADDING_BLOCK_SIZE};
 use crate::dh::{generate_keypair, DhKeyPair, DhPublicKey};
 use crate::kdf::hkdf_sha256_32;
 use crate::kem::KemProvider;
 use crate::ratchet::pq::{self, PqRatchetState};
 use crate::ratchet::{dh_root_step, ChainState, SkippedKeyId, SkippedMessageKeys};
 use crate::tlv::{critical_type, encode, TlvRecord};
-use crate::wire::{WireMessage, DEFAULT_SUITE_ID, WIRE_VERSION};
+use crate::wire::{WireMessage, WireMessageV2, DEFAULT_SUITE_ID, WIRE_VERSION, WIRE_VERSION_V2};
 use crate::CoreError;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,8 @@ use zeroize::Zeroize;
 
 const INFO_INITIATOR_SEND: &[u8] = b"pqmsg-session-initiator-send";
 const INFO_INITIATOR_RECV: &[u8] = b"pqmsg-session-initiator-recv";
+const INFO_INITIATOR_SEND_HK: &[u8] = b"pqmsg-session-initiator-send-hk";
+const INFO_INITIATOR_RECV_HK: &[u8] = b"pqmsg-session-initiator-recv-hk";
 const AD_TAG_PROTOCOL_VERSION: u16 = critical_type(0x1101);
 const AD_TAG_SUITE_ID: u16 = critical_type(0x1102);
 const AD_TAG_EXTERNAL_AD: u16 = critical_type(0x1103);
@@ -58,6 +60,9 @@ impl Drop for SkippedMessageKeySnapshot {
 pub struct SessionSnapshot {
     pub version: u16,
     pub suite_id: u16,
+    /// Negotiated wire format version (1 or 2). Defaults to 1 for backward compat.
+    #[serde(default = "default_wire_version")]
+    pub negotiated_wire_version: u16,
     pub root_key: [u8; 32],
     pub sending_chain_key: [u8; 32],
     pub sending_next_msg_num: u32,
@@ -71,6 +76,16 @@ pub struct SessionSnapshot {
     pub skipped: Vec<SkippedMessageKeySnapshot>,
     #[serde(default)]
     pub pq_ratchet: Option<PqRatchetSnapshot>,
+    /// Header encryption key for sending (V2 only).
+    #[serde(default)]
+    pub sending_header_key: Option<[u8; 32]>,
+    /// Header encryption key for receiving (V2 only).
+    #[serde(default)]
+    pub receiving_header_key: Option<[u8; 32]>,
+    /// Previous receiving header key — used to decrypt the first message
+    /// after a DH ratchet step from the remote side.
+    #[serde(default)]
+    pub prev_receiving_header_key: Option<[u8; 32]>,
 }
 
 impl Drop for SessionSnapshot {
@@ -79,12 +94,26 @@ impl Drop for SessionSnapshot {
         self.sending_chain_key.zeroize();
         self.receiving_chain_key.zeroize();
         self.local_dh_secret.zeroize();
+        if let Some(ref mut k) = self.sending_header_key {
+            k.zeroize();
+        }
+        if let Some(ref mut k) = self.receiving_header_key {
+            k.zeroize();
+        }
+        if let Some(ref mut k) = self.prev_receiving_header_key {
+            k.zeroize();
+        }
     }
+}
+
+fn default_wire_version() -> u16 {
+    WIRE_VERSION
 }
 
 pub struct SessionState {
     version: u16,
     suite_id: u16,
+    negotiated_wire_version: u16,
     root_key: [u8; 32],
     sending_chain: ChainState,
     receiving_chain: ChainState,
@@ -94,11 +123,28 @@ pub struct SessionState {
     skipped: SkippedMessageKeys,
     pq_state: Option<PqRatchetState>,
     pq_kem: Option<Box<dyn KemProvider>>,
+    /// Header encryption key for outgoing messages (V2 header encryption).
+    sending_header_key: Option<[u8; 32]>,
+    /// Header encryption key for incoming messages from the current ratchet epoch.
+    receiving_header_key: Option<[u8; 32]>,
+    /// Previous receiving header key — needed to decrypt the first message after
+    /// the remote peer has performed a DH ratchet step, before we process their
+    /// new ratchet public key.
+    prev_receiving_header_key: Option<[u8; 32]>,
 }
 
 impl Drop for SessionState {
     fn drop(&mut self) {
         self.root_key.zeroize();
+        if let Some(ref mut k) = self.sending_header_key {
+            k.zeroize();
+        }
+        if let Some(ref mut k) = self.receiving_header_key {
+            k.zeroize();
+        }
+        if let Some(ref mut k) = self.prev_receiving_header_key {
+            k.zeroize();
+        }
     }
 }
 
@@ -128,6 +174,26 @@ impl SessionState {
         suite_id: u16,
         max_skipped: usize,
     ) -> Result<Self, CoreError> {
+        Self::from_handshake_with_suite_and_wire_version(
+            role,
+            handshake_root_key,
+            local_dh,
+            remote_dh_pub,
+            suite_id,
+            WIRE_VERSION,
+            max_skipped,
+        )
+    }
+
+    pub fn from_handshake_with_suite_and_wire_version(
+        role: SessionRole,
+        handshake_root_key: [u8; 32],
+        local_dh: DhKeyPair,
+        remote_dh_pub: DhPublicKey,
+        suite_id: u16,
+        wire_version: u16,
+        max_skipped: usize,
+    ) -> Result<Self, CoreError> {
         let (send_info, recv_info) = match role {
             SessionRole::Initiator => (INFO_INITIATOR_SEND, INFO_INITIATOR_RECV),
             SessionRole::Responder => (INFO_INITIATOR_RECV, INFO_INITIATOR_SEND),
@@ -135,9 +201,24 @@ impl SessionState {
         let sending_chain_key = hkdf_sha256_32(&handshake_root_key, None, send_info)?;
         let receiving_chain_key = hkdf_sha256_32(&handshake_root_key, None, recv_info)?;
 
+        // Derive initial header keys for V2 header encryption.
+        let (sending_header_key, receiving_header_key) = if wire_version >= WIRE_VERSION_V2 {
+            let (send_hk_info, recv_hk_info) = match role {
+                SessionRole::Initiator => (INFO_INITIATOR_SEND_HK, INFO_INITIATOR_RECV_HK),
+                SessionRole::Responder => (INFO_INITIATOR_RECV_HK, INFO_INITIATOR_SEND_HK),
+            };
+            (
+                Some(hkdf_sha256_32(&handshake_root_key, None, send_hk_info)?),
+                Some(hkdf_sha256_32(&handshake_root_key, None, recv_hk_info)?),
+            )
+        } else {
+            (None, None)
+        };
+
         Ok(Self {
             version: WIRE_VERSION,
             suite_id,
+            negotiated_wire_version: wire_version,
             root_key: handshake_root_key,
             sending_chain: ChainState::new(sending_chain_key),
             receiving_chain: ChainState::new(receiving_chain_key),
@@ -147,6 +228,9 @@ impl SessionState {
             skipped: SkippedMessageKeys::new(max_skipped),
             pq_state: None,
             pq_kem: None,
+            sending_header_key,
+            receiving_header_key,
+            prev_receiving_header_key: None,
         })
     }
 
@@ -165,6 +249,10 @@ impl SessionState {
 
     pub fn root_key(&self) -> [u8; 32] {
         self.root_key
+    }
+
+    pub fn negotiated_wire_version(&self) -> u16 {
+        self.negotiated_wire_version
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
@@ -189,6 +277,7 @@ impl SessionState {
         SessionSnapshot {
             version: self.version,
             suite_id: self.suite_id,
+            negotiated_wire_version: self.negotiated_wire_version,
             root_key: self.root_key,
             sending_chain_key: self.sending_chain.chain_key(),
             sending_next_msg_num: self.sending_chain.next_msg_num(),
@@ -201,6 +290,9 @@ impl SessionState {
             max_skipped: self.skipped.max_entries(),
             skipped,
             pq_ratchet,
+            sending_header_key: self.sending_header_key,
+            receiving_header_key: self.receiving_header_key,
+            prev_receiving_header_key: self.prev_receiving_header_key,
         }
     }
 
@@ -244,6 +336,7 @@ impl SessionState {
         Self {
             version: snapshot.version,
             suite_id: snapshot.suite_id,
+            negotiated_wire_version: snapshot.negotiated_wire_version,
             root_key,
             sending_chain: ChainState::from_parts(sending_chain_key, snapshot.sending_next_msg_num),
             receiving_chain: ChainState::from_parts(
@@ -259,6 +352,9 @@ impl SessionState {
             skipped: SkippedMessageKeys::from_entries(snapshot.max_skipped, skipped),
             pq_state,
             pq_kem: kem,
+            sending_header_key: snapshot.sending_header_key,
+            receiving_header_key: snapshot.receiving_header_key,
+            prev_receiving_header_key: snapshot.prev_receiving_header_key,
         }
     }
 
@@ -285,69 +381,137 @@ impl SessionState {
             ad,
         )?;
         let mut rng = OsRng;
-        let envelope = encrypt_with_rng(&message_key, message, &associated_data, &mut rng)?;
-
-        let wire = WireMessage {
-            version: self.version,
-            suite_id: self.suite_id,
-            sender_dh_pub,
-            msg_num,
-            prev_chain_len,
-            pq_step_ct,
-            aead_nonce: envelope.nonce,
-            ciphertext: envelope.ciphertext,
+        // V2: apply ISO 7816-4 padding before AEAD encryption
+        let padded;
+        let plaintext = if self.negotiated_wire_version >= WIRE_VERSION_V2 {
+            padded = pad_plaintext(message, PADDING_BLOCK_SIZE);
+            &padded[..]
+        } else {
+            message
         };
+        let envelope = encrypt_with_rng(&message_key, plaintext, &associated_data, &mut rng)?;
         message_key.zeroize();
-        wire.encode()
+
+        if self.negotiated_wire_version >= WIRE_VERSION_V2 {
+            let header = crate::wire::HeaderPlaintext {
+                sender_dh_pub,
+                msg_num,
+                prev_chain_len,
+                pq_step_ct,
+            };
+            let header_bytes = header.encode()?;
+            // Encrypt header with sending header key (AES-256-CTR)
+            let header_bytes = if let Some(ref hk) = self.sending_header_key {
+                crate::wire::encrypt_header(hk, &header_bytes)
+            } else {
+                header_bytes
+            };
+            let wire = WireMessageV2 {
+                version: WIRE_VERSION_V2,
+                suite_id: self.suite_id,
+                encrypted_header: header_bytes,
+                aead_nonce: envelope.nonce,
+                ciphertext: envelope.ciphertext,
+            };
+            wire.encode()
+        } else {
+            let wire = WireMessage {
+                version: self.version,
+                suite_id: self.suite_id,
+                sender_dh_pub,
+                msg_num,
+                prev_chain_len,
+                pq_step_ct,
+                aead_nonce: envelope.nonce,
+                ciphertext: envelope.ciphertext,
+            };
+            wire.encode()
+        }
     }
 
     pub fn decrypt(&mut self, wire_bytes: &[u8], ad: &[u8]) -> Result<Vec<u8>, CoreError> {
-        let wire = WireMessage::decode(wire_bytes)?;
-        if wire.version != self.version {
-            return Err(CoreError::UnsupportedAlgorithm("wire.version"));
-        }
-        if wire.suite_id != self.suite_id {
+        use crate::wire::{decode_wire_message, DecodedWireMessage};
+
+        let decoded = decode_wire_message(wire_bytes)?;
+
+        // Extract common fields depending on wire version
+        let (wire_version, suite_id, sender_dh_pub_bytes, msg_num, prev_chain_len, pq_step_ct, aead_nonce, ciphertext) =
+            match &decoded {
+                DecodedWireMessage::V1(wire) => (
+                    wire.version,
+                    wire.suite_id,
+                    wire.sender_dh_pub,
+                    wire.msg_num,
+                    wire.prev_chain_len,
+                    wire.pq_step_ct.clone(),
+                    wire.aead_nonce,
+                    wire.ciphertext.clone(),
+                ),
+                DecodedWireMessage::V2(wire) => {
+                    // Try decrypting the header with current and previous header keys.
+                    let header = self.decrypt_v2_header(&wire.encrypted_header)?;
+                    (
+                        WIRE_VERSION, // Use V1 version for AD compatibility
+                        wire.suite_id,
+                        header.sender_dh_pub,
+                        header.msg_num,
+                        header.prev_chain_len,
+                        header.pq_step_ct,
+                        wire.aead_nonce,
+                        wire.ciphertext.clone(),
+                    )
+                }
+            };
+
+        if suite_id != self.suite_id {
             return Err(CoreError::UnsupportedAlgorithm("wire.suite_id"));
         }
 
-        let sender_dh_pub = DhPublicKey(wire.sender_dh_pub);
+        let sender_dh_pub = DhPublicKey(sender_dh_pub_bytes);
         if sender_dh_pub != self.remote_dh_pub {
-            self.skip_until(self.remote_dh_pub.0, wire.prev_chain_len)?;
+            self.skip_until(self.remote_dh_pub.0, prev_chain_len)?;
             self.apply_dh_ratchet(sender_dh_pub)?;
         }
 
         let key_id = SkippedKeyId {
-            dh_pub: wire.sender_dh_pub,
-            msg_num: wire.msg_num,
+            dh_pub: sender_dh_pub_bytes,
+            msg_num,
         };
 
-        let mut message_key = if wire.msg_num < self.receiving_chain.next_msg_num() {
+        let mut message_key = if msg_num < self.receiving_chain.next_msg_num() {
             self.skipped
                 .take(key_id)
                 .ok_or(CoreError::MessageKeyUnavailable)?
         } else {
-            self.skip_until(wire.sender_dh_pub, wire.msg_num)?;
+            self.skip_until(sender_dh_pub_bytes, msg_num)?;
             let (_, key) = self.receiving_chain.next_message_key()?;
             key
         };
 
         let envelope = CiphertextEnvelope {
-            nonce: wire.aead_nonce,
-            ciphertext: wire.ciphertext,
+            nonce: aead_nonce,
+            ciphertext,
             aad: session_associated_data(
-                wire.version,
-                wire.suite_id,
-                &wire.sender_dh_pub,
-                wire.msg_num,
-                wire.prev_chain_len,
-                wire.pq_step_ct.as_deref(),
+                wire_version,
+                suite_id,
+                &sender_dh_pub_bytes,
+                msg_num,
+                prev_chain_len,
+                pq_step_ct.as_deref(),
                 ad,
             )?,
         };
-        let plaintext = decrypt(&message_key, &envelope)?;
+        let decrypted = decrypt(&message_key, &envelope)?;
         message_key.zeroize();
 
-        if let Some(ct) = wire.pq_step_ct.as_deref() {
+        // V2: remove ISO 7816-4 padding after AEAD decryption
+        let plaintext = if matches!(decoded, DecodedWireMessage::V2(_)) {
+            unpad_plaintext(&decrypted)?.to_vec()
+        } else {
+            decrypted
+        };
+
+        if let Some(ct) = pq_step_ct.as_deref() {
             let state = self.pq_state.as_ref().ok_or(CoreError::PqRatchetDisabled)?;
             let kem = self.pq_kem.as_ref().ok_or(CoreError::PqRatchetDisabled)?;
             self.root_key = pq::receiver_step(state, kem.as_ref(), &self.root_key, ct)?;
@@ -364,12 +528,43 @@ impl SessionState {
         Ok(())
     }
 
+    /// Decrypt V2 encrypted header. Tries receiving_header_key first, then
+    /// prev_receiving_header_key (for the first message after a DH ratchet from
+    /// the remote side). Falls back to unencrypted if no header keys are set
+    /// (upgraded session that hasn't ratcheted yet).
+    fn decrypt_v2_header(
+        &self,
+        encrypted_header: &[u8],
+    ) -> Result<crate::wire::HeaderPlaintext, CoreError> {
+        use crate::wire::{try_decrypt_header, HeaderPlaintext};
+
+        // Try current receiving header key
+        if let Some(ref hk) = self.receiving_header_key {
+            if let Some(header) = try_decrypt_header(hk, encrypted_header) {
+                return Ok(header);
+            }
+        }
+        // Try previous receiving header key (one-message lag during ratchet transition)
+        if let Some(ref hk) = self.prev_receiving_header_key {
+            if let Some(header) = try_decrypt_header(hk, encrypted_header) {
+                return Ok(header);
+            }
+        }
+        // Fallback: try unencrypted (backward compat with sessions upgraded
+        // from Phase 0 that don't have header keys yet)
+        HeaderPlaintext::decode(encrypted_header)
+    }
+
     fn apply_dh_ratchet(&mut self, new_remote_dh_pub: DhPublicKey) -> Result<(), CoreError> {
         let mut recv_step =
             dh_root_step(&self.root_key, &self.local_dh.secret, &new_remote_dh_pub)?;
         self.root_key = std::mem::take(&mut recv_step.root_key);
         self.receiving_chain
             .reset(std::mem::take(&mut recv_step.chain_key));
+
+        // Rotate header keys: current receiving HK becomes previous
+        self.prev_receiving_header_key = self.receiving_header_key.take();
+        self.receiving_header_key = Some(std::mem::take(&mut recv_step.header_key));
 
         self.prev_chain_len = self.sending_chain.next_msg_num();
         self.remote_dh_pub = new_remote_dh_pub;
@@ -382,6 +577,7 @@ impl SessionState {
         self.root_key = std::mem::take(&mut send_step.root_key);
         self.sending_chain
             .reset(std::mem::take(&mut send_step.chain_key));
+        self.sending_header_key = Some(std::mem::take(&mut send_step.header_key));
         Ok(())
     }
 }
@@ -441,7 +637,7 @@ mod tests {
     use crate::kem::{KemEncapsulation, KemProvider};
     use crate::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
     use crate::ratchet::pq::PqRatchetState;
-    use crate::wire::WireMessage;
+    use crate::wire::{WireMessage, WIRE_VERSION_V2};
     use crate::CoreError;
     use rand::rngs::OsRng;
     use rand::RngCore;
@@ -807,5 +1003,107 @@ mod tests {
         assert!(parsed.pq_step_ct.is_some());
         let plain = bob.decrypt(&wire, ad).expect("decrypt after restore");
         assert_eq!(plain, b"restored");
+    }
+
+    fn setup_v2_sessions(max_skipped: usize) -> (SessionState, SessionState) {
+        let root = setup_handshake_root();
+        let mut rng = OsRng;
+        let alice_dh = generate_keypair(&mut rng);
+        let bob_dh = generate_keypair(&mut rng);
+
+        let alice = SessionState::from_handshake_with_suite_and_wire_version(
+            SessionRole::Initiator,
+            root,
+            alice_dh.clone(),
+            bob_dh.public,
+            crate::wire::DEFAULT_SUITE_ID,
+            crate::wire::WIRE_VERSION_V2,
+            max_skipped,
+        )
+        .expect("alice v2 session");
+        let bob = SessionState::from_handshake_with_suite_and_wire_version(
+            SessionRole::Responder,
+            root,
+            bob_dh,
+            alice_dh.public,
+            crate::wire::DEFAULT_SUITE_ID,
+            crate::wire::WIRE_VERSION_V2,
+            max_skipped,
+        )
+        .expect("bob v2 session");
+        (alice, bob)
+    }
+
+    #[test]
+    fn v2_message_roundtrip_with_padding() {
+        let (mut alice, mut bob) = setup_v2_sessions(16);
+        let ad = b"session-ad";
+
+        let wire = alice.encrypt(b"hello-v2", ad).expect("v2 encrypt");
+        // V2 wire should decode as V2
+        let decoded =
+            crate::wire::decode_wire_message(&wire).expect("decode v2");
+        assert_eq!(decoded.version(), WIRE_VERSION_V2);
+        let plain = bob.decrypt(&wire, ad).expect("v2 decrypt");
+        assert_eq!(plain, b"hello-v2");
+    }
+
+    #[test]
+    fn v2_ciphertext_is_padded_to_block_boundary() {
+        let (mut alice, mut _bob) = setup_v2_sessions(16);
+        let ad = b"session-ad";
+
+        let wire = alice.encrypt(b"tiny", ad).expect("v2 encrypt tiny");
+        let decoded =
+            crate::wire::decode_wire_message(&wire).expect("decode");
+        if let crate::wire::DecodedWireMessage::V2(msg) = decoded {
+            // AEAD ciphertext = padded_plaintext + 16-byte tag
+            // padded_plaintext should be 256 bytes (one block for "tiny")
+            assert_eq!(msg.ciphertext.len(), 256 + 16);
+        } else {
+            panic!("expected V2 message");
+        }
+    }
+
+    #[test]
+    fn v2_bidirectional_exchange() {
+        let (mut alice, mut bob) = setup_v2_sessions(16);
+        let ad = b"v2-ad";
+
+        let w1 = alice.encrypt(b"a->b 1", ad).expect("e1");
+        let p1 = bob.decrypt(&w1, ad).expect("d1");
+        assert_eq!(p1, b"a->b 1");
+
+        let w2 = bob.encrypt(b"b->a 1", ad).expect("e2");
+        let p2 = alice.decrypt(&w2, ad).expect("d2");
+        assert_eq!(p2, b"b->a 1");
+
+        let w3 = alice.encrypt(b"a->b 2", ad).expect("e3");
+        let p3 = bob.decrypt(&w3, ad).expect("d3");
+        assert_eq!(p3, b"a->b 2");
+    }
+
+    #[test]
+    fn v2_out_of_order_delivery() {
+        let (mut alice, mut bob) = setup_v2_sessions(16);
+        let ad = b"v2-ooo";
+
+        let w1 = alice.encrypt(b"m1", ad).expect("e1");
+        let w2 = alice.encrypt(b"m2", ad).expect("e2");
+        let w3 = alice.encrypt(b"m3", ad).expect("e3");
+
+        // Deliver out of order: 1, 3, 2
+        assert_eq!(bob.decrypt(&w1, ad).expect("d1"), b"m1");
+        assert_eq!(bob.decrypt(&w3, ad).expect("d3"), b"m3");
+        assert_eq!(bob.decrypt(&w2, ad).expect("d2"), b"m2");
+    }
+
+    #[test]
+    fn v2_snapshot_preserves_wire_version() {
+        let (alice, _bob) = setup_v2_sessions(16);
+        let snap = alice.snapshot();
+        assert_eq!(snap.negotiated_wire_version, WIRE_VERSION_V2);
+        let restored = SessionState::from_snapshot(snap);
+        assert_eq!(restored.negotiated_wire_version(), WIRE_VERSION_V2);
     }
 }
