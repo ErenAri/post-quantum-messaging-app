@@ -1069,14 +1069,12 @@ export function sealTransportEnvelopeWithSenderCert(
 
 export function openTransportEnvelopeWithSenderCert(
   keys: GeneratedKeys,
-  expectedSenderUserId: string,
   senderIdentityX25519Pub: string,
   sealedMessageBytesBase64: string,
   serverIssuerEd25519Pub: string
 ): CertifiedSealedTransportResult {
   const result = wasmCrypto.openSealedMessageWithSenderCert(
     keys,
-    expectedSenderUserId,
     senderIdentityX25519Pub,
     sealedMessageBytesBase64,
     serverIssuerEd25519Pub

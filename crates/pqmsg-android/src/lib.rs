@@ -2397,7 +2397,6 @@ pub fn seal_message_with_sender_cert(
 #[uniffi::export]
 pub fn open_sealed_message_with_sender_cert(
     keys_json: String,
-    expected_sender_user_id: String,
     sender_identity_x25519_pub: String,
     sealed_message_bytes_base64: String,
     server_issuer_ed25519_pub: String,
@@ -2433,12 +2432,6 @@ pub fn open_sealed_message_with_sender_cert(
         return Err(operation_failed(
             "sealed sender certificate missing from transport envelope",
         ));
-    }
-    if opened.sender_user_id != expected_sender_user_id {
-        return Err(operation_failed(format!(
-            "expected sender '{}' but envelope opened as '{}'",
-            expected_sender_user_id, opened.sender_user_id
-        )));
     }
     Ok(OpenedCertifiedSealedMessage {
         sender_user_id: opened.sender_user_id,

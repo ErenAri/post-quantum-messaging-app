@@ -260,7 +260,14 @@ object MessagingCoordinator {
                 keysJson = context.keysJson,
             )
             for (item in sealedInbox.messages) {
-                val peer = item.sender_user_id
+                val openedTransport = openSealedMessageWithSenderCert(
+                    keysJson = workingKeysJson,
+                    senderIdentityX25519Pub = item.sender_identity_x25519_pub,
+                    sealedMessageBytesBase64 = item.message_bytes_base64,
+                    serverIssuerEd25519Pub =
+                        context.capabilities.sender_certificate_issuer_ed25519_pub,
+                )
+                val peer = openedTransport.senderUserId
                 val peerLastMessageId = store.readPeerLastMessageId(context.profile.userId, peer)
                 if (item.message_id <= peerLastMessageId) {
                     sealedCursor = maxOf(sealedCursor, item.message_id)
@@ -283,14 +290,6 @@ object MessagingCoordinator {
                     userId = context.profile.userId,
                     peerUserId = peer,
                     sessionJson = store.readSession(context.profile.userId, peer),
-                )
-                val openedTransport = openSealedMessageWithSenderCert(
-                    keysJson = workingKeysJson,
-                    expectedSenderUserId = peer,
-                    senderIdentityX25519Pub = item.sender_identity_x25519_pub,
-                    sealedMessageBytesBase64 = item.message_bytes_base64,
-                    serverIssuerEd25519Pub =
-                        context.capabilities.sender_certificate_issuer_ed25519_pub,
                 )
                 val result = decryptMessage(
                     keysJson = workingKeysJson,

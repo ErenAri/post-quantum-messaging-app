@@ -352,37 +352,47 @@ async function encryptDirectPayload(
 
 type DecryptedIncomingPayload = {
   kind: "dm" | "group";
+  senderUserId: string;
   recipient: string;
   plaintext: string;
 };
 
 async function decryptIncomingPayload(
   k: GeneratedKeys,
-  senderUserId: string,
   messageBytesBase64: string,
+  senderUserId?: string,
   senderIdentityX25519Pub?: string
 ): Promise<DecryptedIncomingPayload> {
   const activeKeys = keys ?? k;
   await ensureWebPqRuntime();
   const capabilities = await ensureMandatoryPqRatchetPolicy();
   let transportPayloadBase64 = messageBytesBase64;
+  let resolvedSenderUserId = senderUserId ?? "";
   if (senderIdentityX25519Pub) {
     const opened = openTransportEnvelopeWithSenderCert(
       activeKeys,
-      senderUserId,
       senderIdentityX25519Pub,
       messageBytesBase64,
       capabilities.sender_certificate_issuer_ed25519_pub
     );
+    resolvedSenderUserId = opened.senderUserId;
     transportPayloadBase64 = opened.payloadMessageBytesBase64;
+  }
+  if (!resolvedSenderUserId) {
+    throw new Error("Missing sender identity for incoming message");
   }
   const {
     sessionJson: existingSession,
     clearedLegacy,
-  } = await loadCompatibleDirectSession(senderUserId);
+  } = await loadCompatibleDirectSession(resolvedSenderUserId);
   let result: ReturnType<typeof decryptDirectMessage>;
   try {
-    result = decryptDirectMessage(activeKeys, senderUserId, transportPayloadBase64, existingSession);
+    result = decryptDirectMessage(
+      activeKeys,
+      resolvedSenderUserId,
+      transportPayloadBase64,
+      existingSession
+    );
   } catch (error) {
     if (clearedLegacy) {
       throw new Error("Stored session was reset for mandatory PQ ratchet rollout; peer must start a fresh session.");
@@ -390,9 +400,10 @@ async function decryptIncomingPayload(
     throw error;
   }
   await syncUpdatedKeys(result.updatedKeys);
-  await persistDirectSession(senderUserId, result.sessionJson);
+  await persistDirectSession(resolvedSenderUserId, result.sessionJson);
   return {
     kind: "dm",
+    senderUserId: resolvedSenderUserId,
     recipient: activeKeys.userId,
     plaintext: result.plaintextUtf8,
   };
@@ -3424,7 +3435,11 @@ async function connectRealtime(): Promise<void> {
 async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
   try {
     const k = await ensureKeys();
-    const decrypted = await decryptIncomingPayload(k, wsMsg.sender_user_id, wsMsg.message_bytes_base64);
+        const decrypted = await decryptIncomingPayload(
+          k,
+          wsMsg.message_bytes_base64,
+          wsMsg.sender_user_id
+        );
     const plaintext = decrypted.plaintext;
     const isDirectMessage = decrypted.kind === "dm";
     const groupId = isDirectMessage ? null : decrypted.recipient;
@@ -3515,7 +3530,11 @@ async function pollInboxSilent(): Promise<void> {
     for (const message of inbox.messages) {
       cursor = Math.max(cursor, message.message_id);
       try {
-        const decrypted = await decryptIncomingPayload(k, message.sender_user_id, message.message_bytes_base64);
+        const decrypted = await decryptIncomingPayload(
+          k,
+          message.message_bytes_base64,
+          message.sender_user_id
+        );
         const plaintext = decrypted.plaintext;
         const isDirectMessage = decrypted.kind === "dm";
         const groupId = isDirectMessage ? null : decrypted.recipient;
@@ -4165,15 +4184,14 @@ async function pollSealedInbox(): Promise<void> {
     let conversationListChanged = false;
     for (const item of res.messages) {
       try {
-        const senderId = item.sender_user_id;
-        const plaintext = (
-          await decryptIncomingPayload(
-            k,
-            senderId,
-            item.message_bytes_base64,
-            item.sender_identity_x25519_pub
-          )
-        ).plaintext;
+        const decrypted = await decryptIncomingPayload(
+          k,
+          item.message_bytes_base64,
+          undefined,
+          item.sender_identity_x25519_pub
+        );
+        const senderId = decrypted.senderUserId;
+        const plaintext = decrypted.plaintext;
         const conversationId = convId(k.userId, senderId);
         const existing = await getMessages(conversationId);
         if (existing.some((msg) => msg.serverMessageId === item.message_id)) {

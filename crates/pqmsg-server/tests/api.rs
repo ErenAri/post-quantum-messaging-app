@@ -4152,7 +4152,7 @@ async fn sealed_sender_relay_and_inbox_flow() {
         messages[0]["message_bytes_base64"].as_str(),
         Some(sealed_blob_b64.as_str())
     );
-    assert_eq!(messages[0]["sender_user_id"].as_str(), Some("alice"));
+    assert!(messages[0].get("sender_user_id").is_none());
 }
 
 #[tokio::test]

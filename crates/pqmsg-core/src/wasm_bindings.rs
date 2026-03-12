@@ -718,7 +718,6 @@ pub fn wasm_seal_message_with_sender_cert(
 #[wasm_bindgen]
 pub fn wasm_open_sealed_message_with_sender_cert(
     keys: JsValue,
-    expected_sender_user_id: &str,
     sender_identity_x25519_pub: &str,
     sealed_message_bytes_base64: &str,
     server_issuer_ed25519_pub: &str,
@@ -759,12 +758,6 @@ pub fn wasm_open_sealed_message_with_sender_cert(
         return Err(JsValue::from_str(
             "sealed sender certificate missing from transport envelope",
         ));
-    }
-    if opened.sender_user_id != expected_sender_user_id {
-        return Err(JsValue::from_str(&format!(
-            "expected sender '{expected_sender_user_id}' but envelope opened as '{}'",
-            opened.sender_user_id
-        )));
     }
     serde_wasm_bindgen::to_value(&WasmOpenedCertifiedSealedMessage {
         sender_user_id: opened.sender_user_id,

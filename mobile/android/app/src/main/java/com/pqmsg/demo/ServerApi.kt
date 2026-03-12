@@ -309,7 +309,6 @@ data class SenderCertificateResponse(
 
 data class SealedInboxItem(
     val message_id: Long,
-    val sender_user_id: String,
     val sender_identity_x25519_pub: String,
     val message_bytes_base64: String,
     val received_at: String,

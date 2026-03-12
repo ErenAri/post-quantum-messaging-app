@@ -332,7 +332,6 @@ export function sealMessageWithSenderCert(
 
 export function openSealedMessageWithSenderCert(
   keys: WasmSessionKeys,
-  expectedSenderUserId: string,
   senderIdentityX25519Pub: string,
   sealedMessageBytesBase64: string,
   serverIssuerEd25519Pub: string
@@ -342,7 +341,6 @@ export function openSealedMessageWithSenderCert(
   }
   return wasmModule.wasm_open_sealed_message_with_sender_cert(
     keys,
-    expectedSenderUserId,
     senderIdentityX25519Pub,
     sealedMessageBytesBase64,
     serverIssuerEd25519Pub

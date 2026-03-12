@@ -248,7 +248,6 @@ pub(crate) struct SenderCertificateResponse {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SealedInboxItem {
     pub(crate) message_id: i64,
-    pub(crate) sender_user_id: String,
     pub(crate) sender_identity_x25519_pub: String,
     pub(crate) message_bytes_base64: String,
     pub(crate) received_at: String,

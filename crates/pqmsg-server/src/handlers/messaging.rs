@@ -373,16 +373,14 @@ pub(crate) async fn relay_sealed_message(
             "INSERT INTO sealed_relay_messages (
                 recipient_user_id,
                 recipient_device_id,
-                sender_user_id,
                 sender_identity_x25519_pub,
                 message_blob,
                 received_at
-            ) VALUES ($1, $2, $3, $4, $5, $6)
+            ) VALUES ($1, $2, $3, $4, $5)
             RETURNING message_id",
         )
         .bind(&recipient_user_id)
         .bind(recipient_device_id)
-        .bind(&request.sender_user_id)
         .bind(&sender_identity_x25519_pub)
         .bind(&blob)
         .bind(&now)
@@ -819,12 +817,11 @@ pub(crate) async fn load_sealed_inbox_messages(
     since: i64,
 ) -> Result<Vec<SealedInboxItem>, AppError> {
     let rows = sqlx::query(
-        "SELECT message_id, sender_user_id, sender_identity_x25519_pub, message_blob, received_at
+        "SELECT message_id, sender_identity_x25519_pub, message_blob, received_at
          FROM sealed_relay_messages
          WHERE recipient_user_id = $1
            AND recipient_device_id = $2
            AND message_id > $3
-           AND sender_user_id IS NOT NULL
            AND sender_identity_x25519_pub IS NOT NULL
          ORDER BY message_id ASC
          LIMIT $4",
@@ -840,7 +837,6 @@ pub(crate) async fn load_sealed_inbox_messages(
     for row in rows {
         messages.push(SealedInboxItem {
             message_id: row.try_get("message_id")?,
-            sender_user_id: row.try_get("sender_user_id")?,
             sender_identity_x25519_pub: B64
                 .encode(row.try_get::<Vec<u8>, _>("sender_identity_x25519_pub")?),
             message_bytes_base64: B64.encode(row.try_get::<Vec<u8>, _>("message_blob")?),
