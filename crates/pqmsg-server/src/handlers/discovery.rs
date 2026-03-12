@@ -12,12 +12,22 @@ use crate::types::*;
 use crate::validation::*;
 use crate::AppState;
 
+fn ensure_contact_discovery_supported(state: &AppState) -> Result<(), AppError> {
+    if state.contact_discovery_supported() {
+        return Ok(());
+    }
+    Err(AppError::forbidden(
+        "raw-hash contact discovery is disabled pending a private discovery design",
+    ))
+}
+
 pub(crate) async fn upload_discovery_handles(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
     headers: HeaderMap,
     Json(request): Json<DiscoveryHandlesUploadRequest>,
 ) -> Result<Json<DiscoveryHandlesUploadResponse>, AppError> {
+    ensure_contact_discovery_supported(&state)?;
     check_rate_limit(&state, &format!("discovery-handles:{user_id}"))?;
     validate_id("user_id", &user_id)?;
     let phone_hashes =
@@ -89,6 +99,7 @@ pub(crate) async fn match_discovery_hashes(
     headers: HeaderMap,
     Json(request): Json<DiscoveryMatchRequest>,
 ) -> Result<Json<DiscoveryMatchResponse>, AppError> {
+    ensure_contact_discovery_supported(&state)?;
     check_rate_limit(&state, &format!("discovery-match:{user_id}"))?;
     validate_id("user_id", &user_id)?;
     let query_hashes = normalize_sha256_hashes("hashes_sha256", &request.hashes_sha256)?;

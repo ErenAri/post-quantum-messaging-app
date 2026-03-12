@@ -543,10 +543,10 @@ impl Client {
 // E2E tests
 // ══════════════════════════════════════════════════════════════════════
 
-/// Full register → publish → relay → inbox → receipt round-trip between
+/// Full register → publish → relay → inbox flow while receipts stay disabled.
 /// two clients (Alice → Bob).
 #[tokio::test]
-async fn e2e_full_message_and_receipt_flow() {
+async fn e2e_full_message_and_receipts_disabled_flow() {
     let app = test_app().await;
 
     let alice = Client::new("e2e-alice", "alice-d1", 20);
@@ -615,7 +615,7 @@ async fn e2e_full_message_and_receipt_flow() {
     let received_blob = messages[0]["message_bytes_base64"].as_str().unwrap();
     assert_eq!(B64.decode(received_blob).unwrap(), ciphertext);
 
-    // Bob sends a "delivered" receipt
+    // Bob attempts a "delivered" receipt, but the privacy profile keeps receipts disabled.
     let receipt_auth = receipt_auth_headers(
         &bob.signing_key,
         "e2e-bob",
@@ -634,11 +634,14 @@ async fn e2e_full_message_and_receipt_flow() {
         &receipt_auth,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "send receipt: {receipt_body}");
-    assert_eq!(receipt_body["message_id"].as_i64(), Some(message_id));
-    assert_eq!(receipt_body["receipt_type"].as_str(), Some("delivered"));
+    assert_eq!(status, StatusCode::FORBIDDEN, "send receipt: {receipt_body}");
+    assert!(
+        receipt_body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("read receipts are disabled"))
+    );
 
-    // Alice polls for receipts
+    // Alice cannot poll receipts either.
     let poll_auth = get_receipts_auth_headers(&alice.signing_key, "e2e-alice", "alice-d1", 0);
     let (status, receipts) = json_request_with_headers(
         app.clone(),
@@ -648,17 +651,14 @@ async fn e2e_full_message_and_receipt_flow() {
         &poll_auth,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "poll receipts: {receipts}");
-    let receipt_items = receipts["receipts"].as_array().expect("receipts array");
-    assert_eq!(receipt_items.len(), 1);
-    assert_eq!(receipt_items[0]["message_id"].as_i64(), Some(message_id));
-    assert_eq!(
-        receipt_items[0]["recipient_user_id"].as_str(),
-        Some("e2e-bob")
+    assert_eq!(status, StatusCode::FORBIDDEN, "poll receipts: {receipts}");
+    assert!(
+        receipts["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("read receipts are disabled"))
     );
-    assert_eq!(receipt_items[0]["receipt_type"].as_str(), Some("delivered"));
 
-    // Bob upgrades to "read" receipt
+    // Bob cannot upgrade to a "read" receipt while the feature is disabled.
     let read_auth = receipt_auth_headers(&bob.signing_key, "e2e-bob", "bob-d1", message_id, "read");
     let (status, _) = json_request_with_headers(
         app.clone(),
@@ -671,21 +671,7 @@ async fn e2e_full_message_and_receipt_flow() {
         &read_auth,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "read receipt");
-
-    // Alice can see both receipts
-    let poll_auth2 = get_receipts_auth_headers(&alice.signing_key, "e2e-alice", "alice-d1", 0);
-    let (status, receipts2) = json_request_with_headers(
-        app.clone(),
-        Method::GET,
-        "/v1/users/e2e-alice/receipts/poll?since_id=0",
-        json!({}),
-        &poll_auth2,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let items = receipts2["receipts"].as_array().unwrap();
-    assert_eq!(items.len(), 2, "should have delivered + read receipts");
+    assert_eq!(status, StatusCode::FORBIDDEN, "read receipt");
 }
 
 /// Ephemeral (disappearing) message relay with TTL.
@@ -790,9 +776,9 @@ async fn e2e_ephemeral_rejects_invalid_ttl() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-/// Invalid receipt_type is rejected.
+/// Receipts are rejected before receipt_type validation because the feature is disabled.
 #[tokio::test]
-async fn e2e_receipt_rejects_invalid_type() {
+async fn e2e_receipts_reject_before_type_validation() {
     let app = test_app().await;
     let bob = Client::new("rct-bob", "bob-d1", 80);
     bob.register(&app).await;
@@ -809,12 +795,12 @@ async fn e2e_receipt_rejects_invalid_type() {
         &auth,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
-/// Multi-device: message relayed to both devices, each sends receipt.
+/// Multi-device: message relayed to both devices, but receipts stay disabled.
 #[tokio::test]
-async fn e2e_multi_device_message_and_receipts() {
+async fn e2e_multi_device_message_and_receipts_disabled() {
     let app = test_app().await;
 
     let alice = Client::new("md-alice", "alice-d1", 90);
@@ -882,7 +868,7 @@ async fn e2e_multi_device_message_and_receipts() {
     let msgs_d2 = inbox_d2["messages"].as_array().unwrap();
     assert!(!msgs_d2.is_empty(), "device 2 inbox non-empty");
 
-    // Device 1 sends "delivered" receipt
+    // Device 1 cannot send a "delivered" receipt
     let d1_receipt_auth =
         receipt_auth_headers(&bob.signing_key, "md-bob", "bob-d1", msg_id, "delivered");
     let (status, _) = json_request_with_headers(
@@ -893,9 +879,9 @@ async fn e2e_multi_device_message_and_receipts() {
         &d1_receipt_auth,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // Device 2 sends "delivered" receipt
+    // Device 2 cannot send a "delivered" receipt either
     let d2_receipt_auth =
         receipt_auth_headers(&bob.signing_key, "md-bob", "bob-d2", msg_id, "delivered");
     let (status, _) = json_request_with_headers(
@@ -906,9 +892,9 @@ async fn e2e_multi_device_message_and_receipts() {
         &d2_receipt_auth,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // Alice polls receipts — should see both device receipts
+    // Alice cannot poll receipts while the feature is disabled.
     let poll_auth = get_receipts_auth_headers(&alice.signing_key, "md-alice", "alice-d1", 0);
     let (status, receipts) = json_request_with_headers(
         app.clone(),
@@ -918,15 +904,12 @@ async fn e2e_multi_device_message_and_receipts() {
         &poll_auth,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let items = receipts["receipts"].as_array().unwrap();
-    assert_eq!(items.len(), 2, "receipts from both devices");
-    let devices: Vec<&str> = items
-        .iter()
-        .map(|r| r["recipient_device_id"].as_str().unwrap())
-        .collect();
-    assert!(devices.contains(&"bob-d1"));
-    assert!(devices.contains(&"bob-d2"));
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        receipts["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("read receipts are disabled"))
+    );
 }
 
 /// Security headers are present on all responses.
@@ -1088,9 +1071,9 @@ async fn e2e_ephemeral_multi_device_fan_out() {
     );
 }
 
-/// Receipt idempotency: sending same receipt twice succeeds (upsert).
+/// Receipt endpoints remain consistently forbidden when disabled.
 #[tokio::test]
-async fn e2e_receipt_idempotent_upsert() {
+async fn e2e_receipt_endpoint_stays_forbidden() {
     let app = test_app().await;
     let alice = Client::new("idem-alice", "alice-d1", 150);
     let bob = Client::new("idem-bob", "bob-d1", 160);
@@ -1116,7 +1099,7 @@ async fn e2e_receipt_idempotent_upsert() {
     assert_eq!(status, StatusCode::OK);
     let msg_id = relay_body["message_id"].as_i64().unwrap();
 
-    // Bob sends "delivered" receipt twice — second should succeed (upsert)
+    // Bob sends "delivered" receipt twice — both attempts should be forbidden.
     for _ in 0..2 {
         let auth =
             receipt_auth_headers(&bob.signing_key, "idem-bob", "bob-d1", msg_id, "delivered");
@@ -1128,10 +1111,10 @@ async fn e2e_receipt_idempotent_upsert() {
             &auth,
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "receipt upsert should succeed");
+        assert_eq!(status, StatusCode::FORBIDDEN, "receipt endpoint should stay forbidden");
     }
 
-    // Alice sees exactly one delivered receipt (not duplicated)
+    // Alice cannot poll receipts either.
     let poll_auth = get_receipts_auth_headers(&alice.signing_key, "idem-alice", "alice-d1", 0);
     let (status, receipts) = json_request_with_headers(
         app.clone(),
@@ -1141,9 +1124,12 @@ async fn e2e_receipt_idempotent_upsert() {
         &poll_auth,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let items = receipts["receipts"].as_array().unwrap();
-    assert_eq!(items.len(), 1, "upsert should not create duplicate");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        receipts["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("read receipts are disabled"))
+    );
 }
 
 // ── Call signaling auth helpers ──────────────────────────────────
@@ -1232,9 +1218,9 @@ fn call_signals_auth_headers(
 // Call signaling E2E tests
 // ══════════════════════════════════════════════════════════════════════
 
-/// Full call flow: offer → answer → ICE exchange → poll signals → hangup.
+/// Calling endpoints are disabled in the private-messaging-only profile.
 #[tokio::test]
-async fn e2e_call_full_flow() {
+async fn e2e_call_endpoints_are_disabled() {
     let app = test_app().await;
 
     let alice = Client::new("call-alice", "alice-d1", 170);
@@ -1242,7 +1228,6 @@ async fn e2e_call_full_flow() {
     alice.register(&app).await;
     bob.register(&app).await;
 
-    // 1. Alice sends an offer to Bob
     let offer_auth =
         call_offer_auth_headers(&alice.signing_key, "call-alice", "alice-d1", "call-bob");
     let (status, offer_body) = json_request_with_headers(
@@ -1258,147 +1243,17 @@ async fn e2e_call_full_flow() {
         &offer_auth,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "offer: {offer_body}");
-    let call_id = offer_body["call_id"].as_str().expect("call_id").to_string();
-    assert!(!call_id.is_empty());
-    assert!(offer_body["created_at"].as_str().is_some());
-
-    // 2. Bob polls for signals and sees the offer
-    let poll_auth = call_signals_auth_headers(&bob.signing_key, "call-bob", "bob-d1", &call_id);
-    let (status, signals_body) = json_request_with_headers(
-        app.clone(),
-        Method::GET,
-        &format!("/v1/calls/{call_id}/signals?since=0"),
-        json!({}),
-        &poll_auth,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "poll signals: {signals_body}");
-    let signals = signals_body["signals"].as_array().expect("signals array");
-    assert_eq!(signals.len(), 1);
-    assert!(signals[0]["signal_id"].as_i64().is_some());
-    assert_eq!(signals[0]["signal_type"].as_str(), Some("offer"));
-    assert_eq!(signals[0]["from_user_id"].as_str(), Some("call-alice"));
-
-    // 3. Bob answers the call
-    let answer_auth = call_answer_auth_headers(&bob.signing_key, "call-bob", "bob-d1", &call_id);
-    let (status, answer_body) = json_request_with_headers(
-        app.clone(),
-        Method::POST,
-        &format!("/v1/calls/{call_id}/answer"),
-        json!({
-            "callee_user_id": "call-bob",
-            "device_id": "bob-d1",
-            "sdp_answer_base64": B64.encode(b"v=0\r\no=bob SDP answer")
-        }),
-        &answer_auth,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "answer: {answer_body}");
-    assert_eq!(answer_body["call_id"].as_str(), Some(call_id.as_str()));
-    assert!(answer_body["answered_at"].as_str().is_some());
-
-    // 4. Alice polls and sees the answer
-    let poll_auth_alice =
-        call_signals_auth_headers(&alice.signing_key, "call-alice", "alice-d1", &call_id);
-    let (status, signals_body) = json_request_with_headers(
-        app.clone(),
-        Method::GET,
-        &format!("/v1/calls/{call_id}/signals?since=0"),
-        json!({}),
-        &poll_auth_alice,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let signals = signals_body["signals"].as_array().unwrap();
-    assert_eq!(
-        signals.len(),
-        1,
-        "Alice should see Bob's answer (not her own offer)"
-    );
-    assert!(signals[0]["signal_id"].as_i64().is_some());
-    assert_eq!(signals[0]["signal_type"].as_str(), Some("answer"));
-    assert_eq!(signals[0]["from_user_id"].as_str(), Some("call-bob"));
-
-    // 5. Both exchange ICE candidates
-    let ice_auth_alice =
-        call_ice_auth_headers(&alice.signing_key, "call-alice", "alice-d1", &call_id);
-    let (status, ice_body) = json_request_with_headers(
-        app.clone(),
-        Method::POST,
-        &format!("/v1/calls/{call_id}/ice"),
-        json!({
-            "sender_user_id": "call-alice",
-            "device_id": "alice-d1",
-            "candidate_base64": B64.encode(b"candidate:alice-ice-1")
-        }),
-        &ice_auth_alice,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "alice ice: {ice_body}");
-
-    let ice_auth_bob = call_ice_auth_headers(&bob.signing_key, "call-bob", "bob-d1", &call_id);
-    let (status, _) = json_request_with_headers(
-        app.clone(),
-        Method::POST,
-        &format!("/v1/calls/{call_id}/ice"),
-        json!({
-            "sender_user_id": "call-bob",
-            "device_id": "bob-d1",
-            "candidate_base64": B64.encode(b"candidate:bob-ice-1")
-        }),
-        &ice_auth_bob,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    // 6. Bob polls and sees Alice's ICE candidate
-    let poll_auth_bob2 =
-        call_signals_auth_headers(&bob.signing_key, "call-bob", "bob-d1", &call_id);
-    let (status, signals_body) = json_request_with_headers(
-        app.clone(),
-        Method::GET,
-        &format!("/v1/calls/{call_id}/signals?since=0"),
-        json!({}),
-        &poll_auth_bob2,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let signals = signals_body["signals"].as_array().unwrap();
-    // Bob should see: offer (from Alice) + ice-candidate (from Alice) = 2 signals
-    // (answer from Bob and Bob's own ICE are excluded since from_user_id != auth.user_id)
-    let alice_signals: Vec<_> = signals
-        .iter()
-        .filter(|s| s["from_user_id"].as_str() == Some("call-alice"))
-        .collect();
+    assert_eq!(status, StatusCode::FORBIDDEN, "offer: {offer_body}");
     assert!(
-        alice_signals.len() >= 2,
-        "Bob should see Alice's offer + ICE, got {} signals",
-        alice_signals.len()
+        offer_body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("calling is disabled"))
     );
-
-    // 7. Alice hangs up
-    let hangup_auth =
-        call_hangup_auth_headers(&alice.signing_key, "call-alice", "alice-d1", &call_id);
-    let (status, hangup_body) = json_request_with_headers(
-        app.clone(),
-        Method::POST,
-        &format!("/v1/calls/{call_id}/hangup"),
-        json!({
-            "user_id": "call-alice",
-            "device_id": "alice-d1"
-        }),
-        &hangup_auth,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "hangup: {hangup_body}");
-    assert_eq!(hangup_body["call_id"].as_str(), Some(call_id.as_str()));
-    assert!(hangup_body["ended_at"].as_str().is_some());
 }
 
-/// Answering a non-existent call returns 404.
+/// Answering a non-existent call is still blocked by the calling feature gate.
 #[tokio::test]
-async fn e2e_call_answer_nonexistent() {
+async fn e2e_call_answer_is_disabled() {
     let app = test_app().await;
 
     let bob = Client::new("cne-bob", "bob-d1", 190);
@@ -1418,12 +1273,12 @@ async fn e2e_call_answer_nonexistent() {
         &auth,
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
-/// Invalid call_type in offer is rejected.
+/// Invalid call_type is never reached because calling is disabled.
 #[tokio::test]
-async fn e2e_call_offer_rejects_invalid_type() {
+async fn e2e_call_offer_rejects_before_type_validation() {
     let app = test_app().await;
 
     let alice = Client::new("cit-alice", "alice-d1", 200);
@@ -1445,12 +1300,12 @@ async fn e2e_call_offer_rejects_invalid_type() {
         &auth,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
-/// Hangup on an already-ended call returns 404.
+/// Hangup is blocked by the calling feature gate.
 #[tokio::test]
-async fn e2e_call_hangup_after_ended() {
+async fn e2e_call_hangup_is_disabled() {
     let app = test_app().await;
 
     let alice = Client::new("che-alice", "alice-d1", 220);
@@ -1458,32 +1313,12 @@ async fn e2e_call_hangup_after_ended() {
     alice.register(&app).await;
     bob.register(&app).await;
 
-    // Create a call
-    let offer_auth =
-        call_offer_auth_headers(&alice.signing_key, "che-alice", "alice-d1", "che-bob");
-    let (status, offer_body) = json_request_with_headers(
-        app.clone(),
-        Method::POST,
-        "/v1/calls/che-bob/offer",
-        json!({
-            "caller_user_id": "che-alice",
-            "device_id": "alice-d1",
-            "sdp_offer_base64": B64.encode(b"sdp-offer"),
-            "call_type": "video"
-        }),
-        &offer_auth,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let call_id = offer_body["call_id"].as_str().unwrap();
-
-    // First hangup succeeds
     let hangup_auth =
-        call_hangup_auth_headers(&alice.signing_key, "che-alice", "alice-d1", call_id);
+        call_hangup_auth_headers(&alice.signing_key, "che-alice", "alice-d1", "disabled-call");
     let (status, _) = json_request_with_headers(
         app.clone(),
         Method::POST,
-        &format!("/v1/calls/{call_id}/hangup"),
+        "/v1/calls/disabled-call/hangup",
         json!({
             "user_id": "che-alice",
             "device_id": "alice-d1"
@@ -1491,28 +1326,12 @@ async fn e2e_call_hangup_after_ended() {
         &hangup_auth,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-
-    // Second hangup should fail (call already ended)
-    let hangup_auth2 =
-        call_hangup_auth_headers(&alice.signing_key, "che-alice", "alice-d1", call_id);
-    let (status, _) = json_request_with_headers(
-        app.clone(),
-        Method::POST,
-        &format!("/v1/calls/{call_id}/hangup"),
-        json!({
-            "user_id": "che-alice",
-            "device_id": "alice-d1"
-        }),
-        &hangup_auth2,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
-/// ICE candidate on a non-existent call returns 404.
+/// ICE candidate exchange is blocked by the calling feature gate.
 #[tokio::test]
-async fn e2e_call_ice_nonexistent() {
+async fn e2e_call_ice_is_disabled() {
     let app = test_app().await;
 
     let alice = Client::new("icene-alice", "alice-d1", 240);
@@ -1532,5 +1351,5 @@ async fn e2e_call_ice_nonexistent() {
         &auth,
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }

@@ -65,13 +65,44 @@ class CallActivity : AppCompatActivity() {
             return
         }
 
-        buildUi()
-        checkPermissionsAndStart()
+        buildUnavailableUi()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         signalPollJob?.cancel()
+    }
+
+    private fun buildUnavailableUi() {
+        val layout = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(48, 96, 48, 48)
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+        }
+
+        val title = TextView(this).apply {
+            text = "${callType.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }} calling is unavailable"
+            textSize = 22f
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, 16, 0, 16)
+        }
+        layout.addView(title)
+
+        val body = TextView(this).apply {
+            text = "The supported client path is private messaging only. Calls are disabled in this build."
+            textSize = 15f
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, 0, 0, 32)
+        }
+        layout.addView(body)
+
+        val button = Button(this).apply {
+            text = "Back"
+            setOnClickListener { finish() }
+        }
+        layout.addView(button)
+
+        setContentView(layout)
     }
 
     private fun buildUi() {

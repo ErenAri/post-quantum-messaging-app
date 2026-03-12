@@ -43,6 +43,14 @@ impl AppError {
         }
     }
 
+    pub(crate) fn forbidden(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            title: "Forbidden",
+            detail: detail.into(),
+        }
+    }
+
     pub(crate) fn internal(detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

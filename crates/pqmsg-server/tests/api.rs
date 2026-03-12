@@ -2146,6 +2146,13 @@ async fn capabilities_reports_client_contract() {
         body["pq_ratchet_interval"].as_u64(),
         Some(DEFAULT_PQ_RATCHET_INTERVAL as u64)
     );
+    assert_eq!(body["contact_discovery_supported"].as_bool(), Some(false));
+    assert_eq!(body["presence_supported"].as_bool(), Some(false));
+    assert_eq!(body["typing_indicators_supported"].as_bool(), Some(false));
+    assert_eq!(body["read_receipts_supported"].as_bool(), Some(false));
+    assert_eq!(body["calling_supported"].as_bool(), Some(false));
+    assert_eq!(body["stories_supported"].as_bool(), Some(false));
+    assert_eq!(body["channels_supported"].as_bool(), Some(false));
     assert_eq!(
         body["runtime_crypto_profile"]["protocol_version"].as_u64(),
         Some(PROTOCOL_VERSION_V1 as u64)
@@ -3592,7 +3599,7 @@ async fn inbox_delete_endpoint_removes_remote_messages_for_device() {
 }
 
 #[tokio::test]
-async fn discovery_and_contacts_flow() {
+async fn discovery_disabled_and_contacts_flow() {
     use sha2::{Digest, Sha256};
 
     let app = test_app().await;
@@ -3641,9 +3648,8 @@ async fn discovery_and_contacts_flow() {
         &discovery_upload_headers,
     )
     .await;
-    assert_eq!(status_upload, StatusCode::OK);
-    assert_eq!(upload_payload["uploaded_phone_hashes"].as_u64(), Some(1));
-    assert_eq!(upload_payload["uploaded_email_hashes"].as_u64(), Some(1));
+    assert_eq!(status_upload, StatusCode::FORBIDDEN);
+    assert_eq!(upload_payload["status"].as_u64(), Some(403));
 
     let unknown_hash = {
         let mut hasher = Sha256::new();
@@ -3664,14 +3670,8 @@ async fn discovery_and_contacts_flow() {
         &discovery_match_headers,
     )
     .await;
-    assert_eq!(status_match, StatusCode::OK);
-    let matches = match_payload["matches"].as_array().expect("matches");
-    assert_eq!(matches.len(), 1);
-    assert_eq!(matches[0]["matched_user_id"].as_str(), Some("bob"));
-    assert_eq!(
-        matches[0]["hash_sha256"].as_str(),
-        Some(bob_phone_hash.as_str())
-    );
+    assert_eq!(status_match, StatusCode::FORBIDDEN);
+    assert_eq!(match_payload["status"].as_u64(), Some(403));
 
     let fingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let contact_add_body = json!({
@@ -4114,7 +4114,7 @@ async fn inbox_auth_compatibility_accepts_mobile_secondary_flows() {
         &inbox_auth_headers(&alice_sig, "alice", "alice-dev-1", 0),
     )
     .await;
-    assert_eq!(status_presence_update, StatusCode::OK);
+    assert_eq!(status_presence_update, StatusCode::FORBIDDEN);
 
     let (status_presence_get, presence_payload) = json_request_with_headers(
         app.clone(),
@@ -4124,8 +4124,12 @@ async fn inbox_auth_compatibility_accepts_mobile_secondary_flows() {
         &inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0),
     )
     .await;
-    assert_eq!(status_presence_get, StatusCode::OK);
-    assert_eq!(presence_payload["status"].as_str(), Some("online"));
+    assert_eq!(status_presence_get, StatusCode::FORBIDDEN);
+    assert!(
+        presence_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("presence is disabled"))
+    );
 
     let (status_typing_update, _) = json_request_with_headers(
         app.clone(),
@@ -4135,7 +4139,7 @@ async fn inbox_auth_compatibility_accepts_mobile_secondary_flows() {
         &inbox_auth_headers(&alice_sig, "alice", "alice-dev-1", 0),
     )
     .await;
-    assert_eq!(status_typing_update, StatusCode::OK);
+    assert_eq!(status_typing_update, StatusCode::FORBIDDEN);
 
     let (status_typing_get, typing_payload) = json_request_with_headers(
         app.clone(),
@@ -4145,12 +4149,44 @@ async fn inbox_auth_compatibility_accepts_mobile_secondary_flows() {
         &inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0),
     )
     .await;
-    assert_eq!(status_typing_get, StatusCode::OK);
-    assert_eq!(
-        typing_payload["typing"]
-            .as_array()
-            .map(|typing| typing.len()),
-        Some(1)
+    assert_eq!(status_typing_get, StatusCode::FORBIDDEN);
+    assert!(
+        typing_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("typing indicators are disabled"))
+    );
+
+    let (status_receipt_send, receipt_send_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/receipts",
+        json!({
+            "message_id": 1,
+            "receipt_type": "read"
+        }),
+        &[],
+    )
+    .await;
+    assert_eq!(status_receipt_send, StatusCode::FORBIDDEN);
+    assert!(
+        receipt_send_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("read receipts are disabled"))
+    );
+
+    let (status_receipts_get, receipts_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/alice/receipts/poll",
+        json!({}),
+        &[],
+    )
+    .await;
+    assert_eq!(status_receipts_get, StatusCode::FORBIDDEN);
+    assert!(
+        receipts_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("read receipts are disabled"))
     );
 }
 
@@ -4446,7 +4482,7 @@ async fn bundle_reserve_prevents_full_prekey_exhaustion() {
 }
 
 #[tokio::test]
-async fn rich_media_profile_presence_typing_flow() {
+async fn rich_media_profile_and_disabled_metadata_signals_flow() {
     let app = test_app().await;
     let alice_sig = signing_key(171);
     let bob_sig = signing_key(172);
@@ -4577,9 +4613,12 @@ async fn rich_media_profile_presence_typing_flow() {
         &presence_update_headers,
     )
     .await;
-    assert_eq!(status_presence_update, StatusCode::OK);
-    assert_eq!(presence_update_payload["status"].as_str(), Some("online"));
-    assert_eq!(presence_update_payload["active"].as_bool(), Some(true));
+    assert_eq!(status_presence_update, StatusCode::FORBIDDEN);
+    assert!(
+        presence_update_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("presence is disabled"))
+    );
 
     let presence_get_headers = presence_get_auth_headers(&bob_sig, "bob", "bob-dev-1", "alice");
     let (status_presence_get, presence_get_payload) = json_request_with_headers(
@@ -4590,9 +4629,12 @@ async fn rich_media_profile_presence_typing_flow() {
         &presence_get_headers,
     )
     .await;
-    assert_eq!(status_presence_get, StatusCode::OK);
-    assert_eq!(presence_get_payload["status"].as_str(), Some("online"));
-    assert_eq!(presence_get_payload["active"].as_bool(), Some(true));
+    assert_eq!(status_presence_get, StatusCode::FORBIDDEN);
+    assert!(
+        presence_get_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("presence is disabled"))
+    );
 
     let typing_on_headers =
         typing_update_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob", true);
@@ -4604,8 +4646,12 @@ async fn rich_media_profile_presence_typing_flow() {
         &typing_on_headers,
     )
     .await;
-    assert_eq!(status_typing_on, StatusCode::OK);
-    assert_eq!(typing_on_payload["is_typing"].as_bool(), Some(true));
+    assert_eq!(status_typing_on, StatusCode::FORBIDDEN);
+    assert!(
+        typing_on_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("typing indicators are disabled"))
+    );
 
     let typing_get_headers = typing_get_auth_headers(&bob_sig, "bob", "bob-dev-1", "bob");
     let (status_typing_get, typing_get_payload) = json_request_with_headers(
@@ -4616,12 +4662,12 @@ async fn rich_media_profile_presence_typing_flow() {
         &typing_get_headers,
     )
     .await;
-    assert_eq!(status_typing_get, StatusCode::OK);
-    let typing_entries = typing_get_payload["typing"]
-        .as_array()
-        .expect("typing array");
-    assert_eq!(typing_entries.len(), 1);
-    assert_eq!(typing_entries[0]["sender_user_id"].as_str(), Some("alice"));
+    assert_eq!(status_typing_get, StatusCode::FORBIDDEN);
+    assert!(
+        typing_get_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("typing indicators are disabled"))
+    );
 
     let typing_off_headers =
         typing_update_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob", false);
@@ -4633,8 +4679,12 @@ async fn rich_media_profile_presence_typing_flow() {
         &typing_off_headers,
     )
     .await;
-    assert_eq!(status_typing_off, StatusCode::OK);
-    assert_eq!(typing_off_payload["is_typing"].as_bool(), Some(false));
+    assert_eq!(status_typing_off, StatusCode::FORBIDDEN);
+    assert!(
+        typing_off_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("typing indicators are disabled"))
+    );
 
     let typing_get_headers_after_off = typing_get_auth_headers(&bob_sig, "bob", "bob-dev-1", "bob");
     let (status_typing_get_after_off, typing_get_payload_after_off) = json_request_with_headers(
@@ -4645,18 +4695,16 @@ async fn rich_media_profile_presence_typing_flow() {
         &typing_get_headers_after_off,
     )
     .await;
-    assert_eq!(status_typing_get_after_off, StatusCode::OK);
-    assert_eq!(
-        typing_get_payload_after_off["typing"]
-            .as_array()
-            .expect("typing array")
-            .len(),
-        0
+    assert_eq!(status_typing_get_after_off, StatusCode::FORBIDDEN);
+    assert!(
+        typing_get_payload_after_off["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("typing indicators are disabled"))
     );
 }
 
 #[tokio::test]
-async fn rich_media_profile_presence_typing_reject_invalid_inputs() {
+async fn rich_media_profile_and_disabled_metadata_signals_reject_before_input_validation() {
     let app = test_app().await;
     let alice_sig = signing_key(174);
     let bob_sig = signing_key(175);
@@ -4728,7 +4776,7 @@ async fn rich_media_profile_presence_typing_reject_invalid_inputs() {
         &typing_headers,
     )
     .await;
-    assert_eq!(status_typing_self, StatusCode::BAD_REQUEST);
+    assert_eq!(status_typing_self, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -5417,7 +5465,7 @@ async fn websocket_inbox_disconnect_and_reconnect_delivers_messages() {
 }
 
 #[tokio::test]
-async fn postgres_channel_subscribe_is_idempotent() {
+async fn postgres_channel_endpoints_are_disabled() {
     let Some(app) = test_app_with_postgres_env().await else {
         return;
     };
@@ -5454,15 +5502,16 @@ async fn postgres_channel_subscribe_is_idempotent() {
         &create_headers,
     )
     .await;
-    assert_eq!(status_create, StatusCode::OK);
-    let channel_id = create_payload["channel_id"]
-        .as_str()
-        .expect("channel_id")
-        .to_string();
+    assert_eq!(status_create, StatusCode::FORBIDDEN);
+    assert!(
+        create_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("channels are disabled"))
+    );
 
     let subscribe_message = format!(
         "channel-subscribe:{}:{}:{}",
-        "bob-pg-chan", "bob-pg-chan-dev", channel_id
+        "bob-pg-chan", "bob-pg-chan-dev", "disabled-channel"
     );
     let subscribe_headers = format_string_auth_headers(
         &bob_sig,
@@ -5470,17 +5519,20 @@ async fn postgres_channel_subscribe_is_idempotent() {
         "bob-pg-chan-dev",
         subscribe_message,
     );
-    for _ in 0..2 {
-        let (status_subscribe, _) = json_request_with_headers(
-            app.clone(),
-            Method::POST,
-            &format!("/v1/channels/{channel_id}/subscribe"),
-            json!({}),
-            &subscribe_headers,
-        )
-        .await;
-        assert_eq!(status_subscribe, StatusCode::OK);
-    }
+    let (status_subscribe, subscribe_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/channels/disabled-channel/subscribe",
+        json!({}),
+        &subscribe_headers,
+    )
+    .await;
+    assert_eq!(status_subscribe, StatusCode::FORBIDDEN);
+    assert!(
+        subscribe_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("channels are disabled"))
+    );
 
     let list_headers = format_string_auth_headers(
         &bob_sig,
@@ -5496,18 +5548,16 @@ async fn postgres_channel_subscribe_is_idempotent() {
         &list_headers,
     )
     .await;
-    assert_eq!(status_list, StatusCode::OK);
-    let channels = list_payload["channels"].as_array().expect("channels");
-    assert_eq!(channels.len(), 1);
-    assert_eq!(
-        channels[0]["subscriber_count"].as_i64(),
-        Some(2),
-        "owner + one subscriber should be present after repeated subscribe"
+    assert_eq!(status_list, StatusCode::FORBIDDEN);
+    assert!(
+        list_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("channels are disabled"))
     );
 }
 
 #[tokio::test]
-async fn postgres_story_view_is_idempotent() {
+async fn postgres_story_endpoints_are_disabled() {
     let Some(app) = test_app_with_postgres_env().await else {
         return;
     };
@@ -5549,29 +5599,33 @@ async fn postgres_story_view_is_idempotent() {
         &create_headers,
     )
     .await;
-    assert_eq!(status_create, StatusCode::OK);
-    let story_id = create_payload["story_id"]
-        .as_str()
-        .expect("story_id")
-        .to_string();
+    assert_eq!(status_create, StatusCode::FORBIDDEN);
+    assert!(
+        create_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("stories are disabled"))
+    );
 
     let view_message = format!(
         "story-view:{}:{}:{}",
-        "bob-pg-story", "bob-pg-story-dev", story_id
+        "bob-pg-story", "bob-pg-story-dev", "disabled-story"
     );
     let view_headers =
         format_string_auth_headers(&bob_sig, "bob-pg-story", "bob-pg-story-dev", view_message);
-    for _ in 0..2 {
-        let (status_view, _) = json_request_with_headers(
-            app.clone(),
-            Method::POST,
-            &format!("/v1/stories/{story_id}/view"),
-            json!({}),
-            &view_headers,
-        )
-        .await;
-        assert_eq!(status_view, StatusCode::OK);
-    }
+    let (status_view, view_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/stories/disabled-story/view",
+        json!({}),
+        &view_headers,
+    )
+    .await;
+    assert_eq!(status_view, StatusCode::FORBIDDEN);
+    assert!(
+        view_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("stories are disabled"))
+    );
 
     let feed_headers = format_string_auth_headers(
         &bob_sig,
@@ -5587,13 +5641,11 @@ async fn postgres_story_view_is_idempotent() {
         &feed_headers,
     )
     .await;
-    assert_eq!(status_feed, StatusCode::OK);
-    let stories = feed_payload["stories"].as_array().expect("stories");
-    assert_eq!(stories.len(), 1);
-    assert_eq!(
-        stories[0]["view_count"].as_i64(),
-        Some(1),
-        "repeated view requests should keep a single story view record"
+    assert_eq!(status_feed, StatusCode::FORBIDDEN);
+    assert!(
+        feed_payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("stories are disabled"))
     );
 }
 

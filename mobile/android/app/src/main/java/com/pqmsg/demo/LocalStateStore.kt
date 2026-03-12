@@ -163,6 +163,13 @@ class LocalStateStore(context: Context) {
         return readProtectedFile(path)
     }
 
+    fun clearSession(userId: String, peerUserId: String) {
+        val path = File(rootDir, "sessions/$userId/$peerUserId.json")
+        if (path.exists()) {
+            path.delete()
+        }
+    }
+
     private fun writeProtectedFile(path: File, content: String) {
         path.parentFile?.mkdirs()
         encryptedFile(path).openFileOutput().use { output ->

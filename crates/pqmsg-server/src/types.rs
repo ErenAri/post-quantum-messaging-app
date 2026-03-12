@@ -602,6 +602,13 @@ pub(crate) struct ServerCapabilitiesResponse {
     pub(crate) registration_pow_bits: u8,
     pub(crate) prekey_bundle_reserve_count: i64,
     pub(crate) pq_ratchet_interval: u32,
+    pub(crate) contact_discovery_supported: bool,
+    pub(crate) presence_supported: bool,
+    pub(crate) typing_indicators_supported: bool,
+    pub(crate) read_receipts_supported: bool,
+    pub(crate) calling_supported: bool,
+    pub(crate) stories_supported: bool,
+    pub(crate) channels_supported: bool,
     pub(crate) web_client_policy: &'static str,
 }
 

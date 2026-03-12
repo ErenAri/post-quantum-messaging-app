@@ -96,6 +96,13 @@ class ServerApiTest {
               "registration_pow_bits": 0,
               "prekey_bundle_reserve_count": 10,
               "pq_ratchet_interval": 5,
+              "contact_discovery_supported": false,
+              "presence_supported": false,
+              "typing_indicators_supported": false,
+              "read_receipts_supported": false,
+              "calling_supported": false,
+              "stories_supported": false,
+              "channels_supported": false,
               "web_client_policy": "demo_only"
             }
             """.trimIndent(),
@@ -104,6 +111,12 @@ class ServerApiTest {
 
         assertEquals("demo_only", parsed.web_client_policy)
         assertEquals("ml-kem-768", parsed.runtime_crypto_profile.kem)
+        assertEquals(false, parsed.presence_supported)
+        assertEquals(false, parsed.typing_indicators_supported)
+        assertEquals(false, parsed.read_receipts_supported)
+        assertEquals(false, parsed.calling_supported)
+        assertEquals(false, parsed.stories_supported)
+        assertEquals(false, parsed.channels_supported)
     }
 
     @Test
@@ -132,6 +145,13 @@ class ServerApiTest {
               "registration_pow_bits": 0,
               "prekey_bundle_reserve_count": 10,
               "pq_ratchet_interval": 0,
+              "contact_discovery_supported": false,
+              "presence_supported": false,
+              "typing_indicators_supported": false,
+              "read_receipts_supported": false,
+              "calling_supported": false,
+              "stories_supported": false,
+              "channels_supported": false,
               "web_client_policy": "demo_only"
             }
             """.trimIndent(),

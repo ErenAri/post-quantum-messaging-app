@@ -1,4 +1,5 @@
 import { RequestAuthHeaders } from "./crypto";
+import { validateWebServerUrl } from "./webEnvironment";
 
 export class PqmsgApiError extends Error {
   readonly status: number;
@@ -559,6 +560,13 @@ export type ServerCapabilitiesResponse = {
   registration_pow_bits: number;
   prekey_bundle_reserve_count: number;
   pq_ratchet_interval: number;
+  contact_discovery_supported: boolean;
+  presence_supported: boolean;
+  typing_indicators_supported: boolean;
+  read_receipts_supported: boolean;
+  calling_supported: boolean;
+  stories_supported: boolean;
+  channels_supported: boolean;
   web_client_policy: string;
 };
 
@@ -570,6 +578,7 @@ export class PqmsgApi {
     if (!normalized) {
       throw new Error("server URL is empty");
     }
+    validateWebServerUrl(normalized);
     this.baseUrl = normalized;
   }
 

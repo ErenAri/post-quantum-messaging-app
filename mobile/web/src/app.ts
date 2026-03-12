@@ -55,6 +55,7 @@ import {
   type ServerCapabilitiesResponse,
 } from "./server";
 import {
+  clearDirectMessageSession,
   clearAllDirectMessageSessions,
   DEFAULT_SETUP,
   initMetadataStorage,
@@ -120,6 +121,12 @@ import {
   parseDirectChatTarget,
   startDirectConversationFlow,
 } from "./webFlows";
+import {
+  getLiveUnsupportedWebRuntimeReason,
+  isLoopbackHostname,
+  isSecureWebOrigin,
+  validateWebServerUrl,
+} from "./webEnvironment";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -161,6 +168,8 @@ type InboxFilter = "all" | "unread" | "groups" | "requests" | "archived";
 async function bootstrapApp(): Promise<void> {
   try {
     await initMetadataStorage();
+    setup = loadSetup();
+    ensureSupportedWebEnvironment();
     await ensureWebPqRuntime();
   } catch (error) {
     app.innerHTML = `
@@ -172,7 +181,6 @@ async function bootstrapApp(): Promise<void> {
     return;
   }
 
-  setup = loadSetup();
   if (setup.userId && hasLocalKeys(setup.userId)) {
     const params = new URLSearchParams(location.search);
     const invite = params.get("invite");
@@ -206,6 +214,25 @@ async function loadServerCapabilitiesCached(): Promise<ServerCapabilitiesRespons
   }
 }
 
+function presenceSupported(): boolean {
+  return cachedCapabilities?.presence_supported ?? false;
+}
+
+function typingIndicatorsSupported(): boolean {
+  return cachedCapabilities?.typing_indicators_supported ?? false;
+}
+
+function readReceiptsSupported(): boolean {
+  return cachedCapabilities?.read_receipts_supported ?? false;
+}
+
+function ensureSupportedWebEnvironment(): void {
+  const runtimeIssue = getLiveUnsupportedWebRuntimeReason();
+  if (runtimeIssue) {
+    throw new Error(runtimeIssue);
+  }
+}
+
 async function ensureWebPqRuntime(): Promise<void> {
   if (isPqSessionMessagingAvailable()) {
     return;
@@ -234,6 +261,27 @@ async function loadStoredDirectSession(peerUserId: string): Promise<string | nul
   return loadDirectMessageSession(setup.userId, peerUserId, getPassphrase());
 }
 
+function sessionRequiresRehandshake(sessionJson: string): boolean {
+  try {
+    const parsed = JSON.parse(sessionJson) as { snapshot?: { pq_ratchet?: unknown } };
+    return !parsed.snapshot?.pq_ratchet;
+  } catch {
+    return true;
+  }
+}
+
+async function loadCompatibleDirectSession(peerUserId: string): Promise<{ sessionJson: string | null; clearedLegacy: boolean }> {
+  const existingSession = await loadStoredDirectSession(peerUserId);
+  if (!existingSession) {
+    return { sessionJson: null, clearedLegacy: false };
+  }
+  if (!sessionRequiresRehandshake(existingSession)) {
+    return { sessionJson: existingSession, clearedLegacy: false };
+  }
+  await clearDirectMessageSession(setup.userId, peerUserId);
+  return { sessionJson: null, clearedLegacy: true };
+}
+
 async function syncUpdatedKeys(updatedKeys: GeneratedKeys): Promise<void> {
   const passphrase = getPassphrase();
   keys = updatedKeys;
@@ -247,7 +295,7 @@ async function encryptDirectPayload(
 ): Promise<string> {
   await ensureWebPqRuntime();
   await ensureMandatoryPqRatchetPolicy();
-  const existingSession = await loadStoredDirectSession(peerUserId);
+  const { sessionJson: existingSession } = await loadCompatibleDirectSession(peerUserId);
   if (existingSession) {
     const result = encryptDirectMessageWithSession(existingSession, k.userId, peerUserId, plaintext);
     await persistDirectSession(peerUserId, result.sessionJson);
@@ -285,8 +333,19 @@ async function decryptIncomingPayload(
   const activeKeys = keys ?? k;
   await ensureWebPqRuntime();
   await ensureMandatoryPqRatchetPolicy();
-  const existingSession = await loadStoredDirectSession(senderUserId);
-  const result = decryptDirectMessage(activeKeys, senderUserId, messageBytesBase64, existingSession);
+  const {
+    sessionJson: existingSession,
+    clearedLegacy,
+  } = await loadCompatibleDirectSession(senderUserId);
+  let result: ReturnType<typeof decryptDirectMessage>;
+  try {
+    result = decryptDirectMessage(activeKeys, senderUserId, messageBytesBase64, existingSession);
+  } catch (error) {
+    if (clearedLegacy) {
+      throw new Error("Stored session was reset for mandatory PQ ratchet rollout; peer must start a fresh session.");
+    }
+    throw error;
+  }
   await syncUpdatedKeys(result.updatedKeys);
   await persistDirectSession(senderUserId, result.sessionJson);
   return {
@@ -698,9 +757,16 @@ function renderOnboarding(): void {
   q("#onb-save-server").addEventListener("click", () => {
     const server = q<HTMLInputElement>("#onb-server").value.trim();
     if (server) {
-      setup.serverUrl = server;
-      saveSetup(setup);
-      notify("Server URL saved", "success");
+      try {
+        const parsed = validateWebServerUrl(server);
+        setup.serverUrl = parsed.toString().replace(/\/+$/, "");
+        saveSetup(setup);
+        cachedCapabilities = null;
+        cachedCapabilitiesServerUrl = null;
+        notify("Server URL saved", "success");
+      } catch (error) {
+        notify(errorMsg(error), "error");
+      }
     }
   });
 }
@@ -1122,9 +1188,11 @@ function renderConversations(): void {
     });
   }
 
-  // Start realtime connection & presence heartbeat
+  // Start realtime connection and supported metadata timers
   void connectRealtime();
-  void startPresenceHeartbeat();
+  if (presenceSupported()) {
+    void startPresenceHeartbeat();
+  }
   void loadContactsBackground();
   void syncGroupsBackground();
   void loadProfileNamesBackground(rows.filter((row) => row.kind === "dm").map((row) => row.threadId));
@@ -1158,7 +1226,7 @@ function buildUnifiedConversationRows(
       primaryLabel: label.primaryLabel,
       secondaryLabel: label.secondaryLabel,
       avatarText: label.avatarText,
-      presenceStatus: presence?.status ?? null,
+      presenceStatus: presenceSupported() ? presence?.status ?? null : null,
       isVerified: label.isVerified,
     };
   });
@@ -1404,8 +1472,20 @@ async function renderChat(peerId: string): Promise<void> {
     directMessagingReady = (await initWasmCrypto()) && isPqSessionMessagingAvailable();
   }
   const presence = peerPresenceCache[peerId];
-  const presenceText = presence?.status === "online" ? "online" : presence?.status === "away" ? "away" : "encrypted";
-  const presenceClass = presence?.status === "online" ? "presence-online" : presence?.status === "away" ? "presence-away" : "";
+  const presenceText = presenceSupported()
+    ? presence?.status === "online"
+      ? "online"
+      : presence?.status === "away"
+        ? "away"
+        : "encrypted"
+    : "metadata minimized";
+  const presenceClass = presenceSupported()
+    ? presence?.status === "online"
+      ? "presence-online"
+      : presence?.status === "away"
+        ? "presence-away"
+        : ""
+    : "";
   const fingerprintSummary = identityPin?.fingerprintSha256 || "Not pinned yet";
   const trustSummary = identityPin ? "Trusted on this device" : "Unverified";
   const directMessagingBlockedReason = directMessagingReady
@@ -1460,10 +1540,12 @@ async function renderChat(peerId: string): Promise<void> {
           <p>${escHtml(directMessagingBlockedReason)}</p>
         </div>
       ` : ""}
-      <div id="typing-indicator" class="typing-indicator hidden">
-        <span class="typing-dots"><span></span><span></span><span></span></span>
-        <span class="typing-text">${escHtml(displayName)} is typing</span>
-      </div>
+      ${typingIndicatorsSupported() ? `
+        <div id="typing-indicator" class="typing-indicator hidden">
+          <span class="typing-dots"><span></span><span></span><span></span></span>
+          <span class="typing-text">${escHtml(displayName)} is typing</span>
+        </div>
+      ` : ""}
       <div id="chat-details-sheet" class="chat-details-sheet hidden">
         <div class="chat-details-card">
           <div class="chat-details-head">
@@ -2019,10 +2101,16 @@ async function renderChat(peerId: string): Promise<void> {
   // Poll for any missed messages
   void pollInboxSilent();
 
-  // Start typing + receipt polling for this chat
-  startTypingPoll(peerId);
-  startReceiptPoll();
-  fetchPeerPresence(peerId);
+  // Start supported metadata polling for this chat
+  if (typingIndicatorsSupported()) {
+    startTypingPoll(peerId);
+  }
+  if (readReceiptsSupported()) {
+    startReceiptPoll();
+  }
+  if (presenceSupported()) {
+    void fetchPeerPresence(peerId);
+  }
 }
 
 function renderMessageList(container: HTMLElement, msgs: StoredMessage[]): void {
@@ -2547,7 +2635,9 @@ async function renderSettings(): Promise<void> {
   const fingerprint = keys
     ? identityFingerprint(keys.identityX25519Pub, keys.identityPqSigPub)
     : "not available";
-  const webHoldback = getWebBetaHoldback(await loadServerCapabilitiesCached());
+  const capabilities = await loadServerCapabilitiesCached();
+  const webHoldback = getWebBetaHoldback(capabilities);
+  const contactDiscoverySupported = capabilities?.contact_discovery_supported ?? false;
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
@@ -2631,9 +2721,15 @@ async function renderSettings(): Promise<void> {
         </div>
         <div class="settings-section">
           <h3>Advanced Discovery</h3>
-          <p class="text-secondary settings-desc">Let contacts find you by phone or email hash.</p>
+          <p class="text-secondary settings-desc">${
+            contactDiscoverySupported
+              ? "Let contacts find you by phone or email hash."
+              : "Raw-hash contact discovery is disabled. Share your user ID directly and manage contacts manually."
+          }</p>
           <div class="settings-row">
-            <button id="set-discovery" class="btn-sm">Contact Discovery</button>
+            <button id="set-discovery" class="btn-sm" ${contactDiscoverySupported ? "" : "disabled"}>${
+              contactDiscoverySupported ? "Contact Discovery" : "Unavailable"
+            }</button>
           </div>
         </div>
         <div class="settings-section">
@@ -2740,7 +2836,10 @@ async function renderSettings(): Promise<void> {
   q("#set-identity-log").addEventListener("click", () => navigateTo({ screen: "identity-log" }));
 
   // Discovery navigation
-  q("#set-discovery").addEventListener("click", () => navigateTo({ screen: "discovery" }));
+  const discoveryButton = document.getElementById("set-discovery") as HTMLButtonElement | null;
+  if (discoveryButton && !discoveryButton.disabled) {
+    discoveryButton.addEventListener("click", () => navigateTo({ screen: "discovery" }));
+  }
 
   // Server info navigation
   q("#set-server-info").addEventListener("click", () => navigateTo({ screen: "server-info" }));
@@ -3767,6 +3866,7 @@ function showToast(n: AppNotification): void {
 // ---------------------------------------------------------------------------
 
 function startPresenceHeartbeat(): void {
+  if (!presenceSupported()) return;
   if (presenceHeartbeatTimer) return;
   void sendPresenceUpdate("online");
   presenceHeartbeatTimer = setInterval(() => {
@@ -3775,6 +3875,7 @@ function startPresenceHeartbeat(): void {
 }
 
 async function sendPresenceUpdate(status: "online" | "away" | "offline"): Promise<void> {
+  if (!presenceSupported()) return;
   try {
     const k = await ensureKeys();
     const api = new PqmsgApi(setup.serverUrl);
@@ -3786,6 +3887,7 @@ async function sendPresenceUpdate(status: "online" | "away" | "offline"): Promis
 }
 
 async function fetchPeerPresence(peerId: string): Promise<void> {
+  if (!presenceSupported()) return;
   try {
     const k = await ensureKeys();
     const api = new PqmsgApi(setup.serverUrl);
@@ -3808,6 +3910,7 @@ async function fetchPeerPresence(peerId: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function sendTypingIndicator(peerId: string, isTyping: boolean): void {
+  if (!typingIndicatorsSupported()) return;
   if (typingTimer) clearTimeout(typingTimer);
   if (isTyping) {
     typingTimer = setTimeout(() => {
@@ -3818,6 +3921,7 @@ function sendTypingIndicator(peerId: string, isTyping: boolean): void {
 }
 
 async function sendTypingUpdate(peerId: string, isTyping: boolean): Promise<void> {
+  if (!typingIndicatorsSupported()) return;
   try {
     const k = await ensureKeys();
     const api = new PqmsgApi(setup.serverUrl);
@@ -3829,6 +3933,7 @@ async function sendTypingUpdate(peerId: string, isTyping: boolean): Promise<void
 }
 
 function startTypingPoll(peerId: string): void {
+  if (!typingIndicatorsSupported()) return;
   stopChatTimers();
   const poll = async () => {
     try {
@@ -3853,6 +3958,7 @@ function startTypingPoll(peerId: string): void {
 // ---------------------------------------------------------------------------
 
 function startReceiptPoll(): void {
+  if (!readReceiptsSupported()) return;
   if (receiptPollTimer) return;
   const poll = async () => {
     try {
@@ -3879,6 +3985,7 @@ function startReceiptPoll(): void {
 }
 
 async function sendDeliveredReceipt(messageId: number): Promise<void> {
+  if (!readReceiptsSupported()) return;
   try {
     const k = await ensureKeys();
     const api = new PqmsgApi(setup.serverUrl);
@@ -4029,6 +4136,31 @@ async function addContactSilent(contactUserId: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function renderDiscovery(): Promise<void> {
+  const capabilities = await loadServerCapabilitiesCached();
+  if (!capabilities?.contact_discovery_supported) {
+    app.innerHTML = `
+      <div class="app-shell">
+        <header class="topbar">
+          <button id="disc-back" class="icon-btn" aria-label="Back to settings">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 12H5M12 19l-7-7 7-7"/>
+            </svg>
+          </button>
+          <h1 class="topbar-title">Contact Discovery</h1>
+        </header>
+        <div class="settings-body">
+          <div class="settings-section">
+            <h3>Unavailable</h3>
+            <p class="text-secondary settings-desc">Raw-hash contact discovery is disabled pending a private discovery design.</p>
+            <p class="text-secondary settings-desc">Share your user ID directly and add contacts from Settings instead.</p>
+          </div>
+        </div>
+      </div>
+    `;
+    q("#disc-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
+    return;
+  }
+
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
@@ -4196,6 +4328,13 @@ async function renderServerInfo(): Promise<void> {
           <div class="settings-row"><span>Suites</span><span class="mono">${caps.supported_suite_ids.join(", ")}</span></div>
           <div class="settings-row"><span>Web Policy</span><span class="mono">${escHtml(caps.web_client_policy)}</span></div>
           <div class="settings-row"><span>PQ Ratchet</span><span>every ${caps.pq_ratchet_interval} msgs</span></div>
+          <div class="settings-row"><span>Presence</span><span>${caps.presence_supported ? "Enabled" : "Disabled"}</span></div>
+          <div class="settings-row"><span>Typing</span><span>${caps.typing_indicators_supported ? "Enabled" : "Disabled"}</span></div>
+          <div class="settings-row"><span>Read Receipts</span><span>${caps.read_receipts_supported ? "Enabled" : "Disabled"}</span></div>
+          <div class="settings-row"><span>Calling</span><span>${caps.calling_supported ? "Enabled" : "Disabled"}</span></div>
+          <div class="settings-row"><span>Stories</span><span>${caps.stories_supported ? "Enabled" : "Disabled"}</span></div>
+          <div class="settings-row"><span>Channels</span><span>${caps.channels_supported ? "Enabled" : "Disabled"}</span></div>
+          <div class="settings-row"><span>Contact Discovery</span><span>${caps.contact_discovery_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Prod Baseline</span><span>${caps.production_baseline_met ? "✓ Met" : "✗ Not met"}</span></div>
         </div>
         <div class="settings-section">
@@ -4425,12 +4564,12 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
 
 // Service worker
 if ("serviceWorker" in navigator) {
-  const isLocalDevOrigin =
-    location.protocol !== "https:" ||
-    location.hostname === "localhost" ||
-    location.hostname === "127.0.0.1";
+  const isSupportedSecureOrigin = isSecureWebOrigin(location);
+  const isLocalDevOrigin = location.protocol === "http:" && isLoopbackHostname(location.hostname);
 
-  if (isLocalDevOrigin) {
+  if (!isSupportedSecureOrigin) {
+    // Unsupported insecure origins never register a service worker.
+  } else if (isLocalDevOrigin) {
     void navigator.serviceWorker.getRegistrations()
       .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))
       .catch(() => {

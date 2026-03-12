@@ -14,6 +14,15 @@ use crate::AppState;
 const STORY_TTL_HOURS: i64 = 24;
 const MAX_STORY_CONTENT_BYTES: usize = 512 * 1024;
 
+fn ensure_stories_supported(state: &AppState) -> Result<(), AppError> {
+    if !state.stories_supported() {
+        return Err(AppError::forbidden(
+            "stories are disabled in the private-messaging-only profile",
+        ));
+    }
+    Ok(())
+}
+
 /// POST /v1/stories
 pub(crate) async fn create_story(
     State(state): State<AppState>,
@@ -21,6 +30,7 @@ pub(crate) async fn create_story(
     Json(request): Json<CreateStoryRequest>,
 ) -> Result<Json<CreateStoryResponse>, AppError> {
     check_rate_limit(&state, &format!("story-create:{}", request.author_user_id))?;
+    ensure_stories_supported(&state)?;
     validate_id("author_user_id", &request.author_user_id)?;
     validate_id("device_id", &request.device_id)?;
     decode_base64_range(
@@ -80,6 +90,7 @@ pub(crate) async fn get_stories_feed(
     headers: HeaderMap,
     Query(query): Query<StoriesFeedQuery>,
 ) -> Result<Json<StoriesFeedResponse>, AppError> {
+    ensure_stories_supported(&state)?;
     let auth = parse_request_auth(&headers)?;
     let auth_message = format!("story-feed:{}:{}", auth.user_id, auth.device_id);
     verify_request_auth(&state, &auth, auth_message.as_bytes()).await?;
@@ -162,6 +173,7 @@ pub(crate) async fn view_story(
     Path(story_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<ViewStoryResponse>, AppError> {
+    ensure_stories_supported(&state)?;
     let auth = parse_request_auth(&headers)?;
     let auth_message = format!(
         "story-view:{}:{}:{}",

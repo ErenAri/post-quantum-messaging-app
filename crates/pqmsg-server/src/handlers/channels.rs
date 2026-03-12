@@ -15,6 +15,15 @@ const MAX_CHANNEL_NAME_LEN: usize = 128;
 const MAX_CHANNEL_DESC_LEN: usize = 1024;
 const MAX_CHANNEL_MESSAGE_BYTES: usize = 256 * 1024;
 
+fn ensure_channels_supported(state: &AppState) -> Result<(), AppError> {
+    if !state.channels_supported() {
+        return Err(AppError::forbidden(
+            "channels are disabled in the private-messaging-only profile",
+        ));
+    }
+    Ok(())
+}
+
 /// POST /v1/channels
 pub(crate) async fn create_channel(
     State(state): State<AppState>,
@@ -22,6 +31,7 @@ pub(crate) async fn create_channel(
     Json(request): Json<CreateChannelRequest>,
 ) -> Result<Json<CreateChannelResponse>, AppError> {
     check_rate_limit(&state, &format!("channel-create:{}", request.owner_user_id))?;
+    ensure_channels_supported(&state)?;
     validate_id("owner_user_id", &request.owner_user_id)?;
     validate_id("device_id", &request.device_id)?;
 
@@ -89,6 +99,7 @@ pub(crate) async fn get_channel_messages(
     headers: HeaderMap,
     Query(query): Query<ChannelMessagesQuery>,
 ) -> Result<Json<ChannelMessagesResponse>, AppError> {
+    ensure_channels_supported(&state)?;
     let auth = parse_request_auth(&headers)?;
     let auth_message = format!(
         "channel-messages:{}:{}:{}",
@@ -148,6 +159,7 @@ pub(crate) async fn post_channel_message(
     Json(request): Json<ChannelMessageRequest>,
 ) -> Result<Json<ChannelMessageResponse>, AppError> {
     check_rate_limit(&state, &format!("channel-msg:{channel_id}"))?;
+    ensure_channels_supported(&state)?;
     validate_id("owner_user_id", &request.owner_user_id)?;
     validate_id("device_id", &request.device_id)?;
     decode_base64_range(
@@ -210,6 +222,7 @@ pub(crate) async fn subscribe_channel(
     Path(channel_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<SubscribeChannelResponse>, AppError> {
+    ensure_channels_supported(&state)?;
     let auth = parse_request_auth(&headers)?;
     let auth_message = format!(
         "channel-subscribe:{}:{}:{}",
@@ -252,6 +265,7 @@ pub(crate) async fn list_channels(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ChannelListResponse>, AppError> {
+    ensure_channels_supported(&state)?;
     let auth = parse_request_auth(&headers)?;
     let auth_message = format!("channel-list:{}:{}", auth.user_id, auth.device_id);
     verify_request_auth(&state, &auth, auth_message.as_bytes()).await?;

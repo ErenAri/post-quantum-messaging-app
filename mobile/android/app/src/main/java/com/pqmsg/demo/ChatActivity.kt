@@ -163,22 +163,18 @@ class ChatActivity : AppCompatActivity() {
         renderThreadHistory()
         refreshMeta()
         syncThread()
-        startPresencePolling()
-        startTypingPolling()
-        sendPresenceHeartbeat()
-        sendReadReceipts()
     }
 
     override fun onPause() {
         super.onPause()
         presencePollingJob?.cancel()
         typingPollingJob?.cancel()
+        typingJob?.cancel()
     }
 
     private fun configureInputObservers() {
         messageInput.doAfterTextChanged {
             syncActionAvailability()
-            notifyTyping()
         }
     }
 
@@ -285,7 +281,12 @@ class ChatActivity : AppCompatActivity() {
             userId = context.profile.userId,
             keysJson = context.keysJson,
         )
-        val existingSession = store.readSession(context.profile.userId, activePeerUserId)
+        val existingSession = MessagingCoordinator.loadCompatibleSession(
+            store = store,
+            userId = context.profile.userId,
+            peerUserId = activePeerUserId,
+            sessionJson = store.readSession(context.profile.userId, activePeerUserId),
+        )
 
         val sendResult = if (existingSession.isNullOrBlank()) {
             val fetched = latestBundle ?: context.api.getBundle(activePeerUserId).also {
@@ -530,24 +531,22 @@ class ChatActivity : AppCompatActivity() {
         } else {
             "Peer bundle cached at $bundleFetched"
         }
-        val syncSummary = if (syncInFlight) "Refreshing…" else "Ready"
-        val presenceSummary = if (peerPresenceOnline) "online" else "offline"
-        val typingSummary = if (peerIsTyping) " • typing…" else ""
+        val syncSummary = if (syncInFlight) "Refreshing..." else "Ready"
         val protectionSummary = buildList {
             if (sealedSenderEnabled) add("Sealed sender")
             ephemeralTtlSeconds?.let { add("${it}s auto-delete") }
-        }.joinToString(" • ")
+        }.joinToString(" | ")
         val statusSummary = buildString {
             append("Status: ")
             append(syncSummary)
-            append(" • Cursor ")
+            append(" | Cursor ")
             append(cursor)
             if (protectionSummary.isNotBlank()) {
-                append(" • ")
+                append(" | ")
                 append(protectionSummary)
             }
         }
-        chatMeta.text = "$activePeerUserId • $presenceSummary$typingSummary\n$bundleLine\n$statusSummary"
+        chatMeta.text = "$activePeerUserId | metadata minimized\n$bundleLine\n$statusSummary"
     }
 
     private fun renderThreadHistory() {

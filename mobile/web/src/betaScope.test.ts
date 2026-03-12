@@ -32,6 +32,13 @@ describe("betaScope", () => {
       registration_pow_bits: 0,
       prekey_bundle_reserve_count: 8,
       pq_ratchet_interval: 4,
+      contact_discovery_supported: false,
+      presence_supported: false,
+      typing_indicators_supported: false,
+      read_receipts_supported: false,
+      calling_supported: false,
+      stories_supported: false,
+      channels_supported: false,
       web_client_policy: "demo_only",
     });
     expect(holdback.messagingAllowed).toBe(false);
@@ -62,6 +69,13 @@ describe("betaScope", () => {
       registration_pow_bits: 0,
       prekey_bundle_reserve_count: 8,
       pq_ratchet_interval: 4,
+      contact_discovery_supported: false,
+      presence_supported: false,
+      typing_indicators_supported: false,
+      read_receipts_supported: false,
+      calling_supported: false,
+      stories_supported: false,
+      channels_supported: false,
       web_client_policy: "interop_candidate",
     });
     expect(holdback.messagingAllowed).toBe(false);

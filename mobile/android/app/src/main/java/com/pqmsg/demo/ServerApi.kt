@@ -521,6 +521,13 @@ data class ServerCapabilitiesResponse(
     val registration_pow_bits: Int,
     val prekey_bundle_reserve_count: Int,
     val pq_ratchet_interval: Int,
+    val contact_discovery_supported: Boolean,
+    val presence_supported: Boolean,
+    val typing_indicators_supported: Boolean,
+    val read_receipts_supported: Boolean,
+    val calling_supported: Boolean,
+    val stories_supported: Boolean,
+    val channels_supported: Boolean,
     val web_client_policy: String,
 )
 

@@ -56,6 +56,14 @@ describe("PqmsgApi constructor", () => {
       expect.objectContaining({ method: "GET" })
     );
   });
+
+  it("rejects insecure remote http server URLs", () => {
+    expect(() => new PqmsgApi("http://chat.example")).toThrow("HTTPS server URL");
+  });
+
+  it("rejects server URLs with embedded credentials", () => {
+    expect(() => new PqmsgApi("https://user:pass@chat.example")).toThrow("embedded credentials");
+  });
 });
 
 describe("PqmsgApi methods", () => {

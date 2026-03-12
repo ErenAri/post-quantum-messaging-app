@@ -19,6 +19,24 @@ use crate::{
     TYPING_TTL_SECONDS,
 };
 
+fn ensure_presence_supported(state: &AppState) -> Result<(), AppError> {
+    if !state.presence_supported() {
+        return Err(AppError::forbidden(
+            "presence is disabled pending a privacy-preserving metadata design",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_typing_supported(state: &AppState) -> Result<(), AppError> {
+    if !state.typing_indicators_supported() {
+        return Err(AppError::forbidden(
+            "typing indicators are disabled pending a privacy-preserving metadata design",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn register_push_token(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
@@ -370,6 +388,7 @@ pub(crate) async fn update_presence(
     Json(request): Json<PresenceUpdateRequest>,
 ) -> Result<Json<PresenceResponse>, AppError> {
     check_rate_limit(&state, &format!("presence-update:{user_id}"))?;
+    ensure_presence_supported(&state)?;
     validate_id("user_id", &user_id)?;
     let status = validate_presence_status(&request.status)?;
 
@@ -448,6 +467,7 @@ pub(crate) async fn get_presence(
     headers: HeaderMap,
 ) -> Result<Json<PresenceResponse>, AppError> {
     check_rate_limit(&state, &format!("presence-get:{user_id}"))?;
+    ensure_presence_supported(&state)?;
     validate_id("user_id", &user_id)?;
 
     let auth = parse_request_auth(&headers)?;
@@ -528,6 +548,7 @@ pub(crate) async fn update_typing(
     Json(request): Json<TypingUpdateRequest>,
 ) -> Result<Json<TypingUpdateResponse>, AppError> {
     check_rate_limit(&state, &format!("typing-update:{peer_user_id}"))?;
+    ensure_typing_supported(&state)?;
     validate_id("peer_user_id", &peer_user_id)?;
 
     let auth = parse_request_auth(&headers)?;
@@ -638,6 +659,7 @@ pub(crate) async fn get_typing(
     headers: HeaderMap,
 ) -> Result<Json<TypingInboxResponse>, AppError> {
     check_rate_limit(&state, &format!("typing-get:{user_id}"))?;
+    ensure_typing_supported(&state)?;
     validate_id("user_id", &user_id)?;
     let auth = parse_request_auth(&headers)?;
     if auth.user_id != user_id {

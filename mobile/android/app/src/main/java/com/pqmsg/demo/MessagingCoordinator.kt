@@ -1,6 +1,7 @@
 package com.pqmsg.demo
 
 import android.net.Uri
+import org.json.JSONObject
 import uniffi.pqmsg_android.Suite
 import uniffi.pqmsg_android.buildInboxAuthHeaders
 import uniffi.pqmsg_android.buildPrekeysAuthHeaders
@@ -36,6 +37,32 @@ data class ComposeTarget(
 object MessagingCoordinator {
     private fun normalizePeerUserId(value: String): String {
         return value.trim().removePrefix("@")
+    }
+
+    private fun sessionRequiresRehandshake(sessionJson: String): Boolean {
+        return try {
+            val parsed = JSONObject(sessionJson)
+            val snapshot = parsed.optJSONObject("snapshot") ?: return true
+            snapshot.isNull("pq_ratchet")
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    fun loadCompatibleSession(
+        store: LocalStateStore,
+        userId: String,
+        peerUserId: String,
+        sessionJson: String?,
+    ): String? {
+        if (sessionJson.isNullOrBlank()) {
+            return null
+        }
+        if (!sessionRequiresRehandshake(sessionJson)) {
+            return sessionJson
+        }
+        store.clearSession(userId, peerUserId)
+        return null
     }
 
     suspend fun ensureReady(
@@ -230,7 +257,12 @@ object MessagingCoordinator {
                 continue
             }
 
-            val existingSession = store.readSession(context.profile.userId, peer)
+            val existingSession = loadCompatibleSession(
+                store = store,
+                userId = context.profile.userId,
+                peerUserId = peer,
+                sessionJson = store.readSession(context.profile.userId, peer),
+            )
             val result = decryptMessage(
                 keysJson = workingKeysJson,
                 recipientUserId = context.profile.userId,

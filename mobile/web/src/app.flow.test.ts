@@ -94,6 +94,14 @@ async function eventually(assertion: () => void): Promise<void> {
 function installDom(url = "http://localhost/"): JSDOM {
   const dom = new JSDOM(`<!doctype html><html><body><div id="app"></div></body></html>`, { url });
   const { window } = dom;
+  Object.defineProperty(window, "indexedDB", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(window, "crypto", {
+    configurable: true,
+    value: { subtle: {} },
+  });
   const bindings: Record<string, unknown> = {
     window,
     document: window.document,
@@ -113,6 +121,8 @@ function installDom(url = "http://localhost/"): JSDOM {
     CustomEvent: window.CustomEvent,
     File: window.File,
     Blob: window.Blob,
+    crypto: window.crypto,
+    indexedDB: window.indexedDB,
   };
   for (const [key, value] of Object.entries(bindings)) {
     Object.defineProperty(globalThis, key, {
@@ -163,6 +173,9 @@ async function bootApp(options: BootOptions = {}) {
     existingUsers: new Set(options.existingUsers ?? ["test1", "test2"]),
     bundleUsers: new Set(options.bundleUsers ?? options.existingUsers ?? ["test1", "test2"]),
     relays: [] as Array<{ peerId: string; body: string }>,
+    presenceCalls: 0,
+    typingCalls: 0,
+    receiptCalls: 0,
     capabilities: {
       capability_schema_version: 1,
       security_profile: "research",
@@ -185,6 +198,13 @@ async function bootApp(options: BootOptions = {}) {
       registration_pow_bits: 0,
       prekey_bundle_reserve_count: 0,
       pq_ratchet_interval: 50,
+      contact_discovery_supported: false,
+      presence_supported: false,
+      typing_indicators_supported: false,
+      read_receipts_supported: false,
+      calling_supported: false,
+      stories_supported: false,
+      channels_supported: false,
       web_client_policy: options.capabilities?.web_client_policy ?? "interop_candidate",
     },
   };
@@ -457,22 +477,32 @@ async function bootApp(options: BootOptions = {}) {
       }
 
       async getTyping() {
+        apiState.typingCalls += 1;
         return { typing: [] };
       }
 
       async getReceipts() {
+        apiState.receiptCalls += 1;
         return { receipts: [] };
       }
 
       async getPresence(userId: string) {
+        apiState.presenceCalls += 1;
         return { user_id: userId, status: "offline", updated_at: "2026-03-11T00:00:00Z" };
       }
 
       async updatePresence() {
+        apiState.presenceCalls += 1;
         return { ok: true };
       }
 
       async sendReceipt() {
+        apiState.receiptCalls += 1;
+        return { ok: true };
+      }
+
+      async updateTyping() {
+        apiState.typingCalls += 1;
         return { ok: true };
       }
 
@@ -590,7 +620,12 @@ describe("web app flow coverage", () => {
     const { router, apiState, messagesByConversation } = await bootApp({
       prepare: async (storage) => {
         await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
-        await storage.saveDirectMessageSession("test1", "test2", "pass-1", "existing-session");
+        await storage.saveDirectMessageSession(
+          "test1",
+          "test2",
+          "pass-1",
+          JSON.stringify({ snapshot: { pq_ratchet: { interval: 50 } } }),
+        );
         storage.saveSetup({
           serverUrl: "http://localhost:3000",
           userId: "test1",
@@ -622,6 +657,79 @@ describe("web app flow coverage", () => {
     expect(saved[0].text).toBe("hello from web");
     expect(saved[0].status).toBe("sent");
     expect(document.body.textContent).toContain("hello from web");
+  });
+
+  it("clears legacy stored sessions and re-establishes them with a fresh handshake", async () => {
+    const { storage, router, apiState } = await bootApp({
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        await storage.saveDirectMessageSession(
+          "test1",
+          "test2",
+          "pass-1",
+          JSON.stringify({ snapshot: {} }),
+        );
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "test2",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "chat", peerId: "test2" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLInputElement>("#chat-input")).not.toBeNull();
+    });
+
+    const input = document.querySelector<HTMLInputElement>("#chat-input")!;
+    input.value = "reset legacy session";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>("#chat-send")!.click();
+
+    await eventually(() => {
+      expect(apiState.relays).toHaveLength(1);
+    });
+
+    await expect(storage.loadDirectMessageSession("test1", "test2", "pass-1")).resolves.toBe(
+      "handshake-session",
+    );
+  });
+
+  it("does not emit presence, typing, or receipt metadata when those capabilities are disabled", async () => {
+    const { router, apiState } = await bootApp({
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "test2",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "chat", peerId: "test2" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLInputElement>("#chat-input")).not.toBeNull();
+    });
+
+    const input = document.querySelector<HTMLInputElement>("#chat-input")!;
+    input.value = "hello";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushPromises();
+
+    expect(document.body.textContent).toContain("metadata minimized");
+    expect(apiState.presenceCalls).toBe(0);
+    expect(apiState.typingCalls).toBe(0);
+    expect(apiState.receiptCalls).toBe(0);
   });
 
   it("logs out from settings and returns to onboarding while preserving the saved server URL", async () => {

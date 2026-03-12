@@ -432,6 +432,34 @@ impl AppState {
         SupportedSuites::for_profile(self.security_profile).suite_ids
     }
 
+    pub fn contact_discovery_supported(&self) -> bool {
+        false
+    }
+
+    pub fn presence_supported(&self) -> bool {
+        false
+    }
+
+    pub fn typing_indicators_supported(&self) -> bool {
+        false
+    }
+
+    pub fn read_receipts_supported(&self) -> bool {
+        false
+    }
+
+    pub fn calling_supported(&self) -> bool {
+        false
+    }
+
+    pub fn stories_supported(&self) -> bool {
+        false
+    }
+
+    pub fn channels_supported(&self) -> bool {
+        false
+    }
+
     pub fn with_push_notifier(mut self, push_notifier: Arc<PushNotifier>) -> Self {
         self.push_notifier = push_notifier;
         self

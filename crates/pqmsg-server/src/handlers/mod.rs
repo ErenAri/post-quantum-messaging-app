@@ -48,6 +48,13 @@ fn capabilities_response(state: &AppState) -> ServerCapabilitiesResponse {
         registration_pow_bits: state.dos_policy().registration_pow_bits(),
         prekey_bundle_reserve_count: state.dos_policy().prekey_bundle_reserve_count(),
         pq_ratchet_interval: state.dos_policy().pq_ratchet_interval(),
+        contact_discovery_supported: state.contact_discovery_supported(),
+        presence_supported: state.presence_supported(),
+        typing_indicators_supported: state.typing_indicators_supported(),
+        read_receipts_supported: state.read_receipts_supported(),
+        calling_supported: state.calling_supported(),
+        stories_supported: state.stories_supported(),
+        channels_supported: state.channels_supported(),
         web_client_policy: "demo_only",
     }
 }

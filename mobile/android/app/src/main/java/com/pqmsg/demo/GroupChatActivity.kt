@@ -128,7 +128,12 @@ class GroupChatActivity : AppCompatActivity() {
             .filter { it.user_id != context.profile.userId }
             .map { member ->
                 val peerUserId = member.user_id
-                val existingSession = store.readSession(context.profile.userId, peerUserId)
+                val existingSession = MessagingCoordinator.loadCompatibleSession(
+                    store = store,
+                    userId = context.profile.userId,
+                    peerUserId = peerUserId,
+                    sessionJson = store.readSession(context.profile.userId, peerUserId),
+                )
                 val sendResult = if (existingSession.isNullOrBlank()) {
                     val bundle = context.api.getBundle(peerUserId)
                     initiateSessionAndEncrypt(

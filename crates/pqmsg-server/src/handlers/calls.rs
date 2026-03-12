@@ -11,6 +11,15 @@ use crate::types::*;
 use crate::validation::*;
 use crate::AppState;
 
+fn ensure_calling_supported(state: &AppState) -> Result<(), AppError> {
+    if !state.calling_supported() {
+        return Err(AppError::forbidden(
+            "calling is disabled in the private-messaging-only profile",
+        ));
+    }
+    Ok(())
+}
+
 /// POST /v1/calls/:callee_user_id/offer
 /// Initiates a call by sending an SDP offer. Stores the signaling data for the callee to poll.
 pub(crate) async fn call_offer(
@@ -20,6 +29,7 @@ pub(crate) async fn call_offer(
     Json(request): Json<CallOfferRequest>,
 ) -> Result<Json<CallOfferResponse>, AppError> {
     check_rate_limit(&state, &format!("call-offer:{callee_user_id}"))?;
+    ensure_calling_supported(&state)?;
     validate_id("callee_user_id", &callee_user_id)?;
     validate_id("caller_user_id", &request.caller_user_id)?;
     validate_id("device_id", &request.device_id)?;
@@ -88,6 +98,7 @@ pub(crate) async fn call_answer(
     Json(request): Json<CallAnswerRequest>,
 ) -> Result<Json<CallAnswerResponse>, AppError> {
     check_rate_limit(&state, &format!("call-answer:{call_id}"))?;
+    ensure_calling_supported(&state)?;
     validate_id("callee_user_id", &request.callee_user_id)?;
     validate_id("device_id", &request.device_id)?;
     decode_base64_range(
@@ -163,6 +174,7 @@ pub(crate) async fn call_ice_candidate(
     Json(request): Json<IceCandidateRequest>,
 ) -> Result<Json<IceCandidateResponse>, AppError> {
     check_rate_limit(&state, &format!("call-ice:{call_id}"))?;
+    ensure_calling_supported(&state)?;
     validate_id("sender_user_id", &request.sender_user_id)?;
     validate_id("device_id", &request.device_id)?;
     decode_base64_range("candidate_base64", &request.candidate_base64, 1, 16 * 1024)?;
@@ -218,6 +230,7 @@ pub(crate) async fn call_hangup(
     Json(request): Json<CallHangupRequest>,
 ) -> Result<Json<CallHangupResponse>, AppError> {
     check_rate_limit(&state, &format!("call-hangup:{call_id}"))?;
+    ensure_calling_supported(&state)?;
     validate_id("user_id", &request.user_id)?;
     validate_id("device_id", &request.device_id)?;
 
@@ -286,6 +299,7 @@ pub(crate) async fn poll_call_signals(
     axum::extract::Query(query): axum::extract::Query<CallSignalsQuery>,
 ) -> Result<Json<PollCallSignalsResponse>, AppError> {
     check_rate_limit(&state, &format!("call-signals:{call_id}"))?;
+    ensure_calling_supported(&state)?;
 
     let auth = parse_request_auth(&headers)?;
     let auth_message = format!(

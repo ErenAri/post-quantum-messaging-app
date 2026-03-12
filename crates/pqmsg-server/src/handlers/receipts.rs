@@ -14,6 +14,15 @@ use crate::AppState;
 
 const MAX_RECEIPTS_PAGE: i64 = 200;
 
+fn ensure_read_receipts_supported(state: &AppState) -> Result<(), AppError> {
+    if !state.read_receipts_supported() {
+        return Err(AppError::forbidden(
+            "read receipts are disabled pending a privacy-preserving metadata design",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn send_receipt(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
@@ -21,6 +30,7 @@ pub(crate) async fn send_receipt(
     Json(request): Json<SendReceiptRequest>,
 ) -> Result<Json<SendReceiptResponse>, AppError> {
     check_rate_limit(&state, &format!("receipt:{user_id}"))?;
+    ensure_read_receipts_supported(&state)?;
     validate_id("user_id", &user_id)?;
     ensure_user_exists(&state.pool, &user_id).await?;
 
@@ -81,6 +91,7 @@ pub(crate) async fn get_receipts(
     Query(query): Query<ReceiptsQuery>,
 ) -> Result<Json<ReceiptsResponse>, AppError> {
     check_rate_limit(&state, &format!("get-receipts:{user_id}"))?;
+    ensure_read_receipts_supported(&state)?;
     validate_id("user_id", &user_id)?;
     ensure_user_exists(&state.pool, &user_id).await?;
 
