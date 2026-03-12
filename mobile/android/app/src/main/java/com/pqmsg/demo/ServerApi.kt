@@ -18,6 +18,7 @@ data class RegisterUserRequest(
     val user_id: String,
     val identity_x25519_pub: String,
     val identity_sig_pub: String,
+    val identity_pq_sig_pub: String,
     val device_id: String,
 )
 
@@ -32,6 +33,8 @@ data class PublishPrekeysRequest(
     val sig_over_spk: String,
     val pq_signed_prekey_pub_mlkem768: String,
     val sig_over_pqspk: String,
+    val pq_sig_over_spk: String,
+    val pq_sig_over_pqspk: String,
     val one_time_prekeys_x25519: List<String>,
     val one_time_prekeys_mlkem768: List<String>,
 )
@@ -110,6 +113,7 @@ data class DeviceListResponse(
 data class RotateInitRequest(
     val new_identity_x25519_pub: String,
     val new_identity_sig_pub: String,
+    val new_identity_pq_sig_pub: String,
     val new_device_id: String,
 )
 
@@ -124,6 +128,8 @@ data class RotateConfirmRequest(
     val challenge_id: String,
     val sig_by_current_identity: String,
     val sig_by_new_identity: String,
+    val pq_sig_by_current_identity: String,
+    val pq_sig_by_new_identity: String,
 )
 
 data class RotateConfirmResponse(
@@ -137,6 +143,7 @@ data class IdentityLogItem(
     val version: Int,
     val identity_x25519_pub: String,
     val identity_sig_pub: String,
+    val identity_pq_sig_pub: String?,
     val device_id: String,
     val event_type: String,
     val changed_at: String,
@@ -153,10 +160,13 @@ data class BundleResponse(
     val device_id: String,
     val identity_x25519_pub: String,
     val identity_sig_pub: String,
+    val identity_pq_sig_pub: String,
     val signed_prekey_x25519_pub: String,
     val sig_over_spk: String,
     val pq_signed_prekey_pub_mlkem768: String,
     val sig_over_pqspk: String,
+    val pq_sig_over_spk: String,
+    val pq_sig_over_pqspk: String,
     val one_time_prekey_x25519: String?,
     val one_time_prekey_mlkem768: String?,
     val remaining_one_time_prekeys_x25519: Int?,
@@ -999,6 +1009,9 @@ object ApiClientFactory {
                 capabilities.production_baseline_met
         ) {
             "Server '${capabilities.deployment_mode}' deployment is missing its production baseline"
+        }
+        require(capabilities.pq_ratchet_interval > 0) {
+            "Server is not advertising mandatory PQ ratchet support"
         }
     }
 }

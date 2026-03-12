@@ -19,6 +19,7 @@ use pqmsg_core::handshake::{
 };
 use pqmsg_core::kem::MlKem768;
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
+use pqmsg_core::ratchet::pq::{PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL};
 use pqmsg_core::sealed::{
     derive_pairwise_sealed_sender_key, open_message as open_sealed_message,
     seal_message as seal_sealed_message, SealedEnvelope,
@@ -2429,6 +2430,7 @@ async fn send_message_flow(
         .security_profile
         .enforce_suite_id(prekey_bundle.suite.suite_id()?)?;
     let identity = to_identity_keypair(sender_keys)?;
+    let local_pq_signed_prekey = to_pq_signed_prekey(sender_keys)?;
     let kem = build_kem_for_suite(sender_keys.suite)?;
     let verifier = Ed25519SignatureVerifier;
 
@@ -2439,6 +2441,7 @@ async fn send_message_flow(
         from,
         to,
         &identity,
+        &local_pq_signed_prekey.public_key,
         &prekey_bundle,
         plaintext,
     )?;
@@ -2458,13 +2461,15 @@ async fn send_message_flow(
         public: identity.public_key,
         secret: identity.require_secret_key()?,
     };
-    let session = SessionState::from_handshake_with_suite(
+    let session = SessionState::from_handshake_with_suite_with_pq_ratchet(
         SessionRole::Initiator,
         *initiator.session_key.as_bytes(),
         local_dh,
         prekey_bundle.signed_prekey,
         prekey_bundle.suite.suite_id()?,
         512,
+        mandatory_pq_ratchet_state(&local_pq_signed_prekey, prekey_bundle.pq_signed_prekey.clone()),
+        Box::new(kem),
     )?;
     save_session(
         &session_path,
@@ -2638,13 +2643,15 @@ async fn poll_inbox_flow(
                 public: spk.public_key,
                 secret: spk.require_secret_key()?,
             };
-            let session = SessionState::from_handshake_with_suite(
+            let session = SessionState::from_handshake_with_suite_with_pq_ratchet(
                 SessionRole::Responder,
                 *responder.session_key.as_bytes(),
                 local_dh,
                 initial.ik_a_pub,
                 initial.suite_id,
                 512,
+                mandatory_pq_ratchet_state(&pqspk, initial.pq_ratchet_pub_a.clone()),
+                Box::new(kem),
             )?;
             save_session(
                 &session_path,
@@ -3226,6 +3233,18 @@ fn to_pq_signed_prekey(keys: &UserKeysFile) -> Result<KEMPreKey> {
             &keys.pq_signed_prekey_secret_b64,
         )?),
     })
+}
+
+fn mandatory_pq_ratchet_state(
+    local_pq_prekey: &KEMPreKey,
+    remote_public_key: Vec<u8>,
+) -> PqRatchetState {
+    PqRatchetState {
+        interval: DEFAULT_PQ_RATCHET_INTERVAL,
+        local_public_key: local_pq_prekey.public_key.clone(),
+        local_secret_key: local_pq_prekey.secret_key.clone(),
+        remote_public_key,
+    }
 }
 
 fn default_keys_path(user: &str) -> PathBuf {
@@ -5175,6 +5194,7 @@ mod tests {
             "alice",
             "bob",
             &alice_identity,
+            &alice_identity.public_key.0,
             &bundle,
             b"hello",
         )

@@ -9,6 +9,8 @@ type MockKeys = {
   identityX25519Secret: string;
   identitySigPub: string;
   identitySigSecret: string;
+  identityPqSigPub: string;
+  identityPqSigSecret: string;
   signedPrekeyX25519Pub: string;
   signedPrekeyX25519Secret: string;
   pqSignedPrekeyPubMlkem768: string;
@@ -54,6 +56,8 @@ function makeKeys(userId: string, deviceId = `${userId}-device`): MockKeys {
     identityX25519Secret: `x25519-secret-${userId}`,
     identitySigPub: `sig-pub-${userId}`,
     identitySigSecret: `sig-secret-${userId}`,
+    identityPqSigPub: `pq-sig-pub-${userId}`,
+    identityPqSigSecret: `pq-sig-secret-${userId}`,
     signedPrekeyX25519Pub: `spk-pub-${userId}`,
     signedPrekeyX25519Secret: `spk-secret-${userId}`,
     pqSignedPrekeyPubMlkem768: `pq-spk-pub-${userId}`,
@@ -154,6 +158,7 @@ async function bootApp(options: BootOptions = {}) {
   const outbox: Array<{ id: string; userId: string; peerId: string; groupId?: string }> = [];
   const sessionCache = new Map<string, string>();
   const metadataRecords = new Map<string, string>();
+  const keyRecords = new Map<string, string>();
   const apiState = {
     existingUsers: new Set(options.existingUsers ?? ["test1", "test2"]),
     bundleUsers: new Set(options.bundleUsers ?? options.existingUsers ?? ["test1", "test2"]),
@@ -179,7 +184,7 @@ async function bootApp(options: BootOptions = {}) {
       production_baseline_met: false,
       registration_pow_bits: 0,
       prekey_bundle_reserve_count: 0,
-      pq_ratchet_interval: 0,
+      pq_ratchet_interval: 50,
       web_client_policy: options.capabilities?.web_client_policy ?? "interop_candidate",
     },
   };
@@ -260,6 +265,18 @@ async function bootApp(options: BootOptions = {}) {
     async clearMetadataRecord(id: string) {
       metadataRecords.delete(id);
     },
+    async saveKeyRecord(id: string, sealedKeys: string) {
+      keyRecords.set(id, sealedKeys);
+    },
+    async loadKeyRecord(id: string) {
+      return keyRecords.get(id) ?? null;
+    },
+    async listKeyRecordIds() {
+      return [...keyRecords.keys()].sort((lhs, rhs) => lhs.localeCompare(rhs));
+    },
+    async clearKeyRecord(id: string) {
+      keyRecords.delete(id);
+    },
     async addReaction() {
       return undefined;
     },
@@ -305,6 +322,8 @@ async function bootApp(options: BootOptions = {}) {
         sig_over_spk: "sig",
         pq_signed_prekey_pub_mlkem768: "pq",
         sig_over_pqspk: "pq-sig",
+        pq_sig_over_spk: "pq-sig-spk",
+        pq_sig_over_pqspk: "pq-sig-pqspk",
         one_time_prekeys_x25519: [],
         one_time_prekeys_mlkem768: [],
       }),
@@ -329,6 +348,13 @@ async function bootApp(options: BootOptions = {}) {
       buildPrekeysStatusAuthHeaders: emptyHeaders,
       buildRotateInitAuthHeaders: emptyHeaders,
       buildRotateConfirmAuthHeaders: emptyHeaders,
+      buildRotateConfirmPayload: vi.fn(() => ({
+        challenge_id: "challenge-1",
+        sig_by_current_identity: "sig-current",
+        sig_by_new_identity: "sig-new",
+        pq_sig_by_current_identity: "pq-sig-current",
+        pq_sig_by_new_identity: "pq-sig-new",
+      })),
       buildIdentityLogAuthHeaders: emptyHeaders,
       buildSealedInboxAuthHeaders: emptyHeaders,
       buildEphemeralRelayAuthHeaders: emptyHeaders,
@@ -396,12 +422,15 @@ async function bootApp(options: BootOptions = {}) {
           user_id: userId,
           identity_x25519_pub: `bundle-x25519-${userId}`,
           identity_sig_pub: `bundle-sig-${userId}`,
+          identity_pq_sig_pub: `bundle-pq-sig-${userId}`,
           identity_fingerprint_sha256: `bundle-fp-${userId}`,
           identity_key_version: 1,
           signed_prekey_x25519_pub: `spk-${userId}`,
           sig_over_spk: "sig",
           pq_signed_prekey_pub_mlkem768: `pq-${userId}`,
           sig_over_pqspk: "pq-sig",
+          pq_sig_over_spk: "pq-sig-spk",
+          pq_sig_over_pqspk: "pq-sig-pqspk",
           one_time_prekey_x25519: null,
           one_time_prekey_mlkem768: null,
           bundle_generated_at: "2026-03-11T00:00:00Z",

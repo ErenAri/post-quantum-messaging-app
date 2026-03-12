@@ -312,10 +312,13 @@ class GroupChatActivity : AppCompatActivity() {
             userId = user_id,
             identityX25519Pub = identity_x25519_pub,
             identitySigPub = identity_sig_pub,
+            identityPqSigPub = identity_pq_sig_pub,
             signedPrekeyX25519Pub = signed_prekey_x25519_pub,
             sigOverSpk = sig_over_spk,
             pqSignedPrekeyPubMlkem768 = pq_signed_prekey_pub_mlkem768,
             sigOverPqspk = sig_over_pqspk,
+            pqSigOverSpk = pq_sig_over_spk,
+            pqSigOverPqspk = pq_sig_over_pqspk,
             oneTimePrekeyX25519 = one_time_prekey_x25519,
             oneTimePrekeyMlkem768 = one_time_prekey_mlkem768,
         )

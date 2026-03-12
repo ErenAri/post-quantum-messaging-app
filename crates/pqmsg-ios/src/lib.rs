@@ -16,6 +16,7 @@ use pqmsg_core::handshake::{
 };
 use pqmsg_core::kem::MlKem768;
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
+use pqmsg_core::ratchet::pq::{PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL};
 use pqmsg_core::session::{SessionRole, SessionSnapshot, SessionState};
 use pqmsg_core::storage::{
     unwrap_bytes as unwrap_wrapped_bytes, wrap_bytes as wrap_wrapped_bytes, WrappedSecret,
@@ -278,6 +279,18 @@ fn suite_from_suite_id(suite_id: u16) -> Result<Suite, PqmsgIosError> {
 fn build_kem_for_suite(suite: Suite) -> Result<MlKem768, PqmsgIosError> {
     MlKem768::new(suite_to_kem_algorithm(suite))
         .map_err(|_| operation_failed("pq-oqs backend is disabled"))
+}
+
+fn mandatory_pq_ratchet_state(
+    local_pq_prekey: &KEMPreKey,
+    remote_public_key: Vec<u8>,
+) -> PqRatchetState {
+    PqRatchetState {
+        interval: DEFAULT_PQ_RATCHET_INTERVAL,
+        local_public_key: local_pq_prekey.public_key.clone(),
+        local_secret_key: local_pq_prekey.secret_key.clone(),
+        remote_public_key,
+    }
 }
 
 fn generate_signing_key<R: RngCore + CryptoRng>(rng: &mut R) -> SigningKey {
@@ -1347,6 +1360,7 @@ pub fn initiate_session_and_encrypt(
 
     let prekey_bundle = bundle_to_core(&peer_bundle, keys.suite)?;
     let identity = to_identity_keypair(&keys)?;
+    let local_pq_signed_prekey = to_pq_signed_prekey(&keys)?;
     let kem = build_kem_for_suite(keys.suite)?;
     let verifier = Ed25519SignatureVerifier;
     let initiator = alice_initiate(
@@ -1356,6 +1370,7 @@ pub fn initiate_session_and_encrypt(
         &from_user_id,
         &peer_user_id,
         &identity,
+        &local_pq_signed_prekey.public_key,
         &prekey_bundle,
         plaintext_utf8.as_bytes(),
     )?;
@@ -1365,13 +1380,15 @@ pub fn initiate_session_and_encrypt(
         public: identity.public_key,
         secret: identity.require_secret_key()?,
     };
-    let session = SessionState::from_handshake_with_suite(
+    let session = SessionState::from_handshake_with_suite_with_pq_ratchet(
         SessionRole::Initiator,
         *initiator.session_key.as_bytes(),
         local_dh,
         prekey_bundle.signed_prekey,
         prekey_bundle.suite.suite_id()?,
         512,
+        mandatory_pq_ratchet_state(&local_pq_signed_prekey, prekey_bundle.pq_signed_prekey.clone()),
+        Box::new(kem),
     )?;
     let session_file = SessionFile {
         version: 1,
@@ -1475,13 +1492,15 @@ pub fn decrypt_message(
             public: signed_prekey.public_key,
             secret: signed_prekey.require_secret_key()?,
         };
-        let session = SessionState::from_handshake_with_suite(
+        let session = SessionState::from_handshake_with_suite_with_pq_ratchet(
             SessionRole::Responder,
             *responder.session_key.as_bytes(),
             local_dh,
             initial.ik_a_pub,
             initial.suite_id,
             512,
+            mandatory_pq_ratchet_state(&pq_signed_prekey, initial.pq_ratchet_pub_a.clone()),
+            Box::new(kem),
         )?;
         let session_file = SessionFile {
             version: 1,

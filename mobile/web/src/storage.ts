@@ -1,10 +1,14 @@
 import { GeneratedKeys, openJsonWithPassphrase, sealJsonWithPassphrase } from "./crypto";
 import {
   clearAllSessionCache,
+  clearKeyRecord,
   clearMetadataRecord,
   clearSessionCache,
+  listKeyRecordIds,
+  loadKeyRecord,
   loadMetadataRecord,
   loadSessionCache,
+  saveKeyRecord,
   saveMetadataRecord,
   saveSessionCache,
 } from "./db";
@@ -67,8 +71,6 @@ const CONVERSATION_META_KEY = "pqmsg.web.conversationmeta.v1";
 const PROFILE_CACHE_KEY = "pqmsg.web.profilecache.v1";
 const PINS_KEY = "pqmsg.web.pins.v1";
 const CURSORS_KEY = "pqmsg.web.cursors.v1";
-const KEYS_PREFIX = "pqmsg.web.keys.v1.";
-const DIRECT_MESSAGE_SESSION_PREFIX = "pqmsg.web.dmsession.v1.";
 const METADATA_KEYS = [
   SETUP_KEY,
   CONVERSATIONS_KEY,
@@ -79,6 +81,7 @@ const METADATA_KEYS = [
   CURSORS_KEY,
 ] as const;
 const metadataCache = new Map<string, string | null>();
+const localKeyUsers = new Set<string>();
 
 export const DEFAULT_SETUP: SetupConfig = {
   serverUrl: "http://127.0.0.1:3000",
@@ -91,27 +94,13 @@ export const DEFAULT_SETUP: SetupConfig = {
 
 export async function initMetadataStorage(): Promise<void> {
   for (const key of METADATA_KEYS) {
-    try {
-      const persisted = await loadMetadataRecord(key);
-      if (persisted !== null) {
-        metadataCache.set(key, persisted);
-        localStorage.removeItem(key);
-        continue;
-      }
-    } catch {
-      // Keep the synchronous localStorage fallback for browsers where IndexedDB is unavailable.
-    }
-
-    const legacy = localStorage.getItem(key);
-    metadataCache.set(key, legacy);
-    if (legacy === null) {
-      continue;
-    }
-    try {
-      await saveMetadataRecord(key, legacy);
-      localStorage.removeItem(key);
-    } catch {
-      // Legacy localStorage copy remains the fallback persistence path.
+    metadataCache.set(key, await loadMetadataRecord(key));
+  }
+  localKeyUsers.clear();
+  for (const userId of await listKeyRecordIds()) {
+    const normalized = userId.trim();
+    if (normalized) {
+      localKeyUsers.add(normalized);
     }
   }
 }
@@ -148,14 +137,15 @@ export async function saveKeys(
   keys: GeneratedKeys
 ): Promise<void> {
   const sealed = await sealJsonWithPassphrase(keys, passphrase);
-  localStorage.setItem(`${KEYS_PREFIX}${userId}`, sealed);
+  await saveKeyRecord(userId, sealed);
+  localKeyUsers.add(userId.trim());
 }
 
 export async function loadKeys(
   userId: string,
   passphrase: string
 ): Promise<GeneratedKeys> {
-  const sealed = localStorage.getItem(`${KEYS_PREFIX}${userId}`);
+  const sealed = await loadKeyRecord(userId);
   if (!sealed) {
     throw new Error(`missing keys for user '${userId}'`);
   }
@@ -167,31 +157,11 @@ export function hasLocalKeys(userId: string): boolean {
   if (!normalized) {
     return false;
   }
-  return localStorage.getItem(`${KEYS_PREFIX}${normalized}`) !== null;
+  return localKeyUsers.has(normalized);
 }
 
 export function listLocalKeyUsers(): string[] {
-  const users = new Set<string>();
-  const storageKeys: string[] = [];
-  for (let index = 0; index < localStorage.length; index += 1) {
-    const storageKey = localStorage.key(index);
-    if (storageKey) {
-      storageKeys.push(storageKey);
-    }
-  }
-  if (storageKeys.length === 0) {
-    storageKeys.push(...Object.keys(localStorage));
-  }
-  for (const storageKey of storageKeys) {
-    if (!storageKey.startsWith(KEYS_PREFIX)) {
-      continue;
-    }
-    const userId = storageKey.slice(KEYS_PREFIX.length).trim();
-    if (userId) {
-      users.add(userId);
-    }
-  }
-  return [...users].sort((lhs, rhs) => lhs.localeCompare(rhs));
+  return [...localKeyUsers].sort((lhs, rhs) => lhs.localeCompare(rhs));
 }
 
 export async function saveDirectMessageSession(
@@ -200,10 +170,8 @@ export async function saveDirectMessageSession(
   passphrase: string,
   sessionJson: string
 ): Promise<void> {
-  const key = directMessageSessionStorageKey(userId, peerUserId);
   const sealed = await sealJsonWithPassphrase(sessionJson, passphrase);
   await saveSessionCache(userId, peerUserId, sealed);
-  localStorage.removeItem(key);
 }
 
 export async function loadDirectMessageSession(
@@ -211,21 +179,14 @@ export async function loadDirectMessageSession(
   peerUserId: string,
   passphrase: string
 ): Promise<string | null> {
-  const key = directMessageSessionStorageKey(userId, peerUserId);
-  const sealed = (await loadSessionCache(userId, peerUserId)) ?? localStorage.getItem(key);
+  const sealed = await loadSessionCache(userId, peerUserId);
   if (!sealed) {
     return null;
   }
-  const sessionJson = await openJsonWithPassphrase<string>(sealed, passphrase);
-  if (localStorage.getItem(key) === sealed) {
-    await saveSessionCache(userId, peerUserId, sealed);
-    localStorage.removeItem(key);
-  }
-  return sessionJson;
+  return openJsonWithPassphrase<string>(sealed, passphrase);
 }
 
 export async function clearDirectMessageSession(userId: string, peerUserId: string): Promise<void> {
-  localStorage.removeItem(directMessageSessionStorageKey(userId, peerUserId));
   await clearSessionCache(userId, peerUserId);
 }
 
@@ -233,11 +194,6 @@ export async function clearAllDirectMessageSessions(userId: string): Promise<voi
   const normalizedUser = userId.trim();
   if (!normalizedUser) {
     return;
-  }
-  for (const storageKey of Object.keys(localStorage)) {
-    if (storageKey.startsWith(`${DIRECT_MESSAGE_SESSION_PREFIX}${normalizedUser}:`)) {
-      localStorage.removeItem(storageKey);
-    }
   }
   await clearAllSessionCache(normalizedUser);
 }
@@ -535,7 +491,8 @@ export async function wipeLocalState(userId: string): Promise<void> {
     return;
   }
 
-  localStorage.removeItem(`${KEYS_PREFIX}${normalizedUser}`);
+  await clearKeyRecord(normalizedUser);
+  localKeyUsers.delete(normalizedUser);
 
   const conversations = parseRecord<ConversationRow[]>(CONVERSATIONS_KEY, []).filter(
     (item) => item.userId !== normalizedUser
@@ -597,39 +554,22 @@ function writeRecord<T>(key: string, value: T): void {
 
 function readMetadataJson(key: string): string | null {
   if (metadataCache.has(key)) {
-    const cached = metadataCache.get(key) ?? null;
-    if (cached !== null) {
-      return cached;
-    }
-    const legacy = localStorage.getItem(key);
-    if (legacy !== null) {
-      metadataCache.set(key, legacy);
-      return legacy;
-    }
-    return null;
+    return metadataCache.get(key) ?? null;
   }
-  const raw = localStorage.getItem(key);
-  metadataCache.set(key, raw);
-  return raw;
+  return null;
 }
 
 function persistMetadataJson(key: string, raw: string | null): void {
   metadataCache.set(key, raw);
   if (raw === null) {
-    localStorage.removeItem(key);
     void clearMetadataRecord(key).catch(() => {
       // Best-effort cleanup only.
     });
     return;
   }
-  localStorage.setItem(key, raw);
-  void saveMetadataRecord(key, raw)
-    .then(() => {
-      localStorage.removeItem(key);
-    })
-    .catch(() => {
-      // Legacy localStorage mirror remains as the fallback persistence path.
-    });
+  void saveMetadataRecord(key, raw).catch(() => {
+    // Metadata persistence errors surface on the next bootstrap.
+  });
 }
 
 function defaultConversationMeta(kind: ConversationKind, threadId: string): ConversationMeta {
@@ -642,8 +582,4 @@ function defaultConversationMeta(kind: ConversationKind, threadId: string): Conv
     sealedSenderDefault: false,
     ephemeralTtlDefault: 0,
   };
-}
-
-function directMessageSessionStorageKey(userId: string, peerUserId: string): string {
-  return `${DIRECT_MESSAGE_SESSION_PREFIX}${userId.trim()}:${peerUserId.trim()}`;
 }

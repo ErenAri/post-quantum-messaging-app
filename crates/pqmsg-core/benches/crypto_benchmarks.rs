@@ -290,6 +290,7 @@ fn bench_handshake(c: &mut Criterion) {
                     "alice",
                     "bob",
                     &alice,
+                    &alice.public_key.0,
                     &bundle,
                     b"bench-payload",
                 )
@@ -312,6 +313,7 @@ fn bench_handshake(c: &mut Criterion) {
                     "alice",
                     "bob",
                     &alice,
+                    &alice.public_key.0,
                     &bundle,
                     b"bench-payload",
                 )

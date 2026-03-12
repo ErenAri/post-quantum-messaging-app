@@ -12,10 +12,13 @@ use pqmsg_core::alg::{
 use pqmsg_core::dh::{DhKeyPair, DhPublicKey};
 use pqmsg_core::handshake::{
     alice_initiate, bob_receive, pq_signed_prekey_signature_message,
-    signed_prekey_signature_message, InitialMessage, SignatureVerifier,
+    signed_prekey_signature_message, validate_hybrid_prekey_bundle_signatures, InitialMessage,
+    SignatureVerifier,
 };
 use pqmsg_core::kem::MlKem768;
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
+use pqmsg_core::pq_sig::{MlDsa65, PqSignatureProvider};
+use pqmsg_core::ratchet::pq::{PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL};
 use pqmsg_core::session::{SessionRole, SessionSnapshot, SessionState};
 use pqmsg_core::storage::{
     unwrap_bytes as unwrap_wrapped_bytes, wrap_bytes as wrap_wrapped_bytes, WrappedSecret,
@@ -46,6 +49,9 @@ const AUTH_TAG_ROTATE_NEW_SIG_HASH: u16 = critical_type(0x320C);
 const AUTH_TAG_ROTATE_CHALLENGE_ID: u16 = critical_type(0x320D);
 const AUTH_TAG_ROTATE_SIG_CURRENT_HASH: u16 = critical_type(0x320E);
 const AUTH_TAG_ROTATE_SIG_NEW_HASH: u16 = critical_type(0x320F);
+const AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH: u16 = critical_type(0x3230);
+const AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH: u16 = critical_type(0x3231);
+const AUTH_TAG_ROTATE_PQ_SIG_NEW_HASH: u16 = critical_type(0x3232);
 const AUTH_TAG_PUSH_DEVICE_ID: u16 = critical_type(0x3210);
 const AUTH_TAG_PUSH_TOKEN_HASH: u16 = critical_type(0x3211);
 const AUTH_TAG_LINK_DEVICE_ID: u16 = critical_type(0x3212);
@@ -68,6 +74,7 @@ const ROTATE_SIG_TAG_CHALLENGE_NONCE: u16 = critical_type(0x3103);
 const ROTATE_SIG_TAG_NEW_IDENTITY_X25519: u16 = critical_type(0x3104);
 const ROTATE_SIG_TAG_NEW_IDENTITY_SIG: u16 = critical_type(0x3105);
 const ROTATE_SIG_TAG_NEW_DEVICE_ID: u16 = critical_type(0x3106);
+const ROTATE_SIG_TAG_NEW_IDENTITY_PQ_SIG: u16 = critical_type(0x3107);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, uniffi::Enum)]
 pub enum Suite {
@@ -92,6 +99,8 @@ struct UserKeysFile {
     identity_x25519_secret_b64: String,
     identity_sig_pub_b64: String,
     identity_sig_secret_b64: String,
+    identity_pq_sig_pub_b64: String,
+    identity_pq_sig_secret_b64: String,
     signed_prekey_x25519_pub_b64: String,
     signed_prekey_x25519_secret_b64: String,
     pq_signed_prekey_pub_b64: String,
@@ -122,10 +131,13 @@ struct BundleResponse {
     user_id: String,
     identity_x25519_pub: String,
     identity_sig_pub: String,
+    identity_pq_sig_pub: String,
     signed_prekey_x25519_pub: String,
     sig_over_spk: String,
     pq_signed_prekey_pub_mlkem768: String,
     sig_over_pqspk: String,
+    pq_sig_over_spk: String,
+    pq_sig_over_pqspk: String,
     one_time_prekey_x25519: Option<String>,
     one_time_prekey_mlkem768: Option<String>,
 }
@@ -142,6 +154,7 @@ pub struct RegisterPayload {
     pub user_id: String,
     pub identity_x25519_pub: String,
     pub identity_sig_pub: String,
+    pub identity_pq_sig_pub: String,
     pub device_id: String,
 }
 
@@ -151,6 +164,8 @@ pub struct PublishPrekeysPayload {
     pub sig_over_spk: String,
     pub pq_signed_prekey_pub_mlkem768: String,
     pub sig_over_pqspk: String,
+    pub pq_sig_over_spk: String,
+    pub pq_sig_over_pqspk: String,
     pub one_time_prekeys_x25519: Vec<String>,
     pub one_time_prekeys_mlkem768: Vec<String>,
 }
@@ -183,6 +198,7 @@ pub struct SecondaryDeviceOnboardingPackage {
 pub struct RotateInitPayload {
     pub new_identity_x25519_pub: String,
     pub new_identity_sig_pub: String,
+    pub new_identity_pq_sig_pub: String,
     pub new_device_id: String,
 }
 
@@ -191,6 +207,8 @@ pub struct RotateConfirmPayload {
     pub challenge_id: String,
     pub sig_by_current_identity: String,
     pub sig_by_new_identity: String,
+    pub pq_sig_by_current_identity: String,
+    pub pq_sig_by_new_identity: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
@@ -198,10 +216,13 @@ pub struct ServerBundle {
     pub user_id: String,
     pub identity_x25519_pub: String,
     pub identity_sig_pub: String,
+    pub identity_pq_sig_pub: String,
     pub signed_prekey_x25519_pub: String,
     pub sig_over_spk: String,
     pub pq_signed_prekey_pub_mlkem768: String,
     pub sig_over_pqspk: String,
+    pub pq_sig_over_spk: String,
+    pub pq_sig_over_pqspk: String,
     pub one_time_prekey_x25519: Option<String>,
     pub one_time_prekey_mlkem768: Option<String>,
 }
@@ -290,6 +311,18 @@ fn build_kem_for_suite(suite: Suite) -> Result<MlKem768, PqmsgAndroidError> {
         .map_err(|_| operation_failed("pq-oqs backend is disabled"))
 }
 
+fn mandatory_pq_ratchet_state(
+    local_pq_prekey: &KEMPreKey,
+    remote_public_key: Vec<u8>,
+) -> PqRatchetState {
+    PqRatchetState {
+        interval: DEFAULT_PQ_RATCHET_INTERVAL,
+        local_public_key: local_pq_prekey.public_key.clone(),
+        local_secret_key: local_pq_prekey.secret_key.clone(),
+        remote_public_key,
+    }
+}
+
 fn generate_signing_key<R: RngCore + CryptoRng>(rng: &mut R) -> SigningKey {
     SigningKey::generate(rng)
 }
@@ -311,6 +344,15 @@ fn decode_signing_key_b64(
 
 fn build_signature_payload(signing_key: &SigningKey, message: &[u8]) -> String {
     B64.encode(signing_key.sign(message).to_bytes())
+}
+
+fn build_pq_signature_provider() -> Result<MlDsa65, PqmsgAndroidError> {
+    MlDsa65::new().map_err(|_| operation_failed("pq signature backend is disabled"))
+}
+
+fn build_pq_signature_payload(secret_key: &[u8], message: &[u8]) -> Result<String, PqmsgAndroidError> {
+    let provider = build_pq_signature_provider()?;
+    Ok(B64.encode(provider.sign(secret_key, message)?))
 }
 
 fn auth_signing_key_for_user(keys: &UserKeysFile) -> Result<SigningKey, PqmsgAndroidError> {
@@ -402,6 +444,7 @@ fn rotation_signature_message(
     challenge_nonce: &[u8],
     new_identity_x25519: &[u8],
     new_identity_sig: &[u8],
+    new_identity_pq_sig: &[u8],
     new_device_id: &str,
 ) -> Result<Vec<u8>, PqmsgAndroidError> {
     encode(&[
@@ -424,6 +467,10 @@ fn rotation_signature_message(
         TlvRecord {
             ty: ROTATE_SIG_TAG_NEW_IDENTITY_SIG,
             value: new_identity_sig.to_vec(),
+        },
+        TlvRecord {
+            ty: ROTATE_SIG_TAG_NEW_IDENTITY_PQ_SIG,
+            value: new_identity_pq_sig.to_vec(),
         },
         TlvRecord {
             ty: ROTATE_SIG_TAG_NEW_DEVICE_ID,
@@ -622,6 +669,7 @@ pub fn generate_identity_keys(
     let identity = IdentityKeyPair::generate(format!("{user_id}-ik"), &mut rng);
     let signed_prekey = OneTimePreKey::generate(format!("{user_id}-spk"), &mut rng);
     let identity_sig = generate_signing_key(&mut rng);
+    let pq_identity_sig = build_pq_signature_provider()?.keypair()?;
     let kem = build_kem_for_suite(suite)?;
     let pq_signed_prekey = kem_keypair(&kem)?;
 
@@ -653,6 +701,8 @@ pub fn generate_identity_keys(
         identity_x25519_secret_b64: B64.encode(identity.secret_key.as_slice()),
         identity_sig_pub_b64: B64.encode(identity_sig.verifying_key().to_bytes()),
         identity_sig_secret_b64: B64.encode(identity_sig.to_bytes()),
+        identity_pq_sig_pub_b64: B64.encode(&pq_identity_sig.public_key),
+        identity_pq_sig_secret_b64: B64.encode(pq_identity_sig.secret_key.as_slice()),
         signed_prekey_x25519_pub_b64: B64.encode(signed_prekey.public_key.0),
         signed_prekey_x25519_secret_b64: B64.encode(signed_prekey.secret_key.as_slice()),
         pq_signed_prekey_pub_b64: B64.encode(pq_signed_prekey.public_key),
@@ -681,6 +731,7 @@ pub fn build_register_payload(keys_json: String) -> Result<RegisterPayload, Pqms
         user_id: keys.user_id,
         identity_x25519_pub: keys.identity_x25519_pub_b64,
         identity_sig_pub: keys.identity_sig_pub_b64,
+        identity_pq_sig_pub: keys.identity_pq_sig_pub_b64,
         device_id: keys.device_id,
     })
 }
@@ -697,6 +748,8 @@ pub fn build_publish_prekeys_payload(
     let pq_spk_pub = decode_b64("pq_signed_prekey_pub_b64", &keys.pq_signed_prekey_pub_b64)?;
     let signing_key =
         decode_signing_key_b64("identity_sig_secret_b64", &keys.identity_sig_secret_b64)?;
+    let pq_sig_secret_key =
+        decode_b64("identity_pq_sig_secret_b64", &keys.identity_pq_sig_secret_b64)?;
     if B64.encode(signing_key.verifying_key().to_bytes()) != keys.identity_sig_pub_b64 {
         return Err(invalid_input(
             "identity_sig_pub_b64 does not match identity_sig_secret_b64",
@@ -711,6 +764,8 @@ pub fn build_publish_prekeys_payload(
         sig_over_spk: build_signature_payload(&signing_key, &spk_msg),
         pq_signed_prekey_pub_mlkem768: keys.pq_signed_prekey_pub_b64,
         sig_over_pqspk: build_signature_payload(&signing_key, &pq_msg),
+        pq_sig_over_spk: build_pq_signature_payload(&pq_sig_secret_key, &spk_msg)?,
+        pq_sig_over_pqspk: build_pq_signature_payload(&pq_sig_secret_key, &pq_msg)?,
         one_time_prekeys_x25519: keys
             .one_time_prekeys_x25519
             .into_iter()
@@ -804,6 +859,7 @@ pub fn build_rotate_init_payload(
     Ok(RotateInitPayload {
         new_identity_x25519_pub: keys.identity_x25519_pub_b64,
         new_identity_sig_pub: keys.identity_sig_pub_b64,
+        new_identity_pq_sig_pub: keys.identity_pq_sig_pub_b64,
         new_device_id: keys.device_id,
     })
 }
@@ -814,6 +870,7 @@ pub fn build_rotate_init_auth_headers(
     user_id: String,
     new_identity_x25519_pub: String,
     new_identity_sig_pub: String,
+    new_identity_pq_sig_pub: String,
 ) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
     let keys = read_keys_file(&keys_json)?;
     if keys.user_id != user_id {
@@ -836,6 +893,11 @@ pub fn build_rotate_init_auth_headers(
     hasher.update(new_identity_sig_pub.as_bytes());
     records.push(TlvRecord {
         ty: AUTH_TAG_ROTATE_NEW_SIG_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(new_identity_pq_sig_pub.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH,
         value: hasher.finalize().to_vec(),
     });
     let transcript = encode(&records)
@@ -874,22 +936,31 @@ pub fn build_rotate_confirm_payload(
     }
     let current_signing_key = auth_signing_key_for_user(&current_keys)?;
     let new_signing_key = auth_signing_key_for_user(&new_keys)?;
+    let current_pq_signing_key =
+        decode_b64("identity_pq_sig_secret_b64", &current_keys.identity_pq_sig_secret_b64)?;
+    let new_pq_signing_key =
+        decode_b64("identity_pq_sig_secret_b64", &new_keys.identity_pq_sig_secret_b64)?;
     let challenge_nonce = decode_b64("challenge_nonce_base64", &challenge_nonce_base64)?;
     let new_identity_x25519 =
         decode_b64("identity_x25519_pub_b64", &new_keys.identity_x25519_pub_b64)?;
     let new_identity_sig = decode_b64("identity_sig_pub_b64", &new_keys.identity_sig_pub_b64)?;
+    let new_identity_pq_sig =
+        decode_b64("identity_pq_sig_pub_b64", &new_keys.identity_pq_sig_pub_b64)?;
     let message = rotation_signature_message(
         &user_id,
         &challenge_id,
         &challenge_nonce,
         &new_identity_x25519,
         &new_identity_sig,
+        &new_identity_pq_sig,
         &new_keys.device_id,
     )?;
     Ok(RotateConfirmPayload {
         challenge_id,
         sig_by_current_identity: B64.encode(current_signing_key.sign(&message).to_bytes()),
         sig_by_new_identity: B64.encode(new_signing_key.sign(&message).to_bytes()),
+        pq_sig_by_current_identity: build_pq_signature_payload(&current_pq_signing_key, &message)?,
+        pq_sig_by_new_identity: build_pq_signature_payload(&new_pq_signing_key, &message)?,
     })
 }
 
@@ -900,6 +971,8 @@ pub fn build_rotate_confirm_auth_headers(
     challenge_id: String,
     sig_by_current_identity: String,
     sig_by_new_identity: String,
+    pq_sig_by_current_identity: String,
+    pq_sig_by_new_identity: String,
 ) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
     let keys = read_keys_file(&keys_json)?;
     if keys.user_id != user_id {
@@ -931,6 +1004,16 @@ pub fn build_rotate_confirm_auth_headers(
     hasher.update(sig_by_new_identity.as_bytes());
     records.push(TlvRecord {
         ty: AUTH_TAG_ROTATE_SIG_NEW_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(pq_sig_by_current_identity.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(pq_sig_by_new_identity.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_ROTATE_PQ_SIG_NEW_HASH,
         value: hasher.finalize().to_vec(),
     });
     let transcript = encode(&records)
@@ -985,10 +1068,13 @@ pub fn parse_bundle_json(bundle_json: String) -> Result<ServerBundle, PqmsgAndro
         user_id: bundle.user_id,
         identity_x25519_pub: bundle.identity_x25519_pub,
         identity_sig_pub: bundle.identity_sig_pub,
+        identity_pq_sig_pub: bundle.identity_pq_sig_pub,
         signed_prekey_x25519_pub: bundle.signed_prekey_x25519_pub,
         sig_over_spk: bundle.sig_over_spk,
         pq_signed_prekey_pub_mlkem768: bundle.pq_signed_prekey_pub_mlkem768,
         sig_over_pqspk: bundle.sig_over_pqspk,
+        pq_sig_over_spk: bundle.pq_sig_over_spk,
+        pq_sig_over_pqspk: bundle.pq_sig_over_pqspk,
         one_time_prekey_x25519: bundle.one_time_prekey_x25519,
         one_time_prekey_mlkem768: bundle.one_time_prekey_mlkem768,
     })
@@ -1967,8 +2053,11 @@ pub fn initiate_session_and_encrypt(
 
     let prekey_bundle = bundle_to_core(&peer_bundle, keys.suite)?;
     let identity = to_identity_keypair(&keys)?;
+    let local_pq_signed_prekey = to_pq_signed_prekey(&keys)?;
     let kem = build_kem_for_suite(keys.suite)?;
     let verifier = Ed25519SignatureVerifier;
+    let pq_verifier = build_pq_signature_provider()?;
+    validate_hybrid_prekey_bundle_signatures(&prekey_bundle, &verifier, &pq_verifier)?;
     let initiator = alice_initiate(
         &mut OsRng,
         &verifier,
@@ -1976,6 +2065,7 @@ pub fn initiate_session_and_encrypt(
         &from_user_id,
         &peer_user_id,
         &identity,
+        &local_pq_signed_prekey.public_key,
         &prekey_bundle,
         plaintext_utf8.as_bytes(),
     )?;
@@ -1985,13 +2075,15 @@ pub fn initiate_session_and_encrypt(
         public: identity.public_key,
         secret: identity.require_secret_key()?,
     };
-    let session = SessionState::from_handshake_with_suite(
+    let session = SessionState::from_handshake_with_suite_with_pq_ratchet(
         SessionRole::Initiator,
         *initiator.session_key.as_bytes(),
         local_dh,
         prekey_bundle.signed_prekey,
         prekey_bundle.suite.suite_id()?,
         512,
+        mandatory_pq_ratchet_state(&local_pq_signed_prekey, prekey_bundle.pq_signed_prekey.clone()),
+        Box::new(kem),
     )?;
     let session_file = SessionFile {
         version: 1,
@@ -2095,13 +2187,15 @@ pub fn decrypt_message(
             public: signed_prekey.public_key,
             secret: signed_prekey.require_secret_key()?,
         };
-        let session = SessionState::from_handshake_with_suite(
+        let session = SessionState::from_handshake_with_suite_with_pq_ratchet(
             SessionRole::Responder,
             *responder.session_key.as_bytes(),
             local_dh,
             initial.ik_a_pub,
             initial.suite_id,
             512,
+            mandatory_pq_ratchet_state(&pq_signed_prekey, initial.pq_ratchet_pub_a.clone()),
+            Box::new(kem),
         )?;
         let session_file = SessionFile {
             version: 1,
@@ -2182,8 +2276,14 @@ fn to_identity_keypair(keys: &UserKeysFile) -> Result<IdentityKeyPair, PqmsgAndr
             "identity_x25519_secret_b64",
             &keys.identity_x25519_secret_b64,
         )?),
-        pq_sig_public_key: None,
-        pq_sig_secret_key: None,
+        pq_sig_public_key: Some(decode_b64(
+            "identity_pq_sig_pub_b64",
+            &keys.identity_pq_sig_pub_b64,
+        )?),
+        pq_sig_secret_key: Some(SecretBytes::from(decode_b64(
+            "identity_pq_sig_secret_b64",
+            &keys.identity_pq_sig_secret_b64,
+        )?)),
     })
 }
 
@@ -2237,6 +2337,15 @@ fn bundle_to_core(bundle: &ServerBundle, suite: Suite) -> Result<PreKeyBundle, P
         decode_b64("identity_sig_pub", &bundle.identity_sig_pub)?,
     );
     out.suite = core_suite;
+    out.pq_sig_public_key = Some(decode_b64(
+        "identity_pq_sig_pub",
+        &bundle.identity_pq_sig_pub,
+    )?);
+    out.pq_spk_signature = Some(decode_b64("pq_sig_over_spk", &bundle.pq_sig_over_spk)?);
+    out.pq_pqspk_signature = Some(decode_b64(
+        "pq_sig_over_pqspk",
+        &bundle.pq_sig_over_pqspk,
+    )?);
     out.one_time_prekey = bundle
         .one_time_prekey_x25519
         .as_ref()
@@ -2416,6 +2525,7 @@ mod tests {
 
         let init_payload = build_rotate_init_payload(new_keys_json.clone()).expect("init payload");
         assert_eq!(init_payload.new_device_id, "bob-android-2");
+        assert!(!init_payload.new_identity_pq_sig_pub.is_empty());
 
         let confirm_payload = build_rotate_confirm_payload(
             current_keys_json.clone(),
@@ -2430,6 +2540,8 @@ mod tests {
             confirm_payload.sig_by_current_identity,
             confirm_payload.sig_by_new_identity
         );
+        assert!(!confirm_payload.pq_sig_by_current_identity.is_empty());
+        assert!(!confirm_payload.pq_sig_by_new_identity.is_empty());
 
         let headers = build_identity_log_auth_headers(current_keys_json, "bob".to_string())
             .expect("identity log headers");

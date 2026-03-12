@@ -24,6 +24,7 @@ import {
   buildPrekeysStatusAuthHeaders,
   buildRotateInitAuthHeaders,
   buildRotateConfirmAuthHeaders,
+  buildRotateConfirmPayload,
   buildIdentityLogAuthHeaders,
   buildSealedInboxAuthHeaders,
   buildEphemeralRelayAuthHeaders,
@@ -33,9 +34,7 @@ import {
   buildListDevicesAuthHeaders,
   buildLinkDeviceAuthHeaders,
   buildRevokeDeviceAuthHeaders,
-  decodeWireEnvelopeBase64,
   decryptDirectMessage,
-  decryptFallbackMessage,
   encryptDirectMessageWithSession,
   generateIdentityKeys,
   identityFingerprint,
@@ -45,8 +44,6 @@ import {
   regeneratePublishedPrekeys,
   type GeneratedKeys,
 } from "./crypto";
-import { base64ToBytes, bytesToBase64 } from "./base64";
-import { ed25519 } from "@noble/curves/ed25519";
 import {
   PqmsgApi,
   type ContactEntry,
@@ -164,8 +161,15 @@ type InboxFilter = "all" | "unread" | "groups" | "requests" | "archived";
 async function bootstrapApp(): Promise<void> {
   try {
     await initMetadataStorage();
-  } catch {
-    // Best-effort hydration; storage falls back to legacy localStorage if IndexedDB is unavailable.
+    await ensureWebPqRuntime();
+  } catch (error) {
+    app.innerHTML = `
+      <div class="empty-state">
+        <h2>Secure web messaging unavailable</h2>
+        <p>${escHtml(errorMsg(error))}</p>
+      </div>
+    `;
+    return;
   }
 
   setup = loadSetup();
@@ -212,6 +216,16 @@ async function ensureWebPqRuntime(): Promise<void> {
   }
 }
 
+async function ensureMandatoryPqRatchetPolicy(): Promise<void> {
+  const capabilities = await loadServerCapabilitiesCached();
+  if (!capabilities) {
+    throw new Error("Server capabilities could not be verified.");
+  }
+  if (capabilities.pq_ratchet_interval <= 0) {
+    throw new Error("Server is not advertising mandatory PQ ratchet support.");
+  }
+}
+
 async function persistDirectSession(peerUserId: string, sessionJson: string): Promise<void> {
   await saveDirectMessageSession(setup.userId, peerUserId, getPassphrase(), sessionJson);
 }
@@ -232,6 +246,7 @@ async function encryptDirectPayload(
   plaintext: string
 ): Promise<string> {
   await ensureWebPqRuntime();
+  await ensureMandatoryPqRatchetPolicy();
   const existingSession = await loadStoredDirectSession(peerUserId);
   if (existingSession) {
     const result = encryptDirectMessageWithSession(existingSession, k.userId, peerUserId, plaintext);
@@ -241,7 +256,9 @@ async function encryptDirectPayload(
 
   const api = new PqmsgApi(setup.serverUrl);
   const bundle = await api.getBundle(peerUserId);
-  const fingerprint = bundle.identity_fingerprint_sha256 || identityFingerprint(bundle.identity_x25519_pub);
+  const fingerprint =
+    bundle.identity_fingerprint_sha256
+    || identityFingerprint(bundle.identity_x25519_pub, bundle.identity_pq_sig_pub);
   enforceIdentityPin(
     peerUserId,
     bundle.identity_sig_pub,
@@ -266,27 +283,17 @@ async function decryptIncomingPayload(
   messageBytesBase64: string
 ): Promise<DecryptedIncomingPayload> {
   const activeKeys = keys ?? k;
-  try {
-    const envelope = decodeWireEnvelopeBase64(messageBytesBase64);
-    const plaintext = await decryptFallbackMessage(getPassphrase(), envelope);
-    const isDirectMessage = envelope.recipient === activeKeys.userId;
-    return {
-      kind: isDirectMessage ? "dm" : "group",
-      recipient: envelope.recipient,
-      plaintext,
-    };
-  } catch {
-    await ensureWebPqRuntime();
-    const existingSession = await loadStoredDirectSession(senderUserId);
-    const result = decryptDirectMessage(activeKeys, senderUserId, messageBytesBase64, existingSession);
-    await syncUpdatedKeys(result.updatedKeys);
-    await persistDirectSession(senderUserId, result.sessionJson);
-    return {
-      kind: "dm",
-      recipient: activeKeys.userId,
-      plaintext: result.plaintextUtf8,
-    };
-  }
+  await ensureWebPqRuntime();
+  await ensureMandatoryPqRatchetPolicy();
+  const existingSession = await loadStoredDirectSession(senderUserId);
+  const result = decryptDirectMessage(activeKeys, senderUserId, messageBytesBase64, existingSession);
+  await syncUpdatedKeys(result.updatedKeys);
+  await persistDirectSession(senderUserId, result.sessionJson);
+  return {
+    kind: "dm",
+    recipient: activeKeys.userId,
+    plaintext: result.plaintextUtf8,
+  };
 }
 
 async function ensureWebMessagingAllowed(kind: "direct" | "group"): Promise<boolean> {
@@ -820,6 +827,7 @@ function renderCreateAccount(): void {
         user_id: genKeys.userId,
         identity_x25519_pub: genKeys.identityX25519Pub,
         identity_sig_pub: genKeys.identitySigPub,
+        identity_pq_sig_pub: genKeys.identityPqSigPub,
         device_id: genKeys.deviceId,
       });
 
@@ -2536,7 +2544,9 @@ function showDeleteConfirm(bubble: HTMLElement, serverMessageId: number): void {
 // ---------------------------------------------------------------------------
 
 async function renderSettings(): Promise<void> {
-  const fingerprint = keys ? identityFingerprint(keys.identityX25519Pub) : "not available";
+  const fingerprint = keys
+    ? identityFingerprint(keys.identityX25519Pub, keys.identityPqSigPub)
+    : "not available";
   const webHoldback = getWebBetaHoldback(await loadServerCapabilitiesCached());
   app.innerHTML = `
     <div class="app-shell">
@@ -2603,7 +2613,7 @@ async function renderSettings(): Promise<void> {
         <div class="settings-section">
           <h3>Privacy & Trust</h3>
           <div class="settings-row"><span>Encryption</span><span>Post-quantum (ML-KEM-768)</span></div>
-          <div class="settings-row"><span>Mode</span><span>WebCrypto fallback</span></div>
+          <div class="settings-row"><span>Mode</span><span>Mandatory WASM PQ runtime</span></div>
           <div class="settings-row column"><span>Identity Fingerprint</span><span class="mono fingerprint">${escHtml(fingerprint)}</span></div>
           <div class="settings-row"><span>Server</span><span class="mono">${escHtml(setup.serverUrl)}</span></div>
           <div class="settings-row">
@@ -2772,24 +2782,36 @@ async function renderSettings(): Promise<void> {
       // Generate fresh identity keypair for rotation
       const newKeys = generateIdentityKeys(k.userId, k.deviceId, k.suite, 4);
       // Step 1: initiate rotation challenge
-      const initHeaders = buildRotateInitAuthHeaders(k, newKeys.identityX25519Pub, newKeys.identitySigPub);
+      const initHeaders = buildRotateInitAuthHeaders(
+        k,
+        newKeys.identityX25519Pub,
+        newKeys.identitySigPub,
+        newKeys.identityPqSigPub
+      );
       statusEl.textContent = "Requesting rotation challenge…";
       const challenge = await api.rotateInit(k.userId, {
         new_identity_x25519_pub: newKeys.identityX25519Pub,
         new_identity_sig_pub: newKeys.identitySigPub,
+        new_identity_pq_sig_pub: newKeys.identityPqSigPub,
         new_device_id: k.deviceId,
       }, initHeaders);
-      // Step 2: sign challenge nonce with both current and new identity keys
-      const nonceBytes = new TextEncoder().encode(challenge.challenge_nonce);
-      const sigCurrent = bytesToBase64(ed25519.sign(nonceBytes, base64ToBytes(k.identitySigSecret)));
-      const sigNew = bytesToBase64(ed25519.sign(nonceBytes, base64ToBytes(newKeys.identitySigSecret)));
+      // Step 2: sign the full rotation transcript with both current and new hybrid identities
+      const rotateConfirmPayload = buildRotateConfirmPayload(
+        k,
+        newKeys,
+        challenge.challenge_id,
+        challenge.challenge_nonce
+      );
       statusEl.textContent = "Confirming rotation…";
-      const confirmHeaders = buildRotateConfirmAuthHeaders(k, challenge.challenge_id, sigCurrent, sigNew);
-      const result = await api.rotateConfirm(k.userId, {
-        challenge_id: challenge.challenge_id,
-        sig_by_current_identity: sigCurrent,
-        sig_by_new_identity: sigNew,
-      }, confirmHeaders);
+      const confirmHeaders = buildRotateConfirmAuthHeaders(
+        k,
+        rotateConfirmPayload.challenge_id,
+        rotateConfirmPayload.sig_by_current_identity,
+        rotateConfirmPayload.sig_by_new_identity,
+        rotateConfirmPayload.pq_sig_by_current_identity,
+        rotateConfirmPayload.pq_sig_by_new_identity
+      );
+      const result = await api.rotateConfirm(k.userId, rotateConfirmPayload, confirmHeaders);
       // Step 3: persist new keys locally
       const rotatedKeys: GeneratedKeys = { ...k, ...newKeys };
       const passphrase = getPassphrase();

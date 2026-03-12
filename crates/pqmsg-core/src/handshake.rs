@@ -21,6 +21,7 @@ const AD_TAG_INITIATOR_IDENTITY_KEY: u16 = critical_type(0x0003);
 const AD_TAG_RESPONDER_IDENTITY_KEY: u16 = critical_type(0x0004);
 const AD_TAG_INITIATOR_ID: u16 = critical_type(0x0005);
 const AD_TAG_RESPONDER_ID: u16 = critical_type(0x0006);
+const AD_TAG_INITIATOR_PQ_RATCHET_KEY: u16 = critical_type(0x0007);
 
 const MSG_TAG_PROTOCOL_VERSION: u16 = critical_type(0x0101);
 const MSG_TAG_SUITE_ID: u16 = critical_type(0x0109);
@@ -32,6 +33,7 @@ const MSG_TAG_PQ_CT: u16 = critical_type(0x0106);
 const MSG_TAG_NONCE: u16 = critical_type(0x0107);
 const MSG_TAG_CIPHERTEXT: u16 = critical_type(0x0108);
 const MSG_TAG_OTPK_ID: u16 = critical_type(0x010A);
+const MSG_TAG_PQ_RATCHET_PUB_A: u16 = critical_type(0x010B);
 
 const SIG_TAG_PROTOCOL_VERSION: u16 = critical_type(0x0201);
 const SIG_TAG_LABEL: u16 = critical_type(0x0202);
@@ -69,6 +71,7 @@ pub struct InitialMessage {
     pub ik_a_pub: DhPublicKey,
     pub ek_a_pub: DhPublicKey,
     pub pq_ct: Vec<u8>,
+    pub pq_ratchet_pub_a: Vec<u8>,
     pub nonce: [u8; 12],
     pub ciphertext: Vec<u8>,
     /// ID of the one-time prekey consumed during this handshake (if any).
@@ -107,6 +110,10 @@ impl InitialMessage {
                 value: self.pq_ct.clone(),
             },
             TlvRecord {
+                ty: MSG_TAG_PQ_RATCHET_PUB_A,
+                value: self.pq_ratchet_pub_a.clone(),
+            },
+            TlvRecord {
                 ty: MSG_TAG_NONCE,
                 value: self.nonce.to_vec(),
             },
@@ -133,6 +140,7 @@ impl InitialMessage {
             MSG_TAG_IK_A_PUB,
             MSG_TAG_EK_A_PUB,
             MSG_TAG_PQ_CT,
+            MSG_TAG_PQ_RATCHET_PUB_A,
             MSG_TAG_NONCE,
             MSG_TAG_CIPHERTEXT,
             MSG_TAG_OTPK_ID,
@@ -165,6 +173,12 @@ impl InitialMessage {
             "ek_a_pub",
         )?;
         let pq_ct = require_from_map(&map, MSG_TAG_PQ_CT, "pq_ct")?.to_vec();
+        let pq_ratchet_pub_a = require_from_map(
+            &map,
+            MSG_TAG_PQ_RATCHET_PUB_A,
+            "pq_ratchet_pub_a",
+        )?
+        .to_vec();
         let nonce = parse_12(require_from_map(&map, MSG_TAG_NONCE, "nonce")?, "nonce")?;
         let ciphertext = require_from_map(&map, MSG_TAG_CIPHERTEXT, "ciphertext")?.to_vec();
         let otpk_id = map
@@ -180,6 +194,7 @@ impl InitialMessage {
             ik_a_pub: DhPublicKey(ik_a_pub),
             ek_a_pub: DhPublicKey(ek_a_pub),
             pq_ct,
+            pq_ratchet_pub_a,
             nonce,
             ciphertext,
             otpk_id,
@@ -235,22 +250,23 @@ pub fn validate_prekey_bundle_signatures<V: SignatureVerifier>(
     Ok(())
 }
 
-/// Validate the optional post-quantum (ML-DSA-65) signatures on a prekey bundle.
-///
-/// When `pq_sig_public_key`, `pq_spk_signature`, and `pq_pqspk_signature` are all
-/// present, this verifies them.  When any are absent the check is skipped
-/// (graceful downgrade for bundles from clients that have not yet upgraded).
+/// Validate the mandatory post-quantum (ML-DSA-65) signatures on a prekey bundle.
 pub fn validate_pq_prekey_bundle_signatures<P: PqSignatureProvider>(
     bundle: &PreKeyBundle,
     pq_verifier: &P,
 ) -> Result<(), CoreError> {
-    let (Some(ref pq_pk), Some(ref pq_spk_sig), Some(ref pq_pqspk_sig)) = (
-        &bundle.pq_sig_public_key,
-        &bundle.pq_spk_signature,
-        &bundle.pq_pqspk_signature,
-    ) else {
-        return Ok(());
-    };
+    let pq_pk = bundle
+        .pq_sig_public_key
+        .as_ref()
+        .ok_or(CoreError::MissingField("prekey_bundle.pq_sig_public_key"))?;
+    let pq_spk_sig = bundle
+        .pq_spk_signature
+        .as_ref()
+        .ok_or(CoreError::MissingField("prekey_bundle.pq_spk_signature"))?;
+    let pq_pqspk_sig = bundle
+        .pq_pqspk_signature
+        .as_ref()
+        .ok_or(CoreError::MissingField("prekey_bundle.pq_pqspk_signature"))?;
 
     let spk_message =
         signed_prekey_signature_message(bundle.protocol_version, &bundle.signed_prekey)?;
@@ -263,6 +279,16 @@ pub fn validate_pq_prekey_bundle_signatures<P: PqSignatureProvider>(
     Ok(())
 }
 
+pub fn validate_hybrid_prekey_bundle_signatures<V: SignatureVerifier, P: PqSignatureProvider>(
+    bundle: &PreKeyBundle,
+    verifier: &V,
+    pq_verifier: &P,
+) -> Result<(), CoreError> {
+    validate_prekey_bundle_signatures(bundle, verifier)?;
+    validate_pq_prekey_bundle_signatures(bundle, pq_verifier)?;
+    Ok(())
+}
+
 pub fn associated_data(
     protocol_version: u16,
     suite_id: u16,
@@ -270,6 +296,7 @@ pub fn associated_data(
     responder_identity_key: &DhPublicKey,
     initiator_id: &str,
     responder_id: &str,
+    initiator_pq_ratchet_key: &[u8],
 ) -> Result<Vec<u8>, CoreError> {
     encode(&[
         TlvRecord {
@@ -296,6 +323,10 @@ pub fn associated_data(
             ty: AD_TAG_RESPONDER_ID,
             value: responder_id.as_bytes().to_vec(),
         },
+        TlvRecord {
+            ty: AD_TAG_INITIATOR_PQ_RATCHET_KEY,
+            value: initiator_pq_ratchet_key.to_vec(),
+        },
     ])
 }
 
@@ -307,6 +338,7 @@ pub fn alice_initiate<R: RngCore + CryptoRng, V: SignatureVerifier, K: KemProvid
     alice_id: &str,
     bob_id: &str,
     alice_identity: &IdentityKeyPair,
+    alice_pq_ratchet_public_key: &[u8],
     bob_bundle: &PreKeyBundle,
     payload: &[u8],
 ) -> Result<InitiatorOutput, CoreError> {
@@ -355,6 +387,7 @@ pub fn alice_initiate<R: RngCore + CryptoRng, V: SignatureVerifier, K: KemProvid
         &bob_bundle.identity_key,
         alice_id,
         bob_id,
+        alice_pq_ratchet_public_key,
     )?;
     let envelope = encrypt_with_rng(session_key.as_bytes(), payload, &ad, rng)?;
 
@@ -372,6 +405,7 @@ pub fn alice_initiate<R: RngCore + CryptoRng, V: SignatureVerifier, K: KemProvid
         ik_a_pub: alice_identity.public_key,
         ek_a_pub: alice_ek.public,
         pq_ct: kem_encapsulation.ciphertext,
+        pq_ratchet_pub_a: alice_pq_ratchet_public_key.to_vec(),
         nonce: envelope.nonce,
         ciphertext: envelope.ciphertext,
         otpk_id,
@@ -439,6 +473,7 @@ pub fn bob_receive<K: KemProvider>(
         &bob_identity.public_key,
         &initial_message.sender_id,
         &initial_message.recipient_id,
+        &initial_message.pq_ratchet_pub_a,
     )?;
     let envelope = CiphertextEnvelope {
         nonce: initial_message.nonce,
@@ -665,6 +700,7 @@ mod tests {
             "alice",
             "bob",
             &alice_identity,
+            &alice_identity.public_key.0,
             &bundle,
             b"hello pqmsg",
         )
@@ -694,6 +730,7 @@ mod tests {
             "alice",
             "bob",
             &alice_identity,
+            &alice_identity.public_key.0,
             &bundle,
             b"payload",
         )
@@ -725,6 +762,7 @@ mod tests {
             "alice",
             "bob",
             &alice_identity,
+            &alice_identity.public_key.0,
             &bundle,
             b"payload",
         )
@@ -778,6 +816,7 @@ mod tests {
             "alice",
             "bob",
             &alice_identity,
+            &alice_identity.public_key.0,
             &bundle,
             b"kat-payload",
         )
@@ -796,7 +835,7 @@ mod tests {
         assert_eq!(responder.plaintext, b"kat-payload");
         assert_eq!(initiator.session_key, responder.session_key);
 
-        let expected_transcript_hex = "81010002000181090002000181020005616c69636581030003626f628104002018b7279e7599928f72e167111e89af25fbdff045bd6faa83425ab2d1468c8b6781050020e0ce49028ee32078ac70bf8910b2ebbab37d6e1baf5afc0b393be2ff634b78298106002074e6fa5c389000b2bf9774c6625d6368d03aa43fb398eb1736b8ae93ac5769768107000cc82fb56107fe74a0d3679f848108001b2f1799c2714d83a71a98cc9f859c815480962b56b80e6d516aceb6";
+        let expected_transcript_hex = "81010002000181090002000181020005616c69636581030003626f628104002018b7279e7599928f72e167111e89af25fbdff045bd6faa83425ab2d1468c8b6781050020e0ce49028ee32078ac70bf8910b2ebbab37d6e1baf5afc0b393be2ff634b78298106002074e6fa5c389000b2bf9774c6625d6368d03aa43fb398eb1736b8ae93ac576976810b002018b7279e7599928f72e167111e89af25fbdff045bd6faa83425ab2d1468c8b678107000cc82fb56107fe74a0d3679f848108001b2f1799c2714d83a71a98ccd66eae3a6cd611f16e04364b3c4484c6";
         let expected_session_key_hex =
             "7d40f0a2f7cbb531ffeb2d944bf7b57dfeb5a98e8090965ff1f9576f64793270";
         assert_eq!(hex_encode(&encoded), expected_transcript_hex);
@@ -843,6 +882,7 @@ mod tests {
             "alice",
             "bob",
             &alice_identity,
+            &alice_identity.public_key.0,
             &bundle,
             b"kat-vector-2",
         )
@@ -872,7 +912,7 @@ mod tests {
         );
         assert_eq!(
             transcript_hex,
-            "81010002000181090002000181020005616c69636581030003626f62810400207638d04176f97ced442a413e0d61ba20c71e5d3ecf5bf7e822f562db9c7e9e5181050020fdbbeb429f42522da9c1563623ccc647c4d1ed594648891b4e7508717d67140081060020b159c62fbbaa1c0bd278a7a97f426c0102ab5290805e884fa4bfbdb00f0051d48107000c15734c6700fe3cae0d92b72f8108001c38e86c127ab840ee286d7bd7d42c7b2358d9a9728de96088a83a5d91"
+            "81010002000181090002000181020005616c69636581030003626f62810400207638d04176f97ced442a413e0d61ba20c71e5d3ecf5bf7e822f562db9c7e9e5181050020fdbbeb429f42522da9c1563623ccc647c4d1ed594648891b4e7508717d67140081060020b159c62fbbaa1c0bd278a7a97f426c0102ab5290805e884fa4bfbdb00f0051d4810b00207638d04176f97ced442a413e0d61ba20c71e5d3ecf5bf7e822f562db9c7e9e518107000c15734c6700fe3cae0d92b72f8108001c38e86c127ab840ee286d7bd726dde05a0f8e238ab95811c95d77fb65"
         );
     }
 
@@ -891,6 +931,7 @@ mod tests {
             "alice",
             "bob",
             &alice_identity,
+            &alice_identity.public_key.0,
             &bundle,
             b"roundtrip-test",
         )
@@ -908,6 +949,10 @@ mod tests {
         assert_eq!(decoded.ik_a_pub, initiator.initial_message.ik_a_pub);
         assert_eq!(decoded.ek_a_pub, initiator.initial_message.ek_a_pub);
         assert_eq!(decoded.pq_ct, initiator.initial_message.pq_ct);
+        assert_eq!(
+            decoded.pq_ratchet_pub_a,
+            initiator.initial_message.pq_ratchet_pub_a
+        );
         assert_eq!(decoded.nonce, initiator.initial_message.nonce);
         assert_eq!(decoded.ciphertext, initiator.initial_message.ciphertext);
 
@@ -937,6 +982,7 @@ mod tests {
             "alice",
             "bob",
             &alice_identity,
+            &alice_identity.public_key.0,
             &bundle,
             b"otpk-payload",
         )
@@ -979,6 +1025,7 @@ mod tests {
             "alice",
             "bob",
             &alice_identity,
+            &alice_identity.public_key.0,
             &bundle_no_otpk,
             b"same-payload",
         )

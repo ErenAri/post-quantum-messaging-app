@@ -15,10 +15,12 @@ use http_body_util::BodyExt;
 use pqmsg_core::alg::PROTOCOL_VERSION_V1;
 use pqmsg_core::dh::DhPublicKey;
 use pqmsg_core::handshake::{pq_signed_prekey_signature_message, signed_prekey_signature_message};
+use pqmsg_core::pq_sig::{MlDsa65, PqSignatureProvider};
 use pqmsg_core::tlv::{critical_type, encode, TlvRecord};
 use pqmsg_server::{build_router, init_db, parse_db_backend, AppState, RateLimiter};
 use serde_json::{json, Value};
 use sqlx::any::AnyPoolOptions;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -45,6 +47,20 @@ const AUTH_TAG_LINK_DEVICE_ID: u16 = critical_type(0x3212);
 
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(100_000);
 
+struct TestIdentityKeyPair {
+    classical: SigningKey,
+    pq_public: Vec<u8>,
+    pq_secret: Vec<u8>,
+}
+
+impl Deref for TestIdentityKeyPair {
+    type Target = SigningKey;
+
+    fn deref(&self) -> &Self::Target {
+        &self.classical
+    }
+}
+
 // ── Test infrastructure ────────────────────────────────────────────
 
 async fn test_app() -> axum::Router {
@@ -70,8 +86,14 @@ async fn test_app() -> axum::Router {
     build_router(state)
 }
 
-fn signing_key(seed: u8) -> SigningKey {
-    SigningKey::from_bytes(&[seed; 32])
+fn signing_key(seed: u8) -> TestIdentityKeyPair {
+    let provider = MlDsa65::new().expect("ml-dsa init");
+    let pq_keypair = provider.keypair().expect("ml-dsa keypair");
+    TestIdentityKeyPair {
+        classical: SigningKey::from_bytes(&[seed; 32]),
+        pq_public: pq_keypair.public_key,
+        pq_secret: pq_keypair.secret_key.as_slice().to_vec(),
+    }
 }
 
 async fn json_request(
@@ -381,23 +403,25 @@ fn register_payload(
     user_id: &str,
     device_id: &str,
     identity_x25519_pub: [u8; 32],
-    identity_signing_key: &SigningKey,
+    identity_signing_key: &TestIdentityKeyPair,
 ) -> Value {
     json!({
         "user_id": user_id,
         "identity_x25519_pub": B64.encode(identity_x25519_pub),
         "identity_sig_pub": B64.encode(identity_signing_key.verifying_key().to_bytes()),
+        "identity_pq_sig_pub": B64.encode(&identity_signing_key.pq_public),
         "device_id": device_id,
     })
 }
 
 fn publish_prekeys_payload(
-    identity_signing_key: &SigningKey,
+    identity_signing_key: &TestIdentityKeyPair,
     signed_prekey_x25519_pub: [u8; 32],
     pq_signed_prekey_pub_mlkem768: Vec<u8>,
     one_time_prekeys_x25519: Vec<[u8; 32]>,
     one_time_prekeys_mlkem768: Vec<Vec<u8>>,
 ) -> Value {
+    let pq_provider = MlDsa65::new().expect("ml-dsa init");
     let spk_message = signed_prekey_signature_message(
         PROTOCOL_VERSION_V1,
         &DhPublicKey(signed_prekey_x25519_pub),
@@ -408,12 +432,20 @@ fn publish_prekeys_payload(
             .expect("pqspk message");
     let sig_over_spk = identity_signing_key.sign(&spk_message).to_bytes();
     let sig_over_pqspk = identity_signing_key.sign(&pq_message).to_bytes();
+    let pq_sig_over_spk = pq_provider
+        .sign(&identity_signing_key.pq_secret, &spk_message)
+        .expect("pq sign spk");
+    let pq_sig_over_pqspk = pq_provider
+        .sign(&identity_signing_key.pq_secret, &pq_message)
+        .expect("pq sign pqspk");
 
     json!({
         "signed_prekey_x25519_pub": B64.encode(signed_prekey_x25519_pub),
         "sig_over_spk": B64.encode(sig_over_spk),
         "pq_signed_prekey_pub_mlkem768": B64.encode(pq_signed_prekey_pub_mlkem768),
         "sig_over_pqspk": B64.encode(sig_over_pqspk),
+        "pq_sig_over_spk": B64.encode(pq_sig_over_spk),
+        "pq_sig_over_pqspk": B64.encode(pq_sig_over_pqspk),
         "one_time_prekeys_x25519": one_time_prekeys_x25519
             .into_iter()
             .map(|v| B64.encode(v))
@@ -430,7 +462,7 @@ fn publish_prekeys_payload(
 struct Client {
     user_id: &'static str,
     device_id: &'static str,
-    signing_key: SigningKey,
+    signing_key: TestIdentityKeyPair,
     x25519_pub: [u8; 32],
 }
 

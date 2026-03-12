@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 const sessionCache = new Map<string, string>();
 const metadataCache = new Map<string, string>();
+const keyRecordCache = new Map<string, string>();
 vi.mock("./db", () => ({
   saveSessionCache: async (userId: string, peerId: string, sealedSession: string) => {
     sessionCache.set(`${userId}:${peerId}`, sealedSession);
@@ -28,7 +29,17 @@ vi.mock("./db", () => ({
   clearMetadataRecord: async (id: string) => {
     metadataCache.delete(id);
   },
+  saveKeyRecord: async (id: string, sealedKeys: string) => {
+    keyRecordCache.set(id, sealedKeys);
+  },
+  loadKeyRecord: async (id: string) => keyRecordCache.get(id) ?? null,
+  listKeyRecordIds: async () => [...keyRecordCache.keys()].sort((lhs, rhs) => lhs.localeCompare(rhs)),
+  clearKeyRecord: async (id: string) => {
+    keyRecordCache.delete(id);
+  },
 }));
+
+import { saveKeyRecord, saveMetadataRecord } from "./db";
 
 import {
   loadSetup,
@@ -51,6 +62,7 @@ import {
   loadProfileDisplayNames,
   hasLocalKeys,
   listLocalKeyUsers,
+  saveKeys,
   loadGroupConversations,
   upsertGroupConversation,
   markGroupConversationRead,
@@ -78,6 +90,7 @@ beforeEach(async () => {
   localStorageMock.clear();
   sessionCache.clear();
   metadataCache.clear();
+  keyRecordCache.clear();
   await initMetadataStorage();
 });
 
@@ -100,15 +113,16 @@ describe("loadSetup / saveSetup", () => {
     expect(loadSetup()).toEqual(config);
   });
 
-  it("falls back to defaults for missing fields", () => {
-    localStorageMock.setItem("pqmsg.web.setup.v1", JSON.stringify({ serverUrl: "http://test" }));
+  it("falls back to defaults for missing fields", async () => {
+    await saveMetadataRecord("pqmsg.web.setup.v1", JSON.stringify({ serverUrl: "http://test" }));
+    await initMetadataStorage();
     const setup = loadSetup();
     expect(setup.serverUrl).toBe("http://test");
     expect(setup.suiteLabel).toBe(DEFAULT_SETUP.suiteLabel);
   });
 
-  it("preserves explicitly cleared setup fields", () => {
-    localStorageMock.setItem(
+  it("preserves explicitly cleared setup fields", async () => {
+    await saveMetadataRecord(
       "pqmsg.web.setup.v1",
       JSON.stringify({
         serverUrl: "http://localhost:3000",
@@ -119,6 +133,7 @@ describe("loadSetup / saveSetup", () => {
         displayName: "",
       }),
     );
+    await initMetadataStorage();
     expect(loadSetup()).toEqual({
       serverUrl: "http://localhost:3000",
       userId: "",
@@ -129,8 +144,9 @@ describe("loadSetup / saveSetup", () => {
     });
   });
 
-  it("returns defaults on corrupt JSON", () => {
-    localStorageMock.setItem("pqmsg.web.setup.v1", "not-json{{{");
+  it("returns defaults on corrupt JSON", async () => {
+    await saveMetadataRecord("pqmsg.web.setup.v1", "not-json{{{");
+    await initMetadataStorage();
     expect(loadSetup()).toEqual(DEFAULT_SETUP);
   });
 });
@@ -334,8 +350,9 @@ describe("hasLocalKeys", () => {
     expect(hasLocalKeys("alice")).toBe(false);
   });
 
-  it("returns true when keys exist", () => {
-    localStorageMock.setItem("pqmsg.web.keys.v1.alice", "sealed-data");
+  it("returns true when keys exist", async () => {
+    await saveKeyRecord("alice", "sealed-data");
+    await initMetadataStorage();
     expect(hasLocalKeys("alice")).toBe(true);
   });
 
@@ -346,16 +363,18 @@ describe("hasLocalKeys", () => {
 });
 
 describe("listLocalKeyUsers", () => {
-  it("returns stored key owners in sorted order", () => {
-    localStorageMock.setItem("pqmsg.web.keys.v1.charlie", "sealed-charlie");
-    localStorageMock.setItem("pqmsg.web.keys.v1.alice", "sealed-alice");
-    localStorageMock.setItem("pqmsg.web.keys.v1.bob", "sealed-bob");
+  it("returns stored key owners in sorted order", async () => {
+    await saveKeyRecord("charlie", "sealed-charlie");
+    await saveKeyRecord("alice", "sealed-alice");
+    await saveKeyRecord("bob", "sealed-bob");
+    await initMetadataStorage();
 
     expect(listLocalKeyUsers()).toEqual(["alice", "bob", "charlie"]);
   });
 
-  it("ignores unrelated local storage entries", () => {
-    localStorageMock.setItem("pqmsg.web.keys.v1.alice", "sealed-alice");
+  it("ignores unrelated local storage entries", async () => {
+    await saveKeyRecord("alice", "sealed-alice");
+    await initMetadataStorage();
     localStorageMock.setItem("something-else", "value");
 
     expect(listLocalKeyUsers()).toEqual(["alice"]);
@@ -371,13 +390,13 @@ describe("direct message sessions", () => {
     await expect(loadDirectMessageSession("alice", "bob", "pass-1")).resolves.toBe("session-json");
   });
 
-  it("migrates legacy localStorage sessions on read", async () => {
+  it("rejects legacy localStorage sessions instead of migrating them", async () => {
     const sealed = await sealJsonWithPassphrase("legacy-session", "pass-1");
     localStorageMock.setItem("pqmsg.web.dmsession.v1.alice:bob", sealed);
 
-    await expect(loadDirectMessageSession("alice", "bob", "pass-1")).resolves.toBe("legacy-session");
-    expect(sessionCache.get("alice:bob")).toBe(sealed);
-    expect(localStorageMock.getItem("pqmsg.web.dmsession.v1.alice:bob")).toBeNull();
+    await expect(loadDirectMessageSession("alice", "bob", "pass-1")).resolves.toBeNull();
+    expect(sessionCache.has("alice:bob")).toBe(false);
+    expect(localStorageMock.getItem("pqmsg.web.dmsession.v1.alice:bob")).toBe(sealed);
   });
 });
 
@@ -425,7 +444,8 @@ describe("group conversations", () => {
 
 describe("wipeLocalState", () => {
   it("removes keys for the user", async () => {
-    localStorageMock.setItem("pqmsg.web.keys.v1.alice", "sealed-data");
+    await saveKeyRecord("alice", "sealed-data");
+    await initMetadataStorage();
     await wipeLocalState("alice");
     expect(hasLocalKeys("alice")).toBe(false);
   });

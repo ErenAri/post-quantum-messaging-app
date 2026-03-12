@@ -34,6 +34,8 @@ export interface WasmSessionKeys {
   identityX25519Secret: string;
   identitySigPub: string;
   identitySigSecret: string;
+  identityPqSigPub: string;
+  identityPqSigSecret: string;
   signedPrekeyX25519Pub: string;
   signedPrekeyX25519Secret: string;
   pqSignedPrekeyPubMlkem768: string;
@@ -48,10 +50,13 @@ export interface WasmServerBundle {
   user_id: string;
   identity_x25519_pub: string;
   identity_sig_pub: string;
+  identity_pq_sig_pub: string;
   signed_prekey_x25519_pub: string;
   sig_over_spk: string;
   pq_signed_prekey_pub_mlkem768: string;
   sig_over_pqspk: string;
+  pq_sig_over_spk: string;
+  pq_sig_over_pqspk: string;
   one_time_prekey_x25519: string | null;
   one_time_prekey_mlkem768: string | null;
 }

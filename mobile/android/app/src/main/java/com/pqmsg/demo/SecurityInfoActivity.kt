@@ -395,10 +395,12 @@ class SecurityInfoActivity : AppCompatActivity() {
                 user,
                 rotateInitPayload.newIdentityX25519Pub,
                 rotateInitPayload.newIdentitySigPub,
+                rotateInitPayload.newIdentityPqSigPub,
             ).toHeaderMap(),
             request = RotateInitRequest(
                 new_identity_x25519_pub = rotateInitPayload.newIdentityX25519Pub,
                 new_identity_sig_pub = rotateInitPayload.newIdentitySigPub,
+                new_identity_pq_sig_pub = rotateInitPayload.newIdentityPqSigPub,
                 new_device_id = rotateInitPayload.newDeviceId,
             ),
         )
@@ -421,11 +423,15 @@ class SecurityInfoActivity : AppCompatActivity() {
                 rotateConfirmPayload.challengeId,
                 rotateConfirmPayload.sigByCurrentIdentity,
                 rotateConfirmPayload.sigByNewIdentity,
+                rotateConfirmPayload.pqSigByCurrentIdentity,
+                rotateConfirmPayload.pqSigByNewIdentity,
             ).toHeaderMap(),
             request = RotateConfirmRequest(
                 challenge_id = rotateConfirmPayload.challengeId,
                 sig_by_current_identity = rotateConfirmPayload.sigByCurrentIdentity,
                 sig_by_new_identity = rotateConfirmPayload.sigByNewIdentity,
+                pq_sig_by_current_identity = rotateConfirmPayload.pqSigByCurrentIdentity,
+                pq_sig_by_new_identity = rotateConfirmPayload.pqSigByNewIdentity,
             ),
         )
         check(rotateConfirmResponse.user_id == user) {
@@ -441,6 +447,8 @@ class SecurityInfoActivity : AppCompatActivity() {
                 sig_over_spk = publishPayload.sigOverSpk,
                 pq_signed_prekey_pub_mlkem768 = publishPayload.pqSignedPrekeyPubMlkem768,
                 sig_over_pqspk = publishPayload.sigOverPqspk,
+                pq_sig_over_spk = publishPayload.pqSigOverSpk,
+                pq_sig_over_pqspk = publishPayload.pqSigOverPqspk,
                 one_time_prekeys_x25519 = publishPayload.oneTimePrekeysX25519,
                 one_time_prekeys_mlkem768 = publishPayload.oneTimePrekeysMlkem768,
             ),

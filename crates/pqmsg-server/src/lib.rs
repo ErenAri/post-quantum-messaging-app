@@ -50,6 +50,8 @@ pub(crate) const MAX_DEVICE_ID_LEN: usize = 128;
 pub(crate) const X25519_KEY_LEN: usize = 32;
 pub(crate) const SIG_PUB_KEY_LEN: usize = 32;
 pub(crate) const SIG_LEN: usize = 64;
+pub(crate) const PQ_SIG_PUB_KEY_LEN: usize = pqmsg_core::pq_sig::ML_DSA_65_PK_LEN;
+pub(crate) const PQ_SIG_LEN: usize = pqmsg_core::pq_sig::ML_DSA_65_SIG_LEN;
 pub(crate) const MIN_PQ_KEY_LEN: usize = 32;
 pub(crate) const MAX_PQ_KEY_LEN: usize = 4096;
 pub(crate) const MAX_ONE_TIME_KEYS: usize = 256;
@@ -79,6 +81,7 @@ pub(crate) const ROTATE_SIG_TAG_CHALLENGE_NONCE: u16 = critical_type(0x3103);
 pub(crate) const ROTATE_SIG_TAG_NEW_IDENTITY_X25519: u16 = critical_type(0x3104);
 pub(crate) const ROTATE_SIG_TAG_NEW_IDENTITY_SIG: u16 = critical_type(0x3105);
 pub(crate) const ROTATE_SIG_TAG_NEW_DEVICE_ID: u16 = critical_type(0x3106);
+pub(crate) const ROTATE_SIG_TAG_NEW_IDENTITY_PQ_SIG: u16 = critical_type(0x3107);
 pub(crate) const AUTH_HEADER_USER: &str = "x-pqmsg-auth-user";
 pub(crate) const AUTH_HEADER_DEVICE: &str = "x-pqmsg-auth-device";
 pub(crate) const AUTH_HEADER_TIMESTAMP: &str = "x-pqmsg-auth-timestamp";
@@ -136,6 +139,9 @@ pub(crate) const AUTH_TAG_PRESENCE_STATUS: u16 = critical_type(0x3229);
 pub(crate) const AUTH_TAG_TYPING_PEER_ID: u16 = critical_type(0x322A);
 pub(crate) const AUTH_TAG_TYPING_STATE_FLAG: u16 = critical_type(0x322B);
 pub(crate) const AUTH_TAG_GROUP_RECIPIENTS_HASH: u16 = critical_type(0x322C);
+pub(crate) const AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH: u16 = critical_type(0x3230);
+pub(crate) const AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH: u16 = critical_type(0x3231);
+pub(crate) const AUTH_TAG_ROTATE_PQ_SIG_NEW_HASH: u16 = critical_type(0x3232);
 pub(crate) const MAX_DELETE_MESSAGE_IDS: usize = 512;
 pub(crate) const MAX_POW_NONCE_LEN: usize = 128;
 pub(crate) const DEFAULT_REGISTRATION_POW_BITS_HARDENED: u8 = 18;
@@ -196,7 +202,7 @@ impl DosHardeningPolicy {
                 prekey_publish_min_interval_seconds:
                     DEFAULT_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS_RESEARCH,
                 prekey_bundle_reserve_count: DEFAULT_PREKEY_BUNDLE_RESERVE_COUNT_RESEARCH,
-                pq_ratchet_interval: 0,
+                pq_ratchet_interval: pqmsg_core::ratchet::pq::DEFAULT_PQ_RATCHET_INTERVAL,
             },
             SecurityProfile::HighAssurance | SecurityProfile::NssAligned => Self {
                 registration_pow_bits: DEFAULT_REGISTRATION_POW_BITS_HARDENED,

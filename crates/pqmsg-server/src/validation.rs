@@ -4,6 +4,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use pqmsg_core::alg::PROTOCOL_VERSION_V1;
 use pqmsg_core::dh::DhPublicKey;
 use pqmsg_core::handshake::{pq_signed_prekey_signature_message, signed_prekey_signature_message};
+use pqmsg_core::pq_sig::{MlDsa65, PqSignatureProvider};
 use pqmsg_core::tlv::{encode, TlvRecord};
 use sha2::{Digest, Sha256};
 
@@ -12,10 +13,12 @@ use crate::types::RegisterPushTokenRequest;
 use crate::{
     PushProvider, MAX_CONTACT_ALIAS_LEN, MAX_DEVICE_ID_LEN, MAX_DISCOVERY_HASHES, MAX_FILE_ID_LEN,
     MAX_GROUP_MEMBERS, MAX_MIME_TYPE_LEN, MAX_ONE_TIME_KEYS, MAX_PROFILE_DISPLAY_NAME_LEN,
-    MAX_PUSH_TOKEN_LEN, MAX_ROTATION_CHALLENGE_ID_LEN, MAX_USER_ID_LEN, PREKEY_LOW_WATERMARK,
+    MAX_PUSH_TOKEN_LEN, MAX_ROTATION_CHALLENGE_ID_LEN, MAX_USER_ID_LEN, PQ_SIG_LEN,
+    PQ_SIG_PUB_KEY_LEN, PREKEY_LOW_WATERMARK,
     ROTATE_SIG_TAG_CHALLENGE_ID, ROTATE_SIG_TAG_CHALLENGE_NONCE, ROTATE_SIG_TAG_NEW_DEVICE_ID,
-    ROTATE_SIG_TAG_NEW_IDENTITY_SIG, ROTATE_SIG_TAG_NEW_IDENTITY_X25519, ROTATE_SIG_TAG_USER_ID,
-    SHA256_HEX_LEN, SIG_LEN, SIG_PUB_KEY_LEN, X25519_KEY_LEN,
+    ROTATE_SIG_TAG_NEW_IDENTITY_PQ_SIG, ROTATE_SIG_TAG_NEW_IDENTITY_SIG,
+    ROTATE_SIG_TAG_NEW_IDENTITY_X25519, ROTATE_SIG_TAG_USER_ID, SHA256_HEX_LEN, SIG_LEN,
+    SIG_PUB_KEY_LEN, X25519_KEY_LEN,
 };
 
 pub(crate) fn is_prekey_inventory_low(remaining_x: i64, remaining_pq: i64) -> bool {
@@ -339,12 +342,42 @@ pub(crate) fn validate_ed25519_public_key(identity_sig_pub: &[u8]) -> Result<(),
     Ok(())
 }
 
+pub(crate) fn validate_ml_dsa_public_key(identity_pq_sig_pub: &[u8]) -> Result<(), AppError> {
+    if identity_pq_sig_pub.len() != PQ_SIG_PUB_KEY_LEN {
+        return Err(AppError::bad_request(format!(
+            "identity_pq_sig_pub must be {PQ_SIG_PUB_KEY_LEN} bytes"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_ml_dsa_signature(
+    public_key: &[u8],
+    signature: &[u8],
+    message: &[u8],
+    field: &'static str,
+) -> Result<(), AppError> {
+    validate_ml_dsa_public_key(public_key)?;
+    if signature.len() != PQ_SIG_LEN {
+        return Err(AppError::bad_request(format!(
+            "{field} must be {PQ_SIG_LEN} bytes"
+        )));
+    }
+    let provider =
+        MlDsa65::new().map_err(|_| AppError::internal("pq signature backend unavailable"))?;
+    provider
+        .verify(public_key, message, signature)
+        .map_err(|_| AppError::bad_request(format!("{field} verification failed")))?;
+    Ok(())
+}
+
 pub(crate) fn rotation_signature_message(
     user_id: &str,
     challenge_id: &str,
     challenge_nonce: &[u8],
     new_identity_x25519: &[u8],
     new_identity_sig: &[u8],
+    new_identity_pq_sig: &[u8],
     new_device_id: &str,
 ) -> Result<Vec<u8>, AppError> {
     encode(&[
@@ -369,6 +402,10 @@ pub(crate) fn rotation_signature_message(
             value: new_identity_sig.to_vec(),
         },
         TlvRecord {
+            ty: ROTATE_SIG_TAG_NEW_IDENTITY_PQ_SIG,
+            value: new_identity_pq_sig.to_vec(),
+        },
+        TlvRecord {
             ty: ROTATE_SIG_TAG_NEW_DEVICE_ID,
             value: new_device_id.as_bytes().to_vec(),
         },
@@ -376,18 +413,27 @@ pub(crate) fn rotation_signature_message(
     .map_err(|_| AppError::internal("rotation signature transcript encoding failed"))
 }
 
-pub(crate) fn identity_fingerprint_sha256(identity_key: &[u8]) -> String {
+pub(crate) fn identity_fingerprint_sha256(
+    identity_key: &[u8],
+    identity_pq_sig_pub: Option<&[u8]>,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(identity_key);
+    if let Some(identity_pq_sig_pub) = identity_pq_sig_pub {
+        hasher.update(identity_pq_sig_pub);
+    }
     hex::encode(hasher.finalize())
 }
 
-pub(crate) fn maybe_verify_prekey_signatures(
+pub(crate) fn verify_hybrid_prekey_signatures(
     identity_sig_pub: &[u8],
+    identity_pq_sig_pub: &[u8],
     signed_prekey_x25519_pub: &[u8],
     sig_over_spk: &[u8],
     pq_signed_prekey_pub_mlkem768: &[u8],
     sig_over_pqspk: &[u8],
+    pq_sig_over_spk: &[u8],
+    pq_sig_over_pqspk: &[u8],
 ) -> Result<(), AppError> {
     let identity_sig_pub: [u8; SIG_PUB_KEY_LEN] = identity_sig_pub
         .try_into()
@@ -419,6 +465,26 @@ pub(crate) fn maybe_verify_prekey_signatures(
     verifier
         .verify(&pq_message, &pq_signature)
         .map_err(|_| AppError::bad_request("sig_over_pqspk verification failed"))?;
+
+    validate_ml_dsa_public_key(identity_pq_sig_pub)?;
+    if pq_sig_over_spk.len() != PQ_SIG_LEN {
+        return Err(AppError::bad_request(format!(
+            "pq_sig_over_spk must be {PQ_SIG_LEN} bytes"
+        )));
+    }
+    if pq_sig_over_pqspk.len() != PQ_SIG_LEN {
+        return Err(AppError::bad_request(format!(
+            "pq_sig_over_pqspk must be {PQ_SIG_LEN} bytes"
+        )));
+    }
+    let pq_verifier = MlDsa65::new()
+        .map_err(|_| AppError::internal("failed to initialize ML-DSA verifier"))?;
+    pq_verifier
+        .verify(identity_pq_sig_pub, &spk_message, pq_sig_over_spk)
+        .map_err(|_| AppError::bad_request("pq_sig_over_spk verification failed"))?;
+    pq_verifier
+        .verify(identity_pq_sig_pub, &pq_message, pq_sig_over_pqspk)
+        .map_err(|_| AppError::bad_request("pq_sig_over_pqspk verification failed"))?;
 
     Ok(())
 }

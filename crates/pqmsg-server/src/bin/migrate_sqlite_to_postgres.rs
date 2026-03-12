@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to run postgres migrations")?;
 
     let users = sqlx::query(
-        "SELECT user_id, identity_x25519_pub, identity_sig_pub, device_id, created_at, updated_at
+        "SELECT user_id, identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, created_at, updated_at
          FROM users
          ORDER BY user_id ASC",
     )
@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     let prekeys = sqlx::query(
-        "SELECT user_id, signed_prekey_x25519_pub, sig_over_spk, pq_signed_prekey_pub_mlkem768, sig_over_pqspk, updated_at
+        "SELECT user_id, signed_prekey_x25519_pub, sig_over_spk, pq_signed_prekey_pub_mlkem768, sig_over_pqspk, pq_sig_over_spk, pq_sig_over_pqspk, updated_at
          FROM prekeys
          ORDER BY user_id ASC",
     )
@@ -136,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
 
     let identity_events = if sqlite_table_exists(&sqlite, "identity_events").await? {
         sqlx::query(
-            "SELECT id, user_id, version, identity_x25519_pub, identity_sig_pub, device_id, event_type, changed_at
+            "SELECT id, user_id, version, identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, event_type, changed_at
              FROM identity_events
              ORDER BY id ASC",
         )
@@ -150,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
         .await?
     {
         sqlx::query(
-            "SELECT challenge_id, user_id, nonce, new_identity_x25519_pub, new_identity_sig_pub, new_device_id, created_at, expires_at, consumed
+            "SELECT challenge_id, user_id, nonce, new_identity_x25519_pub, new_identity_sig_pub, new_identity_pq_sig_pub, new_device_id, created_at, expires_at, consumed
              FROM identity_rotation_challenges
              ORDER BY created_at ASC",
         )
@@ -200,17 +200,19 @@ async fn main() -> anyhow::Result<()> {
 
     for row in &users {
         sqlx::query(
-            "INSERT INTO users (user_id, identity_x25519_pub, identity_sig_pub, device_id, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6)
+            "INSERT INTO users (user_id, identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (user_id) DO UPDATE SET
                identity_x25519_pub = EXCLUDED.identity_x25519_pub,
                identity_sig_pub = EXCLUDED.identity_sig_pub,
+               identity_pq_sig_pub = EXCLUDED.identity_pq_sig_pub,
                device_id = EXCLUDED.device_id,
                updated_at = EXCLUDED.updated_at",
         )
         .bind(row.try_get::<String, _>("user_id")?)
         .bind(row.try_get::<Vec<u8>, _>("identity_x25519_pub")?)
         .bind(row.try_get::<Vec<u8>, _>("identity_sig_pub")?)
+        .bind(row.try_get::<Option<Vec<u8>>, _>("identity_pq_sig_pub")?)
         .bind(row.try_get::<String, _>("device_id")?)
         .bind(row.try_get::<String, _>("created_at")?)
         .bind(row.try_get::<String, _>("updated_at")?)
@@ -226,13 +228,17 @@ async fn main() -> anyhow::Result<()> {
                 sig_over_spk,
                 pq_signed_prekey_pub_mlkem768,
                 sig_over_pqspk,
+                pq_sig_over_spk,
+                pq_sig_over_pqspk,
                 updated_at
-             ) VALUES ($1, $2, $3, $4, $5, $6)
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (user_id) DO UPDATE SET
                signed_prekey_x25519_pub = EXCLUDED.signed_prekey_x25519_pub,
                sig_over_spk = EXCLUDED.sig_over_spk,
                pq_signed_prekey_pub_mlkem768 = EXCLUDED.pq_signed_prekey_pub_mlkem768,
                sig_over_pqspk = EXCLUDED.sig_over_pqspk,
+               pq_sig_over_spk = EXCLUDED.pq_sig_over_spk,
+               pq_sig_over_pqspk = EXCLUDED.pq_sig_over_pqspk,
                updated_at = EXCLUDED.updated_at",
         )
         .bind(row.try_get::<String, _>("user_id")?)
@@ -240,6 +246,8 @@ async fn main() -> anyhow::Result<()> {
         .bind(row.try_get::<Vec<u8>, _>("sig_over_spk")?)
         .bind(row.try_get::<Vec<u8>, _>("pq_signed_prekey_pub_mlkem768")?)
         .bind(row.try_get::<Vec<u8>, _>("sig_over_pqspk")?)
+        .bind(row.try_get::<Option<Vec<u8>>, _>("pq_sig_over_spk")?)
+        .bind(row.try_get::<Option<Vec<u8>>, _>("pq_sig_over_pqspk")?)
         .bind(row.try_get::<String, _>("updated_at")?)
         .execute(&mut *tx)
         .await?;
@@ -318,15 +326,17 @@ async fn main() -> anyhow::Result<()> {
                 version,
                 identity_x25519_pub,
                 identity_sig_pub,
+                identity_pq_sig_pub,
                 device_id,
                 event_type,
                 changed_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT (id) DO UPDATE SET
                user_id = EXCLUDED.user_id,
                version = EXCLUDED.version,
                identity_x25519_pub = EXCLUDED.identity_x25519_pub,
                identity_sig_pub = EXCLUDED.identity_sig_pub,
+               identity_pq_sig_pub = EXCLUDED.identity_pq_sig_pub,
                device_id = EXCLUDED.device_id,
                event_type = EXCLUDED.event_type,
                changed_at = EXCLUDED.changed_at",
@@ -336,6 +346,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(row.try_get::<i64, _>("version")?)
         .bind(row.try_get::<Vec<u8>, _>("identity_x25519_pub")?)
         .bind(row.try_get::<Vec<u8>, _>("identity_sig_pub")?)
+        .bind(row.try_get::<Option<Vec<u8>>, _>("identity_pq_sig_pub")?)
         .bind(row.try_get::<String, _>("device_id")?)
         .bind(row.try_get::<String, _>("event_type")?)
         .bind(row.try_get::<String, _>("changed_at")?)
@@ -351,16 +362,18 @@ async fn main() -> anyhow::Result<()> {
                 nonce,
                 new_identity_x25519_pub,
                 new_identity_sig_pub,
+                new_identity_pq_sig_pub,
                 new_device_id,
                 created_at,
                 expires_at,
                 consumed
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (challenge_id) DO UPDATE SET
                user_id = EXCLUDED.user_id,
                nonce = EXCLUDED.nonce,
                new_identity_x25519_pub = EXCLUDED.new_identity_x25519_pub,
                new_identity_sig_pub = EXCLUDED.new_identity_sig_pub,
+               new_identity_pq_sig_pub = EXCLUDED.new_identity_pq_sig_pub,
                new_device_id = EXCLUDED.new_device_id,
                created_at = EXCLUDED.created_at,
                expires_at = EXCLUDED.expires_at,
@@ -371,6 +384,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(row.try_get::<Vec<u8>, _>("nonce")?)
         .bind(row.try_get::<Vec<u8>, _>("new_identity_x25519_pub")?)
         .bind(row.try_get::<Vec<u8>, _>("new_identity_sig_pub")?)
+        .bind(row.try_get::<Option<Vec<u8>>, _>("new_identity_pq_sig_pub")?)
         .bind(row.try_get::<String, _>("new_device_id")?)
         .bind(row.try_get::<String, _>("created_at")?)
         .bind(row.try_get::<String, _>("expires_at")?)

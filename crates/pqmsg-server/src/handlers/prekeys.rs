@@ -17,8 +17,8 @@ use crate::types::*;
 use crate::validation::*;
 use crate::{
     AppState, MAX_IDENTITY_LOG_ITEMS, MAX_PQ_KEY_LEN, MIN_PQ_KEY_LEN, PREKEY_REPLENISH_TARGET,
-    ROTATION_CHALLENGE_BYTES, ROTATION_CHALLENGE_TTL_MINUTES, SIG_LEN, SIG_PUB_KEY_LEN,
-    X25519_KEY_LEN,
+    PQ_SIG_LEN, PQ_SIG_PUB_KEY_LEN, ROTATION_CHALLENGE_BYTES, ROTATION_CHALLENGE_TTL_MINUTES,
+    SIG_LEN, SIG_PUB_KEY_LEN, X25519_KEY_LEN,
 };
 
 pub(crate) async fn publish_prekeys(
@@ -69,6 +69,16 @@ pub(crate) async fn publish_prekeys(
     )?;
     let sig_over_pqspk =
         decode_base64_range("sig_over_pqspk", &request.sig_over_pqspk, SIG_LEN, SIG_LEN)?;
+    let pq_sig_over_spk = decode_base64_exact(
+        "pq_sig_over_spk",
+        &request.pq_sig_over_spk,
+        PQ_SIG_LEN,
+    )?;
+    let pq_sig_over_pqspk = decode_base64_exact(
+        "pq_sig_over_pqspk",
+        &request.pq_sig_over_pqspk,
+        PQ_SIG_LEN,
+    )?;
 
     let mut one_time_x = Vec::with_capacity(request.one_time_prekeys_x25519.len());
     for key in &request.one_time_prekeys_x25519 {
@@ -89,7 +99,9 @@ pub(crate) async fn publish_prekeys(
         )?);
     }
 
-    let user_row = sqlx::query("SELECT identity_sig_pub FROM users WHERE user_id = $1")
+    let user_row = sqlx::query(
+        "SELECT identity_sig_pub, identity_pq_sig_pub FROM users WHERE user_id = $1",
+    )
         .bind(&user_id)
         .fetch_optional(&state.pool)
         .await?;
@@ -98,12 +110,22 @@ pub(crate) async fn publish_prekeys(
     };
 
     let identity_sig_pub: Vec<u8> = user_row.try_get("identity_sig_pub")?;
-    maybe_verify_prekey_signatures(
+    let identity_pq_sig_pub: Option<Vec<u8>> = user_row.try_get("identity_pq_sig_pub")?;
+    let Some(identity_pq_sig_pub) = identity_pq_sig_pub else {
+        return Err(AppError::conflict(
+            "user must re-register with a PQ identity key before publishing prekeys",
+        ));
+    };
+    validate_ml_dsa_public_key(&identity_pq_sig_pub)?;
+    verify_hybrid_prekey_signatures(
         &identity_sig_pub,
+        &identity_pq_sig_pub,
         &signed_prekey_x,
         &sig_over_spk,
         &pq_signed_prekey,
         &sig_over_pqspk,
+        &pq_sig_over_spk,
+        &pq_sig_over_pqspk,
     )?;
 
     let device_id = auth.device_id.clone();
@@ -113,13 +135,15 @@ pub(crate) async fn publish_prekeys(
     sqlx::query(
         "INSERT INTO prekeys (
             user_id, device_id, signed_prekey_x25519_pub, sig_over_spk,
-            pq_signed_prekey_pub_mlkem768, sig_over_pqspk, updated_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            pq_signed_prekey_pub_mlkem768, sig_over_pqspk, pq_sig_over_spk, pq_sig_over_pqspk, updated_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT(user_id, device_id) DO UPDATE SET
             signed_prekey_x25519_pub = EXCLUDED.signed_prekey_x25519_pub,
             sig_over_spk = EXCLUDED.sig_over_spk,
             pq_signed_prekey_pub_mlkem768 = EXCLUDED.pq_signed_prekey_pub_mlkem768,
             sig_over_pqspk = EXCLUDED.sig_over_pqspk,
+            pq_sig_over_spk = EXCLUDED.pq_sig_over_spk,
+            pq_sig_over_pqspk = EXCLUDED.pq_sig_over_pqspk,
             updated_at = EXCLUDED.updated_at",
     )
     .bind(&user_id)
@@ -128,6 +152,8 @@ pub(crate) async fn publish_prekeys(
     .bind(&sig_over_spk)
     .bind(&pq_signed_prekey)
     .bind(&sig_over_pqspk)
+    .bind(&pq_sig_over_spk)
+    .bind(&pq_sig_over_pqspk)
     .bind(&now)
     .execute(&mut *tx)
     .await?;
@@ -244,10 +270,13 @@ pub(crate) async fn get_bundle(
                 ud.device_id,
                 u.identity_x25519_pub,
                 u.identity_sig_pub,
+                u.identity_pq_sig_pub,
                 p.signed_prekey_x25519_pub,
                 p.sig_over_spk,
                 p.pq_signed_prekey_pub_mlkem768,
                 p.sig_over_pqspk,
+                p.pq_sig_over_spk,
+                p.pq_sig_over_pqspk,
                 p.updated_at,
                 COALESCE((
                     SELECT MAX(ie.version)
@@ -271,10 +300,13 @@ pub(crate) async fn get_bundle(
                 ud.device_id,
                 u.identity_x25519_pub,
                 u.identity_sig_pub,
+                u.identity_pq_sig_pub,
                 p.signed_prekey_x25519_pub,
                 p.sig_over_spk,
                 p.pq_signed_prekey_pub_mlkem768,
                 p.sig_over_pqspk,
+                p.pq_sig_over_spk,
+                p.pq_sig_over_pqspk,
                 p.updated_at,
                 COALESCE((
                     SELECT MAX(ie.version)
@@ -296,6 +328,28 @@ pub(crate) async fn get_bundle(
         return Err(AppError::not_found("bundle not found"));
     };
     let device_id: String = row.try_get("device_id")?;
+    let identity_pq_sig_pub_bytes = row
+        .try_get::<Option<Vec<u8>>, _>("identity_pq_sig_pub")?
+        .ok_or_else(|| {
+            AppError::conflict(
+                "bundle missing mandatory PQ identity key; user must re-register",
+            )
+        })?;
+    validate_ml_dsa_public_key(&identity_pq_sig_pub_bytes)?;
+    let pq_sig_over_spk_bytes = row
+        .try_get::<Option<Vec<u8>>, _>("pq_sig_over_spk")?
+        .ok_or_else(|| {
+            AppError::conflict(
+                "bundle missing mandatory PQ signature over signed prekey; user must republish prekeys",
+            )
+        })?;
+    let pq_sig_over_pqspk_bytes = row
+        .try_get::<Option<Vec<u8>>, _>("pq_sig_over_pqspk")?
+        .ok_or_else(|| {
+            AppError::conflict(
+                "bundle missing mandatory PQ signature over PQ signed prekey; user must republish prekeys",
+            )
+        })?;
 
     // Check signed prekey staleness for high-assurance profiles
     if state.security_profile().requires_tls() {
@@ -345,7 +399,10 @@ pub(crate) async fn get_bundle(
     tx.commit().await?;
 
     let identity_x25519_pub_bytes = row.try_get::<Vec<u8>, _>("identity_x25519_pub")?;
-    let identity_fingerprint = identity_fingerprint_sha256(&identity_x25519_pub_bytes);
+    let identity_fingerprint = identity_fingerprint_sha256(
+        &identity_x25519_pub_bytes,
+        Some(&identity_pq_sig_pub_bytes),
+    );
     let identity_key_version_i64: i64 = row.try_get("identity_key_version")?;
     let identity_key_version = u32::try_from(identity_key_version_i64)
         .map_err(|_| AppError::internal("identity_key_version overflow"))?;
@@ -369,12 +426,15 @@ pub(crate) async fn get_bundle(
         device_id,
         identity_x25519_pub: B64.encode(identity_x25519_pub_bytes),
         identity_sig_pub: B64.encode(row.try_get::<Vec<u8>, _>("identity_sig_pub")?),
+        identity_pq_sig_pub: B64.encode(identity_pq_sig_pub_bytes),
         signed_prekey_x25519_pub: B64
             .encode(row.try_get::<Vec<u8>, _>("signed_prekey_x25519_pub")?),
         sig_over_spk: B64.encode(row.try_get::<Vec<u8>, _>("sig_over_spk")?),
         pq_signed_prekey_pub_mlkem768: B64
             .encode(row.try_get::<Vec<u8>, _>("pq_signed_prekey_pub_mlkem768")?),
         sig_over_pqspk: B64.encode(row.try_get::<Vec<u8>, _>("sig_over_pqspk")?),
+        pq_sig_over_spk: B64.encode(pq_sig_over_spk_bytes),
+        pq_sig_over_pqspk: B64.encode(pq_sig_over_pqspk_bytes),
         one_time_prekey_x25519: x25519_otk.map(|bytes| B64.encode(bytes)),
         one_time_prekey_mlkem768: mlkem_otk.map(|bytes| B64.encode(bytes)),
         remaining_one_time_prekeys_x25519: usize::try_from(remaining_x)
@@ -419,9 +479,15 @@ pub(crate) async fn rotate_init(
         SIG_PUB_KEY_LEN,
     )?;
     validate_ed25519_public_key(&new_identity_sig)?;
+    let new_identity_pq_sig = decode_base64_exact(
+        "new_identity_pq_sig_pub",
+        &request.new_identity_pq_sig_pub,
+        PQ_SIG_PUB_KEY_LEN,
+    )?;
+    validate_ml_dsa_public_key(&new_identity_pq_sig)?;
 
     let user_row = sqlx::query(
-        "SELECT identity_x25519_pub, identity_sig_pub, device_id
+        "SELECT identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id
          FROM users
          WHERE user_id = $1",
     )
@@ -434,9 +500,18 @@ pub(crate) async fn rotate_init(
 
     let current_identity_x25519: Vec<u8> = user_row.try_get("identity_x25519_pub")?;
     let current_identity_sig: Vec<u8> = user_row.try_get("identity_sig_pub")?;
+    let current_identity_pq_sig: Option<Vec<u8>> = user_row.try_get("identity_pq_sig_pub")?;
     let current_device_id: String = user_row.try_get("device_id")?;
+    if current_identity_pq_sig.is_none() {
+        return Err(AppError::conflict(
+            "rotation requires an existing PQ identity key; re-register first",
+        ));
+    }
     if current_identity_x25519 == new_identity_x25519
         && current_identity_sig == new_identity_sig
+        && current_identity_pq_sig
+            .as_ref()
+            .is_some_and(|current_key| current_key == &new_identity_pq_sig)
         && current_device_id == request.new_device_id
     {
         return Err(AppError::bad_request(
@@ -459,17 +534,19 @@ pub(crate) async fn rotate_init(
             nonce,
             new_identity_x25519_pub,
             new_identity_sig_pub,
+            new_identity_pq_sig_pub,
             new_device_id,
             created_at,
             expires_at,
             consumed
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0)",
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0)",
     )
     .bind(&challenge_id)
     .bind(&user_id)
     .bind(nonce.to_vec())
     .bind(new_identity_x25519)
     .bind(new_identity_sig)
+    .bind(new_identity_pq_sig)
     .bind(&request.new_device_id)
     .bind(created_at_rfc3339)
     .bind(&expires_at_rfc3339)
@@ -517,12 +594,22 @@ pub(crate) async fn rotate_confirm(
     )?;
     let sig_by_new =
         decode_base64_exact("sig_by_new_identity", &request.sig_by_new_identity, SIG_LEN)?;
+    let pq_sig_by_current = decode_base64_exact(
+        "pq_sig_by_current_identity",
+        &request.pq_sig_by_current_identity,
+        PQ_SIG_LEN,
+    )?;
+    let pq_sig_by_new = decode_base64_exact(
+        "pq_sig_by_new_identity",
+        &request.pq_sig_by_new_identity,
+        PQ_SIG_LEN,
+    )?;
 
     let now = Utc::now();
     let mut tx = state.pool.begin().await?;
 
     let challenge_row = sqlx::query(
-        "SELECT nonce, new_identity_x25519_pub, new_identity_sig_pub, new_device_id, expires_at
+        "SELECT nonce, new_identity_x25519_pub, new_identity_sig_pub, new_identity_pq_sig_pub, new_device_id, expires_at
          FROM identity_rotation_challenges
          WHERE challenge_id = $1 AND user_id = $2 AND consumed = 0",
     )
@@ -537,6 +624,7 @@ pub(crate) async fn rotate_confirm(
     let nonce: Vec<u8> = challenge_row.try_get("nonce")?;
     let new_identity_x25519: Vec<u8> = challenge_row.try_get("new_identity_x25519_pub")?;
     let new_identity_sig: Vec<u8> = challenge_row.try_get("new_identity_sig_pub")?;
+    let new_identity_pq_sig: Option<Vec<u8>> = challenge_row.try_get("new_identity_pq_sig_pub")?;
     let new_device_id: String = challenge_row.try_get("new_device_id")?;
     let expires_at_str: String = challenge_row.try_get("expires_at")?;
     let expires_at = chrono::DateTime::parse_from_rfc3339(&expires_at_str)
@@ -546,7 +634,11 @@ pub(crate) async fn rotate_confirm(
         return Err(AppError::bad_request("rotation challenge expired"));
     }
 
-    let user_row = sqlx::query("SELECT identity_sig_pub FROM users WHERE user_id = $1")
+    let new_identity_pq_sig = new_identity_pq_sig.ok_or_else(|| {
+        AppError::conflict("rotation challenge missing PQ identity key; restart rotation")
+    })?;
+
+    let user_row = sqlx::query("SELECT identity_sig_pub, identity_pq_sig_pub FROM users WHERE user_id = $1")
         .bind(&user_id)
         .fetch_optional(&mut *tx)
         .await?;
@@ -554,6 +646,10 @@ pub(crate) async fn rotate_confirm(
         return Err(AppError::not_found("user not found"));
     };
     let current_identity_sig: Vec<u8> = user_row.try_get("identity_sig_pub")?;
+    let current_identity_pq_sig: Option<Vec<u8>> = user_row.try_get("identity_pq_sig_pub")?;
+    let current_identity_pq_sig = current_identity_pq_sig.ok_or_else(|| {
+        AppError::conflict("current identity is missing PQ key material; re-register first")
+    })?;
 
     let message = rotation_signature_message(
         &user_id,
@@ -561,6 +657,7 @@ pub(crate) async fn rotate_confirm(
         &nonce,
         &new_identity_x25519,
         &new_identity_sig,
+        &new_identity_pq_sig,
         &new_device_id,
     )?;
     verify_ed25519_signature(
@@ -574,6 +671,18 @@ pub(crate) async fn rotate_confirm(
         &sig_by_new,
         &message,
         "sig_by_new_identity",
+    )?;
+    verify_ml_dsa_signature(
+        &current_identity_pq_sig,
+        &pq_sig_by_current,
+        &message,
+        "pq_sig_by_current_identity",
+    )?;
+    verify_ml_dsa_signature(
+        &new_identity_pq_sig,
+        &pq_sig_by_new,
+        &message,
+        "pq_sig_by_new_identity",
     )?;
 
     let consume_result = sqlx::query(
@@ -592,11 +701,12 @@ pub(crate) async fn rotate_confirm(
     let rotated_at = Utc::now().to_rfc3339();
     sqlx::query(
         "UPDATE users
-         SET identity_x25519_pub = $1, identity_sig_pub = $2, device_id = $3, updated_at = $4
-         WHERE user_id = $5",
+         SET identity_x25519_pub = $1, identity_sig_pub = $2, identity_pq_sig_pub = $3, device_id = $4, updated_at = $5
+         WHERE user_id = $6",
     )
     .bind(&new_identity_x25519)
     .bind(&new_identity_sig)
+    .bind(&new_identity_pq_sig)
     .bind(&new_device_id)
     .bind(&rotated_at)
     .bind(&user_id)
@@ -663,15 +773,17 @@ pub(crate) async fn rotate_confirm(
             version,
             identity_x25519_pub,
             identity_sig_pub,
+            identity_pq_sig_pub,
             device_id,
             event_type,
             changed_at
-         ) VALUES ($1, $2, $3, $4, $5, 'rotation', $6)",
+         ) VALUES ($1, $2, $3, $4, $5, $6, 'rotation', $7)",
     )
     .bind(&user_id)
     .bind(i64::from(next_version))
     .bind(&new_identity_x25519)
     .bind(&new_identity_sig)
+    .bind(&new_identity_pq_sig)
     .bind(&new_device_id)
     .bind(&rotated_at)
     .execute(&mut *tx)
@@ -691,7 +803,10 @@ pub(crate) async fn rotate_confirm(
     Ok(Json(RotateConfirmResponse {
         user_id,
         identity_key_version: next_version,
-        identity_fingerprint_sha256: identity_fingerprint_sha256(&new_identity_x25519),
+        identity_fingerprint_sha256: identity_fingerprint_sha256(
+            &new_identity_x25519,
+            Some(&new_identity_pq_sig),
+        ),
         rotated_at,
     }))
 }
@@ -716,6 +831,7 @@ pub(crate) async fn get_identity_log(
             version,
             identity_x25519_pub,
             identity_sig_pub,
+            identity_pq_sig_pub,
             device_id,
             event_type,
             changed_at
@@ -736,14 +852,19 @@ pub(crate) async fn get_identity_log(
             .map_err(|_| AppError::internal("identity version overflow"))?;
         let identity_x25519_pub: Vec<u8> = row.try_get("identity_x25519_pub")?;
         let identity_sig_pub: Vec<u8> = row.try_get("identity_sig_pub")?;
+        let identity_pq_sig_pub: Option<Vec<u8>> = row.try_get("identity_pq_sig_pub")?;
         events.push(IdentityLogItem {
             version,
             identity_x25519_pub: B64.encode(&identity_x25519_pub),
             identity_sig_pub: B64.encode(identity_sig_pub),
+            identity_pq_sig_pub: identity_pq_sig_pub.as_ref().map(|value| B64.encode(value)),
             device_id: row.try_get("device_id")?,
             event_type: row.try_get("event_type")?,
             changed_at: row.try_get("changed_at")?,
-            identity_fingerprint_sha256: identity_fingerprint_sha256(&identity_x25519_pub),
+            identity_fingerprint_sha256: identity_fingerprint_sha256(
+                &identity_x25519_pub,
+                identity_pq_sig_pub.as_deref(),
+            ),
         });
     }
 

@@ -25,11 +25,12 @@ export type StoredMessage = {
 };
 
 const DB_NAME = "pqmsg-web";
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 const MESSAGES_STORE = "messages";
 const OUTBOX_STORE = "outbox";
 const SESSIONS_STORE = "sessions";
 const METADATA_STORE = "metadata";
+const KEYS_STORE = "keys";
 
 export type OutboxMessage = {
   id: string;
@@ -56,6 +57,12 @@ type StoredMetadata = {
   updatedAt: number;
 };
 
+type StoredKeyRecord = {
+  id: string;
+  sealedKeys: string;
+  updatedAt: number;
+};
+
 let dbInstance: IDBDatabase | null = null;
 
 function open(): Promise<IDBDatabase> {
@@ -78,6 +85,9 @@ function open(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(METADATA_STORE)) {
         db.createObjectStore(METADATA_STORE, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(KEYS_STORE)) {
+        db.createObjectStore(KEYS_STORE, { keyPath: "id" });
       }
     };
     request.onsuccess = () => {
@@ -358,6 +368,56 @@ export async function clearMetadataRecord(id: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(METADATA_STORE, "readwrite");
     tx.objectStore(METADATA_STORE).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function saveKeyRecord(id: string, sealedKeys: string): Promise<void> {
+  const db = await open();
+  const record: StoredKeyRecord = {
+    id,
+    sealedKeys,
+    updatedAt: Date.now(),
+  };
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(KEYS_STORE, "readwrite");
+    tx.objectStore(KEYS_STORE).put(record);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function loadKeyRecord(id: string): Promise<string | null> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(KEYS_STORE, "readonly");
+    const request = tx.objectStore(KEYS_STORE).get(id);
+    request.onsuccess = () => {
+      const record = request.result as StoredKeyRecord | undefined;
+      resolve(record?.sealedKeys ?? null);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function listKeyRecordIds(): Promise<string[]> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(KEYS_STORE, "readonly");
+    const request = tx.objectStore(KEYS_STORE).getAllKeys();
+    request.onsuccess = () => {
+      resolve((request.result as IDBValidKey[]).map((value) => String(value)));
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function clearKeyRecord(id: string): Promise<void> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(KEYS_STORE, "readwrite");
+    tx.objectStore(KEYS_STORE).delete(id);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });

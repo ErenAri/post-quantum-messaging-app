@@ -26,11 +26,18 @@ use crate::alg::{
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::dh::{DhKeyPair, DhPublicKey};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
-use crate::handshake::{alice_initiate, bob_receive, InitialMessage, SignatureVerifier};
+use crate::handshake::{
+    alice_initiate, bob_receive, validate_hybrid_prekey_bundle_signatures, InitialMessage,
+    SignatureVerifier,
+};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::kem::MlKem768;
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::keys::{KEMPreKey, PreKeyBundle, SecretBytes};
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+use crate::pq_sig::MlDsa65;
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+use crate::ratchet::pq::{PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::session::{SessionRole, SessionSnapshot, SessionState};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
@@ -352,6 +359,8 @@ struct WasmGeneratedKeysFile {
     identity_x25519_secret: String,
     identity_sig_pub: String,
     identity_sig_secret: String,
+    identity_pq_sig_pub: String,
+    identity_pq_sig_secret: String,
     signed_prekey_x25519_pub: String,
     signed_prekey_x25519_secret: String,
     pq_signed_prekey_pub_mlkem768: String,
@@ -368,10 +377,13 @@ struct WasmServerBundle {
     user_id: String,
     identity_x25519_pub: String,
     identity_sig_pub: String,
+    identity_pq_sig_pub: String,
     signed_prekey_x25519_pub: String,
     sig_over_spk: String,
     pq_signed_prekey_pub_mlkem768: String,
     sig_over_pqspk: String,
+    pq_sig_over_spk: String,
+    pq_sig_over_pqspk: String,
     one_time_prekey_x25519: Option<String>,
     one_time_prekey_mlkem768: Option<String>,
 }
@@ -457,6 +469,19 @@ fn build_kem_for_suite(suite: &str) -> Result<MlKem768, JsValue> {
 }
 
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+fn mandatory_pq_ratchet_state(
+    local_pq_prekey: &KEMPreKey,
+    remote_public_key: Vec<u8>,
+) -> PqRatchetState {
+    PqRatchetState {
+        interval: DEFAULT_PQ_RATCHET_INTERVAL,
+        local_public_key: local_pq_prekey.public_key.clone(),
+        local_secret_key: local_pq_prekey.secret_key.clone(),
+        remote_public_key,
+    }
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 fn decode_b64(field: &'static str, value: &str) -> Result<Vec<u8>, JsValue> {
     B64.decode(value.as_bytes())
         .map_err(|_| JsValue::from_str(&format!("invalid base64 for field '{field}'")))
@@ -488,8 +513,11 @@ fn to_identity_keypair(keys: &WasmGeneratedKeysFile) -> Result<IdentityKeyPair, 
             "identityX25519Secret",
             &keys.identity_x25519_secret,
         )?),
-        pq_sig_public_key: None,
-        pq_sig_secret_key: None,
+        pq_sig_public_key: Some(decode_b64("identityPqSigPub", &keys.identity_pq_sig_pub)?),
+        pq_sig_secret_key: Some(SecretBytes::from(decode_b64(
+            "identityPqSigSecret",
+            &keys.identity_pq_sig_secret,
+        )?)),
     })
 }
 
@@ -570,6 +598,10 @@ fn bundle_to_core(bundle: &WasmServerBundle, suite: &str) -> Result<PreKeyBundle
         kem: suite_to_kem_algorithm(suite)?,
         ..AlgorithmSuite::default()
     };
+    out.pq_sig_public_key = Some(decode_b64("identity_pq_sig_pub", &bundle.identity_pq_sig_pub)?);
+    out.pq_spk_signature = Some(decode_b64("pq_sig_over_spk", &bundle.pq_sig_over_spk)?);
+    out.pq_pqspk_signature =
+        Some(decode_b64("pq_sig_over_pqspk", &bundle.pq_sig_over_pqspk)?);
     out.one_time_prekey = bundle
         .one_time_prekey_x25519
         .as_ref()
@@ -636,8 +668,12 @@ pub fn wasm_initiate_session_and_encrypt(
 
     let prekey_bundle = bundle_to_core(&peer_bundle, &keys.suite)?;
     let identity = to_identity_keypair(&keys)?;
+    let local_pq_signed_prekey = to_pq_signed_prekey(&keys)?;
     let kem = build_kem_for_suite(&keys.suite)?;
     let verifier = WasmEd25519SignatureVerifier;
+    let pq_verifier = MlDsa65::new().map_err(|e| JsValue::from_str(&e.to_string()))?;
+    validate_hybrid_prekey_bundle_signatures(&prekey_bundle, &verifier, &pq_verifier)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let initiator = alice_initiate(
         &mut OsRng,
         &verifier,
@@ -645,6 +681,7 @@ pub fn wasm_initiate_session_and_encrypt(
         from_user_id,
         peer_user_id,
         &identity,
+        &local_pq_signed_prekey.public_key,
         &prekey_bundle,
         plaintext_utf8.as_bytes(),
     )
@@ -660,7 +697,7 @@ pub fn wasm_initiate_session_and_encrypt(
             .require_secret_key()
             .map_err(|e| JsValue::from_str(&e.to_string()))?,
     };
-    let session = SessionState::from_handshake_with_suite(
+    let session = SessionState::from_handshake_with_suite_with_pq_ratchet(
         SessionRole::Initiator,
         *initiator.session_key.as_bytes(),
         local_dh,
@@ -670,6 +707,8 @@ pub fn wasm_initiate_session_and_encrypt(
             .suite_id()
             .map_err(|e| JsValue::from_str(&e.to_string()))?,
         512,
+        mandatory_pq_ratchet_state(&local_pq_signed_prekey, prekey_bundle.pq_signed_prekey.clone()),
+        Box::new(kem),
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let session_file = WasmSessionFile {
@@ -811,13 +850,15 @@ pub fn wasm_decrypt_message(
                 .require_secret_key()
                 .map_err(|e| JsValue::from_str(&e.to_string()))?,
         };
-        let session = SessionState::from_handshake_with_suite(
+        let session = SessionState::from_handshake_with_suite_with_pq_ratchet(
             SessionRole::Responder,
             *responder.session_key.as_bytes(),
             local_dh,
             initial.ik_a_pub,
             initial.suite_id,
             512,
+            mandatory_pq_ratchet_state(&pq_signed_prekey, initial.pq_ratchet_pub_a.clone()),
+            Box::new(kem),
         )
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let session_file = WasmSessionFile {

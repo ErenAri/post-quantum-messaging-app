@@ -11,6 +11,8 @@ use pqmsg_core::alg::SecurityProfile;
 use pqmsg_core::alg::PROTOCOL_VERSION_V1;
 use pqmsg_core::dh::DhPublicKey;
 use pqmsg_core::handshake::{pq_signed_prekey_signature_message, signed_prekey_signature_message};
+use pqmsg_core::pq_sig::{MlDsa65, PqSignatureProvider, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
+use pqmsg_core::ratchet::pq::DEFAULT_PQ_RATCHET_INTERVAL;
 use pqmsg_core::tlv::{critical_type, encode, TlvRecord};
 use pqmsg_server::{
     build_router, init_db, parse_db_backend, AppState, AuditLogger, DbBackend, DosHardeningPolicy,
@@ -19,6 +21,7 @@ use pqmsg_server::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::any::AnyPoolOptions;
+use std::ops::Deref;
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -35,6 +38,7 @@ const ROTATE_SIG_TAG_CHALLENGE_NONCE: u16 = critical_type(0x3103);
 const ROTATE_SIG_TAG_NEW_IDENTITY_X25519: u16 = critical_type(0x3104);
 const ROTATE_SIG_TAG_NEW_IDENTITY_SIG: u16 = critical_type(0x3105);
 const ROTATE_SIG_TAG_NEW_DEVICE_ID: u16 = critical_type(0x3106);
+const ROTATE_SIG_TAG_NEW_IDENTITY_PQ_SIG: u16 = critical_type(0x3107);
 const AUTH_HEADER_USER: &str = "x-pqmsg-auth-user";
 const AUTH_HEADER_DEVICE: &str = "x-pqmsg-auth-device";
 const AUTH_HEADER_TIMESTAMP: &str = "x-pqmsg-auth-timestamp";
@@ -55,6 +59,9 @@ const AUTH_TAG_ROTATE_NEW_SIG_HASH: u16 = critical_type(0x320C);
 const AUTH_TAG_ROTATE_CHALLENGE_ID: u16 = critical_type(0x320D);
 const AUTH_TAG_ROTATE_SIG_CURRENT_HASH: u16 = critical_type(0x320E);
 const AUTH_TAG_ROTATE_SIG_NEW_HASH: u16 = critical_type(0x320F);
+const AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH: u16 = critical_type(0x3230);
+const AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH: u16 = critical_type(0x3231);
+const AUTH_TAG_ROTATE_PQ_SIG_NEW_HASH: u16 = critical_type(0x3232);
 const AUTH_TAG_PUSH_DEVICE_ID: u16 = critical_type(0x3210);
 const AUTH_TAG_PUSH_TOKEN_HASH: u16 = critical_type(0x3211);
 const AUTH_TAG_LINK_DEVICE_ID: u16 = critical_type(0x3212);
@@ -84,6 +91,20 @@ const AUTH_TAG_PRESENCE_STATUS: u16 = critical_type(0x3229);
 const AUTH_TAG_TYPING_PEER_ID: u16 = critical_type(0x322A);
 const AUTH_TAG_TYPING_STATE_FLAG: u16 = critical_type(0x322B);
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+struct TestIdentityKeyPair {
+    classical: SigningKey,
+    pq_public: Vec<u8>,
+    pq_secret: Vec<u8>,
+}
+
+impl Deref for TestIdentityKeyPair {
+    type Target = SigningKey;
+
+    fn deref(&self) -> &Self::Target {
+        &self.classical
+    }
+}
 
 async fn test_app() -> axum::Router {
     sqlx::any::install_default_drivers();
@@ -344,20 +365,27 @@ async fn text_request(
     (status, headers, String::from_utf8_lossy(&bytes).to_string())
 }
 
-fn signing_key(seed: u8) -> SigningKey {
-    SigningKey::from_bytes(&[seed; 32])
+fn signing_key(seed: u8) -> TestIdentityKeyPair {
+    let provider = MlDsa65::new().expect("ml-dsa init");
+    let pq_keypair = provider.keypair().expect("ml-dsa keypair");
+    TestIdentityKeyPair {
+        classical: SigningKey::from_bytes(&[seed; 32]),
+        pq_public: pq_keypair.public_key,
+        pq_secret: pq_keypair.secret_key.as_slice().to_vec(),
+    }
 }
 
 fn register_payload(
     user_id: &str,
     device_id: &str,
     identity_x25519_pub: [u8; 32],
-    identity_signing_key: &SigningKey,
+    identity_signing_key: &TestIdentityKeyPair,
 ) -> Value {
     json!({
         "user_id": user_id,
         "identity_x25519_pub": B64.encode(identity_x25519_pub),
         "identity_sig_pub": B64.encode(identity_signing_key.verifying_key().to_bytes()),
+        "identity_pq_sig_pub": B64.encode(&identity_signing_key.pq_public),
         "device_id": device_id,
     })
 }
@@ -380,6 +408,10 @@ fn register_payload_with_pow(base: Value, bits: u8) -> Value {
         .as_str()
         .expect("identity_sig_pub")
         .to_string();
+    let identity_pq_sig_pub = payload["identity_pq_sig_pub"]
+        .as_str()
+        .expect("identity_pq_sig_pub")
+        .to_string();
     let mut nonce_counter: u64 = 0;
     loop {
         let nonce = format!("{nonce_counter:x}");
@@ -390,6 +422,7 @@ fn register_payload_with_pow(base: Value, bits: u8) -> Value {
                 device_id.as_bytes(),
                 identity_x25519_pub.as_bytes(),
                 identity_sig_pub.as_bytes(),
+                identity_pq_sig_pub.as_bytes(),
                 nonce.as_bytes(),
             ]
             .join(&[0u8][..]),
@@ -427,12 +460,13 @@ fn hash_has_leading_zero_bits(bytes: &[u8], bits: u8) -> bool {
 }
 
 fn publish_prekeys_payload(
-    identity_signing_key: &SigningKey,
+    identity_signing_key: &TestIdentityKeyPair,
     signed_prekey_x25519_pub: [u8; 32],
     pq_signed_prekey_pub_mlkem768: Vec<u8>,
     one_time_prekeys_x25519: Vec<[u8; 32]>,
     one_time_prekeys_mlkem768: Vec<Vec<u8>>,
 ) -> Value {
+    let pq_provider = MlDsa65::new().expect("ml-dsa init");
     let spk_message = signed_prekey_signature_message(
         PROTOCOL_VERSION_V1,
         &DhPublicKey(signed_prekey_x25519_pub),
@@ -443,12 +477,20 @@ fn publish_prekeys_payload(
             .expect("pqspk message");
     let sig_over_spk = identity_signing_key.sign(&spk_message).to_bytes();
     let sig_over_pqspk = identity_signing_key.sign(&pq_message).to_bytes();
+    let pq_sig_over_spk = pq_provider
+        .sign(&identity_signing_key.pq_secret, &spk_message)
+        .expect("pq sign spk");
+    let pq_sig_over_pqspk = pq_provider
+        .sign(&identity_signing_key.pq_secret, &pq_message)
+        .expect("pq sign pqspk");
 
     json!({
         "signed_prekey_x25519_pub": B64.encode(signed_prekey_x25519_pub),
         "sig_over_spk": B64.encode(sig_over_spk),
         "pq_signed_prekey_pub_mlkem768": B64.encode(pq_signed_prekey_pub_mlkem768),
         "sig_over_pqspk": B64.encode(sig_over_pqspk),
+        "pq_sig_over_spk": B64.encode(pq_sig_over_spk),
+        "pq_sig_over_pqspk": B64.encode(pq_sig_over_pqspk),
         "one_time_prekeys_x25519": one_time_prekeys_x25519
             .into_iter()
             .map(|value| B64.encode(value))
@@ -460,12 +502,22 @@ fn publish_prekeys_payload(
     })
 }
 
+fn pq_signature_b64(identity_signing_key: &TestIdentityKeyPair, message: &[u8]) -> String {
+    let provider = MlDsa65::new().expect("ml-dsa init");
+    B64.encode(
+        provider
+            .sign(&identity_signing_key.pq_secret, message)
+            .expect("ml-dsa sign"),
+    )
+}
+
 fn rotation_signature_message(
     user_id: &str,
     challenge_id: &str,
     challenge_nonce: &[u8],
     new_identity_x25519: &[u8; 32],
     new_identity_sig: &[u8; 32],
+    new_identity_pq_sig: &[u8],
     new_device_id: &str,
 ) -> Vec<u8> {
     encode(&[
@@ -488,6 +540,10 @@ fn rotation_signature_message(
         TlvRecord {
             ty: ROTATE_SIG_TAG_NEW_IDENTITY_SIG,
             value: new_identity_sig.to_vec(),
+        },
+        TlvRecord {
+            ty: ROTATE_SIG_TAG_NEW_IDENTITY_PQ_SIG,
+            value: new_identity_pq_sig.to_vec(),
         },
         TlvRecord {
             ty: ROTATE_SIG_TAG_NEW_DEVICE_ID,
@@ -1714,6 +1770,16 @@ fn rotate_init_auth_headers(
     );
     records.push(TlvRecord {
         ty: AUTH_TAG_ROTATE_NEW_SIG_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(
+        rotate_body["new_identity_pq_sig_pub"]
+            .as_str()
+            .unwrap()
+            .as_bytes(),
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH,
         value: hasher.finalize().to_vec(),
     });
     let message = encode(&records).expect("rotate-init auth transcript");
@@ -1767,6 +1833,26 @@ fn rotate_confirm_auth_headers(
     );
     records.push(TlvRecord {
         ty: AUTH_TAG_ROTATE_SIG_NEW_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(
+        confirm_body["pq_sig_by_current_identity"]
+            .as_str()
+            .unwrap()
+            .as_bytes(),
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(
+        confirm_body["pq_sig_by_new_identity"]
+            .as_str()
+            .unwrap()
+            .as_bytes(),
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_ROTATE_PQ_SIG_NEW_HASH,
         value: hasher.finalize().to_vec(),
     });
     let message = encode(&records).expect("rotate-confirm auth transcript");
@@ -1888,6 +1974,7 @@ async fn invalid_inputs_are_rejected() {
         "user_id": "bob",
         "identity_x25519_pub": B64.encode([1u8; 31]),
         "identity_sig_pub": B64.encode(bob_sig.verifying_key().to_bytes()),
+        "identity_pq_sig_pub": B64.encode(vec![9u8; ML_DSA_65_PK_LEN]),
         "device_id": "bob-dev-1"
     });
     let (status_register, body_register) = json_request(
@@ -1925,6 +2012,8 @@ async fn invalid_inputs_are_rejected() {
         "sig_over_spk": B64.encode([6u8; 64]),
         "pq_signed_prekey_pub_mlkem768": B64.encode([7u8; 64]),
         "sig_over_pqspk": B64.encode([8u8; 64]),
+        "pq_sig_over_spk": B64.encode(vec![9u8; ML_DSA_65_SIG_LEN]),
+        "pq_sig_over_pqspk": B64.encode(vec![10u8; ML_DSA_65_SIG_LEN]),
         "one_time_prekeys_x25519": [],
         "one_time_prekeys_mlkem768": []
     });
@@ -2054,6 +2143,10 @@ async fn capabilities_reports_client_contract() {
     assert_eq!(body["production_baseline_met"].as_bool(), Some(false));
     assert_eq!(body["web_client_policy"].as_str(), Some("demo_only"));
     assert_eq!(
+        body["pq_ratchet_interval"].as_u64(),
+        Some(DEFAULT_PQ_RATCHET_INTERVAL as u64)
+    );
+    assert_eq!(
         body["runtime_crypto_profile"]["protocol_version"].as_u64(),
         Some(PROTOCOL_VERSION_V1 as u64)
     );
@@ -2115,6 +2208,7 @@ async fn audit_log_file_captures_security_rejects() {
         "user_id": "",
         "identity_x25519_pub": B64.encode([7u8; 32]),
         "identity_sig_pub": B64.encode([8u8; 32]),
+        "identity_pq_sig_pub": B64.encode(vec![9u8; ML_DSA_65_PK_LEN]),
         "device_id": "bad-dev"
     });
     let (status, _) = json_request(
@@ -2165,6 +2259,7 @@ async fn identity_rotation_happy_path_and_log() {
     let rotate_init = json!({
         "new_identity_x25519_pub": B64.encode(new_identity_x25519),
         "new_identity_sig_pub": B64.encode(new_identity_sig),
+        "new_identity_pq_sig_pub": B64.encode(&key_new.pq_public),
         "new_device_id": "bob-dev-2"
     });
     let rotate_init_auth = rotate_init_auth_headers(&key_old, "bob", "bob-dev-1", &rotate_init);
@@ -2192,12 +2287,15 @@ async fn identity_rotation_happy_path_and_log() {
         &challenge_nonce,
         &new_identity_x25519,
         &new_identity_sig,
+        &key_new.pq_public,
         "bob-dev-2",
     );
     let rotate_confirm = json!({
         "challenge_id": challenge_id,
         "sig_by_current_identity": B64.encode(key_old.sign(&message).to_bytes()),
-        "sig_by_new_identity": B64.encode(key_new.sign(&message).to_bytes())
+        "sig_by_new_identity": B64.encode(key_new.sign(&message).to_bytes()),
+        "pq_sig_by_current_identity": pq_signature_b64(&key_old, &message),
+        "pq_sig_by_new_identity": pq_signature_b64(&key_new, &message)
     });
     let rotate_confirm_auth =
         rotate_confirm_auth_headers(&key_old, "bob", "bob-dev-1", &rotate_confirm);
@@ -2238,6 +2336,10 @@ async fn identity_rotation_happy_path_and_log() {
         bundle["identity_x25519_pub"].as_str(),
         Some(B64.encode(new_identity_x25519).as_str())
     );
+    assert_eq!(
+        bundle["identity_pq_sig_pub"].as_str(),
+        Some(B64.encode(&key_new.pq_public).as_str())
+    );
     assert_eq!(bundle["identity_key_version"].as_u64(), Some(2));
 
     let log_headers = identity_log_auth_headers(&key_new, "bob", "bob-dev-2");
@@ -2254,6 +2356,10 @@ async fn identity_rotation_happy_path_and_log() {
     assert_eq!(events.len(), 2);
     assert_eq!(events[0]["version"].as_u64(), Some(2));
     assert_eq!(events[0]["event_type"].as_str(), Some("rotation"));
+    assert_eq!(
+        events[0]["identity_pq_sig_pub"].as_str(),
+        Some(B64.encode(&key_new.pq_public).as_str())
+    );
     assert_eq!(events[1]["version"].as_u64(), Some(1));
     assert_eq!(events[1]["event_type"].as_str(), Some("initial"));
 }
@@ -2471,6 +2577,7 @@ async fn identity_rotation_rejects_invalid_signature() {
     let rotate_init = json!({
         "new_identity_x25519_pub": B64.encode([2u8; 32]),
         "new_identity_sig_pub": B64.encode(key_new.verifying_key().to_bytes()),
+        "new_identity_pq_sig_pub": B64.encode(&key_new.pq_public),
         "new_device_id": "bob-dev-2"
     });
     let rotate_init_auth = rotate_init_auth_headers(&key_old, "bob", "bob-dev-1", &rotate_init);
@@ -2488,7 +2595,9 @@ async fn identity_rotation_rejects_invalid_signature() {
     let rotate_confirm = json!({
         "challenge_id": challenge_id,
         "sig_by_current_identity": B64.encode(attacker.sign(b"bad").to_bytes()),
-        "sig_by_new_identity": B64.encode(attacker.sign(b"bad").to_bytes())
+        "sig_by_new_identity": B64.encode(attacker.sign(b"bad").to_bytes()),
+        "pq_sig_by_current_identity": pq_signature_b64(&attacker, b"bad"),
+        "pq_sig_by_new_identity": pq_signature_b64(&attacker, b"bad")
     });
     let rotate_confirm_auth =
         rotate_confirm_auth_headers(&key_old, "bob", "bob-dev-1", &rotate_confirm);
@@ -4712,15 +4821,12 @@ async fn encrypted_backups_roundtrip_and_replace_latest_version() {
     assert_eq!(status_reg_alice, StatusCode::OK);
 
     let backup_v1 = vec![0x01, 0x02, 0x03, 0x04];
-    let backup_v1_hash = hex::encode(Sha256::digest(&backup_v1));
-    let upload_v1_headers = format_string_auth_headers(
+    let upload_v1_headers = backup_upload_auth_headers(
         &alice_sig,
         "alice-backup",
         "alice-backup-dev",
-        format!(
-            "backups-upload:{}:{}:{}:{}",
-            "alice-backup", "alice-backup-dev", 1, backup_v1_hash
-        ),
+        1,
+        &backup_v1,
     );
     let (status_upload_v1, upload_v1_payload) = json_request_with_headers(
         app.clone(),
@@ -4742,12 +4848,8 @@ async fn encrypted_backups_roundtrip_and_replace_latest_version() {
         Some(backup_v1.len() as u64)
     );
 
-    let download_headers = format_string_auth_headers(
-        &alice_sig,
-        "alice-backup",
-        "alice-backup-dev",
-        "backups-download:alice-backup:alice-backup-dev:alice-backup",
-    );
+    let download_headers =
+        backup_download_auth_headers(&alice_sig, "alice-backup", "alice-backup-dev");
     let (status_download_v1, download_v1_payload) = json_request_with_headers(
         app.clone(),
         Method::GET,
@@ -4764,15 +4866,12 @@ async fn encrypted_backups_roundtrip_and_replace_latest_version() {
     );
 
     let backup_v2 = vec![0x05, 0x06, 0x07, 0x08, 0x09];
-    let backup_v2_hash = hex::encode(Sha256::digest(&backup_v2));
-    let upload_v2_headers = format_string_auth_headers(
+    let upload_v2_headers = backup_upload_auth_headers(
         &alice_sig,
         "alice-backup",
         "alice-backup-dev",
-        format!(
-            "backups-upload:{}:{}:{}:{}",
-            "alice-backup", "alice-backup-dev", 2, backup_v2_hash
-        ),
+        2,
+        &backup_v2,
     );
     let (status_upload_v2, upload_v2_payload) = json_request_with_headers(
         app.clone(),
@@ -4790,12 +4889,14 @@ async fn encrypted_backups_roundtrip_and_replace_latest_version() {
     assert_eq!(status_upload_v2, StatusCode::OK);
     assert_eq!(upload_v2_payload["backup_version"].as_i64(), Some(2));
 
+    let download_v2_headers =
+        backup_download_auth_headers(&alice_sig, "alice-backup", "alice-backup-dev");
     let (status_download_v2, download_v2_payload) = json_request_with_headers(
         app,
         Method::GET,
         "/v1/users/alice-backup/backups/latest",
         json!({}),
-        &download_headers,
+        &download_v2_headers,
     )
     .await;
     assert_eq!(status_download_v2, StatusCode::OK);

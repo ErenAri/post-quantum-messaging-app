@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
-import { sha256 } from "@noble/hashes/sha2";
 
 vi.mock("./crypto-wasm", () => ({
   initWasm: vi.fn(async () => true),
@@ -11,9 +10,12 @@ vi.mock("./crypto-wasm", () => ({
     public_key: new Uint8Array(1184).fill(7),
     secret_key: new Uint8Array(2400).fill(9),
   })),
-  pqSigAvailable: vi.fn(() => false),
-  mlDsaKeypair: vi.fn(),
-  mlDsaSign: vi.fn(),
+  pqSigAvailable: vi.fn(() => true),
+  mlDsaKeypair: vi.fn(() => ({
+    public_key: new Uint8Array(1952).fill(5),
+    secret_key: new Uint8Array(4032).fill(6),
+  })),
+  mlDsaSign: vi.fn(() => new Uint8Array(3309).fill(8)),
   mlDsaVerify: vi.fn(),
   encrypt: vi.fn(),
   decrypt: vi.fn(),
@@ -65,8 +67,6 @@ import {
   buildEphemeralRelayAuthHeaders,
   sealJsonWithPassphrase,
   openJsonWithPassphrase,
-  encryptFallbackMessage,
-  decryptFallbackMessage,
   encodeWireEnvelopeBase64,
   decodeWireEnvelopeBase64,
   identityFingerprint,
@@ -99,6 +99,12 @@ describe("generateIdentityKeys", () => {
     expect(base64ToBytes(keys.identitySigPub).length).toBe(32);
   });
 
+  it("generates ML-DSA identity keys when PQ support is available", () => {
+    const keys = testKeys();
+    expect(base64ToBytes(keys.identityPqSigPub).length).toBe(1952);
+    expect(base64ToBytes(keys.identityPqSigSecret).length).toBe(4032);
+  });
+
   it("generates correct number of one-time prekeys", () => {
     const keys = generateIdentityKeys("bob", "d2", "ml-kem-768", 5);
     expect(keys.oneTimePrekeysX25519.length).toBe(5);
@@ -129,6 +135,8 @@ describe("buildPublishPrekeysPayload", () => {
     const payload = buildPublishPrekeysPayload(keys);
     expect(payload.signed_prekey_x25519_pub).toBe(keys.signedPrekeyX25519Pub);
     expect(payload.pq_signed_prekey_pub_mlkem768).toBe(keys.pqSignedPrekeyPubMlkem768);
+    expect(payload.pq_sig_over_spk).toBeTruthy();
+    expect(payload.pq_sig_over_pqspk).toBeTruthy();
     expect(payload.one_time_prekeys_x25519).toEqual(keys.oneTimePrekeysX25519);
     expect(payload.one_time_prekeys_mlkem768).toEqual(keys.oneTimePrekeysMlkem768);
   });
@@ -326,45 +334,22 @@ describe("sealJsonWithPassphrase / openJsonWithPassphrase", () => {
   });
 });
 
-describe("encryptFallbackMessage / decryptFallbackMessage", () => {
-  it("round-trips a message", async () => {
-    const envelope = await encryptFallbackMessage("secret", "alice", "bob", "hello bob");
-    expect(envelope.v).toBe(1);
-    expect(envelope.mode).toBe("webcrypto-fallback-v1");
-    expect(envelope.sender).toBe("alice");
-    expect(envelope.recipient).toBe("bob");
-    const decrypted = await decryptFallbackMessage("secret", envelope);
-    expect(decrypted).toBe("hello bob");
-  });
-
-  it("fails with wrong passphrase", async () => {
-    const envelope = await encryptFallbackMessage("correct", "a", "b", "msg");
-    await expect(decryptFallbackMessage("wrong", envelope)).rejects.toThrow();
-  });
-
-  it("fails with tampered ciphertext", async () => {
-    const envelope = await encryptFallbackMessage("pass", "a", "b", "msg");
-    const ct = base64ToBytes(envelope.ct_b64);
-    ct[0] ^= 0xff; // flip a byte
-    envelope.ct_b64 = bytesToBase64(ct);
-    await expect(decryptFallbackMessage("pass", envelope)).rejects.toThrow();
-  });
-
-  it("fails with wrong sender/recipient in AAD", async () => {
-    const envelope = await encryptFallbackMessage("pass", "alice", "bob", "msg");
-    envelope.sender = "eve"; // tamper with sender
-    await expect(decryptFallbackMessage("pass", envelope)).rejects.toThrow();
-  });
-});
-
 describe("encodeWireEnvelopeBase64 / decodeWireEnvelopeBase64", () => {
-  it("round-trips a wire envelope", async () => {
-    const envelope = await encryptFallbackMessage("pass", "alice", "bob", "hello");
+  it("round-trips a production wire envelope", () => {
+    const envelope: WireEnvelope = {
+      v: 1,
+      mode: "pqmsg-classical-v1",
+      sender: "alice",
+      recipient: "bob",
+      salt_b64: bytesToBase64(new Uint8Array([1, 2, 3])),
+      iv_b64: bytesToBase64(new Uint8Array([4, 5, 6])),
+      ct_b64: bytesToBase64(utf8ToBytes("ciphertext")),
+    };
     const encoded = encodeWireEnvelopeBase64(envelope);
     expect(typeof encoded).toBe("string");
     const decoded = decodeWireEnvelopeBase64(encoded);
     expect(decoded.v).toBe(1);
-    expect(decoded.mode).toBe("webcrypto-fallback-v1");
+    expect(decoded.mode).toBe("pqmsg-classical-v1");
     expect(decoded.sender).toBe("alice");
     expect(decoded.recipient).toBe("bob");
     expect(decoded.ct_b64).toBe(envelope.ct_b64);
@@ -373,7 +358,7 @@ describe("encodeWireEnvelopeBase64 / decodeWireEnvelopeBase64", () => {
   it("rejects unsupported wire version", () => {
     const bad: WireEnvelope = {
       v: 2 as 1,
-      mode: "webcrypto-fallback-v1",
+      mode: "pqmsg-classical-v1",
       sender: "a",
       recipient: "b",
       salt_b64: "",
@@ -418,5 +403,11 @@ describe("identityFingerprint", () => {
     const b = testKeys();
     expect(identityFingerprint(a.identityX25519Pub))
       .not.toBe(identityFingerprint(b.identityX25519Pub));
+  });
+
+  it("changes when the PQ identity key changes", () => {
+    const keys = testKeys();
+    expect(identityFingerprint(keys.identityX25519Pub))
+      .not.toBe(identityFingerprint(keys.identityX25519Pub, keys.identityPqSigPub));
   });
 });

@@ -107,6 +107,43 @@ class ServerApiTest {
     }
 
     @Test
+    fun validate_capabilities_requires_mandatory_pq_ratchet() {
+        val parsed = gson.fromJson(
+            """
+            {
+              "capability_schema_version": 1,
+              "security_profile": "research",
+              "deployment_mode": "development",
+              "tls_required": false,
+              "tls_enabled": false,
+              "supported_suite_ids": [1],
+              "runtime_crypto_profile": {
+                "protocol_version": 1,
+                "suite_id": 1,
+                "kem": "ml-kem-768",
+                "dh": "x25519",
+                "kdf": "hkdf-sha256",
+                "aead": "chacha20-poly1305",
+                "signature": "ed25519",
+                "pq_oqs_enabled": true,
+                "fips_mode": false
+              },
+              "production_baseline_met": false,
+              "registration_pow_bits": 0,
+              "prekey_bundle_reserve_count": 10,
+              "pq_ratchet_interval": 0,
+              "web_client_policy": "demo_only"
+            }
+            """.trimIndent(),
+            ServerCapabilitiesResponse::class.java,
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            ApiClientFactory.validateCapabilities(parsed, "ml-kem-768")
+        }
+    }
+
+    @Test
     fun poll_call_signals_response_parses_signal_id() {
         val parsed = gson.fromJson(
             """

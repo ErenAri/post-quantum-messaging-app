@@ -148,6 +148,7 @@ pub(crate) fn registration_pow_message(request: &RegisterUserRequest, nonce: &st
         request.device_id.as_bytes(),
         request.identity_x25519_pub.as_bytes(),
         request.identity_sig_pub.as_bytes(),
+        request.identity_pq_sig_pub.as_bytes(),
         nonce.as_bytes(),
     ]
     .join(&[0u8][..])

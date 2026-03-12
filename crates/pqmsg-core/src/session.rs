@@ -185,6 +185,30 @@ impl SessionState {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_handshake_with_suite_with_pq_ratchet(
+        role: SessionRole,
+        handshake_root_key: [u8; 32],
+        local_dh: DhKeyPair,
+        remote_dh_pub: DhPublicKey,
+        suite_id: u16,
+        max_skipped: usize,
+        pq_ratchet: PqRatchetState,
+        pq_kem: Box<dyn KemProvider>,
+    ) -> Result<Self, CoreError> {
+        Self::from_handshake_with_suite_and_wire_version_with_pq_ratchet(
+            role,
+            handshake_root_key,
+            local_dh,
+            remote_dh_pub,
+            suite_id,
+            WIRE_VERSION,
+            max_skipped,
+            pq_ratchet,
+            pq_kem,
+        )
+    }
+
     pub fn from_handshake_with_suite_and_wire_version(
         role: SessionRole,
         handshake_root_key: [u8; 32],
@@ -232,6 +256,31 @@ impl SessionState {
             receiving_header_key,
             prev_receiving_header_key: None,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_handshake_with_suite_and_wire_version_with_pq_ratchet(
+        role: SessionRole,
+        handshake_root_key: [u8; 32],
+        local_dh: DhKeyPair,
+        remote_dh_pub: DhPublicKey,
+        suite_id: u16,
+        wire_version: u16,
+        max_skipped: usize,
+        pq_ratchet: PqRatchetState,
+        pq_kem: Box<dyn KemProvider>,
+    ) -> Result<Self, CoreError> {
+        let mut session = Self::from_handshake_with_suite_and_wire_version(
+            role,
+            handshake_root_key,
+            local_dh,
+            remote_dh_pub,
+            suite_id,
+            wire_version,
+            max_skipped,
+        )?;
+        session.enable_pq_ratchet(pq_ratchet, pq_kem);
+        Ok(session)
     }
 
     pub fn enable_pq_ratchet(&mut self, state: PqRatchetState, kem: Box<dyn KemProvider>) {
@@ -752,6 +801,7 @@ mod tests {
             "alice",
             "bob",
             &alice_identity,
+            &alice_identity.public_key.0,
             &bundle,
             b"seed",
         )

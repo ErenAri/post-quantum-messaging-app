@@ -23,10 +23,12 @@ use crate::{
     AUTH_TAG_PRESENCE_STATUS, AUTH_TAG_PROFILE_AVATAR_HASH, AUTH_TAG_PROFILE_AVATAR_MIME_HASH,
     AUTH_TAG_PROFILE_DISPLAY_NAME_HASH, AUTH_TAG_PUSH_DEVICE_ID, AUTH_TAG_PUSH_TOKEN_HASH,
     AUTH_TAG_RECIPIENT_ID, AUTH_TAG_REVOKE_DEVICE_ID, AUTH_TAG_ROTATE_CHALLENGE_ID,
-    AUTH_TAG_ROTATE_NEW_SIG_HASH, AUTH_TAG_ROTATE_NEW_X25519_HASH,
-    AUTH_TAG_ROTATE_SIG_CURRENT_HASH, AUTH_TAG_ROTATE_SIG_NEW_HASH, AUTH_TAG_SINCE,
-    AUTH_TAG_TIMESTAMP, AUTH_TAG_TYPING_PEER_ID, AUTH_TAG_TYPING_STATE_FLAG, AUTH_TAG_USER_ID,
-    MAX_DEVICE_ID_LEN, MAX_REQUEST_ID_LEN, MAX_USER_ID_LEN, REQUEST_ID_HEADER, SIG_LEN,
+    AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH, AUTH_TAG_ROTATE_NEW_SIG_HASH,
+    AUTH_TAG_ROTATE_NEW_X25519_HASH, AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH,
+    AUTH_TAG_ROTATE_PQ_SIG_NEW_HASH, AUTH_TAG_ROTATE_SIG_CURRENT_HASH,
+    AUTH_TAG_ROTATE_SIG_NEW_HASH, AUTH_TAG_SINCE, AUTH_TAG_TIMESTAMP,
+    AUTH_TAG_TYPING_PEER_ID, AUTH_TAG_TYPING_STATE_FLAG, AUTH_TAG_USER_ID, MAX_DEVICE_ID_LEN,
+    MAX_REQUEST_ID_LEN, MAX_USER_ID_LEN, REQUEST_ID_HEADER, SIG_LEN,
 };
 
 #[derive(Debug)]
@@ -836,6 +838,11 @@ pub(crate) fn rotate_init_auth_message(
     hasher.update(request.new_identity_sig_pub.as_bytes());
     records.push(TlvRecord {
         ty: AUTH_TAG_ROTATE_NEW_SIG_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(request.new_identity_pq_sig_pub.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH,
         value: hasher.finalize().to_vec(),
     });
     encode(&records).map_err(|_| AppError::internal("failed to encode rotate-init auth transcript"))
@@ -859,6 +866,16 @@ pub(crate) fn rotate_confirm_auth_message(
     hasher.update(request.sig_by_new_identity.as_bytes());
     records.push(TlvRecord {
         ty: AUTH_TAG_ROTATE_SIG_NEW_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(request.pq_sig_by_current_identity.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(request.pq_sig_by_new_identity.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_ROTATE_PQ_SIG_NEW_HASH,
         value: hasher.finalize().to_vec(),
     });
     encode(&records)

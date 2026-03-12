@@ -17,6 +17,7 @@ export type RegisterUserRequest = {
   user_id: string;
   identity_x25519_pub: string;
   identity_sig_pub: string;
+  identity_pq_sig_pub: string;
   device_id: string;
 };
 
@@ -31,6 +32,8 @@ export type PublishPrekeysRequest = {
   sig_over_spk: string;
   pq_signed_prekey_pub_mlkem768: string;
   sig_over_pqspk: string;
+  pq_sig_over_spk: string;
+  pq_sig_over_pqspk: string;
   one_time_prekeys_x25519: string[];
   one_time_prekeys_mlkem768: string[];
 };
@@ -52,10 +55,13 @@ export type BundleResponse = {
   device_id: string;
   identity_x25519_pub: string;
   identity_sig_pub: string;
+  identity_pq_sig_pub: string;
   signed_prekey_x25519_pub: string;
   sig_over_spk: string;
   pq_signed_prekey_pub_mlkem768: string;
   sig_over_pqspk: string;
+  pq_sig_over_spk: string;
+  pq_sig_over_pqspk: string;
   one_time_prekey_x25519: string | null;
   one_time_prekey_mlkem768: string | null;
   identity_fingerprint_sha256: string | null;
@@ -323,6 +329,7 @@ export type PrekeysStatusResponse = {
 export type RotateInitRequest = {
   new_identity_x25519_pub: string;
   new_identity_sig_pub: string;
+  new_identity_pq_sig_pub: string;
   new_device_id: string;
 };
 
@@ -337,6 +344,8 @@ export type RotateConfirmRequest = {
   challenge_id: string;
   sig_by_current_identity: string;
   sig_by_new_identity: string;
+  pq_sig_by_current_identity: string;
+  pq_sig_by_new_identity: string;
 };
 
 export type RotateConfirmResponse = {
@@ -350,6 +359,7 @@ export type IdentityLogItem = {
   version: number;
   identity_x25519_pub: string;
   identity_sig_pub: string;
+  identity_pq_sig_pub?: string | null;
   device_id: string;
   event_type: string;
   changed_at: string;

@@ -6,6 +6,7 @@ pub(crate) struct RegisterUserRequest {
     pub(crate) user_id: String,
     pub(crate) identity_x25519_pub: String,
     pub(crate) identity_sig_pub: String,
+    pub(crate) identity_pq_sig_pub: String,
     pub(crate) device_id: String,
     #[serde(default)]
     pub(crate) pow_nonce: Option<String>,
@@ -253,6 +254,8 @@ pub(crate) struct PublishPrekeysRequest {
     pub(crate) sig_over_spk: String,
     pub(crate) pq_signed_prekey_pub_mlkem768: String,
     pub(crate) sig_over_pqspk: String,
+    pub(crate) pq_sig_over_spk: String,
+    pub(crate) pq_sig_over_pqspk: String,
     pub(crate) one_time_prekeys_x25519: Vec<String>,
     pub(crate) one_time_prekeys_mlkem768: Vec<String>,
 }
@@ -274,6 +277,7 @@ pub(crate) struct PublishPrekeysResponse {
 pub(crate) struct RotateInitRequest {
     pub(crate) new_identity_x25519_pub: String,
     pub(crate) new_identity_sig_pub: String,
+    pub(crate) new_identity_pq_sig_pub: String,
     pub(crate) new_device_id: String,
 }
 
@@ -290,6 +294,8 @@ pub(crate) struct RotateConfirmRequest {
     pub(crate) challenge_id: String,
     pub(crate) sig_by_current_identity: String,
     pub(crate) sig_by_new_identity: String,
+    pub(crate) pq_sig_by_current_identity: String,
+    pub(crate) pq_sig_by_new_identity: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -305,6 +311,7 @@ pub(crate) struct IdentityLogItem {
     pub(crate) version: u32,
     pub(crate) identity_x25519_pub: String,
     pub(crate) identity_sig_pub: String,
+    pub(crate) identity_pq_sig_pub: Option<String>,
     pub(crate) device_id: String,
     pub(crate) event_type: String,
     pub(crate) changed_at: String,
@@ -323,10 +330,13 @@ pub(crate) struct BundleResponse {
     pub(crate) device_id: String,
     pub(crate) identity_x25519_pub: String,
     pub(crate) identity_sig_pub: String,
+    pub(crate) identity_pq_sig_pub: String,
     pub(crate) signed_prekey_x25519_pub: String,
     pub(crate) sig_over_spk: String,
     pub(crate) pq_signed_prekey_pub_mlkem768: String,
     pub(crate) sig_over_pqspk: String,
+    pub(crate) pq_sig_over_spk: String,
+    pub(crate) pq_sig_over_pqspk: String,
     pub(crate) one_time_prekey_x25519: Option<String>,
     pub(crate) one_time_prekey_mlkem768: Option<String>,
     pub(crate) remaining_one_time_prekeys_x25519: usize,

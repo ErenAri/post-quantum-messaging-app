@@ -1,0 +1,2 @@
+ALTER TABLE identity_rotation_challenges
+ADD COLUMN new_identity_pq_sig_pub BLOB;

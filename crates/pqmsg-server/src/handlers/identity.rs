@@ -10,7 +10,7 @@ use crate::db::*;
 use crate::error::AppError;
 use crate::types::*;
 use crate::validation::*;
-use crate::{AppState, SIG_PUB_KEY_LEN, X25519_KEY_LEN};
+use crate::{AppState, PQ_SIG_PUB_KEY_LEN, SIG_PUB_KEY_LEN, X25519_KEY_LEN};
 
 pub(crate) async fn register_user(
     State(state): State<AppState>,
@@ -33,15 +33,23 @@ pub(crate) async fn register_user(
         SIG_PUB_KEY_LEN,
     )?;
     validate_ed25519_public_key(&identity_sig)?;
+    let identity_pq_sig = decode_base64_exact(
+        "identity_pq_sig_pub",
+        &request.identity_pq_sig_pub,
+        PQ_SIG_PUB_KEY_LEN,
+    )?;
+    validate_ml_dsa_public_key(&identity_pq_sig)?;
 
     let now = Utc::now().to_rfc3339();
     let insert_result = sqlx::query(
-        "INSERT INTO users (user_id, identity_x25519_pub, identity_sig_pub, device_id, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $5)",
+        "INSERT INTO users (
+            user_id, identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $6)",
     )
     .bind(&request.user_id)
     .bind(&identity_x25519)
     .bind(&identity_sig)
+    .bind(&identity_pq_sig)
     .bind(&request.device_id)
     .bind(&now)
     .execute(&state.pool)
@@ -51,7 +59,7 @@ pub(crate) async fn register_user(
         Ok(_) => {}
         Err(sqlx::Error::Database(db_error)) if db_error.is_unique_violation() => {
             let existing = sqlx::query(
-                "SELECT identity_x25519_pub, identity_sig_pub, device_id, created_at
+                "SELECT identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, created_at
                  FROM users
                  WHERE user_id = $1",
             )
@@ -66,16 +74,34 @@ pub(crate) async fn register_user(
 
             let existing_identity_x25519: Vec<u8> = existing.try_get("identity_x25519_pub")?;
             let existing_identity_sig: Vec<u8> = existing.try_get("identity_sig_pub")?;
+            let existing_identity_pq_sig: Option<Vec<u8>> =
+                existing.try_get("identity_pq_sig_pub")?;
             let existing_device_id: String = existing.try_get("device_id")?;
             let existing_created_at: String = existing.try_get("created_at")?;
 
             if existing_identity_x25519 != identity_x25519
                 || existing_identity_sig != identity_sig
                 || existing_device_id != request.device_id
+                || existing_identity_pq_sig
+                    .as_ref()
+                    .is_some_and(|existing_key| existing_key != &identity_pq_sig)
             {
                 return Err(AppError::conflict(
                     "user_id is already registered with an immutable identity",
                 ));
+            }
+
+            if existing_identity_pq_sig.is_none() {
+                sqlx::query(
+                    "UPDATE users
+                     SET identity_pq_sig_pub = $1, updated_at = $2
+                     WHERE user_id = $3 AND identity_pq_sig_pub IS NULL",
+                )
+                .bind(&identity_pq_sig)
+                .bind(&now)
+                .bind(&request.user_id)
+                .execute(&state.pool)
+                .await?;
             }
 
             sqlx::query(
@@ -115,13 +141,14 @@ pub(crate) async fn register_user(
 
     sqlx::query(
         "INSERT INTO identity_events (
-            user_id, version, identity_x25519_pub, identity_sig_pub, device_id, event_type, changed_at
-         ) VALUES ($1, 1, $2, $3, $4, 'initial', $5)
+            user_id, version, identity_x25519_pub, identity_sig_pub, identity_pq_sig_pub, device_id, event_type, changed_at
+         ) VALUES ($1, 1, $2, $3, $4, $5, 'initial', $6)
          ON CONFLICT (user_id, version) DO NOTHING",
     )
     .bind(&request.user_id)
     .bind(&identity_x25519)
     .bind(&identity_sig)
+    .bind(&identity_pq_sig)
     .bind(&request.device_id)
     .bind(&now)
     .execute(&state.pool)

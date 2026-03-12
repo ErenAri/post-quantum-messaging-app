@@ -56,10 +56,20 @@ const AUTH_TAG_ROTATE_NEW_SIG_HASH = criticalType(0x320c);
 const AUTH_TAG_ROTATE_CHALLENGE_ID = criticalType(0x320d);
 const AUTH_TAG_ROTATE_SIG_CURRENT_HASH = criticalType(0x320e);
 const AUTH_TAG_ROTATE_SIG_NEW_HASH = criticalType(0x320f);
+const AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH = criticalType(0x3230);
+const AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH = criticalType(0x3231);
+const AUTH_TAG_ROTATE_PQ_SIG_NEW_HASH = criticalType(0x3232);
 
 const SIG_TAG_PROTOCOL_VERSION = criticalType(0x0201);
 const SIG_TAG_LABEL = criticalType(0x0202);
 const SIG_TAG_KEY_MATERIAL = criticalType(0x0203);
+const ROTATE_SIG_TAG_USER_ID = criticalType(0x3101);
+const ROTATE_SIG_TAG_CHALLENGE_ID = criticalType(0x3102);
+const ROTATE_SIG_TAG_CHALLENGE_NONCE = criticalType(0x3103);
+const ROTATE_SIG_TAG_NEW_IDENTITY_X25519 = criticalType(0x3104);
+const ROTATE_SIG_TAG_NEW_IDENTITY_SIG = criticalType(0x3105);
+const ROTATE_SIG_TAG_NEW_DEVICE_ID = criticalType(0x3106);
+const ROTATE_SIG_TAG_NEW_IDENTITY_PQ_SIG = criticalType(0x3107);
 
 const PBKDF2_ITERATIONS = 200_000;
 
@@ -71,6 +81,8 @@ export type GeneratedKeys = {
   identityX25519Secret: string;
   identitySigPub: string;
   identitySigSecret: string;
+  identityPqSigPub: string;
+  identityPqSigSecret: string;
   signedPrekeyX25519Pub: string;
   signedPrekeyX25519Secret: string;
   pqSignedPrekeyPubMlkem768: string;
@@ -94,18 +106,28 @@ export type PublishPrekeysPayload = {
   sig_over_spk: string;
   pq_signed_prekey_pub_mlkem768: string;
   sig_over_pqspk: string;
+  pq_sig_over_spk: string;
+  pq_sig_over_pqspk: string;
   one_time_prekeys_x25519: string[];
   one_time_prekeys_mlkem768: string[];
 };
 
 export type WireEnvelope = {
   v: 1;
-  mode: "webcrypto-fallback-v1" | "pqmsg-classical-v1";
+  mode: "pqmsg-classical-v1";
   sender: string;
   recipient: string;
   salt_b64: string;
   iv_b64: string;
   ct_b64: string;
+};
+
+export type RotateConfirmPayload = {
+  challenge_id: string;
+  sig_by_current_identity: string;
+  sig_by_new_identity: string;
+  pq_sig_by_current_identity: string;
+  pq_sig_by_new_identity: string;
 };
 
 type SealedPayload = {
@@ -137,13 +159,14 @@ export function generateIdentityKeys(
   if (oneTimeCount < 1 || oneTimeCount > 64) {
     throw new Error("one-time prekey count must be in 1..64");
   }
-  if (suite === "ml-kem-768" && !wasmCrypto.kemAvailable()) {
+  if (!wasmCrypto.kemAvailable() || !wasmCrypto.pqSigAvailable()) {
     throw new Error("Web post-quantum runtime unavailable in this build.");
   }
   const identityXSecret = x25519.utils.randomPrivateKey();
   const identityXPub = x25519.getPublicKey(identityXSecret);
   const identitySigSecret = ed25519.utils.randomPrivateKey();
   const identitySigPub = ed25519.getPublicKey(identitySigSecret);
+  const identityPqSig = wasmCrypto.mlDsaKeypair();
   const signedPrekeySecret = x25519.utils.randomPrivateKey();
   const signedPrekeyPub = x25519.getPublicKey(signedPrekeySecret);
 
@@ -172,6 +195,8 @@ export function generateIdentityKeys(
     identityX25519Secret: bytesToBase64(identityXSecret),
     identitySigPub: bytesToBase64(identitySigPub),
     identitySigSecret: bytesToBase64(identitySigSecret),
+    identityPqSigPub: bytesToBase64(identityPqSig.public_key),
+    identityPqSigSecret: bytesToBase64(identityPqSig.secret_key),
     signedPrekeyX25519Pub: bytesToBase64(signedPrekeyPub),
     signedPrekeyX25519Secret: bytesToBase64(signedPrekeySecret),
     pqSignedPrekeyPubMlkem768: bytesToBase64(pqSignedPrekey.public_key),
@@ -187,15 +212,20 @@ export function buildPublishPrekeysPayload(keys: GeneratedKeys): PublishPrekeysP
   const spkPub = base64ToBytes(keys.signedPrekeyX25519Pub);
   const pqSpkPub = base64ToBytes(keys.pqSignedPrekeyPubMlkem768);
   const identitySigSecret = base64ToBytes(keys.identitySigSecret);
+  const identityPqSigSecret = base64ToBytes(keys.identityPqSigSecret);
   const spkMsg = signatureMessage(1, utf8ToBytes("SPK"), spkPub);
   const pqMsg = signatureMessage(1, utf8ToBytes("PQSPK"), pqSpkPub);
   const sigOverSpk = ed25519.sign(spkMsg, identitySigSecret);
   const sigOverPq = ed25519.sign(pqMsg, identitySigSecret);
+  const pqSigOverSpk = wasmCrypto.mlDsaSign(identityPqSigSecret, spkMsg);
+  const pqSigOverPq = wasmCrypto.mlDsaSign(identityPqSigSecret, pqMsg);
   return {
     signed_prekey_x25519_pub: keys.signedPrekeyX25519Pub,
     sig_over_spk: bytesToBase64(sigOverSpk),
     pq_signed_prekey_pub_mlkem768: keys.pqSignedPrekeyPubMlkem768,
     sig_over_pqspk: bytesToBase64(sigOverPq),
+    pq_sig_over_spk: bytesToBase64(pqSigOverSpk),
+    pq_sig_over_pqspk: bytesToBase64(pqSigOverPq),
     one_time_prekeys_x25519: keys.oneTimePrekeysX25519,
     one_time_prekeys_mlkem768: keys.oneTimePrekeysMlkem768
   };
@@ -613,13 +643,15 @@ export function buildPrekeysStatusAuthHeaders(keys: GeneratedKeys): RequestAuthH
 export function buildRotateInitAuthHeaders(
   keys: GeneratedKeys,
   newIdentityX25519Pub: string,
-  newIdentitySigPub: string
+  newIdentitySigPub: string,
+  newIdentityPqSigPub: string
 ): RequestAuthHeaders {
   const timestamp = unixTimestampSeconds();
   const nonce = bytesToBase64(randomBytes(16));
   const records = authCommonRecords("rotate-init", keys.userId, keys.deviceId, timestamp, nonce);
   records.push({ ty: AUTH_TAG_ROTATE_NEW_X25519_HASH, value: sha256(utf8ToBytes(newIdentityX25519Pub)) });
   records.push({ ty: AUTH_TAG_ROTATE_NEW_SIG_HASH, value: sha256(utf8ToBytes(newIdentitySigPub)) });
+  records.push({ ty: AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH, value: sha256(utf8ToBytes(newIdentityPqSigPub)) });
   return signAuthHeaders(keys, timestamp, nonce, records);
 }
 
@@ -627,7 +659,9 @@ export function buildRotateConfirmAuthHeaders(
   keys: GeneratedKeys,
   challengeId: string,
   sigByCurrentIdentity: string,
-  sigByNewIdentity: string
+  sigByNewIdentity: string,
+  pqSigByCurrentIdentity: string,
+  pqSigByNewIdentity: string
 ): RequestAuthHeaders {
   const timestamp = unixTimestampSeconds();
   const nonce = bytesToBase64(randomBytes(16));
@@ -635,7 +669,48 @@ export function buildRotateConfirmAuthHeaders(
   records.push({ ty: AUTH_TAG_ROTATE_CHALLENGE_ID, value: utf8ToBytes(challengeId) });
   records.push({ ty: AUTH_TAG_ROTATE_SIG_CURRENT_HASH, value: sha256(utf8ToBytes(sigByCurrentIdentity)) });
   records.push({ ty: AUTH_TAG_ROTATE_SIG_NEW_HASH, value: sha256(utf8ToBytes(sigByNewIdentity)) });
+  records.push({ ty: AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH, value: sha256(utf8ToBytes(pqSigByCurrentIdentity)) });
+  records.push({ ty: AUTH_TAG_ROTATE_PQ_SIG_NEW_HASH, value: sha256(utf8ToBytes(pqSigByNewIdentity)) });
   return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
+export function buildRotateConfirmPayload(
+  currentKeys: GeneratedKeys,
+  newKeys: GeneratedKeys,
+  challengeId: string,
+  challengeNonceBase64: string
+): RotateConfirmPayload {
+  if (!wasmCrypto.pqSigAvailable()) {
+    throw new Error("Web post-quantum runtime unavailable in this build.");
+  }
+  if (currentKeys.userId !== newKeys.userId) {
+    throw new Error("rotation requires current and new keys for the same user");
+  }
+  const challengeNonce = base64ToBytes(challengeNonceBase64);
+  const message = rotationSignatureMessage(
+    currentKeys.userId,
+    challengeId,
+    challengeNonce,
+    base64ToBytes(newKeys.identityX25519Pub),
+    base64ToBytes(newKeys.identitySigPub),
+    base64ToBytes(newKeys.identityPqSigPub),
+    newKeys.deviceId
+  );
+  return {
+    challenge_id: challengeId,
+    sig_by_current_identity: bytesToBase64(
+      ed25519.sign(message, base64ToBytes(currentKeys.identitySigSecret))
+    ),
+    sig_by_new_identity: bytesToBase64(
+      ed25519.sign(message, base64ToBytes(newKeys.identitySigSecret))
+    ),
+    pq_sig_by_current_identity: bytesToBase64(
+      wasmCrypto.mlDsaSign(base64ToBytes(currentKeys.identityPqSigSecret), message)
+    ),
+    pq_sig_by_new_identity: bytesToBase64(
+      wasmCrypto.mlDsaSign(base64ToBytes(newKeys.identityPqSigSecret), message)
+    ),
+  };
 }
 
 export function buildIdentityLogAuthHeaders(keys: GeneratedKeys): RequestAuthHeaders {
@@ -770,58 +845,19 @@ export async function openJsonWithPassphrase<T>(
 }
 
 export async function encryptFallbackMessage(
-  passphrase: string,
-  sender: string,
-  recipient: string,
-  plaintext: string
+  _passphrase: string,
+  _sender: string,
+  _recipient: string,
+  _plaintext: string
 ): Promise<WireEnvelope> {
-  const salt = randomBytes(16);
-  const iv = randomBytes(12);
-  const key = await deriveAesGcmKey(passphrase, salt);
-  const aad = utf8ToBytes(`pqmsg-webcrypto-fallback:${sender}:${recipient}:v1`);
-  const ciphertext = new Uint8Array(
-    await crypto.subtle.encrypt(
-      {
-        name: "AES-GCM",
-        iv: iv.buffer as ArrayBuffer,
-        additionalData: aad.buffer as ArrayBuffer
-      },
-      key,
-      utf8ToBytes(plaintext).buffer as ArrayBuffer
-    )
-  );
-  return {
-    v: 1,
-    mode: "webcrypto-fallback-v1",
-    sender,
-    recipient,
-    salt_b64: bytesToBase64(salt),
-    iv_b64: bytesToBase64(iv),
-    ct_b64: bytesToBase64(ciphertext)
-  };
+  throw new Error("Web fallback messaging is disabled; WASM PQ runtime is required.");
 }
 
 export async function decryptFallbackMessage(
-  passphrase: string,
-  wire: WireEnvelope
+  _passphrase: string,
+  _wire: WireEnvelope
 ): Promise<string> {
-  const salt = base64ToBytes(wire.salt_b64);
-  const iv = base64ToBytes(wire.iv_b64);
-  const ciphertext = base64ToBytes(wire.ct_b64);
-  const key = await deriveAesGcmKey(passphrase, salt);
-  const aad = utf8ToBytes(`pqmsg-webcrypto-fallback:${wire.sender}:${wire.recipient}:v1`);
-  const plaintext = new Uint8Array(
-    await crypto.subtle.decrypt(
-      {
-        name: "AES-GCM",
-        iv: iv.buffer as ArrayBuffer,
-        additionalData: aad.buffer as ArrayBuffer
-      },
-      key,
-      ciphertext.buffer as ArrayBuffer
-    )
-  );
-  return bytesToUtf8(plaintext);
+  throw new Error("Web fallback messaging is disabled; legacy fallback envelopes are rejected.");
 }
 
 export function encodeWireEnvelopeBase64(envelope: WireEnvelope): string {
@@ -830,7 +866,7 @@ export function encodeWireEnvelopeBase64(envelope: WireEnvelope): string {
 
 export function decodeWireEnvelopeBase64(wireBase64: string): WireEnvelope {
   const wire = JSON.parse(bytesToUtf8(base64ToBytes(wireBase64))) as WireEnvelope;
-  if (wire.v !== 1 || (wire.mode !== "webcrypto-fallback-v1" && wire.mode !== "pqmsg-classical-v1")) {
+  if (wire.v !== 1 || wire.mode !== "pqmsg-classical-v1") {
     throw new Error("unsupported wire mode");
   }
   return wire;
@@ -895,7 +931,6 @@ export function regeneratePublishedPrekeys(
 
 /**
  * Encrypt a message using WASM (ChaCha20-Poly1305 via pqmsg-core).
- * Falls back to WebCrypto AES-GCM if WASM is unavailable.
  */
 export async function encryptMessage(
   passphrase: string,
@@ -903,25 +938,24 @@ export async function encryptMessage(
   recipient: string,
   plaintext: string
 ): Promise<WireEnvelope> {
-  if (wasmCrypto.wasmAvailable()) {
-    const ad = wasmCrypto.conversationAd(sender, recipient);
-    const salt = randomBytes(16);
-    const key = wasmCrypto.hkdfSha256(utf8ToBytes(passphrase), salt, ad, 32);
-    const ct = wasmCrypto.encrypt(key, utf8ToBytes(plaintext), ad);
-    // ct = nonce(12) || ciphertext+tag
-    const nonce = ct.slice(0, 12);
-    const ciphertextBytes = ct.slice(12);
-    return {
-      v: 1,
-      mode: "pqmsg-classical-v1",
-      sender,
-      recipient,
-      salt_b64: bytesToBase64(salt),
-      iv_b64: bytesToBase64(nonce),
-      ct_b64: bytesToBase64(ciphertextBytes)
-    };
+  if (!wasmCrypto.wasmAvailable()) {
+    throw new Error("WASM PQ runtime is required for web messaging.");
   }
-  return encryptFallbackMessage(passphrase, sender, recipient, plaintext);
+  const ad = wasmCrypto.conversationAd(sender, recipient);
+  const salt = randomBytes(16);
+  const key = wasmCrypto.hkdfSha256(utf8ToBytes(passphrase), salt, ad, 32);
+  const ct = wasmCrypto.encrypt(key, utf8ToBytes(plaintext), ad);
+  const nonce = ct.slice(0, 12);
+  const ciphertextBytes = ct.slice(12);
+  return {
+    v: 1,
+    mode: "pqmsg-classical-v1",
+    sender,
+    recipient,
+    salt_b64: bytesToBase64(salt),
+    iv_b64: bytesToBase64(nonce),
+    ct_b64: bytesToBase64(ciphertextBytes)
+  };
 }
 
 /**
@@ -945,7 +979,7 @@ export async function decryptMessage(
     const pt = wasmCrypto.decrypt(key, combined, ad);
     return bytesToUtf8(pt);
   }
-  return decryptFallbackMessage(passphrase, wire);
+  throw new Error("unsupported wire mode");
 }
 
 export function initiateDirectMessageSession(
@@ -1003,8 +1037,11 @@ export function decryptDirectMessage(
   };
 }
 
-export function identityFingerprint(identityX25519PubB64: string): string {
-  return bytesToHex(sha256(base64ToBytes(identityX25519PubB64)));
+export function identityFingerprint(identityX25519PubB64: string, identityPqSigPubB64?: string): string {
+  const fingerprintInput = identityPqSigPubB64
+    ? concatBytes([base64ToBytes(identityX25519PubB64), base64ToBytes(identityPqSigPubB64)])
+    : base64ToBytes(identityX25519PubB64);
+  return bytesToHex(sha256(fingerprintInput));
 }
 
 function signatureMessage(
@@ -1033,6 +1070,26 @@ function authCommonRecords(
     { ty: AUTH_TAG_TIMESTAMP, value: i64ToBeBytes(timestamp) },
     { ty: AUTH_TAG_NONCE, value: utf8ToBytes(nonce) }
   ];
+}
+
+function rotationSignatureMessage(
+  userId: string,
+  challengeId: string,
+  challengeNonce: Uint8Array,
+  newIdentityX25519: Uint8Array,
+  newIdentitySig: Uint8Array,
+  newIdentityPqSig: Uint8Array,
+  newDeviceId: string
+): Uint8Array {
+  return encodeTlv([
+    { ty: ROTATE_SIG_TAG_USER_ID, value: utf8ToBytes(userId) },
+    { ty: ROTATE_SIG_TAG_CHALLENGE_ID, value: utf8ToBytes(challengeId) },
+    { ty: ROTATE_SIG_TAG_CHALLENGE_NONCE, value: challengeNonce },
+    { ty: ROTATE_SIG_TAG_NEW_IDENTITY_X25519, value: newIdentityX25519 },
+    { ty: ROTATE_SIG_TAG_NEW_IDENTITY_SIG, value: newIdentitySig },
+    { ty: ROTATE_SIG_TAG_NEW_IDENTITY_PQ_SIG, value: newIdentityPqSig },
+    { ty: ROTATE_SIG_TAG_NEW_DEVICE_ID, value: utf8ToBytes(newDeviceId) },
+  ]);
 }
 
 function signAuthHeaders(
