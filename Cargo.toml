@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/pqmsg-core",
+    "crates/pqmsg-discovery",
     "crates/pqmsg-server",
     "crates/pqmsg-cli",
     "crates/pqmsg-android",

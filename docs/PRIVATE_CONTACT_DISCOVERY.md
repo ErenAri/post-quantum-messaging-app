@@ -7,6 +7,7 @@ Current product posture:
 - Raw hash upload/match on the main server is disabled.
 - Manual contacts, opaque invite links, and optional `@username` lookup remain the active contact bootstrap paths.
 - The app server can now advertise `contact_discovery_mode` and, when configured, mint short-lived signed tickets for a separate private discovery service.
+- A separate pqmsg-discovery service crate now exposes /health and /v1/manifest and can verify app-server-issued discovery tickets.
 
 This document defines the next honest step beyond that groundwork: a dedicated private contact discovery subsystem instead of rebuilding a weaker server-side address-book lookup in `pqmsg-server`.
 
@@ -59,6 +60,11 @@ Responsibilities:
 - Return only matched account references and minimal proof/metadata needed by the client.
 
 The discovery service must be isolated from the main messaging server so the main server never receives the user's address-book query material.
+
+Current implementation boundary:
+
+- pqmsg-discovery verifies short-lived tickets and publishes a manifest contract.
+- The actual privacy-preserving lookup protocol is still not implemented.
 
 ### 3. Client
 
@@ -123,8 +129,11 @@ Need explicit policy for:
 
 ## Current Repo Boundary
 
-Until the separate service exists, the correct server/client posture is:
+Until the separate service lookup protocol exists, the correct server/client posture is:
 
 - `contact_discovery_supported = false`
 - `contact_discovery_mode = "manual_only"` unless a separate service is actually configured
 - manual contacts, invite links, and optional `@username` lookup remain the only supported discovery/bootstrap paths
+
+
+
