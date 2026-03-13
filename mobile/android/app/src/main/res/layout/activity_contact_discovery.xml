@@ -102,6 +102,106 @@
     </com.google.android.material.card.MaterialCardView>
 
     <com.google.android.material.card.MaterialCardView
+        android:id="@+id/cardPrivateDiscovery"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="18dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/private_discovery_title"
+                android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/contacts_private_service_notice"
+                android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
+
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.PQMsg.TextInputLayout"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:hint="@string/hint_discovery_phone_hashes">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/editDiscoveryPhones"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="top|start"
+                    android:inputType="textMultiLine|textNoSuggestions"
+                    android:minLines="2" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.PQMsg.TextInputLayout"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="@string/hint_discovery_email_hashes">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/editDiscoveryEmails"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="top|start"
+                    android:inputType="textMultiLine|textNoSuggestions"
+                    android:minLines="2" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonUploadDiscoveryHandles"
+                style="@style/Widget.PQMsg.Button.Secondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/button_upload_discovery_handles" />
+
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.PQMsg.TextInputLayout"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:hint="@string/hint_discovery_query_hashes">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/editDiscoveryQuery"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="top|start"
+                    android:inputType="textMultiLine|textNoSuggestions"
+                    android:minLines="2" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonSearchDiscovery"
+                style="@style/Widget.PQMsg.Button.Primary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/button_search_discovery" />
+
+            <TextView
+                android:id="@+id/textDiscoveryMatches"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted"
+                android:visibility="gone" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_marginTop="12dp"

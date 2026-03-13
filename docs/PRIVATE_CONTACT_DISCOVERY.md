@@ -7,9 +7,10 @@ Current product posture:
 - Raw hash upload/match on the main server is disabled.
 - Manual contacts, opaque invite links, and optional `@username` lookup remain the active contact bootstrap paths.
 - The app server can now advertise `contact_discovery_mode` and, when configured, mint short-lived signed tickets for a separate private discovery service.
-- A separate pqmsg-discovery service crate now exposes /health and /v1/manifest and can verify app-server-issued discovery tickets.
+- A separate `pqmsg-discovery` service crate now exposes `/health`, `/v1/manifest`, `/v1/discovery/handles`, and `/v1/discovery/match`.
+- Supported web and Android clients can now request a discovery ticket from the app server and talk directly to the separate discovery service.
 
-This document defines the next honest step beyond that groundwork: a dedicated private contact discovery subsystem instead of rebuilding a weaker server-side address-book lookup in `pqmsg-server`.
+This document defines the next honest step beyond that groundwork: replacing the current service-boundary-only hashed-directory flow with a real privacy-preserving contact discovery subsystem instead of rebuilding a weaker server-side address-book lookup in `pqmsg-server`.
 
 ## Research Baseline
 
@@ -56,22 +57,23 @@ Responsibilities:
 
 - Accept only short-lived app-server-issued tickets.
 - Verify the ticket signature and expiry.
-- Perform the privacy-preserving lookup over blinded/encrypted identifiers.
+- Perform the lookup over client-submitted identifiers without routing those queries through the main messaging server.
 - Return only matched account references and minimal proof/metadata needed by the client.
 
 The discovery service must be isolated from the main messaging server so the main server never receives the user's address-book query material.
 
 Current implementation boundary:
 
-- pqmsg-discovery verifies short-lived tickets and publishes a manifest contract.
-- The actual privacy-preserving lookup protocol is still not implemented.
+- `pqmsg-discovery` verifies short-lived tickets, publishes a manifest contract, and exposes a development-only `hashed_handle_directory` lookup mode.
+- In that mode, clients upload SHA-256 handle hashes and submit SHA-256 query hashes directly to the discovery service.
+- This is intentionally marked `privacy_mode = "service_boundary_only"` and is not a production claim of Signal-style private discovery.
 
 ### 3. Client
 
 Responsibilities:
 
 - Normalize contact handles locally.
-- Blind/encrypt inputs before submitting to the discovery service.
+- Submit discovery input directly to the discovery service instead of the main app server.
 - Present results as optional contact suggestions, not automatic server-side graph mutation.
 - Cache only the minimal local result set needed for UX.
 
@@ -79,7 +81,7 @@ Responsibilities:
 
 1. Client fetches `/v1/capabilities`.
 2. If `contact_discovery_mode == "private_service"`, client requests `/v1/users/{user_id}/contact-discovery/ticket`.
-3. Client performs the privacy-preserving discovery protocol directly against `contact_discovery_service_origin`.
+3. Client performs the current service-boundary-only discovery flow directly against `contact_discovery_service_origin`.
 4. Discovery service returns matched account references.
 5. Client converts selected results into local/manual contacts.
 
@@ -121,19 +123,20 @@ Need explicit policy for:
 
 ## Recommended Implementation Order
 
-1. Add a dedicated discovery-service manifest/attestation contract.
-2. Implement a separate `pqmsg-discovery` service crate or sibling service.
-3. Add client-side private-discovery transport and local result handling on Android and web.
-4. Remove any remaining product text that implies discovery is available before the new service ships.
-5. Subject the discovery service to separate review before enabling it in hardened deployments.
+1. Replace the current `hashed_handle_directory` flow with one concrete audited private-discovery primitive.
+2. Add attestation / manifest verification strong enough for hardened deployments.
+3. Limit or eliminate service-side handle persistence once the final primitive is chosen.
+4. Subject the discovery service to separate review before enabling it in hardened deployments.
+5. Keep the main app server raw-hash routes disabled.
 
 ## Current Repo Boundary
 
 Until the separate service lookup protocol exists, the correct server/client posture is:
 
-- `contact_discovery_supported = false`
-- `contact_discovery_mode = "manual_only"` unless a separate service is actually configured
-- manual contacts, invite links, and optional `@username` lookup remain the only supported discovery/bootstrap paths
+- `contact_discovery_supported = true` only when a separate discovery service is actually configured
+- `contact_discovery_mode = "private_service"` only for the separate-service ticket flow
+- raw-hash upload/match routes on the main app server remain disabled
+- manual contacts, invite links, and optional `@username` lookup remain the supported bootstrap paths outside the discovery service
 
 
 

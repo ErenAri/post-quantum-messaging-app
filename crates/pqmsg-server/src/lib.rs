@@ -459,7 +459,7 @@ impl AppState {
     }
 
     pub fn contact_discovery_supported(&self) -> bool {
-        false
+        self.contact_discovery_service_origin.is_some()
     }
 
     pub fn contact_discovery_mode(&self) -> &'static str {

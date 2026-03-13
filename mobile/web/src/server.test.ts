@@ -408,6 +408,80 @@ describe("PqmsgApi methods", () => {
     expect(url).toBe("http://localhost:8080/v1/capabilities");
   });
 
+  it("getContactDiscoveryManifest fetches the separate discovery service manifest", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        service: "pqmsg-discovery",
+        protocol_version: 1,
+        attestation_mode: "unattested_development",
+        ticket_format: "base64(json-payload).base64(ed25519-signature)",
+        ticket_issuer_ed25519_pub: "issuer-ed25519-pub",
+        ticket_max_ttl_seconds: 300,
+        lookup_protocol: "not_implemented",
+        privacy_mode: "service_boundary_only",
+      })
+    );
+    const manifest = await api.getContactDiscoveryManifest("https://cdsi.example");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(manifest.service).toBe("pqmsg-discovery");
+    expect(url).toBe("https://cdsi.example/v1/manifest");
+    expect(opts.method).toBe("GET");
+  });
+
+  it("uploadDiscoveryHandlesToService sends POST to the separate discovery service", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        user_id: "alice",
+        device_id: "alice-dev-1",
+        uploaded_phone_hashes: 1,
+        uploaded_email_hashes: 0,
+        updated_at: "2026-03-13T00:00:00Z",
+      })
+    );
+    const result = await api.uploadDiscoveryHandlesToService("https://cdsi.example", {
+      ticket: "ticket-1",
+      phone_hashes_sha256: ["11".repeat(32)],
+      email_hashes_sha256: [],
+    });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(result.user_id).toBe("alice");
+    expect(url).toBe("https://cdsi.example/v1/discovery/handles");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(String(opts.body))).toEqual({
+      ticket: "ticket-1",
+      phone_hashes_sha256: ["11".repeat(32)],
+      email_hashes_sha256: [],
+    });
+  });
+
+  it("matchDiscoveryHashesAtService sends POST to the separate discovery service", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        user_id: "alice",
+        matches: [
+          {
+            hash_sha256: "11".repeat(32),
+            matched_user_id: "bob",
+            handle_kind: "phone",
+          },
+        ],
+        checked_at: "2026-03-13T00:00:00Z",
+      })
+    );
+    const result = await api.matchDiscoveryHashesAtService("https://cdsi.example", {
+      ticket: "ticket-2",
+      hashes_sha256: ["11".repeat(32)],
+    });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(result.matches).toHaveLength(1);
+    expect(url).toBe("https://cdsi.example/v1/discovery/match");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(String(opts.body))).toEqual({
+      ticket: "ticket-2",
+      hashes_sha256: ["11".repeat(32)],
+    });
+  });
+
   it("getTransparencyProof sends GET with optional previous_tree_size", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ user_id: "alice" }));
     await api.getTransparencyProof("alice", 7);

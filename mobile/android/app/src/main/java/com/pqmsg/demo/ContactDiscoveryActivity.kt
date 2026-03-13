@@ -13,6 +13,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.launch
+import uniffi.pqmsg_android.buildContactDiscoveryTicketAuthHeaders
 import uniffi.pqmsg_android.buildContactsListAuthHeaders
 import uniffi.pqmsg_android.buildContactsRemoveAuthHeaders
 import uniffi.pqmsg_android.buildContactsUpsertAuthHeaders
@@ -23,6 +24,13 @@ class ContactDiscoveryActivity : AppCompatActivity() {
     private lateinit var contactUserIdInput: EditText
     private lateinit var contactAliasInput: EditText
     private lateinit var addContactButton: MaterialButton
+    private lateinit var privateDiscoveryCard: View
+    private lateinit var discoveryPhonesInput: EditText
+    private lateinit var discoveryEmailsInput: EditText
+    private lateinit var discoveryQueryInput: EditText
+    private lateinit var uploadDiscoveryButton: MaterialButton
+    private lateinit var searchDiscoveryButton: MaterialButton
+    private lateinit var discoveryMatchesText: TextView
     private lateinit var contactsList: ListView
     private lateinit var emptyText: TextView
     private lateinit var backButton: MaterialButton
@@ -37,11 +45,20 @@ class ContactDiscoveryActivity : AppCompatActivity() {
         contactUserIdInput = findViewById(R.id.editContactUserId)
         contactAliasInput = findViewById(R.id.editContactAlias)
         addContactButton = findViewById(R.id.buttonAddContact)
+        privateDiscoveryCard = findViewById(R.id.cardPrivateDiscovery)
+        discoveryPhonesInput = findViewById(R.id.editDiscoveryPhones)
+        discoveryEmailsInput = findViewById(R.id.editDiscoveryEmails)
+        discoveryQueryInput = findViewById(R.id.editDiscoveryQuery)
+        uploadDiscoveryButton = findViewById(R.id.buttonUploadDiscoveryHandles)
+        searchDiscoveryButton = findViewById(R.id.buttonSearchDiscovery)
+        discoveryMatchesText = findViewById(R.id.textDiscoveryMatches)
         contactsList = findViewById(R.id.listContacts)
         emptyText = findViewById(R.id.textContactsEmpty)
         backButton = findViewById(R.id.buttonBackFromContacts)
 
         addContactButton.setOnClickListener { addContact() }
+        uploadDiscoveryButton.setOnClickListener { uploadPrivateDiscoveryHandles() }
+        searchDiscoveryButton.setOnClickListener { matchPrivateDiscoveryHashes() }
         backButton.setOnClickListener { finish() }
 
         contactsList.setOnItemClickListener { _, _, position, _ ->
@@ -72,6 +89,10 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                     userId = setup.userId,
                     suiteLabel = setup.suiteLabel,
                 )
+                setPrivateDiscoveryEnabled(
+                    enabled = context.capabilities.contact_discovery_mode == "private_service" &&
+                        context.capabilities.contact_discovery_supported,
+                )
                 val response = context.api.listContacts(
                     userId = context.profile.userId,
                     headers = buildContactsListAuthHeaders(
@@ -81,7 +102,14 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 )
                 currentContacts = response.contacts
                 renderContacts()
-                statusText.text = getString(R.string.contacts_manual_status, currentContacts.size)
+                statusText.text = if (
+                    context.capabilities.contact_discovery_mode == "private_service" &&
+                    context.capabilities.contact_discovery_supported
+                ) {
+                    getString(R.string.contacts_private_service_status, currentContacts.size)
+                } else {
+                    getString(R.string.contacts_manual_status, currentContacts.size)
+                }
             }.onFailure {
                 statusText.text = UiErrorMapper.fromThrowable(it, "Load contacts").headline
             }
@@ -115,6 +143,140 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                     }
                     return tv
                 }
+            }
+        }
+    }
+
+    private fun setPrivateDiscoveryEnabled(enabled: Boolean) {
+        privateDiscoveryCard.visibility = if (enabled) View.VISIBLE else View.GONE
+        if (!enabled) {
+            discoveryMatchesText.visibility = View.GONE
+            discoveryMatchesText.text = ""
+            discoveryPhonesInput.setText("")
+            discoveryEmailsInput.setText("")
+            discoveryQueryInput.setText("")
+        }
+    }
+
+    private fun normalizeDiscoveryHashes(rawValue: String): List<String> {
+        val values = rawValue
+            .lineSequence()
+            .map { it.trim().lowercase() }
+            .filter { it.isNotBlank() }
+            .toList()
+        require(values.size <= 2048) { "At most 2048 hashes are allowed per request" }
+        require(values.all { value -> value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' } }) {
+            "Discovery values must be 64-character SHA-256 hex strings"
+        }
+        return values.distinct().sorted()
+    }
+
+    private suspend fun issueDiscoveryTicket(context: ReadyMessagingContext): ContactDiscoveryTicketResponse {
+        val configuredOrigin = context.capabilities.contact_discovery_service_origin?.trim().orEmpty()
+        require(configuredOrigin.isNotBlank()) {
+            "Private contact discovery service is not configured"
+        }
+        val response = context.api.issueContactDiscoveryTicket(
+            userId = context.profile.userId,
+            headers = buildContactDiscoveryTicketAuthHeaders(
+                keysJson = context.keysJson,
+                userId = context.profile.userId,
+            ).toHeaderMap(),
+        )
+        require(
+            ApiClientFactory.normalizeBaseUrl(response.service_origin) ==
+                ApiClientFactory.normalizeBaseUrl(configuredOrigin),
+        ) {
+            "Contact discovery service origin mismatch"
+        }
+        return response
+    }
+
+    private fun uploadPrivateDiscoveryHandles() {
+        val setup = store.loadSetup()
+        lifecycleScope.launch {
+            runCatching {
+                val phoneHashes = normalizeDiscoveryHashes(discoveryPhonesInput.text.toString())
+                val emailHashes = normalizeDiscoveryHashes(discoveryEmailsInput.text.toString())
+                require(phoneHashes.isNotEmpty() || emailHashes.isNotEmpty()) {
+                    "Enter at least one phone or email hash"
+                }
+                val context = MessagingCoordinator.ensureReady(
+                    store = store,
+                    serverUrl = setup.serverUrl,
+                    userId = setup.userId,
+                    suiteLabel = setup.suiteLabel,
+                )
+                require(
+                    context.capabilities.contact_discovery_mode == "private_service" &&
+                        context.capabilities.contact_discovery_supported,
+                ) {
+                    "Private contact discovery is unavailable for this profile"
+                }
+                val ticket = issueDiscoveryTicket(context)
+                val discoveryApi = ApiClientFactory.createDiscovery(ticket.service_origin)
+                val response = discoveryApi.uploadDiscoveryHandles(
+                    PrivateDiscoveryHandlesUploadRequest(
+                        ticket = ticket.ticket,
+                        phone_hashes_sha256 = phoneHashes,
+                        email_hashes_sha256 = emailHashes,
+                    ),
+                )
+                statusText.text = getString(
+                    R.string.contacts_discovery_uploaded_status,
+                    response.uploaded_phone_hashes,
+                    response.uploaded_email_hashes,
+                )
+            }.onFailure {
+                statusText.text = UiErrorMapper.fromThrowable(it, "Upload discovery handles").headline
+            }
+        }
+    }
+
+    private fun matchPrivateDiscoveryHashes() {
+        val setup = store.loadSetup()
+        lifecycleScope.launch {
+            runCatching {
+                val hashes = normalizeDiscoveryHashes(discoveryQueryInput.text.toString())
+                require(hashes.isNotEmpty()) { "Enter at least one query hash" }
+                val context = MessagingCoordinator.ensureReady(
+                    store = store,
+                    serverUrl = setup.serverUrl,
+                    userId = setup.userId,
+                    suiteLabel = setup.suiteLabel,
+                )
+                require(
+                    context.capabilities.contact_discovery_mode == "private_service" &&
+                        context.capabilities.contact_discovery_supported,
+                ) {
+                    "Private contact discovery is unavailable for this profile"
+                }
+                val ticket = issueDiscoveryTicket(context)
+                val discoveryApi = ApiClientFactory.createDiscovery(ticket.service_origin)
+                val response = discoveryApi.matchDiscoveryHashes(
+                    PrivateDiscoveryMatchRequest(
+                        ticket = ticket.ticket,
+                        hashes_sha256 = hashes,
+                    ),
+                )
+                if (response.matches.isEmpty()) {
+                    discoveryMatchesText.visibility = View.VISIBLE
+                    discoveryMatchesText.text = getString(R.string.contacts_discovery_matches_empty)
+                } else {
+                    discoveryMatchesText.visibility = View.VISIBLE
+                    discoveryMatchesText.text = response.matches.joinToString(separator = "\n") {
+                        "${it.matched_user_id} [${it.handle_kind}] ${it.hash_sha256}"
+                    }
+                    if (contactUserIdInput.text.isNullOrBlank()) {
+                        contactUserIdInput.setText(response.matches.first().matched_user_id)
+                    }
+                }
+                statusText.text = getString(
+                    R.string.contacts_discovery_matches_status,
+                    response.matches.size,
+                )
+            }.onFailure {
+                statusText.text = UiErrorMapper.fromThrowable(it, "Search discovery").headline
             }
         }
     }

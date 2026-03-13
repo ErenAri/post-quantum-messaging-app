@@ -1454,6 +1454,45 @@ pub fn build_sender_certificate_auth_headers(
 }
 
 #[uniffi::export]
+pub fn build_contact_discovery_ticket_auth_headers(
+    keys_json: String,
+    user_id: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != user_id {
+        return Err(invalid_input(format!(
+            "user_id '{}' does not match keys user '{}'",
+            user_id, keys.user_id
+        )));
+    }
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "contact-discovery-ticket",
+        &user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let transcript = encode(&records).map_err(|_| {
+        operation_failed("failed to encode contact-discovery-ticket auth transcript")
+    })?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
 pub fn build_contacts_list_auth_headers(
     keys_json: String,
     user_id: String,

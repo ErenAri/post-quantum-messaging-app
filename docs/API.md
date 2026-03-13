@@ -554,6 +554,8 @@ Response:
 
 `POST /v1/users/{user_id}/discovery/handles`
 
+Compatibility-only raw-hash route on the main app server. It remains disabled in the privacy-hardened profile; supported clients use the separate discovery service flow described below instead.
+
 Request:
 
 ```json
@@ -564,6 +566,8 @@ Request:
 ```
 
 `POST /v1/users/{user_id}/discovery/match`
+
+Compatibility-only raw-hash route on the main app server. It remains disabled in the privacy-hardened profile; supported clients use the separate discovery service flow described below instead.
 
 Request:
 
@@ -664,6 +668,76 @@ Response:
   "expires_at": "2026-03-26T12:05:00Z"
 }
 ```
+
+`GET {contact_discovery_service_origin}/v1/manifest`
+
+Separate discovery-service manifest. Current development-only contract:
+
+```json
+{
+  "service": "pqmsg-discovery",
+  "protocol_version": 1,
+  "attestation_mode": "unattested_development",
+  "ticket_format": "base64(json-payload).base64(ed25519-signature)",
+  "ticket_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
+  "ticket_max_ttl_seconds": 300,
+  "lookup_protocol": "hashed_handle_directory",
+  "privacy_mode": "service_boundary_only"
+}
+```
+
+`POST {contact_discovery_service_origin}/v1/discovery/handles`
+
+Current separate-service upload flow. Request:
+
+```json
+{
+  "ticket": "base64(json-payload).base64(ed25519-signature)",
+  "phone_hashes_sha256": ["hex(sha256(e164_phone))"],
+  "email_hashes_sha256": ["hex(sha256(lowercase_email))"]
+}
+```
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "device_id": "alice-device-1",
+  "uploaded_phone_hashes": 1,
+  "uploaded_email_hashes": 1,
+  "updated_at": "2026-03-26T12:03:00Z"
+}
+```
+
+`POST {contact_discovery_service_origin}/v1/discovery/match`
+
+Current separate-service match flow. Request:
+
+```json
+{
+  "ticket": "base64(json-payload).base64(ed25519-signature)",
+  "hashes_sha256": ["hex(sha256(contact_handle))"]
+}
+```
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "matches": [
+    {
+      "hash_sha256": "hex...",
+      "matched_user_id": "bob",
+      "handle_kind": "phone"
+    }
+  ],
+  "checked_at": "2026-03-26T12:04:00Z"
+}
+```
+
+This current separate-service lookup mode is intentionally limited to `privacy_mode = "service_boundary_only"` and is not a production claim of full private contact discovery.
 
 `GET /v1/contact-invites/{invite_token}`
 
@@ -1283,6 +1357,7 @@ Response:
   "contact_discovery_mode": "manual_only",
   "contact_discovery_ticket_supported": false,
   "contact_discovery_service_origin": null,
+  "contact_discovery_ticket_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
   "group_messaging_supported": false,
   "sealed_sender_required": true,
   "sender_certificate_supported": true,
@@ -1327,6 +1402,7 @@ Response:
   "contact_discovery_mode": "private_service",
   "contact_discovery_ticket_supported": true,
   "contact_discovery_service_origin": "https://cdsi.example",
+  "contact_discovery_ticket_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
   "group_messaging_supported": false,
   "sealed_sender_required": true,
   "sender_certificate_supported": true,
@@ -1343,6 +1419,7 @@ Important capability flags:
 - `contact_discovery_supported`: raw-hash discovery inside the app server. Hardened deployments report `false`.
 - `contact_discovery_mode`: `manual_only` or `private_service`.
 - `contact_discovery_ticket_supported`: whether the server can mint short-lived tickets for a dedicated private discovery service.
+- `contact_discovery_ticket_issuer_ed25519_pub`: Ed25519 public key the separate discovery service must trust for ticket verification.
 - `sealed_sender_required`: supported direct messaging must use sealed transport.
 - `sender_certificate_supported`: certified sealed-sender envelopes are available.
 - `sealed_delivery_tokens_supported`: sealed-relay ingress requires recipient delivery tokens.

@@ -27,8 +27,7 @@ import {
   buildIdentityLogAuthHeaders,
   buildSealedInboxAuthHeaders,
   buildSenderCertificateAuthHeaders,
-  buildDiscoveryHandlesAuthHeaders,
-  buildDiscoveryMatchAuthHeaders,
+  buildContactDiscoveryTicketAuthHeaders,
   buildPushTokenAuthHeaders,
   buildListDevicesAuthHeaders,
   buildLinkDeviceAuthHeaders,
@@ -51,6 +50,7 @@ import {
   PqmsgApi,
   type BundleResponse,
   type ContactEntry,
+  type ContactDiscoveryManifestResponse,
   type GroupMembershipRecord,
   type GroupMemberRecord,
   type IdentityLogItem,
@@ -282,6 +282,17 @@ async function ensureMandatoryPqRatchetPolicy(): Promise<ServerCapabilitiesRespo
   }
   if (!capabilities.transparency_log_issuer_ed25519_pub) {
     throw new Error("Server is not advertising the transparency log issuer key.");
+  }
+  if (
+    capabilities.contact_discovery_mode === "private_service" &&
+    (
+      !capabilities.contact_discovery_supported ||
+      !capabilities.contact_discovery_ticket_supported ||
+      !capabilities.contact_discovery_service_origin ||
+      !capabilities.contact_discovery_ticket_issuer_ed25519_pub
+    )
+  ) {
+    throw new Error("Server is advertising private contact discovery without a complete service contract.");
   }
   return capabilities;
 }
@@ -3031,6 +3042,26 @@ async function renderSettings(): Promise<void> {
   const webHoldback = getWebBetaHoldback(capabilities);
   const contactDiscoverySupported = capabilities?.contact_discovery_supported ?? false;
   const contactDiscoveryMode = capabilities?.contact_discovery_mode ?? "manual_only";
+  let contactDiscoveryManifest: ContactDiscoveryManifestResponse | null = null;
+  let contactDiscoveryManifestStatus =
+    contactDiscoveryMode === "private_service" ? "Manifest unavailable" : "Manual-only";
+  if (
+    contactDiscoveryMode === "private_service" &&
+    capabilities?.contact_discovery_service_origin
+  ) {
+    try {
+      contactDiscoveryManifest = await api.getContactDiscoveryManifest(
+        capabilities.contact_discovery_service_origin,
+      );
+      contactDiscoveryManifestStatus =
+        contactDiscoveryManifest.ticket_issuer_ed25519_pub ===
+          capabilities.contact_discovery_ticket_issuer_ed25519_pub
+          ? `Verified (${contactDiscoveryManifest.attestation_mode})`
+          : "Issuer mismatch";
+    } catch {
+      contactDiscoveryManifestStatus = "Manifest unavailable";
+    }
+  }
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
@@ -3090,7 +3121,7 @@ async function renderSettings(): Promise<void> {
           <h3>People</h3>
           <p class="text-secondary settings-desc">${
             contactDiscoveryMode === "private_service"
-              ? "Manual contacts remain the active flow here. This server is also prepared for a separate private discovery service."
+              ? "Manual contacts remain the active flow here. This server is prepared for a separate private discovery service, but the blinded lookup client flow is not shipped yet."
               : "Manual contacts only. Add people by exact @username or invite link. Private discovery stays unavailable in this privacy profile."
           }</p>
           <div id="contacts-manage">
@@ -3138,9 +3169,16 @@ async function renderSettings(): Promise<void> {
             contactDiscoverySupported
               ? "Let contacts find you by phone or email hash."
               : contactDiscoveryMode === "private_service"
-                ? "Raw-hash contact discovery stays disabled. This server is configured for a separate private discovery service, but the web client still uses manual contacts and private invite links."
+                ? "Raw-hash contact discovery stays disabled. The discovery manifest is checked here before any future private-lookup flow is allowed."
                 : "Raw-hash contact discovery is disabled. Share your @username or a private invite link and manage contacts manually."
           }</p>
+          ${
+            contactDiscoveryMode === "private_service"
+              ? `<div class="settings-row"><span>Manifest</span><span>${escHtml(contactDiscoveryManifestStatus)}</span></div>
+          <div class="settings-row"><span>Service Origin</span><span class="mono">${escHtml(capabilities?.contact_discovery_service_origin || "not configured")}</span></div>
+          <div class="settings-row"><span>Lookup Protocol</span><span>${escHtml(contactDiscoveryManifest?.lookup_protocol || "unknown")}</span></div>`
+              : ""
+          }
           <div class="settings-row">
             <button id="set-discovery" class="btn-sm" ${contactDiscoverySupported ? "" : "disabled"}>${
               contactDiscoverySupported ? "Contact Discovery" : "Unavailable"
@@ -4602,6 +4640,9 @@ async function addContactSilent(contactUserId: string): Promise<void> {
 
 async function renderDiscovery(): Promise<void> {
   const capabilities = await loadServerCapabilitiesCached();
+  const contactDiscoveryMode = capabilities?.contact_discovery_mode ?? "manual_only";
+  const contactDiscoveryServiceOrigin =
+    capabilities?.contact_discovery_service_origin?.trim() ?? "";
   if (!capabilities?.contact_discovery_supported) {
     app.innerHTML = `
       <div class="app-shell">
@@ -4639,7 +4680,11 @@ async function renderDiscovery(): Promise<void> {
       <div class="settings-body">
         <div class="settings-section">
           <h3>Upload Your Handles</h3>
-          <p class="text-secondary settings-desc">Share hashed phone/email so contacts can find you.</p>
+          <p class="text-secondary settings-desc">${
+            contactDiscoveryMode === "private_service"
+              ? "Upload SHA-256 handle hashes to the separate discovery service using a short-lived ticket from the app server. This is a service-boundary-only development privacy mode, not full private contact discovery."
+              : "Share hashed phone/email so contacts can find you."
+          }</p>
           <label class="field">
             <span>Phone hashes (one per line, SHA-256 hex)</span>
             <textarea id="disc-phones" rows="3" class="input-sm disc-textarea" placeholder="e.g. a1b2c3d4…"></textarea>
@@ -4653,7 +4698,11 @@ async function renderDiscovery(): Promise<void> {
         </div>
         <div class="settings-section">
           <h3>Find Contacts</h3>
-          <p class="text-secondary settings-desc">Enter hashes to check who's registered.</p>
+          <p class="text-secondary settings-desc">${
+            contactDiscoveryMode === "private_service"
+              ? "Submit query hashes to the separate discovery service with a short-lived ticket. Matches only return user IDs that uploaded the same handle hashes."
+              : "Enter hashes to check who's registered."
+          }</p>
           <label class="field">
             <span>Query hashes (one per line, SHA-256 hex)</span>
             <textarea id="disc-query" rows="3" class="input-sm disc-textarea" placeholder="e.g. a1b2c3d4…"></textarea>
@@ -4667,6 +4716,25 @@ async function renderDiscovery(): Promise<void> {
 
   q("#disc-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
 
+  async function issueDiscoveryTicket(api: PqmsgApi, keys: GeneratedKeys): Promise<{
+    serviceOrigin: string;
+    ticket: string;
+  }> {
+    const headers = buildContactDiscoveryTicketAuthHeaders(keys);
+    const response = await api.issueContactDiscoveryTicket(keys.userId, headers);
+    const configuredOrigin = contactDiscoveryServiceOrigin
+      ? validateWebServerUrl(contactDiscoveryServiceOrigin).origin
+      : null;
+    const ticketOrigin = validateWebServerUrl(response.service_origin).origin;
+    if (configuredOrigin && configuredOrigin !== ticketOrigin) {
+      throw new Error("Contact discovery service origin mismatch");
+    }
+    return {
+      serviceOrigin: ticketOrigin,
+      ticket: response.ticket,
+    };
+  }
+
   q("#disc-upload").addEventListener("click", async () => {
     const statusEl = document.getElementById("disc-upload-status")!;
     const phones = q<HTMLTextAreaElement>("#disc-phones").value.split("\n").map(l => l.trim()).filter(Boolean);
@@ -4675,11 +4743,12 @@ async function renderDiscovery(): Promise<void> {
     try {
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
-      const headers = buildDiscoveryHandlesAuthHeaders(k, phones, emails);
-      const res = await api.uploadDiscoveryHandles(k.userId, {
+      const { serviceOrigin, ticket } = await issueDiscoveryTicket(api, k);
+      const res = await api.uploadDiscoveryHandlesToService(serviceOrigin, {
+        ticket,
         phone_hashes_sha256: phones,
         email_hashes_sha256: emails,
-      }, headers);
+      });
       statusEl.innerHTML = `<span class="text-success">✓ Uploaded ${res.uploaded_phone_hashes} phone + ${res.uploaded_email_hashes} email hashes</span>`;
     } catch (e) {
       statusEl.innerHTML = `<span class="text-danger">Upload failed: ${escHtml(errorMsg(e))}</span>`;
@@ -4694,8 +4763,11 @@ async function renderDiscovery(): Promise<void> {
     try {
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
-      const headers = buildDiscoveryMatchAuthHeaders(k, hashes);
-      const res = await api.discoveryMatch(k.userId, { hashes_sha256: hashes }, headers);
+      const { serviceOrigin, ticket } = await issueDiscoveryTicket(api, k);
+      const res = await api.matchDiscoveryHashesAtService(serviceOrigin, {
+        ticket,
+        hashes_sha256: hashes,
+      });
       if (res.matches.length === 0) {
         resultsEl.innerHTML = '<p class="text-secondary">No matches found.</p>';
         return;
@@ -4805,6 +4877,7 @@ async function renderServerInfo(): Promise<void> {
           <div class="settings-row"><span>Ephemeral DM</span><span>${caps.ephemeral_messaging_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Contact Discovery</span><span>${caps.contact_discovery_mode === "private_service" ? "Private service" : (caps.contact_discovery_supported ? "Enabled" : "Manual only")}</span></div>
           <div class="settings-row"><span>Discovery Tickets</span><span>${caps.contact_discovery_ticket_supported ? "Available" : "Unavailable"}</span></div>
+          <div class="settings-row"><span>Discovery Ticket Issuer</span><span class="mono">${escHtml(caps.contact_discovery_ticket_issuer_ed25519_pub)}</span></div>
           <div class="settings-row"><span>Prod Baseline</span><span>${caps.production_baseline_met ? "✓ Met" : "✗ Not met"}</span></div>
         </div>
         <div class="settings-section">

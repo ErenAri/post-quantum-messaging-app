@@ -16,12 +16,9 @@ use crate::types::*;
 use crate::validation::*;
 use crate::AppState;
 
-fn ensure_contact_discovery_supported(state: &AppState) -> Result<(), AppError> {
-    if state.contact_discovery_supported() {
-        return Ok(());
-    }
+fn ensure_contact_discovery_supported(_state: &AppState) -> Result<(), AppError> {
     Err(AppError::forbidden(
-        "raw-hash contact discovery is disabled pending a private discovery design",
+        "raw-hash contact discovery on the app server is disabled; use the configured private discovery service ticket flow",
     ))
 }
 

@@ -206,6 +206,17 @@ export type ContactDiscoveryTicketResponse = {
   expires_at: string;
 };
 
+export type ContactDiscoveryManifestResponse = {
+  service: string;
+  protocol_version: number;
+  attestation_mode: string;
+  ticket_format: string;
+  ticket_issuer_ed25519_pub: string;
+  ticket_max_ttl_seconds: number;
+  lookup_protocol: string;
+  privacy_mode: string;
+};
+
 export type ContactEntry = {
   contact_user_id: string;
   username?: string | null;
@@ -656,6 +667,7 @@ export type ServerCapabilitiesResponse = {
   sender_certificate_supported: boolean;
   key_transparency_supported: boolean;
   sealed_delivery_tokens_supported: boolean;
+  contact_discovery_ticket_issuer_ed25519_pub: string;
   sender_certificate_issuer_ed25519_pub: string;
   transparency_log_issuer_ed25519_pub: string;
   authenticated_direct_messaging_supported: boolean;
@@ -1286,6 +1298,59 @@ export class PqmsgApi {
       {},
       headers
     );
+  }
+
+  async getContactDiscoveryManifest(serviceOrigin: string): Promise<ContactDiscoveryManifestResponse> {
+    const parsed = validateWebServerUrl(serviceOrigin);
+    const normalized = `${parsed.origin}`;
+    const response = await fetch(`${normalized}/v1/manifest`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      throw new PqmsgApiError(response.status, await response.text());
+    }
+    return response.json() as Promise<ContactDiscoveryManifestResponse>;
+  }
+
+  async uploadDiscoveryHandlesToService(
+    serviceOrigin: string,
+    payload: DiscoveryHandlesUploadRequest & { ticket: string }
+  ): Promise<DiscoveryHandlesUploadResponse> {
+    const parsed = validateWebServerUrl(serviceOrigin);
+    const normalized = `${parsed.origin}`;
+    const response = await fetch(`${normalized}/v1/discovery/handles`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      throw new PqmsgApiError(response.status, await response.text());
+    }
+    return response.json() as Promise<DiscoveryHandlesUploadResponse>;
+  }
+
+  async matchDiscoveryHashesAtService(
+    serviceOrigin: string,
+    payload: DiscoveryMatchRequest & { ticket: string }
+  ): Promise<DiscoveryMatchResponse> {
+    const parsed = validateWebServerUrl(serviceOrigin);
+    const normalized = `${parsed.origin}`;
+    const response = await fetch(`${normalized}/v1/discovery/match`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      throw new PqmsgApiError(response.status, await response.text());
+    }
+    return response.json() as Promise<DiscoveryMatchResponse>;
   }
 
   async registerPushToken(

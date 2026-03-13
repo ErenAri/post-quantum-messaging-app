@@ -721,6 +721,7 @@ pub(crate) struct ServerCapabilitiesResponse {
     pub(crate) sender_certificate_supported: bool,
     pub(crate) key_transparency_supported: bool,
     pub(crate) sealed_delivery_tokens_supported: bool,
+    pub(crate) contact_discovery_ticket_issuer_ed25519_pub: String,
     pub(crate) sender_certificate_issuer_ed25519_pub: String,
     pub(crate) transparency_log_issuer_ed25519_pub: String,
     pub(crate) authenticated_direct_messaging_supported: bool,

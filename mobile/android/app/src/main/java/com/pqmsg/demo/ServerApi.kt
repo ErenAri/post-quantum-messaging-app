@@ -451,6 +451,17 @@ data class ContactDiscoveryTicketResponse(
     val expires_at: String,
 )
 
+data class PrivateDiscoveryHandlesUploadRequest(
+    val ticket: String,
+    val phone_hashes_sha256: List<String>,
+    val email_hashes_sha256: List<String>,
+)
+
+data class PrivateDiscoveryMatchRequest(
+    val ticket: String,
+    val hashes_sha256: List<String>,
+)
+
 // Profile & Presence & Typing
 
 data class UpsertProfileRequest(
@@ -616,6 +627,7 @@ data class ServerCapabilitiesResponse(
     val sender_certificate_supported: Boolean,
     val key_transparency_supported: Boolean,
     val sealed_delivery_tokens_supported: Boolean,
+    val contact_discovery_ticket_issuer_ed25519_pub: String,
     val sender_certificate_issuer_ed25519_pub: String,
     val transparency_log_issuer_ed25519_pub: String,
     val authenticated_direct_messaging_supported: Boolean,
@@ -1040,10 +1052,30 @@ interface PqmsgApi {
     ): PollCallSignalsResponse
 }
 
+interface PqmsgDiscoveryApi {
+    @POST("/v1/discovery/handles")
+    suspend fun uploadDiscoveryHandles(
+        @Body request: PrivateDiscoveryHandlesUploadRequest,
+    ): DiscoveryHandlesUploadResponse
+
+    @POST("/v1/discovery/match")
+    suspend fun matchDiscoveryHashes(
+        @Body request: PrivateDiscoveryMatchRequest,
+    ): DiscoveryMatchResponse
+}
+
 object ApiClientFactory {
     fun create(serverUrl: String): PqmsgApi {
+        return buildRetrofit(serverUrl).create(PqmsgApi::class.java)
+    }
+
+    fun createDiscovery(serviceOrigin: String): PqmsgDiscoveryApi {
+        return buildRetrofit(serviceOrigin).create(PqmsgDiscoveryApi::class.java)
+    }
+
+    private fun buildRetrofit(base: String): Retrofit {
         val policy = resolveTransportPolicy(
-            serverUrl,
+            base,
             BuildConfig.ALLOW_CLEARTEXT_DEMO,
             BuildConfig.TLS_PIN_SHA256,
         )
@@ -1069,7 +1101,6 @@ object ApiClientFactory {
             .addConverterFactory(GsonConverterFactory.create())
             .client(client)
             .build()
-            .create(PqmsgApi::class.java)
     }
 
     data class TransportPolicy(
@@ -1169,11 +1200,25 @@ object ApiClientFactory {
         require(capabilities.sealed_delivery_tokens_supported) {
             "Server is not advertising sealed delivery token support"
         }
+        require(capabilities.contact_discovery_ticket_issuer_ed25519_pub.isNotBlank()) {
+            "Server is missing the contact discovery ticket issuer public key"
+        }
         require(capabilities.sender_certificate_issuer_ed25519_pub.isNotBlank()) {
             "Server is missing the sender certificate issuer public key"
         }
         require(capabilities.transparency_log_issuer_ed25519_pub.isNotBlank()) {
             "Server is missing the transparency log issuer public key"
+        }
+        if (capabilities.contact_discovery_mode == "private_service") {
+            require(capabilities.contact_discovery_supported) {
+                "Server advertises private contact discovery mode without enabling contact discovery"
+            }
+            require(capabilities.contact_discovery_ticket_supported) {
+                "Server advertises private contact discovery without discovery ticket support"
+            }
+            require(!capabilities.contact_discovery_service_origin.isNullOrBlank()) {
+                "Server advertises private contact discovery without a discovery service origin"
+            }
         }
         require(!capabilities.authenticated_direct_messaging_supported) {
             "Server still exposes legacy authenticated direct messaging"

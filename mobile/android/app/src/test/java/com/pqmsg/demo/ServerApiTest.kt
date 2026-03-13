@@ -96,7 +96,7 @@ class ServerApiTest {
               "registration_pow_bits": 0,
               "prekey_bundle_reserve_count": 10,
               "pq_ratchet_interval": 1,
-              "contact_discovery_supported": false,
+              "contact_discovery_supported": true,
               "contact_discovery_mode": "manual_only",
               "contact_discovery_ticket_supported": false,
               "contact_discovery_service_origin": null,
@@ -111,6 +111,7 @@ class ServerApiTest {
               "sender_certificate_supported": true,
               "key_transparency_supported": true,
               "sealed_delivery_tokens_supported": true,
+              "contact_discovery_ticket_issuer_ed25519_pub": "issuer-ed25519-pub",
               "sender_certificate_issuer_ed25519_pub": "issuer-ed25519-pub",
               "transparency_log_issuer_ed25519_pub": "issuer-ed25519-pub",
               "authenticated_direct_messaging_supported": false,
@@ -125,6 +126,7 @@ class ServerApiTest {
         assertEquals("manual_only", parsed.contact_discovery_mode)
         assertEquals(false, parsed.contact_discovery_ticket_supported)
         assertNull(parsed.contact_discovery_service_origin)
+        assertEquals("issuer-ed25519-pub", parsed.contact_discovery_ticket_issuer_ed25519_pub)
         assertEquals("ml-kem-768", parsed.runtime_crypto_profile.kem)
         assertEquals(false, parsed.presence_supported)
         assertEquals(false, parsed.typing_indicators_supported)
@@ -184,6 +186,64 @@ class ServerApiTest {
               "sender_certificate_supported": true,
               "key_transparency_supported": true,
               "sealed_delivery_tokens_supported": true,
+              "contact_discovery_ticket_issuer_ed25519_pub": "issuer-ed25519-pub",
+              "sender_certificate_issuer_ed25519_pub": "issuer-ed25519-pub",
+              "transparency_log_issuer_ed25519_pub": "issuer-ed25519-pub",
+              "authenticated_direct_messaging_supported": false,
+              "ephemeral_messaging_supported": false,
+              "web_client_policy": "demo_only"
+            }
+            """.trimIndent(),
+            ServerCapabilitiesResponse::class.java,
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            ApiClientFactory.validateCapabilities(parsed, "ml-kem-768")
+        }
+    }
+
+    @Test
+    fun validate_capabilities_requires_service_origin_for_private_discovery_mode() {
+        val parsed = gson.fromJson(
+            """
+            {
+              "capability_schema_version": 1,
+              "security_profile": "research",
+              "deployment_mode": "development",
+              "tls_required": false,
+              "tls_enabled": false,
+              "supported_suite_ids": [1],
+              "runtime_crypto_profile": {
+                "protocol_version": 1,
+                "suite_id": 1,
+                "kem": "ml-kem-768",
+                "dh": "x25519",
+                "kdf": "hkdf-sha256",
+                "aead": "chacha20-poly1305",
+                "signature": "ed25519",
+                "pq_oqs_enabled": true,
+                "fips_mode": false
+              },
+              "production_baseline_met": false,
+              "registration_pow_bits": 0,
+              "prekey_bundle_reserve_count": 10,
+              "pq_ratchet_interval": 1,
+              "contact_discovery_supported": false,
+              "contact_discovery_mode": "private_service",
+              "contact_discovery_ticket_supported": true,
+              "contact_discovery_service_origin": null,
+              "presence_supported": false,
+              "typing_indicators_supported": false,
+              "read_receipts_supported": false,
+              "calling_supported": false,
+              "stories_supported": false,
+              "channels_supported": false,
+              "group_messaging_supported": false,
+              "sealed_sender_required": true,
+              "sender_certificate_supported": true,
+              "key_transparency_supported": true,
+              "sealed_delivery_tokens_supported": true,
+              "contact_discovery_ticket_issuer_ed25519_pub": "issuer-ed25519-pub",
               "sender_certificate_issuer_ed25519_pub": "issuer-ed25519-pub",
               "transparency_log_issuer_ed25519_pub": "issuer-ed25519-pub",
               "authenticated_direct_messaging_supported": false,
@@ -266,5 +326,62 @@ class ServerApiTest {
 
         assertEquals("alice.secure", parsed.username)
         assertEquals("alice", parsed.user_id)
+    }
+
+    @Test
+    fun validate_capabilities_requires_contact_discovery_enabled_for_private_service_mode() {
+        val parsed = gson.fromJson(
+            """
+            {
+              "capability_schema_version": 1,
+              "security_profile": "research",
+              "deployment_mode": "development",
+              "tls_required": false,
+              "tls_enabled": false,
+              "supported_suite_ids": [1],
+              "runtime_crypto_profile": {
+                "protocol_version": 1,
+                "suite_id": 1,
+                "kem": "ml-kem-768",
+                "dh": "x25519",
+                "kdf": "hkdf-sha256",
+                "aead": "chacha20-poly1305",
+                "signature": "ed25519",
+                "pq_oqs_enabled": true,
+                "fips_mode": false
+              },
+              "production_baseline_met": false,
+              "registration_pow_bits": 0,
+              "prekey_bundle_reserve_count": 10,
+              "pq_ratchet_interval": 1,
+              "contact_discovery_supported": false,
+              "contact_discovery_mode": "private_service",
+              "contact_discovery_ticket_supported": true,
+              "contact_discovery_service_origin": "https://cdsi.example",
+              "presence_supported": false,
+              "typing_indicators_supported": false,
+              "read_receipts_supported": false,
+              "calling_supported": false,
+              "stories_supported": false,
+              "channels_supported": false,
+              "group_messaging_supported": false,
+              "sealed_sender_required": true,
+              "sender_certificate_supported": true,
+              "key_transparency_supported": true,
+              "sealed_delivery_tokens_supported": true,
+              "contact_discovery_ticket_issuer_ed25519_pub": "issuer-ed25519-pub",
+              "sender_certificate_issuer_ed25519_pub": "issuer-ed25519-pub",
+              "transparency_log_issuer_ed25519_pub": "issuer-ed25519-pub",
+              "authenticated_direct_messaging_supported": false,
+              "ephemeral_messaging_supported": false,
+              "web_client_policy": "demo_only"
+            }
+            """.trimIndent(),
+            ServerCapabilitiesResponse::class.java,
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            ApiClientFactory.validateCapabilities(parsed, "ml-kem-768")
+        }
     }
 }

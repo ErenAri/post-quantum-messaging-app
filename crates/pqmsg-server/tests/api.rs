@@ -2435,6 +2435,11 @@ async fn capabilities_reports_client_contract() {
         Some(false)
     );
     assert!(body["contact_discovery_service_origin"].is_null());
+    assert!(
+        body["contact_discovery_ticket_issuer_ed25519_pub"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
     assert_eq!(body["presence_supported"].as_bool(), Some(false));
     assert_eq!(body["typing_indicators_supported"].as_bool(), Some(false));
     assert_eq!(
@@ -2466,7 +2471,7 @@ async fn capabilities_report_private_contact_discovery_service_when_configured()
     let app = test_app_with_contact_discovery_service_origin("https://cdsi.example").await;
     let (status, body) = json_request(app, Method::GET, "/v1/capabilities", json!({})).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["contact_discovery_supported"].as_bool(), Some(false));
+    assert_eq!(body["contact_discovery_supported"].as_bool(), Some(true));
     assert_eq!(
         body["contact_discovery_mode"].as_str(),
         Some("private_service")

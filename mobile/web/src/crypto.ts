@@ -775,6 +775,16 @@ export function buildSenderCertificateAuthHeaders(keys: GeneratedKeys): RequestA
   return signAuthHeaders(keys, timestamp, nonce, records);
 }
 
+export function buildContactDiscoveryTicketAuthHeaders(
+  keys: GeneratedKeys
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const records = authCommonRecords("contact-discovery-ticket", keys.userId, keys.deviceId, timestamp, nonce);
+  records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  return signAuthHeaders(keys, timestamp, nonce, records);
+}
+
 // --- Phase 4: Ephemeral relay auth (format-string, not TLV) ---
 
 export function buildEphemeralRelayAuthHeaders(

@@ -221,6 +221,7 @@ async function bootApp(options: BootOptions = {}) {
       sender_certificate_supported: true,
       key_transparency_supported: true,
       sealed_delivery_tokens_supported: true,
+      contact_discovery_ticket_issuer_ed25519_pub: "issuer-ed25519-pub",
       sender_certificate_issuer_ed25519_pub: "issuer-ed25519-pub",
       transparency_log_issuer_ed25519_pub: "issuer-ed25519-pub",
       authenticated_direct_messaging_supported: false,

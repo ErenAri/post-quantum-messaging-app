@@ -1,25 +1,31 @@
 use anyhow::{Context, Result};
 use axum::extract::State;
-use axum::routing::get;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::info;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8082";
 const DEFAULT_ATTESTATION_MODE: &str = "unattested_development";
 const CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS: i64 = 300;
+const MAX_DISCOVERY_HASHES_PER_REQUEST: usize = 2048;
 
 #[derive(Clone)]
 struct AppState {
     ticket_issuer_verifying_key: Arc<VerifyingKey>,
     attestation_mode: String,
+    registry: Arc<RwLock<DiscoveryRegistry>>,
 }
 
 impl AppState {
@@ -47,6 +53,47 @@ struct ManifestResponse {
     privacy_mode: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+struct ProblemJson<'a> {
+    r#type: &'a str,
+    title: &'a str,
+    status: u16,
+    detail: String,
+}
+
+#[derive(Debug)]
+struct DiscoveryError {
+    status: StatusCode,
+    title: &'static str,
+    detail: String,
+}
+
+impl DiscoveryError {
+    fn bad_request(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            title: "Bad Request",
+            detail: detail.into(),
+        }
+    }
+}
+
+impl IntoResponse for DiscoveryError {
+    fn into_response(self) -> Response {
+        (
+            self.status,
+            [(header::CONTENT_TYPE, "application/problem+json")],
+            Json(ProblemJson {
+                r#type: "about:blank",
+                title: self.title,
+                status: self.status.as_u16(),
+                detail: self.detail,
+            }),
+        )
+            .into_response()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ContactDiscoveryTicketClaims {
     v: u8,
@@ -55,6 +102,115 @@ pub(crate) struct ContactDiscoveryTicketClaims {
     issued_at: String,
     expires_at: String,
     nonce: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct StoredHandle {
+    hash_sha256: String,
+    handle_kind: String,
+}
+
+#[derive(Debug, Default)]
+struct DiscoveryRegistry {
+    user_handles: HashMap<String, Vec<StoredHandle>>,
+}
+
+impl DiscoveryRegistry {
+    fn replace_handles(&mut self, user_id: &str, phone_hashes: &[String], email_hashes: &[String]) {
+        let mut handles = Vec::with_capacity(phone_hashes.len() + email_hashes.len());
+        handles.extend(phone_hashes.iter().cloned().map(|hash_sha256| StoredHandle {
+            hash_sha256,
+            handle_kind: "phone".to_string(),
+        }));
+        handles.extend(email_hashes.iter().cloned().map(|hash_sha256| StoredHandle {
+            hash_sha256,
+            handle_kind: "email".to_string(),
+        }));
+        self.user_handles.insert(user_id.to_string(), handles);
+    }
+
+    fn match_hashes(&self, requester_user_id: &str, query_hashes: &[String]) -> Vec<DiscoveryMatchItem> {
+        let query_set: HashSet<&str> = query_hashes.iter().map(String::as_str).collect();
+        let mut matches = Vec::new();
+        for (user_id, handles) in &self.user_handles {
+            if user_id == requester_user_id {
+                continue;
+            }
+            for handle in handles {
+                if query_set.contains(handle.hash_sha256.as_str()) {
+                    matches.push(DiscoveryMatchItem {
+                        hash_sha256: handle.hash_sha256.clone(),
+                        matched_user_id: user_id.clone(),
+                        handle_kind: handle.handle_kind.clone(),
+                    });
+                }
+            }
+        }
+        matches.sort_by(|left, right| {
+            left.hash_sha256
+                .cmp(&right.hash_sha256)
+                .then_with(|| left.matched_user_id.cmp(&right.matched_user_id))
+                .then_with(|| left.handle_kind.cmp(&right.handle_kind))
+        });
+        matches
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscoveryHandlesUploadRequest {
+    ticket: String,
+    phone_hashes_sha256: Vec<String>,
+    email_hashes_sha256: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DiscoveryHandlesUploadResponse {
+    user_id: String,
+    device_id: String,
+    uploaded_phone_hashes: usize,
+    uploaded_email_hashes: usize,
+    updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscoveryMatchRequest {
+    ticket: String,
+    hashes_sha256: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+struct DiscoveryMatchItem {
+    hash_sha256: String,
+    matched_user_id: String,
+    handle_kind: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DiscoveryMatchResponse {
+    user_id: String,
+    matches: Vec<DiscoveryMatchItem>,
+    checked_at: String,
+}
+
+fn normalize_sha256_hashes(field: &str, values: &[String]) -> Result<Vec<String>, DiscoveryError> {
+    if values.len() > MAX_DISCOVERY_HASHES_PER_REQUEST {
+        return Err(DiscoveryError::bad_request(format!(
+            "{field} must contain at most {MAX_DISCOVERY_HASHES_PER_REQUEST} values"
+        )));
+    }
+    let mut normalized = Vec::with_capacity(values.len());
+    for value in values {
+        let trimmed = value.trim().to_ascii_lowercase();
+        if trimmed.len() != 64 || !trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(DiscoveryError::bad_request(format!(
+                "{field} entries must be 64-character SHA-256 hex strings"
+            )));
+        }
+        normalized.push(trimmed);
+    }
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -73,9 +229,59 @@ async fn manifest(State(state): State<AppState>) -> Json<ManifestResponse> {
         ticket_format: "base64(json-payload).base64(ed25519-signature)",
         ticket_issuer_ed25519_pub: state.ticket_issuer_public_key_b64(),
         ticket_max_ttl_seconds: CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS,
-        lookup_protocol: "not_implemented",
+        lookup_protocol: "hashed_handle_directory",
         privacy_mode: "service_boundary_only",
     })
+}
+
+async fn upload_handles(
+    State(state): State<AppState>,
+    Json(request): Json<DiscoveryHandlesUploadRequest>,
+) -> Result<Json<DiscoveryHandlesUploadResponse>, DiscoveryError> {
+    let claims = verify_contact_discovery_ticket(
+        &state.ticket_issuer_verifying_key,
+        &request.ticket,
+        Utc::now(),
+    )
+    .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
+    let phone_hashes = normalize_sha256_hashes("phone_hashes_sha256", &request.phone_hashes_sha256)?;
+    let email_hashes = normalize_sha256_hashes("email_hashes_sha256", &request.email_hashes_sha256)?;
+    let now = Utc::now().to_rfc3339();
+    state
+        .registry
+        .write()
+        .await
+        .replace_handles(&claims.user_id, &phone_hashes, &email_hashes);
+    Ok(Json(DiscoveryHandlesUploadResponse {
+        user_id: claims.user_id,
+        device_id: claims.device_id,
+        uploaded_phone_hashes: phone_hashes.len(),
+        uploaded_email_hashes: email_hashes.len(),
+        updated_at: now,
+    }))
+}
+
+async fn match_handles(
+    State(state): State<AppState>,
+    Json(request): Json<DiscoveryMatchRequest>,
+) -> Result<Json<DiscoveryMatchResponse>, DiscoveryError> {
+    let claims = verify_contact_discovery_ticket(
+        &state.ticket_issuer_verifying_key,
+        &request.ticket,
+        Utc::now(),
+    )
+    .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
+    let query_hashes = normalize_sha256_hashes("hashes_sha256", &request.hashes_sha256)?;
+    let matches = state
+        .registry
+        .read()
+        .await
+        .match_hashes(&claims.user_id, &query_hashes);
+    Ok(Json(DiscoveryMatchResponse {
+        user_id: claims.user_id,
+        matches,
+        checked_at: Utc::now().to_rfc3339(),
+    }))
 }
 
 fn parse_ticket_issuer_verifying_key() -> Result<Arc<VerifyingKey>> {
@@ -151,9 +357,7 @@ pub(crate) fn verify_contact_discovery_ticket(
     if expires_at <= issued_at {
         anyhow::bail!("contact discovery ticket expires_at must be after issued_at");
     }
-    if expires_at.signed_duration_since(issued_at).num_seconds()
-        > CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS
-    {
+    if expires_at.signed_duration_since(issued_at).num_seconds() > CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS {
         anyhow::bail!("contact discovery ticket exceeds max ttl");
     }
     if expires_at <= now {
@@ -184,10 +388,13 @@ async fn main() -> Result<()> {
     let state = AppState {
         ticket_issuer_verifying_key,
         attestation_mode,
+        registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
     };
     let app = Router::new()
         .route("/health", get(health))
         .route("/v1/manifest", get(manifest))
+        .route("/v1/discovery/handles", post(upload_handles))
+        .route("/v1/discovery/match", post(match_handles))
         .with_state(state);
 
     info!("pqmsg-discovery listening on {}", bind_addr);
@@ -284,6 +491,23 @@ mod tests {
         .expect_err("signature mismatch");
         assert!(error.to_string().contains("signature"));
     }
+
+    #[test]
+    fn registry_replaces_handles_and_matches_other_users() {
+        let mut registry = DiscoveryRegistry::default();
+        registry.replace_handles(
+            "alice",
+            &["11".repeat(32)],
+            &["22".repeat(32)],
+        );
+        registry.replace_handles(
+            "bob",
+            &["33".repeat(32)],
+            &["44".repeat(32), "11".repeat(32)],
+        );
+        let matches = registry.match_hashes("alice", &["11".repeat(32), "44".repeat(32)]);
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].matched_user_id, "bob");
+        assert_eq!(matches[1].matched_user_id, "bob");
+    }
 }
-
-
