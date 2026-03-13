@@ -122,6 +122,7 @@ describe("startDirectConversationFlow", () => {
   it("validates and prepares a new direct conversation", async () => {
     const ensureDirectChatPeerExists = vi.fn(async () => {});
     const resolveInviteToken = vi.fn(async () => "test2");
+    const resolvePeerTarget = vi.fn(async () => "test2");
     const addContactSilent = vi.fn(async () => {});
     const markConversationAccepted = vi.fn();
     const setConversationArchived = vi.fn();
@@ -136,6 +137,7 @@ describe("startDirectConversationFlow", () => {
         {
           ensureDirectChatPeerExists,
           resolveInviteToken,
+          resolvePeerTarget,
           addContactSilent,
           markConversationAccepted,
           setConversationArchived,
@@ -147,6 +149,7 @@ describe("startDirectConversationFlow", () => {
     expect(peerId).toBe("test2");
     expect(ensureDirectChatPeerExists).toHaveBeenCalledWith("test2");
     expect(resolveInviteToken).not.toHaveBeenCalled();
+    expect(resolvePeerTarget).toHaveBeenCalledWith("https://app.test/?invite=test2");
     expect(addContactSilent).toHaveBeenCalledWith("test2");
     expect(markConversationAccepted).toHaveBeenCalledWith("test2");
     expect(setConversationArchived).toHaveBeenCalledWith("dm", "test2", false);
@@ -164,6 +167,7 @@ describe("startDirectConversationFlow", () => {
         {
           ensureDirectChatPeerExists: async () => {},
           resolveInviteToken: async () => "test1",
+          resolvePeerTarget: async () => "test1",
           addContactSilent: async () => {},
           markConversationAccepted: () => {},
           setConversationArchived: () => {},
@@ -177,6 +181,7 @@ describe("startDirectConversationFlow", () => {
   it("redeems opaque invite tokens before opening a conversation", async () => {
     const ensureDirectChatPeerExists = vi.fn(async () => {});
     const resolveInviteToken = vi.fn(async () => "test2");
+    const resolvePeerTarget = vi.fn(async () => "ignored");
     const addContactSilent = vi.fn(async () => {});
 
     const peerId = await startDirectConversationFlow(
@@ -187,6 +192,7 @@ describe("startDirectConversationFlow", () => {
       {
         ensureDirectChatPeerExists,
         resolveInviteToken,
+        resolvePeerTarget,
         addContactSilent,
         markConversationAccepted: () => {},
         setConversationArchived: () => {},
@@ -197,6 +203,7 @@ describe("startDirectConversationFlow", () => {
 
     expect(peerId).toBe("test2");
     expect(resolveInviteToken).toHaveBeenCalledWith("opaque-token-123");
+    expect(resolvePeerTarget).not.toHaveBeenCalled();
     expect(ensureDirectChatPeerExists).toHaveBeenCalledWith("test2");
     expect(addContactSilent).toHaveBeenCalledWith("test2");
   });

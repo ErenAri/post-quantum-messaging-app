@@ -10,6 +10,8 @@ The web client requires the WASM PQ runtime for messaging:
 
 The current release train does not treat the web client as a supported beta messaging client, and web calling is out of scope.
 
+Manual contact bootstrap on the hardened web path is `@username` or opaque invite only. Raw-hash contact discovery remains disabled.
+
 ## 2. Security Position
 
 WASM bindings and call prototypes still exist as research paths in the repo, but they are not the supported beta path:
@@ -71,10 +73,11 @@ npm run preview
    - generate keys,
    - register user,
    - publish prekeys.
-2. Fetch peer bundle before first send.
-3. Review the server capability policy before treating web messaging as available.
-4. Poll inbox to decrypt.
-5. Review pinned identities and trust state in Security Snapshot.
+2. Claim a shareable `@username` in Settings if you want a stable manual contact handle.
+3. Fetch peer bundle before first send.
+4. Review the server capability policy before treating web messaging as available.
+5. Poll inbox to decrypt.
+6. Review pinned identities and trust state in Security Snapshot.
 
 ## 7. PWA Shell Components
 

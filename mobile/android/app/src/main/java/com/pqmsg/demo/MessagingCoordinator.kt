@@ -38,6 +38,7 @@ data class ComposeTarget(
     val peerUserId: String,
     val serverUrl: String,
     val inviteToken: String? = null,
+    val username: String? = null,
 )
 
 data class PeerTransparencyStatus(
@@ -581,6 +582,8 @@ object MessagingCoordinator {
         val inviteToken = target.inviteToken?.trim().orEmpty()
         return if (inviteToken.isNotBlank()) {
             normalizePeerUserId(api.resolveContactInvite(inviteToken).user_id)
+        } else if (!target.username.isNullOrBlank()) {
+            normalizePeerUserId(api.resolveUsername(target.username.trim()).user_id)
         } else {
             normalizePeerUserId(target.peerUserId)
         }
@@ -604,9 +607,13 @@ object MessagingCoordinator {
         if (webInvitePeer.isNotBlank()) {
             val inviteServer = extractQueryParameterFallback(trimmed, "server")
             val resolvedInviteServer = if (inviteServer.isBlank()) fallbackServerUrl else inviteServer
+            val normalizedUsername = webInvitePeer.takeIf {
+                extractQueryParameterFallback(trimmed, "invite").trim().startsWith("@")
+            }
             return ComposeTarget(
-                peerUserId = webInvitePeer,
+                peerUserId = if (normalizedUsername == null) webInvitePeer else "",
                 serverUrl = ApiClientFactory.normalizeBaseUrl(resolvedInviteServer),
+                username = normalizedUsername,
             )
         }
         val parsed = runCatching { Uri.parse(trimmed) }.getOrNull()
@@ -635,9 +642,14 @@ object MessagingCoordinator {
                     extractQueryParameterFallback(trimmed, "server")
                 }
                 val resolvedInviteServer = if (inviteServer.isBlank()) fallbackServerUrl else inviteServer
+                val normalizedUsername = invitePeer.takeIf {
+                    parsed.getQueryParameter("invite")?.trim().orEmpty().startsWith("@") ||
+                        extractQueryParameterFallback(trimmed, "invite").startsWith("@")
+                }
                 return ComposeTarget(
-                    peerUserId = invitePeer,
+                    peerUserId = if (normalizedUsername == null) invitePeer else "",
                     serverUrl = ApiClientFactory.normalizeBaseUrl(resolvedInviteServer),
+                    username = normalizedUsername,
                 )
             }
         }
@@ -653,11 +665,17 @@ object MessagingCoordinator {
                 inviteToken = inviteToken.ifBlank { null },
             )
         }
-        val peerUserId = normalizePeerUserId(trimmed)
-        require(peerUserId.isNotBlank()) { "username or invite is empty" }
+        val normalizedUsername = trimmed.removePrefix("@").trim().takeIf {
+            trimmed.startsWith("@") && it.isNotBlank()
+        }
+        val peerUserId = if (normalizedUsername == null) normalizePeerUserId(trimmed) else ""
+        require(peerUserId.isNotBlank() || !normalizedUsername.isNullOrBlank()) {
+            "username or invite is empty"
+        }
         return ComposeTarget(
             peerUserId = peerUserId,
             serverUrl = ApiClientFactory.normalizeBaseUrl(fallbackServerUrl),
+            username = normalizedUsername,
         )
     }
 

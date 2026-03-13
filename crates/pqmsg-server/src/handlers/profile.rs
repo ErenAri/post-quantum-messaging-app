@@ -256,6 +256,7 @@ pub(crate) async fn upsert_user_profile(
     check_rate_limit(&state, &format!("profile-upsert:{user_id}"))?;
     validate_id("user_id", &user_id)?;
     let display_name = validate_optional_profile_display_name(request.display_name.as_deref())?;
+    let username = validate_optional_username(request.username.as_deref())?;
     let avatar_mime = validate_optional_mime_type("avatar_mime", request.avatar_mime.as_deref())?;
     let avatar_blob = match request.avatar_bytes_base64.as_deref() {
         Some(value) => Some(decode_base64_range(
@@ -285,6 +286,7 @@ pub(crate) async fn upsert_user_profile(
         &auth,
         &user_id,
         display_name.as_deref(),
+        username.as_deref(),
         avatar_mime.as_deref(),
         avatar_blob.as_deref(),
     )?;
@@ -312,13 +314,17 @@ pub(crate) async fn upsert_user_profile(
         "INSERT INTO user_profiles (
             user_id,
             display_name,
+            username,
+            username_normalized,
             avatar_mime,
             avatar_blob,
             avatar_object_key,
             updated_at
-         ) VALUES ($1, $2, $3, $4, $5, $6)
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (user_id) DO UPDATE SET
             display_name = EXCLUDED.display_name,
+            username = EXCLUDED.username,
+            username_normalized = EXCLUDED.username_normalized,
             avatar_mime = EXCLUDED.avatar_mime,
             avatar_blob = EXCLUDED.avatar_blob,
             avatar_object_key = EXCLUDED.avatar_object_key,
@@ -326,12 +332,20 @@ pub(crate) async fn upsert_user_profile(
     )
     .bind(&user_id)
     .bind(&display_name)
+    .bind(&username)
+    .bind(&username)
     .bind(&avatar_mime)
     .bind(Option::<Vec<u8>>::None)
     .bind(&avatar_object_key)
     .bind(&now)
     .execute(state.pool())
-    .await?;
+    .await
+    .map_err(|error| match error {
+        sqlx::Error::Database(db_error) if db_error.is_unique_violation() && username.is_some() => {
+            AppError::conflict("username is already claimed on this server")
+        }
+        other => AppError::from(other),
+    })?;
 
     if let Some(previous_key) = previous_avatar_object_key {
         if avatar_object_key.as_deref() != Some(previous_key.as_str()) {
@@ -345,6 +359,7 @@ pub(crate) async fn upsert_user_profile(
     Ok(Json(UserProfileResponse {
         user_id,
         display_name,
+        username,
         avatar_mime,
         avatar_bytes_base64,
         sealed_delivery_token: Some(sealed_delivery_token),
@@ -369,7 +384,7 @@ pub(crate) async fn get_user_profile(
         may_read_sealed_delivery_token(&state, &auth.user_id, &user_id).await?;
 
     let row = sqlx::query(
-        "SELECT display_name, avatar_mime, avatar_blob, avatar_object_key, updated_at
+        "SELECT display_name, username, avatar_mime, avatar_blob, avatar_object_key, updated_at
          FROM user_profiles
          WHERE user_id = $1",
     )
@@ -388,6 +403,7 @@ pub(crate) async fn get_user_profile(
         return Ok(Json(UserProfileResponse {
             user_id,
             display_name: None,
+            username: None,
             avatar_mime: None,
             avatar_bytes_base64: None,
             sealed_delivery_token,
@@ -417,10 +433,34 @@ pub(crate) async fn get_user_profile(
     Ok(Json(UserProfileResponse {
         user_id,
         display_name: row.try_get("display_name")?,
+        username: row.try_get("username")?,
         avatar_mime: row.try_get("avatar_mime")?,
         avatar_bytes_base64: avatar_blob.map(|value| B64.encode(value)),
         sealed_delivery_token,
         updated_at: row.try_get("updated_at")?,
+    }))
+}
+
+pub(crate) async fn resolve_username(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Result<Json<UsernameResolveResponse>, AppError> {
+    check_rate_limit(&state, "username-resolve")?;
+    let username = validate_username(&username)?;
+    let row = sqlx::query(
+        "SELECT user_id, username
+         FROM user_profiles
+         WHERE username_normalized = $1
+         LIMIT 1",
+    )
+    .bind(&username)
+    .fetch_optional(state.pool())
+    .await?
+    .ok_or_else(|| AppError::not_found("username not found"))?;
+
+    Ok(Json(UsernameResolveResponse {
+        username: row.try_get("username")?,
+        user_id: row.try_get("user_id")?,
     }))
 }
 

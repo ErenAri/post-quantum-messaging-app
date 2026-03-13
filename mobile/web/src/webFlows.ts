@@ -89,6 +89,7 @@ export async function unlockBrowserAccount(
 export type StartDirectConversationDeps = {
   ensureDirectChatPeerExists: (peerId: string) => Promise<void>;
   resolveInviteToken: (inviteToken: string) => Promise<string>;
+  resolvePeerTarget: (rawTarget: string) => Promise<string>;
   addContactSilent: (peerId: string) => Promise<void>;
   markConversationAccepted: (peerId: string) => void;
   setConversationArchived: (
@@ -115,7 +116,7 @@ export async function startDirectConversationFlow(
   const inviteToken = extractInviteToken(params.rawTarget);
   const resolvedPeer = inviteToken
     ? (await deps.resolveInviteToken(inviteToken)).replace(/^@/, "")
-    : parseDirectChatTarget(params.rawTarget).replace(/^@/, "");
+    : (await deps.resolvePeerTarget(params.rawTarget)).replace(/^@/, "");
   if (!resolvedPeer) {
     throw new Error("User ID is required");
   }

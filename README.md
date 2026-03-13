@@ -14,6 +14,7 @@ As of March 9, 2026, the supported beta path is **Android private beta for messa
 - Web remains a demo surface and is not part of the supported beta.
 - Outbound web messaging stays blocked whenever the server advertises `web_client_policy = demo_only`.
 - Calling remains out of scope for the beta on every client.
+- Manual contact bootstrap on the hardened Android/web path is `@username` or opaque invite only; private discovery and private groups are still not implemented.
 
 ## Research Positioning
 

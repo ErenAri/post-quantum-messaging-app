@@ -20,6 +20,7 @@ export type SetupConfig = {
   suiteLabel: "ml-kem-768" | "kyber768";
   peerUserId: string;
   displayName: string;
+  username?: string;
 };
 
 export type ConversationSummary = {
@@ -101,6 +102,7 @@ export const DEFAULT_SETUP: SetupConfig = {
   suiteLabel: "ml-kem-768",
   peerUserId: "bob",
   displayName: "",
+  username: "",
 };
 
 export async function initMetadataStorage(): Promise<void> {
@@ -132,6 +134,7 @@ export function loadSetup(): SetupConfig {
         : DEFAULT_SETUP.suiteLabel,
       peerUserId: typeof parsed.peerUserId === "string" ? parsed.peerUserId : DEFAULT_SETUP.peerUserId,
       displayName: typeof parsed.displayName === "string" ? parsed.displayName : DEFAULT_SETUP.displayName,
+      username: typeof parsed.username === "string" ? parsed.username : DEFAULT_SETUP.username,
     };
   } catch {
     return DEFAULT_SETUP;

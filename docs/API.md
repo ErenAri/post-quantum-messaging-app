@@ -685,6 +685,19 @@ Response:
 }
 ```
 
+`GET /v1/usernames/{username}`
+
+Resolves a shareable `@username` to the underlying account `user_id`.
+
+Response:
+
+```json
+{
+  "username": "alice.secure",
+  "user_id": "alice"
+}
+```
+
 ### 4.8B Group Membership and Fan-Out Relay
 
 `POST /v1/groups`
@@ -913,10 +926,13 @@ Request:
 ```json
 {
   "display_name": "Alice Example",
+  "username": "alice.secure",
   "avatar_mime": "image/png",
   "avatar_bytes_base64": "base64(opaque_avatar_blob)"
 }
 ```
+
+`username` is optional. When present it is normalized to lowercase, must be 3..=32 characters, and is unique per server.
 
 Both `avatar_mime` and `avatar_bytes_base64` MUST be supplied together or omitted together.
 
@@ -932,6 +948,7 @@ Response:
 {
   "user_id": "alice",
   "display_name": "Alice Example",
+  "username": "alice.secure",
   "avatar_mime": "image/png",
   "avatar_bytes_base64": "base64(opaque_avatar_blob)",
   "sealed_delivery_token": "base64(12-byte recipient delivery token)",

@@ -35,6 +35,7 @@ const AUTH_TAG_CONTACT_FINGERPRINT = criticalType(0x321c);
 const AUTH_TAG_PROFILE_DISPLAY_NAME_HASH = criticalType(0x3226);
 const AUTH_TAG_PROFILE_AVATAR_HASH = criticalType(0x3227);
 const AUTH_TAG_PROFILE_AVATAR_MIME_HASH = criticalType(0x3228);
+const AUTH_TAG_PROFILE_USERNAME_HASH = criticalType(0x322d);
 const AUTH_TAG_PRESENCE_STATUS = criticalType(0x3229);
 const AUTH_TAG_TYPING_PEER_ID = criticalType(0x322a);
 const AUTH_TAG_TYPING_STATE_FLAG = criticalType(0x322b);
@@ -376,6 +377,7 @@ export function buildProfileGetAuthHeaders(
 export function buildProfileUpsertAuthHeaders(
   keys: GeneratedKeys,
   displayName: string,
+  username: string,
   avatarMime: string,
   avatarBlob: string
 ): RequestAuthHeaders {
@@ -384,6 +386,10 @@ export function buildProfileUpsertAuthHeaders(
   const records = authCommonRecords("profile-upsert", keys.userId, keys.deviceId, timestamp, nonce);
   records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
   records.push({ ty: AUTH_TAG_PROFILE_DISPLAY_NAME_HASH, value: sha256(utf8ToBytes(displayName)) });
+  records.push({
+    ty: AUTH_TAG_PROFILE_USERNAME_HASH,
+    value: sha256(utf8ToBytes(username.trim().replace(/^@/, "").toLowerCase()))
+  });
   records.push({ ty: AUTH_TAG_PROFILE_AVATAR_HASH, value: sha256(utf8ToBytes(avatarBlob)) });
   records.push({ ty: AUTH_TAG_PROFILE_AVATAR_MIME_HASH, value: sha256(utf8ToBytes(avatarMime)) });
   return signAuthHeaders(keys, timestamp, nonce, records);

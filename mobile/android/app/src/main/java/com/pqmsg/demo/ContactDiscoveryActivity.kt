@@ -117,7 +117,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
     private fun addContact() {
         val rawTarget = contactUserIdInput.text.toString().trim()
         if (rawTarget.isBlank()) {
-            statusText.text = "Enter a username or invite link"
+            statusText.text = "Enter an @username or invite link"
             return
         }
         val alias = contactAliasInput.text.toString().trim().ifBlank { null }

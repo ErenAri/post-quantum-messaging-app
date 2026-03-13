@@ -19,7 +19,8 @@ class MessagingCoordinatorTest {
             "http://10.0.2.2:3000",
         )
 
-        assertEquals("TestUser", target.peerUserId)
+        assertEquals("", target.peerUserId)
+        assertEquals("TestUser", target.username)
         assertEquals("http://10.0.2.2:3000/", target.serverUrl)
     }
 
@@ -31,6 +32,19 @@ class MessagingCoordinatorTest {
         )
 
         assertEquals("InviteUser", target.peerUserId)
+        assertEquals(null, target.username)
+        assertEquals("http://10.0.2.2:3000/", target.serverUrl)
+    }
+
+    @Test
+    fun parse_compose_target_extracts_username_invite_links() {
+        val target = MessagingCoordinator.parseComposeTarget(
+            "https://app.test/chat?invite=%40InviteUser",
+            "http://10.0.2.2:3000",
+        )
+
+        assertEquals("", target.peerUserId)
+        assertEquals("InviteUser", target.username)
         assertEquals("http://10.0.2.2:3000/", target.serverUrl)
     }
 
@@ -43,6 +57,7 @@ class MessagingCoordinatorTest {
 
         assertEquals("", target.peerUserId)
         assertEquals("opaque-token-123", target.inviteToken)
+        assertEquals(null, target.username)
         assertEquals("https://relay.example/", target.serverUrl)
     }
 

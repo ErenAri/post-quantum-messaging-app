@@ -446,6 +446,7 @@ data class ContactInviteResolveResponse(
 
 data class UpsertProfileRequest(
     val display_name: String?,
+    val username: String?,
     val avatar_mime: String?,
     val avatar_bytes_base64: String?,
 )
@@ -453,10 +454,16 @@ data class UpsertProfileRequest(
 data class UserProfileResponse(
     val user_id: String,
     val display_name: String?,
+    val username: String?,
     val avatar_mime: String?,
     val avatar_bytes_base64: String?,
     val sealed_delivery_token: String?,
     val updated_at: String?,
+)
+
+data class UsernameLookupResponse(
+    val username: String,
+    val user_id: String,
 )
 
 data class PresenceUpdateRequest(
@@ -882,6 +889,11 @@ interface PqmsgApi {
     suspend fun getContactInviteBundle(
         @Path("invite_token") inviteToken: String,
     ): BundleResponse
+
+    @GET("/v1/usernames/{username}")
+    suspend fun resolveUsername(
+        @Path("username") username: String,
+    ): UsernameLookupResponse
 
     // Profile & Presence
 

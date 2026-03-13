@@ -174,10 +174,21 @@ describe("PqmsgApi methods", () => {
 
   it("upsertProfile sends POST", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ user_id: "alice" }));
-    await api.upsertProfile("alice", { display_name: "Alice" }, fakeHeaders);
+    await api.upsertProfile("alice", { display_name: "Alice", username: "alice.secure" }, fakeHeaders);
     const [url, opts] = mockFetch.mock.calls[0];
     expect(url).toBe("http://localhost:8080/v1/users/alice/profile");
     expect(opts.method).toBe("POST");
+  });
+
+  it("resolveUsername sends unauthenticated GET", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ username: "alice.secure", user_id: "alice" }));
+    const result = await api.resolveUsername("@Alice.Secure");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(result.user_id).toBe("alice");
+    expect(result.username).toBe("alice.secure");
+    expect(url).toBe("http://localhost:8080/v1/usernames/Alice.Secure");
+    expect(opts.method).toBe("GET");
+    expect(opts.headers.get("x-pqmsg-auth-user")).toBeNull();
   });
 
   it("getPresence sends GET", async () => {

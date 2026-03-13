@@ -13,8 +13,8 @@ use crate::types::RegisterPushTokenRequest;
 use crate::{
     PushProvider, MAX_CONTACT_ALIAS_LEN, MAX_DEVICE_ID_LEN, MAX_DISCOVERY_HASHES, MAX_FILE_ID_LEN,
     MAX_GROUP_MEMBERS, MAX_MIME_TYPE_LEN, MAX_ONE_TIME_KEYS, MAX_PROFILE_DISPLAY_NAME_LEN,
-    MAX_PUSH_TOKEN_LEN, MAX_ROTATION_CHALLENGE_ID_LEN, MAX_USER_ID_LEN, PQ_SIG_LEN,
-    PQ_SIG_PUB_KEY_LEN, PREKEY_LOW_WATERMARK, ROTATE_SIG_TAG_CHALLENGE_ID,
+    MAX_PUSH_TOKEN_LEN, MAX_ROTATION_CHALLENGE_ID_LEN, MAX_USERNAME_LEN, MAX_USER_ID_LEN,
+    PQ_SIG_LEN, PQ_SIG_PUB_KEY_LEN, PREKEY_LOW_WATERMARK, ROTATE_SIG_TAG_CHALLENGE_ID,
     ROTATE_SIG_TAG_CHALLENGE_NONCE, ROTATE_SIG_TAG_NEW_DEVICE_ID,
     ROTATE_SIG_TAG_NEW_IDENTITY_PQ_SIG, ROTATE_SIG_TAG_NEW_IDENTITY_SIG,
     ROTATE_SIG_TAG_NEW_IDENTITY_X25519, ROTATE_SIG_TAG_USER_ID, SHA256_HEX_LEN, SIG_LEN,
@@ -197,6 +197,53 @@ pub(crate) fn validate_optional_profile_display_name(
         )));
     }
     Ok(Some(trimmed.to_string()))
+}
+
+pub(crate) fn validate_optional_username(value: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(validate_username(trimmed)?))
+}
+
+pub(crate) fn validate_username(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().trim_start_matches('@').to_ascii_lowercase();
+    if normalized.len() < 3 || normalized.len() > MAX_USERNAME_LEN {
+        return Err(AppError::bad_request(format!(
+            "username must be 3..={MAX_USERNAME_LEN} characters"
+        )));
+    }
+    let bytes = normalized.as_bytes();
+    let is_valid_core = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+    let is_valid_punct = |byte: u8| byte == b'.' || byte == b'_';
+    if !is_valid_core(bytes[0]) || !is_valid_core(*bytes.last().expect("username len checked")) {
+        return Err(AppError::bad_request(
+            "username must start and end with a letter or digit",
+        ));
+    }
+    let mut previous_was_punct = false;
+    for &byte in bytes {
+        if is_valid_core(byte) {
+            previous_was_punct = false;
+            continue;
+        }
+        if !is_valid_punct(byte) {
+            return Err(AppError::bad_request(
+                "username must contain only lowercase letters, digits, '.' or '_'",
+            ));
+        }
+        if previous_was_punct {
+            return Err(AppError::bad_request(
+                "username cannot contain consecutive punctuation",
+            ));
+        }
+        previous_was_punct = true;
+    }
+    Ok(normalized)
 }
 
 pub(crate) fn validate_presence_status(value: &str) -> Result<String, AppError> {

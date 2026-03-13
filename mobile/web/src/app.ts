@@ -834,14 +834,24 @@ async function loadProfileNameBackground(targetUserId: string): Promise<void> {
       cachedSealedDeliveryTokens[targetUserId] = sealedDeliveryToken;
     }
     const displayName = profile.display_name?.trim() || "";
-    if (!displayName) {
-      return;
+    if (displayName) {
+      cachedProfileNames[targetUserId] = displayName;
+      writeProfileDisplayName(k.userId, targetUserId, displayName);
     }
-    cachedProfileNames[targetUserId] = displayName;
-    writeProfileDisplayName(k.userId, targetUserId, displayName);
-    if (targetUserId === k.userId && setup.displayName !== displayName) {
-      setup.displayName = displayName;
-      saveSetup(setup);
+    if (targetUserId === k.userId) {
+      let changed = false;
+      if (displayName && setup.displayName !== displayName) {
+        setup.displayName = displayName;
+        changed = true;
+      }
+      const username = profile.username?.trim() || "";
+      if ((setup.username || "") !== username) {
+        setup.username = username;
+        changed = true;
+      }
+      if (changed) {
+        saveSetup(setup);
+      }
     }
   } catch {
     // Best-effort
@@ -963,7 +973,16 @@ async function resolvePeerUserIdFromTarget(rawTarget: string, api?: PqmsgApi): P
   if (inviteToken) {
     return loadInvitePeerFromToken(inviteToken, api);
   }
-  return parseDirectChatTarget(rawTarget).replace(/^@/, "").trim();
+  const resolvedTarget = parseDirectChatTarget(rawTarget).trim();
+  if (!resolvedTarget) {
+    return "";
+  }
+  if (resolvedTarget.startsWith("@")) {
+    const resolvedApi = api ?? new PqmsgApi(setup.serverUrl);
+    const match = await resolvedApi.resolveUsername(resolvedTarget);
+    return match.user_id.trim().replace(/^@/, "");
+  }
+  return resolvedTarget.replace(/^@/, "").trim();
 }
 
 function describePeerLookupError(peerId: string, err: unknown): string {
@@ -1090,7 +1109,7 @@ function renderCreateAccount(): void {
                   <div class="avatar avatar-sm">${escHtml(accountId.slice(0, 2).toUpperCase())}</div>
                   <div class="contact-info">
                     <span class="contact-name">${escHtml(accountId)}</span>
-                    <span class="contact-id">Tap to fill username</span>
+                    <span class="contact-id">Tap to fill account ID</span>
                   </div>
                 </button>
               `
@@ -1187,7 +1206,7 @@ function renderCreateAccount(): void {
       await api.publishPrekeys(genKeys.userId, payload, headers);
 
       try {
-        const profileHeaders = buildProfileUpsertAuthHeaders(genKeys, name, "", "");
+        const profileHeaders = buildProfileUpsertAuthHeaders(genKeys, name, "", "", "");
         await api.upsertProfile(genKeys.userId, { display_name: name }, profileHeaders);
       } catch {
         notify("Account created, but profile name could not be synced yet", "info");
@@ -1200,6 +1219,7 @@ function renderCreateAccount(): void {
         suiteLabel: "ml-kem-768",
         peerUserId: "",
         displayName: name,
+        username: "",
       };
       saveSetup(setup);
       sessionStorage.setItem("pqmsg.passphrase", pass);
@@ -1209,7 +1229,7 @@ function renderCreateAccount(): void {
 
       setProgress(progress, 100);
       status.textContent = "Ready!";
-      notify(`Your username is @${userId} — share it with contacts`, "info");
+      notify(`Your account ID is @${userId}. Claim a shareable @username in Settings.`, "info");
       setTimeout(() => navigateTo({ screen: "conversations" }), 600);
     } catch (e) {
       status.textContent = `Error: ${errorMsg(e)}`;
@@ -1240,7 +1260,7 @@ function renderSignIn(): void {
                     <div class="avatar avatar-sm">${escHtml(accountId.slice(0, 2).toUpperCase())}</div>
                     <div class="contact-info">
                       <span class="contact-name">${escHtml(accountId)}</span>
-                      <span class="contact-id">Tap to fill username</span>
+                      <span class="contact-id">Tap to fill account ID</span>
                     </div>
                   </button>
                 ` 
@@ -1287,7 +1307,7 @@ function renderSignIn(): void {
     const uid = normalizeBrowserUserId(uidInput.value);
     const pass = passInput.value;
     if (!uidInput.value.trim()) {
-      status.textContent = "Enter the username for an account saved in this browser.";
+      status.textContent = "Enter the account ID for an account saved in this browser.";
       status.classList.add("error-text");
       uidInput.focus();
       return;
@@ -2649,6 +2669,7 @@ function renderNewChat(): void {
           {
             ensureDirectChatPeerExists,
             resolveInviteToken: async (token: string) => loadInvitePeerFromToken(token),
+            resolvePeerTarget: async (rawTarget: string) => resolvePeerUserIdFromTarget(rawTarget),
             addContactSilent,
             markConversationAccepted,
             setConversationArchived,
@@ -3005,7 +3026,11 @@ async function renderSettings(): Promise<void> {
           <div>
             <span class="settings-eyebrow">Your account</span>
             <h2>${escHtml(setup.displayName || setup.userId)}</h2>
-            <p class="settings-hero-copy">Messaging from <span class="mono">@${escHtml(setup.userId)}</span> on <span class="mono">${escHtml(setup.deviceId)}</span></p>
+            <p class="settings-hero-copy">${
+              setup.username
+                ? `Shareable username <span class="mono">@${escHtml(setup.username)}</span> · Account ID <span class="mono">@${escHtml(setup.userId)}</span> on <span class="mono">${escHtml(setup.deviceId)}</span>`
+                : `Account ID <span class="mono">@${escHtml(setup.userId)}</span> on <span class="mono">${escHtml(setup.deviceId)}</span>. Claim a shareable @username below.`
+            }</p>
           </div>
           <button data-open-devices="1" class="btn-secondary">Manage Devices</button>
         </div>
@@ -3023,6 +3048,10 @@ async function renderSettings(): Promise<void> {
               <span>Display Name</span>
               <input id="set-name" type="text" value="${escHtml(setup.displayName || setup.userId)}" />
             </label>
+            <label class="field">
+              <span>Shareable Username</span>
+              <input id="set-username" type="text" value="${escHtml(setup.username || "")}" placeholder="@yourname" autocomplete="off" />
+            </label>
             <button id="set-save-profile" class="btn-sm">Save</button>
           </div>
           <div class="settings-row"><span>User ID</span><span class="mono">${escHtml(setup.userId)}</span></div>
@@ -3035,7 +3064,7 @@ async function renderSettings(): Promise<void> {
         </div>
         <div class="settings-section">
           <h3>People</h3>
-          <p class="text-secondary settings-desc">Manual contacts only. Add people by exact username or invite link. Private discovery stays unavailable in this privacy profile.</p>
+          <p class="text-secondary settings-desc">Manual contacts only. Add people by exact @username or invite link. Private discovery stays unavailable in this privacy profile.</p>
           <div id="contacts-manage">
             ${cachedContacts.length === 0 ? '<p class="text-secondary">No contacts yet</p>' :
               cachedContacts.map(c => `
@@ -3048,7 +3077,7 @@ async function renderSettings(): Promise<void> {
             }
           </div>
           <div class="add-contact-row">
-            <input id="set-add-contact-id" type="text" placeholder="Username or invite link" class="input-sm" />
+            <input id="set-add-contact-id" type="text" placeholder="@username or invite link" class="input-sm" />
             <input id="set-add-contact-alias" type="text" placeholder="Alias (optional)" class="input-sm" />
             <button id="set-add-contact" class="btn-sm">Add</button>
           </div>
@@ -3077,7 +3106,7 @@ async function renderSettings(): Promise<void> {
           <p class="text-secondary settings-desc">${
             contactDiscoverySupported
               ? "Let contacts find you by phone or email hash."
-              : "Raw-hash contact discovery is disabled. Share your user ID directly and manage contacts manually."
+              : "Raw-hash contact discovery is disabled. Share your @username or a private invite link and manage contacts manually."
           }</p>
           <div class="settings-row">
             <button id="set-discovery" class="btn-sm" ${contactDiscoverySupported ? "" : "disabled"}>${
@@ -3125,18 +3154,29 @@ async function renderSettings(): Promise<void> {
   // Save profile
   q("#set-save-profile").addEventListener("click", async () => {
     const nameInput = q<HTMLInputElement>("#set-name");
+    const usernameInput = q<HTMLInputElement>("#set-username");
     const newName = nameInput.value.trim();
+    const newUsername = usernameInput.value.trim();
     if (!newName) { nameInput.focus(); return; }
     try {
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
-      const headers = buildProfileUpsertAuthHeaders(k, newName, "", "");
-      await api.upsertProfile(k.userId, { display_name: newName }, headers);
-      setup.displayName = newName;
+      const headers = buildProfileUpsertAuthHeaders(k, newName, newUsername, "", "");
+      const profile = await api.upsertProfile(
+        k.userId,
+        {
+          display_name: newName,
+          username: newUsername || undefined,
+        },
+        headers
+      );
+      setup.displayName = profile.display_name?.trim() || newName;
+      setup.username = profile.username?.trim() || "";
       saveSetup(setup);
-      cachedProfileNames[k.userId] = newName;
-      writeProfileDisplayName(k.userId, k.userId, newName);
+      cachedProfileNames[k.userId] = setup.displayName;
+      writeProfileDisplayName(k.userId, k.userId, setup.displayName);
       refreshConversationsIfVisible();
+      void renderSettings();
       notify("Profile updated", "success");
     } catch (e) {
       notify(`Profile update failed: ${errorMsg(e)}`, "error");
@@ -4532,7 +4572,7 @@ async function renderDiscovery(): Promise<void> {
           <div class="settings-section">
             <h3>Unavailable</h3>
             <p class="text-secondary settings-desc">Raw-hash contact discovery is disabled pending a private discovery design.</p>
-            <p class="text-secondary settings-desc">Share your user ID directly and add contacts from Settings instead.</p>
+            <p class="text-secondary settings-desc">Share your @username or a private invite link and add contacts from Settings instead.</p>
           </div>
         </div>
       </div>

@@ -129,6 +129,7 @@ export type RevokeDeviceResponse = {
 export type ProfileResponse = {
   user_id: string;
   display_name: string | null;
+  username: string | null;
   avatar_mime: string | null;
   avatar_bytes_base64: string | null;
   sealed_delivery_token: string | null;
@@ -137,8 +138,14 @@ export type ProfileResponse = {
 
 export type UpsertProfileRequest = {
   display_name?: string;
+  username?: string;
   avatar_mime?: string;
   avatar_bytes_base64?: string;
+};
+
+export type UsernameResolveResponse = {
+  username: string;
+  user_id: string;
 };
 
 export type PresenceResponse = {
@@ -803,6 +810,18 @@ export class PqmsgApi {
       `/v1/users/${encodeURIComponent(userId)}/profile`,
       payload,
       headers
+    );
+  }
+
+  async resolveUsername(
+    username: string
+  ): Promise<UsernameResolveResponse> {
+    const normalized = username.trim().replace(/^@/, "");
+    return this.request<UsernameResolveResponse>(
+      "GET",
+      `/v1/usernames/${encodeURIComponent(normalized)}`,
+      undefined,
+      {}
     );
   }
 

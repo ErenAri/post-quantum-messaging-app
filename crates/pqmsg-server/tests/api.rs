@@ -95,6 +95,7 @@ const AUTH_TAG_PROFILE_AVATAR_MIME_HASH: u16 = critical_type(0x3228);
 const AUTH_TAG_PRESENCE_STATUS: u16 = critical_type(0x3229);
 const AUTH_TAG_TYPING_PEER_ID: u16 = critical_type(0x322A);
 const AUTH_TAG_TYPING_STATE_FLAG: u16 = critical_type(0x322B);
+const AUTH_TAG_PROFILE_USERNAME_HASH: u16 = critical_type(0x322D);
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 struct TestIdentityKeyPair {
@@ -1664,6 +1665,7 @@ fn profile_upsert_auth_headers(
     device_id: &str,
     target_user_id: &str,
     display_name: Option<&str>,
+    username: Option<&str>,
     avatar_mime: Option<&str>,
     avatar_blob: Option<&[u8]>,
 ) -> Vec<(&'static str, String)> {
@@ -1682,6 +1684,16 @@ fn profile_upsert_auth_headers(
     hasher.update(display_name.unwrap_or_default().as_bytes());
     records.push(TlvRecord {
         ty: AUTH_TAG_PROFILE_DISPLAY_NAME_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    let normalized_username = username
+        .unwrap_or_default()
+        .trim()
+        .trim_start_matches('@')
+        .to_ascii_lowercase();
+    hasher.update(normalized_username.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PROFILE_USERNAME_HASH,
         value: hasher.finalize_reset().to_vec(),
     });
     hasher.update(avatar_blob.unwrap_or_default());
@@ -5174,6 +5186,7 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
     let avatar = vec![1u8, 2, 3, 4];
     let profile_body = json!({
         "display_name": "Alice Example",
+        "username": "alice.secure",
         "avatar_mime": "image/png",
         "avatar_bytes_base64": B64.encode(&avatar)
     });
@@ -5183,6 +5196,7 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
         "alice-dev-1",
         "alice",
         Some("Alice Example"),
+        Some("alice.secure"),
         Some("image/png"),
         Some(&avatar),
     );
@@ -5199,6 +5213,10 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
         profile_upsert_payload["display_name"].as_str(),
         Some("Alice Example")
     );
+    assert_eq!(
+        profile_upsert_payload["username"].as_str(),
+        Some("alice.secure")
+    );
 
     let profile_get_headers = profile_get_auth_headers(&bob_sig, "bob", "bob-dev-1", "alice");
     let (status_profile_get, profile_get_payload) = json_request_with_headers(
@@ -5213,6 +5231,10 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
     assert_eq!(
         profile_get_payload["display_name"].as_str(),
         Some("Alice Example")
+    );
+    assert_eq!(
+        profile_get_payload["username"].as_str(),
+        Some("alice.secure")
     );
     assert_eq!(
         profile_get_payload["avatar_bytes_base64"].as_str(),
@@ -5326,6 +5348,98 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
 }
 
 #[tokio::test]
+async fn profile_usernames_round_trip_and_enforce_uniqueness() {
+    let app = test_app().await;
+    let alice_sig = signing_key(181);
+    let bob_sig = signing_key(182);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", [91u8; 32], &alice_sig);
+    let reg_bob = register_payload("bob", "bob-dev-1", [92u8; 32], &bob_sig);
+    let (status_reg_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_reg_alice, StatusCode::OK);
+    let (status_reg_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_reg_bob, StatusCode::OK);
+
+    let alice_headers = profile_upsert_auth_headers(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "alice",
+        Some("Alice"),
+        Some("@Alice.Secure"),
+        None,
+        None,
+    );
+    let (status_profile_upsert, profile_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/profile",
+        json!({
+            "display_name": "Alice",
+            "username": "@Alice.Secure"
+        }),
+        &alice_headers,
+    )
+    .await;
+    assert_eq!(status_profile_upsert, StatusCode::OK);
+    assert_eq!(profile_payload["username"].as_str(), Some("alice.secure"));
+
+    let alice_get_headers = profile_get_auth_headers(&alice_sig, "alice", "alice-dev-1", "alice");
+    let (status_profile_get, profile_get_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/alice/profile",
+        json!({}),
+        &alice_get_headers,
+    )
+    .await;
+    assert_eq!(status_profile_get, StatusCode::OK);
+    assert_eq!(
+        profile_get_payload["username"].as_str(),
+        Some("alice.secure")
+    );
+
+    let (status_lookup, lookup_payload) = json_request(
+        app.clone(),
+        Method::GET,
+        "/v1/usernames/Alice.Secure",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_lookup, StatusCode::OK);
+    assert_eq!(lookup_payload["username"].as_str(), Some("alice.secure"));
+    assert_eq!(lookup_payload["user_id"].as_str(), Some("alice"));
+
+    let bob_headers = profile_upsert_auth_headers(
+        &bob_sig,
+        "bob",
+        "bob-dev-1",
+        "bob",
+        Some("Bob"),
+        Some("alice.secure"),
+        None,
+        None,
+    );
+    let (status_bob_profile, bob_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/profile",
+        json!({
+            "display_name": "Bob",
+            "username": "alice.secure"
+        }),
+        &bob_headers,
+    )
+    .await;
+    assert_eq!(status_bob_profile, StatusCode::CONFLICT);
+    assert!(bob_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("username is already claimed")));
+}
+
+#[tokio::test]
 async fn rich_media_profile_and_disabled_metadata_signals_reject_before_input_validation() {
     let app = test_app().await;
     let alice_sig = signing_key(174);
@@ -5372,6 +5486,7 @@ async fn rich_media_profile_and_disabled_metadata_signals_reject_before_input_va
         "alice-dev-1",
         "alice",
         Some("Alice"),
+        None,
         Some("image/png"),
         None,
     );

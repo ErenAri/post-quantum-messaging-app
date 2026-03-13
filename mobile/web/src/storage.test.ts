@@ -108,6 +108,7 @@ describe("loadSetup / saveSetup", () => {
       suiteLabel: "ml-kem-768",
       peerUserId: "bob",
       displayName: "Alice",
+      username: "",
     };
     saveSetup(config);
     expect(loadSetup()).toEqual(config);
@@ -131,6 +132,7 @@ describe("loadSetup / saveSetup", () => {
         suiteLabel: "ml-kem-768",
         peerUserId: "",
         displayName: "",
+        username: "",
       }),
     );
     await initMetadataStorage();
@@ -141,6 +143,7 @@ describe("loadSetup / saveSetup", () => {
       suiteLabel: "ml-kem-768",
       peerUserId: "",
       displayName: "",
+      username: "",
     });
   });
 

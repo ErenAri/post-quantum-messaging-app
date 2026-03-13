@@ -15,7 +15,7 @@
     <string name="hint_onboarding_package">Linked Device Package</string>
     <string name="hint_message">Message</string>
     <string name="hint_managed_device">Managed Device ID</string>
-    <string name="hint_username_or_invite">Username or invite link</string>
+    <string name="hint_username_or_invite">@username or invite link</string>
     <string name="button_generate">Generate Identity Keys</string>
     <string name="button_register">Register User</string>
     <string name="button_publish">Publish Prekeys</string>
@@ -121,7 +121,7 @@
     <string name="hint_contact_hash">Phone or email SHA-256 hash</string>
     <string name="hint_contact_user_id">Contact username</string>
     <string name="hint_contact_alias">Alias (optional)</string>
-    <string name="contacts_manual_only_notice">Manual contacts only. Add people by exact username or invite link. Private contact discovery is unavailable in this privacy profile.</string>
+    <string name="contacts_manual_only_notice">Manual contacts only. Add people by exact @username or invite link. Private contact discovery is unavailable in this privacy profile.</string>
     <string name="contacts_manual_status">%1$d manual contact(s)</string>
     <string name="contacts_added_status">Contact added: %1$s</string>
 

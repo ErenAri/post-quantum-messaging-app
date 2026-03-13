@@ -204,7 +204,7 @@ describe("auth header builders", () => {
 
   it("buildProfileUpsertAuthHeaders", () => {
     assertAuthHeaders(
-      buildProfileUpsertAuthHeaders(keys, "Alice", "image/png", "base64avatar"),
+      buildProfileUpsertAuthHeaders(keys, "Alice", "@alice.secure", "image/png", "base64avatar"),
       "alice", "device1"
     );
   });

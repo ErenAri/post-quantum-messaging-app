@@ -242,4 +242,20 @@ class ServerApiTest {
         assertEquals("Ym9iLW1zZw==", parsed.recipients[0].message_bytes_base64)
         assertEquals("carol", parsed.recipients[1].recipient_user_id)
     }
+
+    @Test
+    fun username_lookup_response_parses() {
+        val parsed = gson.fromJson(
+            """
+            {
+              "username": "alice.secure",
+              "user_id": "alice"
+            }
+            """.trimIndent(),
+            UsernameLookupResponse::class.java,
+        )
+
+        assertEquals("alice.secure", parsed.username)
+        assertEquals("alice", parsed.user_id)
+    }
 }

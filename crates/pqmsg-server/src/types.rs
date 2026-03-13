@@ -490,6 +490,7 @@ pub(crate) struct FileDownloadResponse {
 #[derive(Debug, Deserialize)]
 pub(crate) struct UpsertProfileRequest {
     pub(crate) display_name: Option<String>,
+    pub(crate) username: Option<String>,
     pub(crate) avatar_mime: Option<String>,
     pub(crate) avatar_bytes_base64: Option<String>,
 }
@@ -527,10 +528,17 @@ pub(crate) struct BackupDownloadResponse {
 pub(crate) struct UserProfileResponse {
     pub(crate) user_id: String,
     pub(crate) display_name: Option<String>,
+    pub(crate) username: Option<String>,
     pub(crate) avatar_mime: Option<String>,
     pub(crate) avatar_bytes_base64: Option<String>,
     pub(crate) sealed_delivery_token: Option<String>,
     pub(crate) updated_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct UsernameResolveResponse {
+    pub(crate) username: String,
+    pub(crate) user_id: String,
 }
 
 #[derive(Debug, Deserialize)]

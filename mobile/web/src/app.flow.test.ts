@@ -177,6 +177,7 @@ async function bootApp(options: BootOptions = {}) {
   const apiState = {
     existingUsers: new Set(options.existingUsers ?? ["test1", "test2"]),
     bundleUsers: new Set(options.bundleUsers ?? options.existingUsers ?? ["test1", "test2"]),
+    usernames: new Map<string, string>((options.existingUsers ?? ["test1", "test2"]).map((userId) => [userId, userId] as const)),
     contacts: new Set<string>(),
     relays: [] as Array<{ peerId: string; body: string }>,
     presenceCalls: 0,
@@ -480,13 +481,54 @@ async function bootApp(options: BootOptions = {}) {
         if (!apiState.existingUsers.has(userId)) {
           throw new Error("HTTP 404: user not found");
         }
+        const username = Array.from(apiState.usernames.entries()).find(([, mappedUserId]) => mappedUserId === userId)?.[0] ?? null;
         return {
           user_id: userId,
           display_name: userId,
+          username,
           sealed_delivery_token:
             options.profileTokensRequireContact && !apiState.contacts.has(userId)
               ? null
               : `delivery-token:${userId}`,
+        };
+      }
+
+      async upsertProfile(userId: string, request: { display_name?: string; username?: string }) {
+        if (!apiState.existingUsers.has(userId)) {
+          throw new Error("HTTP 404: user not found");
+        }
+        const normalizedUsername = request.username?.trim().replace(/^@/, "").toLowerCase() || "";
+        if (normalizedUsername) {
+          const owner = apiState.usernames.get(normalizedUsername);
+          if (owner && owner !== userId) {
+            throw new Error("HTTP 409: username already claimed");
+          }
+          apiState.usernames.set(normalizedUsername, userId);
+        } else {
+          for (const [candidate, owner] of [...apiState.usernames.entries()]) {
+            if (owner === userId && candidate !== userId) {
+              apiState.usernames.delete(candidate);
+            }
+          }
+        }
+        return {
+          user_id: userId,
+          display_name: request.display_name ?? userId,
+          username: normalizedUsername || null,
+          sealed_delivery_token: `delivery-token:${userId}`,
+          updated_at: "2026-03-11T00:00:00Z",
+        };
+      }
+
+      async resolveUsername(username: string) {
+        const normalizedUsername = username.trim().replace(/^@/, "").toLowerCase();
+        const userId = apiState.usernames.get(normalizedUsername);
+        if (!userId) {
+          throw new Error("HTTP 404: username not found");
+        }
+        return {
+          username: normalizedUsername,
+          user_id: userId,
         };
       }
 
@@ -955,6 +997,37 @@ describe("web app flow coverage", () => {
     });
 
     expect(realtimeState.connectCalls).toBe(1);
+  });
+
+  it("starts a direct conversation from a shareable username", async () => {
+    const { router } = await bootApp({
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "",
+          displayName: "test1",
+          username: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "new-chat" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLInputElement>("#nc-peer")).not.toBeNull();
+    });
+
+    const input = document.querySelector<HTMLInputElement>("#nc-peer")!;
+    input.value = "@test2";
+    document.querySelector<HTMLButtonElement>("#nc-start")!.click();
+
+    await eventually(() => {
+      expect(router.getCurrentView()).toEqual({ screen: "chat", peerId: "test2" });
+    });
   });
 
   it("shows verified transparency status in the identity log view", async () => {
