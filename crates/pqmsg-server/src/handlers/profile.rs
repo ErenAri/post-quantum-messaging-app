@@ -7,6 +7,7 @@ use chrono::{Duration, Utc};
 use sqlx::Row;
 use uuid::Uuid;
 
+use super::prekeys::load_bundle_response;
 use super::util::*;
 use crate::auth::*;
 use crate::db::*;
@@ -37,7 +38,7 @@ fn ensure_typing_supported(state: &AppState) -> Result<(), AppError> {
     Ok(())
 }
 
-async fn may_read_sealed_delivery_token(
+async fn may_read_shared_profile(
     state: &AppState,
     requester_user_id: &str,
     target_user_id: &str,
@@ -257,6 +258,8 @@ pub(crate) async fn upsert_user_profile(
     validate_id("user_id", &user_id)?;
     let display_name = validate_optional_profile_display_name(request.display_name.as_deref())?;
     let username = validate_optional_username(request.username.as_deref())?;
+    let username_lookup_enabled =
+        username.is_some() && request.username_lookup_enabled.unwrap_or(true);
     let avatar_mime = validate_optional_mime_type("avatar_mime", request.avatar_mime.as_deref())?;
     let avatar_blob = match request.avatar_bytes_base64.as_deref() {
         Some(value) => Some(decode_base64_range(
@@ -287,6 +290,7 @@ pub(crate) async fn upsert_user_profile(
         &user_id,
         display_name.as_deref(),
         username.as_deref(),
+        username_lookup_enabled,
         avatar_mime.as_deref(),
         avatar_blob.as_deref(),
     )?;
@@ -316,15 +320,17 @@ pub(crate) async fn upsert_user_profile(
             display_name,
             username,
             username_normalized,
+            username_lookup_enabled,
             avatar_mime,
             avatar_blob,
             avatar_object_key,
             updated_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (user_id) DO UPDATE SET
             display_name = EXCLUDED.display_name,
             username = EXCLUDED.username,
             username_normalized = EXCLUDED.username_normalized,
+            username_lookup_enabled = EXCLUDED.username_lookup_enabled,
             avatar_mime = EXCLUDED.avatar_mime,
             avatar_blob = EXCLUDED.avatar_blob,
             avatar_object_key = EXCLUDED.avatar_object_key,
@@ -334,6 +340,7 @@ pub(crate) async fn upsert_user_profile(
     .bind(&display_name)
     .bind(&username)
     .bind(&username)
+    .bind(username_lookup_enabled)
     .bind(&avatar_mime)
     .bind(Option::<Vec<u8>>::None)
     .bind(&avatar_object_key)
@@ -360,6 +367,7 @@ pub(crate) async fn upsert_user_profile(
         user_id,
         display_name,
         username,
+        username_lookup_enabled,
         avatar_mime,
         avatar_bytes_base64,
         sealed_delivery_token: Some(sealed_delivery_token),
@@ -380,11 +388,13 @@ pub(crate) async fn get_user_profile(
     verify_request_auth(&state, &auth, &auth_message).await?;
     ensure_user_exists(state.pool(), &auth.user_id).await?;
     ensure_user_exists(state.pool(), &user_id).await?;
-    let include_sealed_delivery_token =
-        may_read_sealed_delivery_token(&state, &auth.user_id, &user_id).await?;
+    let include_shared_profile = may_read_shared_profile(&state, &auth.user_id, &user_id).await?;
+    let include_sealed_delivery_token = include_shared_profile;
 
     let row = sqlx::query(
-        "SELECT display_name, username, avatar_mime, avatar_blob, avatar_object_key, updated_at
+        "SELECT display_name, username,
+                CASE WHEN username_lookup_enabled THEN 1 ELSE 0 END AS username_lookup_enabled_flag,
+                avatar_mime, avatar_blob, avatar_object_key, updated_at
          FROM user_profiles
          WHERE user_id = $1",
     )
@@ -404,6 +414,7 @@ pub(crate) async fn get_user_profile(
             user_id,
             display_name: None,
             username: None,
+            username_lookup_enabled: false,
             avatar_mime: None,
             avatar_bytes_base64: None,
             sealed_delivery_token,
@@ -430,12 +441,33 @@ pub(crate) async fn get_user_profile(
     } else {
         None
     };
+    let profile_username: Option<String> = row.try_get("username")?;
+    let username_lookup_enabled: i64 = row.try_get("username_lookup_enabled_flag")?;
     Ok(Json(UserProfileResponse {
         user_id,
-        display_name: row.try_get("display_name")?,
-        username: row.try_get("username")?,
-        avatar_mime: row.try_get("avatar_mime")?,
-        avatar_bytes_base64: avatar_blob.map(|value| B64.encode(value)),
+        display_name: if include_shared_profile {
+            row.try_get("display_name")?
+        } else {
+            None
+        },
+        username: if include_shared_profile {
+            profile_username.clone()
+        } else {
+            None
+        },
+        username_lookup_enabled: include_shared_profile
+            && username_lookup_enabled != 0
+            && profile_username.is_some(),
+        avatar_mime: if include_shared_profile {
+            row.try_get("avatar_mime")?
+        } else {
+            None
+        },
+        avatar_bytes_base64: if include_shared_profile {
+            avatar_blob.map(|value| B64.encode(value))
+        } else {
+            None
+        },
         sealed_delivery_token,
         updated_at: row.try_get("updated_at")?,
     }))
@@ -450,7 +482,7 @@ pub(crate) async fn resolve_username(
     let row = sqlx::query(
         "SELECT user_id, username
          FROM user_profiles
-         WHERE username_normalized = $1
+         WHERE username_normalized = $1 AND username_lookup_enabled = TRUE
          LIMIT 1",
     )
     .bind(&username)
@@ -462,6 +494,26 @@ pub(crate) async fn resolve_username(
         username: row.try_get("username")?,
         user_id: row.try_get("user_id")?,
     }))
+}
+
+pub(crate) async fn get_username_bundle(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Result<Json<BundleResponse>, AppError> {
+    check_rate_limit(&state, "username-bundle")?;
+    let username = validate_username(&username)?;
+    let user_id: String = sqlx::query_scalar(
+        "SELECT user_id
+         FROM user_profiles
+         WHERE username_normalized = $1 AND username_lookup_enabled = TRUE
+         LIMIT 1",
+    )
+    .bind(&username)
+    .fetch_optional(state.pool())
+    .await?
+    .ok_or_else(|| AppError::not_found("username not found"))?;
+    let bundle = load_bundle_response(&state, &user_id, &BundleQuery { device_id: None }).await?;
+    Ok(Json(bundle))
 }
 
 pub(crate) async fn update_presence(

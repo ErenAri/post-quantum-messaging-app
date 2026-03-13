@@ -4,10 +4,12 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Bundle
-import android.widget.Toast
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
@@ -20,6 +22,8 @@ import uniffi.pqmsg_android.buildIdentityLogAuthHeaders
 import uniffi.pqmsg_android.buildLinkDeviceAuthHeaders
 import uniffi.pqmsg_android.buildListDevicesAuthHeaders
 import uniffi.pqmsg_android.buildPrekeysAuthHeaders
+import uniffi.pqmsg_android.buildProfileGetAuthHeaders
+import uniffi.pqmsg_android.buildProfileUpsertAuthHeaders
 import uniffi.pqmsg_android.buildRevokeDeviceAuthHeaders
 import uniffi.pqmsg_android.buildRetireDeviceAuthHeaders
 import uniffi.pqmsg_android.buildRotateConfirmAuthHeaders
@@ -40,6 +44,7 @@ class SecurityInfoActivity : AppCompatActivity() {
     private lateinit var onboardingPassphraseInput: EditText
     private lateinit var onboardingPackageInput: EditText
     private lateinit var refreshButton: Button
+    private lateinit var editProfileButton: Button
     private lateinit var listDevicesButton: Button
     private lateinit var linkDeviceButton: Button
     private lateinit var revokeDeviceButton: Button
@@ -74,6 +79,7 @@ class SecurityInfoActivity : AppCompatActivity() {
         onboardingPassphraseInput = findViewById(R.id.editSecurityOnboardingPassphrase)
         onboardingPackageInput = findViewById(R.id.editSecurityOnboardingPackage)
         refreshButton = findViewById(R.id.buttonRefreshSecurityInfo)
+        editProfileButton = findViewById(R.id.buttonEditShareableProfile)
         listDevicesButton = findViewById(R.id.buttonListDevices)
         linkDeviceButton = findViewById(R.id.buttonLinkDevice)
         revokeDeviceButton = findViewById(R.id.buttonRevokeDevice)
@@ -124,6 +130,7 @@ class SecurityInfoActivity : AppCompatActivity() {
             syncActionAvailability()
         }
         refreshButton.setOnClickListener { renderSecurityInfo() }
+        editProfileButton.setOnClickListener { showShareableProfileEditor() }
         listDevicesButton.setOnClickListener { runSecurityAction("List devices") { listLinkedDevices() } }
         linkDeviceButton.setOnClickListener { runSecurityAction("Link device") { linkManagedDevice() } }
         revokeDeviceButton.setOnClickListener { runSecurityAction("Revoke device") { revokeManagedDevice() } }
@@ -214,10 +221,114 @@ class SecurityInfoActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun showShareableProfileEditor() {
+        val user = userInput.text.toString().trim()
+        if (user.isBlank()) {
+            statusText.text = "Enter a user id before editing the shareable profile."
+            return
+        }
+        lifecycleScope.launch {
+            runCatching {
+                loadEditableProfile(user)
+            }.onSuccess { profile ->
+                val displayNameInput = EditText(this@SecurityInfoActivity).apply {
+                    hint = getString(R.string.hint_profile_display_name)
+                    setText(profile.display_name.orEmpty())
+                }
+                val usernameInput = EditText(this@SecurityInfoActivity).apply {
+                    hint = getString(R.string.hint_shareable_username)
+                    setText(profile.username?.let { "@$it" }.orEmpty())
+                }
+                val lookupEnabledInput = CheckBox(this@SecurityInfoActivity).apply {
+                    text = getString(R.string.label_allow_username_lookup)
+                    isChecked = profile.username_lookup_enabled ?: false
+                }
+                val container = LinearLayout(this@SecurityInfoActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(24, 8, 24, 0)
+                    addView(displayNameInput)
+                    addView(usernameInput)
+                    addView(lookupEnabledInput)
+                }
+                AlertDialog.Builder(this@SecurityInfoActivity)
+                    .setTitle(R.string.button_edit_shareable_profile)
+                    .setView(container)
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setPositiveButton(R.string.button_save_shareable_profile) { _, _ ->
+                        lifecycleScope.launch {
+                            runCatching {
+                                updateShareableProfile(
+                                    displayNameInput.text?.toString().orEmpty(),
+                                    usernameInput.text?.toString().orEmpty(),
+                                    lookupEnabledInput.isChecked,
+                                )
+                            }.onSuccess { message ->
+                                renderSecurityInfo()
+                                statusText.text = message
+                                Toast.makeText(this@SecurityInfoActivity, message, Toast.LENGTH_SHORT).show()
+                            }.onFailure {
+                                val mapped = UiErrorMapper.fromThrowable(it, "Update shareable profile")
+                                statusText.text = mapped.headline
+                                Toast.makeText(this@SecurityInfoActivity, mapped.headline, Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                    .show()
+            }.onFailure {
+                val mapped = UiErrorMapper.fromThrowable(it, "Load shareable profile")
+                statusText.text = mapped.headline
+                Toast.makeText(this@SecurityInfoActivity, mapped.headline, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private suspend fun loadEditableProfile(user: String): UserProfileResponse {
+        val context = loadDeviceManagementContext(user)
+        return context.api.getUserProfile(
+            userId = user,
+            headers = buildProfileGetAuthHeaders(context.keysJson, user).toHeaderMap(),
+        )
+    }
+
+    private suspend fun updateShareableProfile(
+        displayName: String,
+        username: String,
+        usernameLookupEnabled: Boolean,
+    ): String {
+        val user = requireCurrentUser()
+        val context = loadDeviceManagementContext(user)
+        val normalizedDisplayName = displayName.trim().ifBlank { null }
+        val normalizedUsername = username.trim().ifBlank { null }
+        val response = context.api.upsertUserProfile(
+            userId = user,
+            headers = buildProfileUpsertAuthHeaders(
+                context.keysJson,
+                user,
+                normalizedDisplayName.orEmpty(),
+                normalizedUsername.orEmpty(),
+                normalizedUsername != null && usernameLookupEnabled,
+                "",
+                "",
+            ).toHeaderMap(),
+            request = UpsertProfileRequest(
+                display_name = normalizedDisplayName,
+                username = normalizedUsername,
+                username_lookup_enabled = if (normalizedUsername != null) usernameLookupEnabled else false,
+                avatar_mime = null,
+                avatar_bytes_base64 = null,
+            ),
+        )
+        val summary = response.username?.let { usernameValue ->
+            "@$usernameValue${if (response.username_lookup_enabled == true) " (lookup on)" else " (invite-only)"}"
+        } ?: "no shareable username"
+        return "Updated shareable profile: $summary"
+    }
+
     private fun syncActionAvailability() {
         val hasUser = userInput.text.toString().trim().isNotBlank()
         val hasManagedDevice = managedDeviceInput.text.toString().trim().isNotBlank()
         val hasOnboardingPackage = onboardingPackageInput.text.toString().trim().isNotBlank()
+        editProfileButton.isEnabled = hasUser
         listDevicesButton.isEnabled = hasUser
         linkDeviceButton.isEnabled = hasUser && hasManagedDevice
         revokeDeviceButton.isEnabled = hasUser && hasManagedDevice

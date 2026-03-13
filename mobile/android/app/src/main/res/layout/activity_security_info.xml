@@ -132,6 +132,14 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="14dp"
                     android:text="@string/button_refresh_security" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonEditShareableProfile"
+                    style="@style/Widget.PQMsg.Button.Secondary"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/button_edit_shareable_profile" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

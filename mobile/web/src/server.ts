@@ -130,6 +130,7 @@ export type ProfileResponse = {
   user_id: string;
   display_name: string | null;
   username: string | null;
+  username_lookup_enabled?: boolean | null;
   avatar_mime: string | null;
   avatar_bytes_base64: string | null;
   sealed_delivery_token: string | null;
@@ -139,6 +140,7 @@ export type ProfileResponse = {
 export type UpsertProfileRequest = {
   display_name?: string;
   username?: string;
+  username_lookup_enabled?: boolean;
   avatar_mime?: string;
   avatar_bytes_base64?: string;
 };
@@ -196,8 +198,17 @@ export type WsInboxTicketResponse = {
   expires_at: string;
 };
 
+export type ContactDiscoveryTicketResponse = {
+  user_id: string;
+  device_id: string;
+  service_origin: string;
+  ticket: string;
+  expires_at: string;
+};
+
 export type ContactEntry = {
   contact_user_id: string;
+  username?: string | null;
   alias: string | null;
   verified_by_qr: boolean;
   verified_fingerprint_sha256: string | null;
@@ -631,6 +642,9 @@ export type ServerCapabilitiesResponse = {
   prekey_bundle_reserve_count: number;
   pq_ratchet_interval: number;
   contact_discovery_supported: boolean;
+  contact_discovery_mode: string;
+  contact_discovery_ticket_supported: boolean;
+  contact_discovery_service_origin: string | null;
   presence_supported: boolean;
   typing_indicators_supported: boolean;
   read_receipts_supported: boolean;
@@ -820,6 +834,18 @@ export class PqmsgApi {
     return this.request<UsernameResolveResponse>(
       "GET",
       `/v1/usernames/${encodeURIComponent(normalized)}`,
+      undefined,
+      {}
+    );
+  }
+
+  async getUsernameBundle(
+    username: string
+  ): Promise<BundleResponse> {
+    const normalized = username.trim().replace(/^@/, "");
+    return this.request<BundleResponse>(
+      "GET",
+      `/v1/usernames/${encodeURIComponent(normalized)}/bundle`,
       undefined,
       {}
     );
@@ -1246,6 +1272,18 @@ export class PqmsgApi {
       "POST",
       `/v1/users/${encodeURIComponent(userId)}/discovery/match`,
       payload,
+      headers
+    );
+  }
+
+  async issueContactDiscoveryTicket(
+    userId: string,
+    headers: RequestAuthHeaders
+  ): Promise<ContactDiscoveryTicketResponse> {
+    return this.request<ContactDiscoveryTicketResponse>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/contact-discovery/ticket`,
+      {},
       headers
     );
   }

@@ -1,7 +1,11 @@
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::Json;
-use chrono::Utc;
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
+use chrono::{Duration, Utc};
+use ed25519_dalek::Signer;
+use serde::Serialize;
 use sqlx::Row;
 
 use super::util::*;
@@ -19,6 +23,70 @@ fn ensure_contact_discovery_supported(state: &AppState) -> Result<(), AppError> 
     Err(AppError::forbidden(
         "raw-hash contact discovery is disabled pending a private discovery design",
     ))
+}
+
+fn ensure_contact_discovery_ticket_supported(state: &AppState) -> Result<String, AppError> {
+    state
+        .contact_discovery_service_origin()
+        .ok_or_else(|| {
+            AppError::forbidden(
+                "private contact discovery service is not configured; use manual contacts or invite links",
+            )
+        })
+}
+
+#[derive(Serialize)]
+struct ContactDiscoveryTicketPayload {
+    v: u8,
+    user_id: String,
+    device_id: String,
+    issued_at: String,
+    expires_at: String,
+    nonce: String,
+}
+
+pub(crate) async fn create_contact_discovery_ticket(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<ContactDiscoveryTicketResponse>, AppError> {
+    let service_origin = ensure_contact_discovery_ticket_supported(&state)?;
+    check_rate_limit(&state, &format!("contact-discovery-ticket:{user_id}"))?;
+    validate_id("user_id", &user_id)?;
+    ensure_user_exists(state.pool(), &user_id).await?;
+
+    let auth = parse_request_auth(&headers)?;
+    if auth.user_id != user_id {
+        return Err(AppError::bad_request("auth user_id mismatch"));
+    }
+    let auth_message = contact_discovery_ticket_auth_message(&auth, &user_id)?;
+    verify_request_auth(&state, &auth, &auth_message).await?;
+
+    let issued_at = Utc::now();
+    let expires_at = issued_at + Duration::minutes(5);
+    let payload = ContactDiscoveryTicketPayload {
+        v: 1,
+        user_id: user_id.clone(),
+        device_id: auth.device_id.clone(),
+        issued_at: issued_at.to_rfc3339(),
+        expires_at: expires_at.to_rfc3339(),
+        nonce: uuid::Uuid::new_v4().to_string(),
+    };
+    let payload_bytes = serde_json::to_vec(&payload)
+        .map_err(|_| AppError::internal("serialize contact discovery ticket"))?;
+    let signature = state
+        .sender_certificate_signing_key()
+        .sign(&payload_bytes)
+        .to_bytes();
+    let ticket = format!("{}.{}", B64.encode(payload_bytes), B64.encode(signature));
+
+    Ok(Json(ContactDiscoveryTicketResponse {
+        user_id,
+        device_id: auth.device_id,
+        service_origin,
+        ticket,
+        expires_at: expires_at.to_rfc3339(),
+    }))
 }
 
 pub(crate) async fn upload_discovery_handles(
@@ -159,10 +227,19 @@ pub(crate) async fn list_contacts(
     ensure_user_exists(state.pool(), &user_id).await?;
 
     let rows = sqlx::query(
-        "SELECT contact_user_id, alias, verified_by_qr, verified_fingerprint_sha256, created_at, updated_at
+        "SELECT
+            contacts.contact_user_id,
+            user_profiles.username,
+            contacts.alias,
+            contacts.verified_by_qr,
+            contacts.verified_fingerprint_sha256,
+            contacts.created_at,
+            contacts.updated_at
          FROM contacts
-         WHERE user_id = $1
-         ORDER BY updated_at DESC, contact_user_id ASC",
+         LEFT JOIN user_profiles
+           ON user_profiles.user_id = contacts.contact_user_id
+         WHERE contacts.user_id = $1
+         ORDER BY contacts.updated_at DESC, contacts.contact_user_id ASC",
     )
     .bind(&user_id)
     .fetch_all(state.pool())
@@ -172,6 +249,7 @@ pub(crate) async fn list_contacts(
         let verified_by_qr: i64 = row.try_get("verified_by_qr")?;
         contacts.push(ContactListItem {
             contact_user_id: row.try_get("contact_user_id")?,
+            username: row.try_get("username")?,
             alias: row.try_get("alias")?,
             verified_by_qr: verified_by_qr != 0,
             verified_fingerprint_sha256: row.try_get("verified_fingerprint_sha256")?,

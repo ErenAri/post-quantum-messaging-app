@@ -705,6 +705,11 @@ function getConversationMetaCached(
   return lookup.get(conversationMetaKey(kind, threadId)) ?? loadConversationMeta(setup.userId, kind, threadId);
 }
 
+function formatContactHandle(contact: Pick<ContactEntry, "contact_user_id" | "username"> | undefined): string {
+  const username = contact?.username?.trim().replace(/^@+/, "") || "";
+  return username ? `@${username}` : (contact?.contact_user_id || "");
+}
+
 function resolvePeerIdentity(peerId: string): {
   primaryLabel: string;
   secondaryLabel: string;
@@ -713,8 +718,10 @@ function resolvePeerIdentity(peerId: string): {
 } {
   const contact = cachedContacts.find((item) => item.contact_user_id === peerId);
   const cachedName = cachedProfileNames[peerId]?.trim() || readProfileDisplayName(setup.userId, peerId)?.trim() || "";
-  const primaryLabel = contact?.alias?.trim() || cachedName || peerId;
-  const secondaryLabel = primaryLabel === peerId ? "" : `@${peerId}`;
+  const contactHandle = formatContactHandle(contact);
+  const primaryLabel = contact?.alias?.trim() || cachedName || contactHandle || peerId;
+  const secondaryCandidate = contactHandle || (primaryLabel === peerId ? "" : peerId);
+  const secondaryLabel = secondaryCandidate && primaryLabel !== secondaryCandidate ? secondaryCandidate : "";
   const avatarText = primaryLabel.slice(0, 2).toUpperCase() || peerId.slice(0, 2).toUpperCase();
   const isVerified = Boolean(contact?.verified_by_qr || readIdentityPin(setup.userId, peerId));
   return { primaryLabel, secondaryLabel, avatarText, isVerified };
@@ -849,6 +856,11 @@ async function loadProfileNameBackground(targetUserId: string): Promise<void> {
         setup.username = username;
         changed = true;
       }
+      const usernameLookupEnabled = Boolean(profile.username_lookup_enabled && username);
+      if (Boolean(setup.usernameLookupEnabled) !== usernameLookupEnabled) {
+        setup.usernameLookupEnabled = usernameLookupEnabled;
+        changed = true;
+      }
       if (changed) {
         saveSetup(setup);
       }
@@ -978,9 +990,7 @@ async function resolvePeerUserIdFromTarget(rawTarget: string, api?: PqmsgApi): P
     return "";
   }
   if (resolvedTarget.startsWith("@")) {
-    const resolvedApi = api ?? new PqmsgApi(setup.serverUrl);
-    const match = await resolvedApi.resolveUsername(resolvedTarget);
-    return match.user_id.trim().replace(/^@/, "");
+    return loadUsernamePeerFromHandle(resolvedTarget, api);
   }
   return resolvedTarget.replace(/^@/, "").trim();
 }
@@ -1020,6 +1030,12 @@ function rememberInviteBundle(bundle: BundleResponse): string {
 async function loadInvitePeerFromToken(inviteToken: string, api?: PqmsgApi): Promise<string> {
   const resolvedApi = api ?? new PqmsgApi(setup.serverUrl);
   const bundle = await resolvedApi.getContactInviteBundle(inviteToken);
+  return rememberInviteBundle(bundle);
+}
+
+async function loadUsernamePeerFromHandle(username: string, api?: PqmsgApi): Promise<string> {
+  const resolvedApi = api ?? new PqmsgApi(setup.serverUrl);
+  const bundle = await resolvedApi.getUsernameBundle(username);
   return rememberInviteBundle(bundle);
 }
 
@@ -1206,8 +1222,12 @@ function renderCreateAccount(): void {
       await api.publishPrekeys(genKeys.userId, payload, headers);
 
       try {
-        const profileHeaders = buildProfileUpsertAuthHeaders(genKeys, name, "", "", "");
-        await api.upsertProfile(genKeys.userId, { display_name: name }, profileHeaders);
+        const profileHeaders = buildProfileUpsertAuthHeaders(genKeys, name, "", false, "", "");
+        await api.upsertProfile(
+          genKeys.userId,
+          { display_name: name, username_lookup_enabled: false },
+          profileHeaders
+        );
       } catch {
         notify("Account created, but profile name could not be synced yet", "info");
       }
@@ -1220,6 +1240,7 @@ function renderCreateAccount(): void {
         peerUserId: "",
         displayName: name,
         username: "",
+        usernameLookupEnabled: false,
       };
       saveSetup(setup);
       sessionStorage.setItem("pqmsg.passphrase", pass);
@@ -2586,15 +2607,14 @@ function statusSvg(status: StoredMessage["status"]): string {
 
 function renderNewChat(): void {
   const contactRows = cachedContacts.map(c => {
-    const name = c.alias || cachedProfileNames[c.contact_user_id] || c.contact_user_id;
-    const initials = name.slice(0, 2).toUpperCase();
+    const identity = resolvePeerIdentity(c.contact_user_id);
     const verified = c.verified_by_qr ? `<span class="verified-badge" title="Verified">✓</span>` : "";
     return `
       <div class="contact-row" data-contact="${escHtml(c.contact_user_id)}">
-        <div class="avatar avatar-sm">${initials}</div>
+        <div class="avatar avatar-sm">${escHtml(identity.avatarText)}</div>
         <div class="contact-info">
-          <span class="contact-name">${escHtml(name)}${verified}</span>
-          <span class="contact-id">${escHtml(c.contact_user_id)}</span>
+          <span class="contact-name">${escHtml(identity.primaryLabel)}${verified}</span>
+          ${identity.secondaryLabel ? `<span class="contact-id">${escHtml(identity.secondaryLabel)}</span>` : ""}
         </div>
       </div>
     `;
@@ -2922,13 +2942,12 @@ async function renderGroupInfo(groupId: string): Promise<void> {
 
 function renderCreateGroup(): void {
   const contactRows = cachedContacts.map(c => {
-    const name = c.alias || c.contact_user_id;
-    const initials = name.slice(0, 2).toUpperCase();
+    const identity = resolvePeerIdentity(c.contact_user_id);
     return `
       <label class="contact-row contact-checkbox">
         <input type="checkbox" value="${escHtml(c.contact_user_id)}" class="cg-member-cb" />
-        <div class="avatar avatar-sm">${initials}</div>
-        <span class="contact-name">${escHtml(name)}</span>
+        <div class="avatar avatar-sm">${escHtml(identity.avatarText)}</div>
+        <span class="contact-name">${escHtml(identity.primaryLabel)}</span>
       </label>
     `;
   }).join("");
@@ -3011,6 +3030,7 @@ async function renderSettings(): Promise<void> {
   const capabilities = await loadServerCapabilitiesCached();
   const webHoldback = getWebBetaHoldback(capabilities);
   const contactDiscoverySupported = capabilities?.contact_discovery_supported ?? false;
+  const contactDiscoveryMode = capabilities?.contact_discovery_mode ?? "manual_only";
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
@@ -3028,7 +3048,7 @@ async function renderSettings(): Promise<void> {
             <h2>${escHtml(setup.displayName || setup.userId)}</h2>
             <p class="settings-hero-copy">${
               setup.username
-                ? `Shareable username <span class="mono">@${escHtml(setup.username)}</span> · Account ID <span class="mono">@${escHtml(setup.userId)}</span> on <span class="mono">${escHtml(setup.deviceId)}</span>`
+                ? `Shareable username <span class="mono">@${escHtml(setup.username)}</span> ${setup.usernameLookupEnabled ? "· exact lookup on" : "· invite-only"} · Account ID <span class="mono">@${escHtml(setup.userId)}</span> on <span class="mono">${escHtml(setup.deviceId)}</span>`
                 : `Account ID <span class="mono">@${escHtml(setup.userId)}</span> on <span class="mono">${escHtml(setup.deviceId)}</span>. Claim a shareable @username below.`
             }</p>
           </div>
@@ -3052,6 +3072,10 @@ async function renderSettings(): Promise<void> {
               <span>Shareable Username</span>
               <input id="set-username" type="text" value="${escHtml(setup.username || "")}" placeholder="@yourname" autocomplete="off" />
             </label>
+            <label class="switch-inline">
+              <input id="set-username-lookup-enabled" type="checkbox" ${setup.username && setup.usernameLookupEnabled ? "checked" : ""} ${setup.username ? "" : "disabled"} />
+              <span>Allow exact @username lookup</span>
+            </label>
             <button id="set-save-profile" class="btn-sm">Save</button>
           </div>
           <div class="settings-row"><span>User ID</span><span class="mono">${escHtml(setup.userId)}</span></div>
@@ -3064,16 +3088,23 @@ async function renderSettings(): Promise<void> {
         </div>
         <div class="settings-section">
           <h3>People</h3>
-          <p class="text-secondary settings-desc">Manual contacts only. Add people by exact @username or invite link. Private discovery stays unavailable in this privacy profile.</p>
+          <p class="text-secondary settings-desc">${
+            contactDiscoveryMode === "private_service"
+              ? "Manual contacts remain the active flow here. This server is also prepared for a separate private discovery service."
+              : "Manual contacts only. Add people by exact @username or invite link. Private discovery stays unavailable in this privacy profile."
+          }</p>
           <div id="contacts-manage">
             ${cachedContacts.length === 0 ? '<p class="text-secondary">No contacts yet</p>' :
-              cachedContacts.map(c => `
+              cachedContacts.map(c => {
+                const identity = resolvePeerIdentity(c.contact_user_id);
+                return `
                 <div class="contact-manage-row">
-                  <span>${escHtml(c.alias || c.contact_user_id)}</span>
-                  <span class="mono text-secondary">${escHtml(c.contact_user_id)}</span>
+                  <span>${escHtml(identity.primaryLabel)}</span>
+                  ${identity.secondaryLabel ? `<span class="mono text-secondary">${escHtml(identity.secondaryLabel)}</span>` : ""}
                   <button class="btn-sm btn-danger-sm" data-remove-contact="${escHtml(c.contact_user_id)}">Remove</button>
                 </div>
-              `).join("")
+              `;
+              }).join("")
             }
           </div>
           <div class="add-contact-row">
@@ -3106,7 +3137,9 @@ async function renderSettings(): Promise<void> {
           <p class="text-secondary settings-desc">${
             contactDiscoverySupported
               ? "Let contacts find you by phone or email hash."
-              : "Raw-hash contact discovery is disabled. Share your @username or a private invite link and manage contacts manually."
+              : contactDiscoveryMode === "private_service"
+                ? "Raw-hash contact discovery stays disabled. This server is configured for a separate private discovery service, but the web client still uses manual contacts and private invite links."
+                : "Raw-hash contact discovery is disabled. Share your @username or a private invite link and manage contacts manually."
           }</p>
           <div class="settings-row">
             <button id="set-discovery" class="btn-sm" ${contactDiscoverySupported ? "" : "disabled"}>${
@@ -3152,26 +3185,40 @@ async function renderSettings(): Promise<void> {
   q("#set-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
 
   // Save profile
+  q<HTMLInputElement>("#set-username").addEventListener("input", () => {
+    const usernameInput = q<HTMLInputElement>("#set-username");
+    const usernameLookupEnabledInput = q<HTMLInputElement>("#set-username-lookup-enabled");
+    const hasUsername = usernameInput.value.trim().length > 0;
+    usernameLookupEnabledInput.disabled = !hasUsername;
+    if (!hasUsername) {
+      usernameLookupEnabledInput.checked = false;
+    }
+  });
+
   q("#set-save-profile").addEventListener("click", async () => {
     const nameInput = q<HTMLInputElement>("#set-name");
     const usernameInput = q<HTMLInputElement>("#set-username");
+    const usernameLookupEnabledInput = q<HTMLInputElement>("#set-username-lookup-enabled");
     const newName = nameInput.value.trim();
     const newUsername = usernameInput.value.trim();
+    const usernameLookupEnabled = Boolean(newUsername) && usernameLookupEnabledInput.checked;
     if (!newName) { nameInput.focus(); return; }
     try {
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
-      const headers = buildProfileUpsertAuthHeaders(k, newName, newUsername, "", "");
+      const headers = buildProfileUpsertAuthHeaders(k, newName, newUsername, usernameLookupEnabled, "", "");
       const profile = await api.upsertProfile(
         k.userId,
         {
           display_name: newName,
           username: newUsername || undefined,
+          username_lookup_enabled: usernameLookupEnabled,
         },
         headers
       );
       setup.displayName = profile.display_name?.trim() || newName;
       setup.username = profile.username?.trim() || "";
+      setup.usernameLookupEnabled = Boolean(profile.username_lookup_enabled && setup.username);
       saveSetup(setup);
       cachedProfileNames[k.userId] = setup.displayName;
       writeProfileDisplayName(k.userId, k.userId, setup.displayName);
@@ -3471,8 +3518,7 @@ function renderLinkDevice(): void {
 // ---------------------------------------------------------------------------
 
 async function renderCall(peerId: string, callType: "audio" | "video"): Promise<void> {
-  const contact = cachedContacts.find(ct => ct.contact_user_id === peerId);
-  const displayName = contact?.alias || peerId;
+  const displayName = resolvePeerIdentity(peerId).primaryLabel;
   const callMode = callType === "video" ? "Video" : "Audio";
 
   app.innerHTML = `
@@ -3641,8 +3687,7 @@ async function renderIncomingCall(
   callType: "audio" | "video",
   sdpOfferBase64: string
 ): Promise<void> {
-  const contact = cachedContacts.find(ct => ct.contact_user_id === peerId);
-  const displayName = contact?.alias || peerId;
+  const displayName = resolvePeerIdentity(peerId).primaryLabel;
   void callId;
   const callMode = callType === "video" ? "video" : "audio";
   void sdpOfferBase64;
@@ -4758,7 +4803,8 @@ async function renderServerInfo(): Promise<void> {
           <div class="settings-row"><span>Sealed Sender</span><span>${caps.sealed_sender_required ? "Required" : "Optional"}</span></div>
           <div class="settings-row"><span>Sender Certs</span><span>${caps.sender_certificate_supported ? "Required" : "Disabled"}</span></div>
           <div class="settings-row"><span>Ephemeral DM</span><span>${caps.ephemeral_messaging_supported ? "Enabled" : "Disabled"}</span></div>
-          <div class="settings-row"><span>Contact Discovery</span><span>${caps.contact_discovery_supported ? "Enabled" : "Disabled"}</span></div>
+          <div class="settings-row"><span>Contact Discovery</span><span>${caps.contact_discovery_mode === "private_service" ? "Private service" : (caps.contact_discovery_supported ? "Enabled" : "Manual only")}</span></div>
+          <div class="settings-row"><span>Discovery Tickets</span><span>${caps.contact_discovery_ticket_supported ? "Available" : "Unavailable"}</span></div>
           <div class="settings-row"><span>Prod Baseline</span><span>${caps.production_baseline_met ? "✓ Met" : "✗ Not met"}</span></div>
         </div>
         <div class="settings-section">
@@ -4977,6 +5023,7 @@ async function verifyPeerSafetyNumber(peerUserId: string): Promise<void> {
     const now = new Date().toISOString();
     upsertCachedContact({
       contact_user_id: peerUserId,
+      username: contact?.username || null,
       alias: contact?.alias || null,
       verified_by_qr: true,
       verified_fingerprint_sha256: identityPin.fingerprintSha256,

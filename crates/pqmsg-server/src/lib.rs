@@ -145,6 +145,7 @@ pub(crate) const AUTH_TAG_TYPING_PEER_ID: u16 = critical_type(0x322A);
 pub(crate) const AUTH_TAG_TYPING_STATE_FLAG: u16 = critical_type(0x322B);
 pub(crate) const AUTH_TAG_GROUP_RECIPIENTS_HASH: u16 = critical_type(0x322C);
 pub(crate) const AUTH_TAG_PROFILE_USERNAME_HASH: u16 = critical_type(0x322D);
+pub(crate) const AUTH_TAG_PROFILE_USERNAME_LOOKUP_ENABLED: u16 = critical_type(0x322E);
 const DEVELOPMENT_SENDER_CERT_SIGNING_KEY_BYTES: [u8; 32] = [0x53; 32];
 pub(crate) const AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH: u16 = critical_type(0x3230);
 pub(crate) const AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH: u16 = critical_type(0x3231);
@@ -314,6 +315,7 @@ pub struct AppState {
     ephemeral_state: Arc<EphemeralStateStore>,
     sender_certificate_signing_key: Arc<SigningKey>,
     authenticated_direct_messaging_supported: bool,
+    contact_discovery_service_origin: Option<String>,
 }
 
 impl AppState {
@@ -345,6 +347,7 @@ impl AppState {
             ephemeral_state: Arc::new(EphemeralStateStore::disabled()),
             sender_certificate_signing_key: Arc::new(default_sender_certificate_signing_key()),
             authenticated_direct_messaging_supported: false,
+            contact_discovery_service_origin: None,
         }
     }
 
@@ -380,6 +383,7 @@ impl AppState {
             ephemeral_state: Arc::new(EphemeralStateStore::disabled()),
             sender_certificate_signing_key: Arc::new(default_sender_certificate_signing_key()),
             authenticated_direct_messaging_supported: false,
+            contact_discovery_service_origin: None,
         }
     }
 
@@ -456,6 +460,22 @@ impl AppState {
 
     pub fn contact_discovery_supported(&self) -> bool {
         false
+    }
+
+    pub fn contact_discovery_mode(&self) -> &'static str {
+        if self.contact_discovery_service_origin.is_some() {
+            "private_service"
+        } else {
+            "manual_only"
+        }
+    }
+
+    pub fn contact_discovery_ticket_supported(&self) -> bool {
+        self.contact_discovery_service_origin.is_some()
+    }
+
+    pub fn contact_discovery_service_origin(&self) -> Option<String> {
+        self.contact_discovery_service_origin.clone()
     }
 
     pub fn presence_supported(&self) -> bool {
@@ -547,6 +567,14 @@ impl AppState {
 
     pub fn with_authenticated_direct_messaging_supported(mut self, supported: bool) -> Self {
         self.authenticated_direct_messaging_supported = supported;
+        self
+    }
+
+    pub fn with_contact_discovery_service_origin(
+        mut self,
+        contact_discovery_service_origin: Option<String>,
+    ) -> Self {
+        self.contact_discovery_service_origin = contact_discovery_service_origin;
         self
     }
 
@@ -1968,7 +1996,12 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/contact-invites/:invite_token/bundle",
             get(get_contact_invite_bundle),
         )
+        .route(
+            "/v1/users/:user_id/contact-discovery/ticket",
+            post(create_contact_discovery_ticket),
+        )
         .route("/v1/usernames/:username", get(resolve_username))
+        .route("/v1/usernames/:username/bundle", get(get_username_bundle))
         .route("/v1/users/:user_id/groups", get(list_user_groups))
         .route("/v1/groups", post(create_group))
         .route("/v1/groups/:group_id/members", get(list_group_members))

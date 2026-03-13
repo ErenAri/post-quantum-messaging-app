@@ -96,6 +96,7 @@ const AUTH_TAG_PRESENCE_STATUS: u16 = critical_type(0x3229);
 const AUTH_TAG_TYPING_PEER_ID: u16 = critical_type(0x322A);
 const AUTH_TAG_TYPING_STATE_FLAG: u16 = critical_type(0x322B);
 const AUTH_TAG_PROFILE_USERNAME_HASH: u16 = critical_type(0x322D);
+const AUTH_TAG_PROFILE_USERNAME_LOOKUP_ENABLED: u16 = critical_type(0x322E);
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 struct TestIdentityKeyPair {
@@ -203,6 +204,30 @@ async fn test_app_with_authenticated_dm_compat() -> axum::Router {
         )),
     )
     .with_authenticated_direct_messaging_supported(true);
+    build_router(state)
+}
+
+async fn test_app_with_contact_discovery_service_origin(service_origin: &str) -> axum::Router {
+    sqlx::any::install_default_drivers();
+    let database_url = "sqlite::memory:";
+    let db_backend = parse_db_backend(database_url).expect("sqlite backend");
+    let pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .expect("connect sqlite memory");
+    init_db(&pool, db_backend).await.expect("migrate");
+    let state = AppState::new(
+        pool,
+        db_backend,
+        Arc::new(RateLimiter::new(
+            1_000.0,
+            1_000.0,
+            100_000,
+            StdDuration::from_secs(600),
+        )),
+    )
+    .with_contact_discovery_service_origin(Some(service_origin.to_string()));
     build_router(state)
 }
 
@@ -1209,6 +1234,35 @@ fn contact_invite_create_auth_headers(
     ]
 }
 
+fn contact_discovery_ticket_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!("cdt-{}", NONCE_COUNTER.fetch_add(1, Ordering::Relaxed));
+    let mut records = auth_common_records(
+        "contact-discovery-ticket",
+        user_id,
+        device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("contact-discovery-ticket auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
 fn contacts_upsert_auth_headers(
     signing_key: &SigningKey,
     user_id: &str,
@@ -1666,6 +1720,7 @@ fn profile_upsert_auth_headers(
     target_user_id: &str,
     display_name: Option<&str>,
     username: Option<&str>,
+    username_lookup_enabled: bool,
     avatar_mime: Option<&str>,
     avatar_blob: Option<&[u8]>,
 ) -> Vec<(&'static str, String)> {
@@ -1695,6 +1750,10 @@ fn profile_upsert_auth_headers(
     records.push(TlvRecord {
         ty: AUTH_TAG_PROFILE_USERNAME_HASH,
         value: hasher.finalize_reset().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PROFILE_USERNAME_LOOKUP_ENABLED,
+        value: vec![if username_lookup_enabled { 1 } else { 0 }],
     });
     hasher.update(avatar_blob.unwrap_or_default());
     records.push(TlvRecord {
@@ -2370,6 +2429,12 @@ async fn capabilities_reports_client_contract() {
         Some(DEFAULT_PQ_RATCHET_INTERVAL as u64)
     );
     assert_eq!(body["contact_discovery_supported"].as_bool(), Some(false));
+    assert_eq!(body["contact_discovery_mode"].as_str(), Some("manual_only"));
+    assert_eq!(
+        body["contact_discovery_ticket_supported"].as_bool(),
+        Some(false)
+    );
+    assert!(body["contact_discovery_service_origin"].is_null());
     assert_eq!(body["presence_supported"].as_bool(), Some(false));
     assert_eq!(body["typing_indicators_supported"].as_bool(), Some(false));
     assert_eq!(
@@ -2394,6 +2459,86 @@ async fn capabilities_reports_client_contract() {
     assert!(body["supported_suite_ids"]
         .as_array()
         .is_some_and(|suite_ids| !suite_ids.is_empty()));
+}
+
+#[tokio::test]
+async fn capabilities_report_private_contact_discovery_service_when_configured() {
+    let app = test_app_with_contact_discovery_service_origin("https://cdsi.example").await;
+    let (status, body) = json_request(app, Method::GET, "/v1/capabilities", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["contact_discovery_supported"].as_bool(), Some(false));
+    assert_eq!(
+        body["contact_discovery_mode"].as_str(),
+        Some("private_service")
+    );
+    assert_eq!(
+        body["contact_discovery_ticket_supported"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        body["contact_discovery_service_origin"].as_str(),
+        Some("https://cdsi.example")
+    );
+}
+
+#[tokio::test]
+async fn contact_discovery_ticket_requires_configured_service() {
+    let app = test_app().await;
+    let alice_sig = signing_key(31);
+    let reg = register_payload(
+        "alice-discovery",
+        "alice-discovery-dev",
+        [31u8; 32],
+        &alice_sig,
+    );
+    let (status_reg, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg).await;
+    assert_eq!(status_reg, StatusCode::OK);
+    let headers =
+        contact_discovery_ticket_auth_headers(&alice_sig, "alice-discovery", "alice-discovery-dev");
+    let (status, body) = json_request_with_headers(
+        app,
+        Method::POST,
+        "/v1/users/alice-discovery/contact-discovery/ticket",
+        json!({}),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["detail"].as_str(),
+        Some("private contact discovery service is not configured; use manual contacts or invite links")
+    );
+}
+
+#[tokio::test]
+async fn contact_discovery_ticket_is_issued_for_configured_service() {
+    let app = test_app_with_contact_discovery_service_origin("https://cdsi.example").await;
+    let alice_sig = signing_key(32);
+    let reg = register_payload("alice-cdsi", "alice-cdsi-dev", [32u8; 32], &alice_sig);
+    let (status_reg, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg).await;
+    assert_eq!(status_reg, StatusCode::OK);
+    let headers = contact_discovery_ticket_auth_headers(&alice_sig, "alice-cdsi", "alice-cdsi-dev");
+    let (status, body) = json_request_with_headers(
+        app,
+        Method::POST,
+        "/v1/users/alice-cdsi/contact-discovery/ticket",
+        json!({}),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["user_id"].as_str(), Some("alice-cdsi"));
+    assert_eq!(body["device_id"].as_str(), Some("alice-cdsi-dev"));
+    assert_eq!(
+        body["service_origin"].as_str(),
+        Some("https://cdsi.example")
+    );
+    let ticket = body["ticket"].as_str().expect("ticket string");
+    let mut parts = ticket.split('.');
+    assert!(parts.next().is_some_and(|value| !value.is_empty()));
+    assert!(parts.next().is_some_and(|value| !value.is_empty()));
+    assert!(parts.next().is_none());
+    assert!(body["expires_at"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -4168,6 +4313,31 @@ async fn discovery_disabled_and_contacts_flow() {
         json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
     assert_eq!(status_bob, StatusCode::OK);
 
+    let bob_profile_headers = profile_upsert_auth_headers(
+        &bob_sig,
+        "bob",
+        "bob-dev-1",
+        "bob",
+        Some("Bob"),
+        Some("bob.secure"),
+        true,
+        None,
+        None,
+    );
+    let (status_bob_profile, bob_profile_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/profile",
+        json!({
+            "display_name": "Bob",
+            "username": "bob.secure"
+        }),
+        &bob_profile_headers,
+    )
+    .await;
+    assert_eq!(status_bob_profile, StatusCode::OK);
+    assert_eq!(bob_profile_payload["username"].as_str(), Some("bob.secure"));
+
     let bob_phone_hash = {
         let mut hasher = Sha256::new();
         hasher.update(b"+15550001111");
@@ -4268,6 +4438,7 @@ async fn discovery_disabled_and_contacts_flow() {
         .expect("contacts");
     assert_eq!(contacts.len(), 1);
     assert_eq!(contacts[0]["contact_user_id"].as_str(), Some("bob"));
+    assert_eq!(contacts[0]["username"].as_str(), Some("bob.secure"));
     assert_eq!(contacts[0]["alias"].as_str(), Some("Bobby"));
     assert_eq!(contacts[0]["verified_by_qr"].as_bool(), Some(true));
 
@@ -5197,6 +5368,7 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
         "alice",
         Some("Alice Example"),
         Some("alice.secure"),
+        true,
         Some("image/png"),
         Some(&avatar),
     );
@@ -5228,18 +5400,9 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
     )
     .await;
     assert_eq!(status_profile_get, StatusCode::OK);
-    assert_eq!(
-        profile_get_payload["display_name"].as_str(),
-        Some("Alice Example")
-    );
-    assert_eq!(
-        profile_get_payload["username"].as_str(),
-        Some("alice.secure")
-    );
-    assert_eq!(
-        profile_get_payload["avatar_bytes_base64"].as_str(),
-        Some(B64.encode(avatar).as_str())
-    );
+    assert!(profile_get_payload["display_name"].is_null());
+    assert!(profile_get_payload["username"].is_null());
+    assert!(profile_get_payload["avatar_bytes_base64"].is_null());
     assert!(profile_get_payload["sealed_delivery_token"].is_null());
 
     add_contact_for_delivery_access(app.clone(), &bob_sig, "bob", "bob-dev-1", "alice").await;
@@ -5255,6 +5418,18 @@ async fn rich_media_profile_and_disabled_metadata_signals_flow() {
         )
         .await;
     assert_eq!(status_profile_get_after_contact, StatusCode::OK);
+    assert_eq!(
+        profile_get_after_contact_payload["display_name"].as_str(),
+        Some("Alice Example")
+    );
+    assert_eq!(
+        profile_get_after_contact_payload["username"].as_str(),
+        Some("alice.secure")
+    );
+    assert_eq!(
+        profile_get_after_contact_payload["avatar_bytes_base64"].as_str(),
+        Some(B64.encode(avatar).as_str())
+    );
     assert!(profile_get_after_contact_payload["sealed_delivery_token"]
         .as_str()
         .is_some_and(|value| !value.is_empty()));
@@ -5362,6 +5537,24 @@ async fn profile_usernames_round_trip_and_enforce_uniqueness() {
         json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
     assert_eq!(status_reg_bob, StatusCode::OK);
 
+    let publish = publish_prekeys_payload(
+        &alice_sig,
+        [93u8; 32],
+        vec![94u8; 64],
+        vec![[95u8; 32]],
+        vec![vec![96u8; 64]],
+    );
+    let publish_auth = prekeys_auth_headers(&alice_sig, "alice", "alice-dev-1", &publish);
+    let (status_publish, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/prekeys",
+        publish,
+        &publish_auth,
+    )
+    .await;
+    assert_eq!(status_publish, StatusCode::OK);
+
     let alice_headers = profile_upsert_auth_headers(
         &alice_sig,
         "alice",
@@ -5369,6 +5562,7 @@ async fn profile_usernames_round_trip_and_enforce_uniqueness() {
         "alice",
         Some("Alice"),
         Some("@Alice.Secure"),
+        true,
         None,
         None,
     );
@@ -5385,6 +5579,10 @@ async fn profile_usernames_round_trip_and_enforce_uniqueness() {
     .await;
     assert_eq!(status_profile_upsert, StatusCode::OK);
     assert_eq!(profile_payload["username"].as_str(), Some("alice.secure"));
+    assert_eq!(
+        profile_payload["username_lookup_enabled"].as_bool(),
+        Some(true)
+    );
 
     let alice_get_headers = profile_get_auth_headers(&alice_sig, "alice", "alice-dev-1", "alice");
     let (status_profile_get, profile_get_payload) = json_request_with_headers(
@@ -5400,6 +5598,23 @@ async fn profile_usernames_round_trip_and_enforce_uniqueness() {
         profile_get_payload["username"].as_str(),
         Some("alice.secure")
     );
+    assert_eq!(
+        profile_get_payload["username_lookup_enabled"].as_bool(),
+        Some(true)
+    );
+
+    let bob_get_headers = profile_get_auth_headers(&bob_sig, "bob", "bob-dev-1", "alice");
+    let (status_bob_profile_get, bob_profile_payload) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/alice/profile",
+        json!({}),
+        &bob_get_headers,
+    )
+    .await;
+    assert_eq!(status_bob_profile_get, StatusCode::OK);
+    assert!(bob_profile_payload["username"].is_null());
+    assert!(bob_profile_payload["display_name"].is_null());
 
     let (status_lookup, lookup_payload) = json_request(
         app.clone(),
@@ -5412,6 +5627,68 @@ async fn profile_usernames_round_trip_and_enforce_uniqueness() {
     assert_eq!(lookup_payload["username"].as_str(), Some("alice.secure"));
     assert_eq!(lookup_payload["user_id"].as_str(), Some("alice"));
 
+    let (status_bundle_lookup, bundle_lookup_payload) = json_request(
+        app.clone(),
+        Method::GET,
+        "/v1/usernames/alice.secure/bundle",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_bundle_lookup, StatusCode::OK);
+    assert_eq!(bundle_lookup_payload["user_id"].as_str(), Some("alice"));
+    assert!(bundle_lookup_payload["identity_x25519_pub"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+
+    let hidden_headers = profile_upsert_auth_headers(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "alice",
+        Some("Alice"),
+        Some("alice.secure"),
+        false,
+        None,
+        None,
+    );
+    let (status_hidden_update, hidden_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice/profile",
+        json!({
+            "display_name": "Alice",
+            "username": "alice.secure",
+            "username_lookup_enabled": false
+        }),
+        &hidden_headers,
+    )
+    .await;
+    assert_eq!(status_hidden_update, StatusCode::OK);
+    assert_eq!(
+        hidden_payload["username_lookup_enabled"].as_bool(),
+        Some(false)
+    );
+
+    let (status_hidden_lookup, hidden_lookup_payload) = json_request(
+        app.clone(),
+        Method::GET,
+        "/v1/usernames/Alice.Secure",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_hidden_lookup, StatusCode::NOT_FOUND);
+    assert_eq!(hidden_lookup_payload["status"].as_u64(), Some(404));
+
+    let (status_hidden_bundle, hidden_bundle_payload) = json_request(
+        app.clone(),
+        Method::GET,
+        "/v1/usernames/alice.secure/bundle",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_hidden_bundle, StatusCode::NOT_FOUND);
+    assert_eq!(hidden_bundle_payload["status"].as_u64(), Some(404));
+
     let bob_headers = profile_upsert_auth_headers(
         &bob_sig,
         "bob",
@@ -5419,6 +5696,7 @@ async fn profile_usernames_round_trip_and_enforce_uniqueness() {
         "bob",
         Some("Bob"),
         Some("alice.secure"),
+        true,
         None,
         None,
     );
@@ -5487,6 +5765,7 @@ async fn rich_media_profile_and_disabled_metadata_signals_reject_before_input_va
         "alice",
         Some("Alice"),
         None,
+        false,
         Some("image/png"),
         None,
     );

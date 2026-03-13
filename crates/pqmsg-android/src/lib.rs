@@ -72,10 +72,15 @@ const AUTH_TAG_GROUP_ID: u16 = critical_type(0x321D);
 const AUTH_TAG_GROUP_MEMBER_USER_ID: u16 = critical_type(0x321E);
 const AUTH_TAG_GROUP_MEMBERS_HASH: u16 = critical_type(0x321F);
 const AUTH_TAG_GROUP_SENDER_USER_ID: u16 = critical_type(0x3220);
+const AUTH_TAG_PROFILE_DISPLAY_NAME_HASH: u16 = critical_type(0x3226);
+const AUTH_TAG_PROFILE_AVATAR_HASH: u16 = critical_type(0x3227);
+const AUTH_TAG_PROFILE_AVATAR_MIME_HASH: u16 = critical_type(0x3228);
 const AUTH_TAG_PRESENCE_STATUS: u16 = critical_type(0x3229);
 const AUTH_TAG_TYPING_PEER_ID: u16 = critical_type(0x322A);
 const AUTH_TAG_TYPING_STATE_FLAG: u16 = critical_type(0x322B);
 const AUTH_TAG_GROUP_RECIPIENTS_HASH: u16 = critical_type(0x322C);
+const AUTH_TAG_PROFILE_USERNAME_HASH: u16 = critical_type(0x322D);
+const AUTH_TAG_PROFILE_USERNAME_LOOKUP_ENABLED: u16 = critical_type(0x322E);
 const ROTATE_SIG_TAG_USER_ID: u16 = critical_type(0x3101);
 const ROTATE_SIG_TAG_CHALLENGE_ID: u16 = critical_type(0x3102);
 const ROTATE_SIG_TAG_CHALLENGE_NONCE: u16 = critical_type(0x3103);
@@ -1879,6 +1884,69 @@ pub fn build_profile_get_auth_headers(
     });
     let transcript = encode(&records)
         .map_err(|_| operation_failed("failed to encode profile-get auth transcript"))?;
+    let signature = signing_key.sign(&transcript).to_bytes();
+    Ok(RequestAuthHeaders {
+        auth_user: keys.user_id,
+        auth_device: keys.device_id,
+        auth_timestamp: timestamp.to_string(),
+        auth_nonce: nonce,
+        auth_signature: B64.encode(signature),
+    })
+}
+
+#[uniffi::export]
+pub fn build_profile_upsert_auth_headers(
+    keys_json: String,
+    user_id: String,
+    display_name: String,
+    username: String,
+    username_lookup_enabled: bool,
+    avatar_mime: String,
+    avatar_blob: String,
+) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
+    let keys = read_keys_file(&keys_json)?;
+    let signing_key = auth_signing_key_for_user(&keys)?;
+    let timestamp = auth_timestamp()?;
+    let nonce = auth_nonce();
+    let mut records = auth_common_records(
+        "profile-upsert",
+        &keys.user_id,
+        &keys.device_id,
+        timestamp,
+        &nonce,
+    );
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(display_name.trim().as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PROFILE_DISPLAY_NAME_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    let normalized_username = username.trim().trim_start_matches('@').to_ascii_lowercase();
+    hasher.update(normalized_username.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PROFILE_USERNAME_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PROFILE_USERNAME_LOOKUP_ENABLED,
+        value: vec![if username_lookup_enabled { 1 } else { 0 }],
+    });
+    hasher.update(avatar_blob.as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PROFILE_AVATAR_HASH,
+        value: hasher.finalize_reset().to_vec(),
+    });
+    hasher.update(avatar_mime.trim().as_bytes());
+    records.push(TlvRecord {
+        ty: AUTH_TAG_PROFILE_AVATAR_MIME_HASH,
+        value: hasher.finalize().to_vec(),
+    });
+    let transcript = encode(&records)
+        .map_err(|_| operation_failed("failed to encode profile-upsert auth transcript"))?;
     let signature = signing_key.sign(&transcript).to_bytes();
     Ok(RequestAuthHeaders {
         auth_user: keys.user_id,

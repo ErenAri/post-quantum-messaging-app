@@ -115,6 +115,7 @@ pub(crate) struct UpsertContactResponse {
 #[derive(Debug, Serialize)]
 pub(crate) struct ContactListItem {
     pub(crate) contact_user_id: String,
+    pub(crate) username: Option<String>,
     pub(crate) alias: Option<String>,
     pub(crate) verified_by_qr: bool,
     pub(crate) verified_fingerprint_sha256: Option<String>,
@@ -139,6 +140,15 @@ pub(crate) struct ContactInviteCreateResponse {
 pub(crate) struct ContactInviteResolveResponse {
     pub(crate) invite_token: String,
     pub(crate) user_id: String,
+    pub(crate) expires_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ContactDiscoveryTicketResponse {
+    pub(crate) user_id: String,
+    pub(crate) device_id: String,
+    pub(crate) service_origin: String,
+    pub(crate) ticket: String,
     pub(crate) expires_at: String,
 }
 
@@ -491,6 +501,7 @@ pub(crate) struct FileDownloadResponse {
 pub(crate) struct UpsertProfileRequest {
     pub(crate) display_name: Option<String>,
     pub(crate) username: Option<String>,
+    pub(crate) username_lookup_enabled: Option<bool>,
     pub(crate) avatar_mime: Option<String>,
     pub(crate) avatar_bytes_base64: Option<String>,
 }
@@ -529,6 +540,7 @@ pub(crate) struct UserProfileResponse {
     pub(crate) user_id: String,
     pub(crate) display_name: Option<String>,
     pub(crate) username: Option<String>,
+    pub(crate) username_lookup_enabled: bool,
     pub(crate) avatar_mime: Option<String>,
     pub(crate) avatar_bytes_base64: Option<String>,
     pub(crate) sealed_delivery_token: Option<String>,
@@ -695,6 +707,9 @@ pub(crate) struct ServerCapabilitiesResponse {
     pub(crate) prekey_bundle_reserve_count: i64,
     pub(crate) pq_ratchet_interval: u32,
     pub(crate) contact_discovery_supported: bool,
+    pub(crate) contact_discovery_mode: String,
+    pub(crate) contact_discovery_ticket_supported: bool,
+    pub(crate) contact_discovery_service_origin: Option<String>,
     pub(crate) presence_supported: bool,
     pub(crate) typing_indicators_supported: bool,
     pub(crate) read_receipts_supported: bool,

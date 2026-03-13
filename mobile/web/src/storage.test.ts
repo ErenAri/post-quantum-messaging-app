@@ -109,6 +109,7 @@ describe("loadSetup / saveSetup", () => {
       peerUserId: "bob",
       displayName: "Alice",
       username: "",
+      usernameLookupEnabled: false,
     };
     saveSetup(config);
     expect(loadSetup()).toEqual(config);
@@ -144,6 +145,7 @@ describe("loadSetup / saveSetup", () => {
       peerUserId: "",
       displayName: "",
       username: "",
+      usernameLookupEnabled: false,
     });
   });
 

@@ -94,6 +94,7 @@ Server startup is controlled by environment variables:
 - `PQMSG_RATE_LIMIT_BUCKET_TTL_SECS`: bucket entry TTL seconds (default: `600`)
 - `PQMSG_RATE_LIMIT_REDIS_URL`: optional Redis URL to enable distributed rate limiting
 - `PQMSG_RATE_LIMIT_REDIS_KEY_PREFIX`: optional Redis key prefix (default: `pqmsg:ratelimit:`)
+- `PQMSG_CONTACT_DISCOVERY_SERVICE_ORIGIN`: optional dedicated private contact discovery service origin (for example `https://cdsi.example`)
 - `PQMSG_REGISTRATION_POW_BITS`: optional registration proof-of-work difficulty override
 - `PQMSG_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS`: optional minimum interval between prekey publishes per user/device
 - `PQMSG_PREKEY_BUNDLE_RESERVE_COUNT`: optional one-time prekey reserve floor per device before returning last-resort bundle mode
@@ -124,6 +125,7 @@ The following endpoints require request authentication headers:
 - `GET /v1/users/{user_id}/devices`
 - `POST /v1/users/{user_id}/discovery/handles`
 - `POST /v1/users/{user_id}/discovery/match`
+- `POST /v1/users/{user_id}/contact-discovery/ticket`
 - `GET /v1/users/{user_id}/contacts`
 - `POST /v1/users/{user_id}/contacts`
 - `POST /v1/users/{user_id}/contacts/remove`
@@ -597,6 +599,7 @@ Response:
   "contacts": [
     {
       "contact_user_id": "bob",
+      "username": "bob.secure",
       "alias": "Bobby",
       "verified_by_qr": true,
       "verified_fingerprint_sha256": "hex...",
@@ -606,6 +609,8 @@ Response:
   ]
 }
 ```
+
+`username` is optional and, when present, is the contact's shareable server-local `@username` without the leading `@`.
 
 `POST /v1/users/{user_id}/contacts`
 
@@ -641,6 +646,22 @@ Response:
   "user_id": "alice",
   "invite_token": "4d7f8d1c7f2042d9b2f7e98c6d3f0a12",
   "expires_at": "2026-03-26T12:00:00Z"
+}
+```
+
+`POST /v1/users/{user_id}/contact-discovery/ticket`
+
+Authenticated request with no body. This does not enable raw-hash discovery on the app server. Instead, when `contact_discovery_mode` is `private_service`, it mints a short-lived opaque ticket for a separate private discovery service.
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "device_id": "alice-dev-1",
+  "service_origin": "https://cdsi.example",
+  "ticket": "base64(json-payload).base64(ed25519-signature)",
+  "expires_at": "2026-03-26T12:05:00Z"
 }
 ```
 
@@ -688,6 +709,7 @@ Response:
 `GET /v1/usernames/{username}`
 
 Resolves a shareable `@username` to the underlying account `user_id`.
+Returns `404` when the target account has disabled exact `@username` lookup.
 
 Response:
 
@@ -695,6 +717,34 @@ Response:
 {
   "username": "alice.secure",
   "user_id": "alice"
+}
+```
+
+`GET /v1/usernames/{username}/bundle`
+
+Returns the current prekey bundle for a shareable `@username` so manual contact bootstrap does not need a separate username-resolution call followed by `/v1/users/{user_id}/bundle`.
+Returns `404` when the target account has disabled exact `@username` lookup.
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "device_id": "alice-dev-1",
+  "identity_x25519_pub": "base64...",
+  "identity_sig_pub": "base64...",
+  "identity_pq_sig_pub": "base64...",
+  "signed_prekey_x25519_pub": "base64...",
+  "sig_over_spk": "base64...",
+  "pq_signed_prekey_pub_mlkem768": "base64...",
+  "sig_over_pqspk": "base64...",
+  "pq_sig_over_spk": "base64...",
+  "pq_sig_over_pqspk": "base64...",
+  "one_time_prekey_x25519": "base64...",
+  "one_time_prekey_mlkem768": "base64...",
+  "identity_key_version": 1,
+  "identity_fingerprint_sha256": "hex...",
+  "bundle_generated_at": "2026-03-12T12:00:00Z"
 }
 ```
 
@@ -828,7 +878,7 @@ Recipients obtain the delivery token from an authenticated profile read:
 
 `GET /v1/users/{user_id}/profile`
 
-The `sealed_delivery_token` field is only returned to the target user themself or to callers who have explicitly added that user as a contact.
+The `display_name`, `username`, `avatar_*`, and `sealed_delivery_token` fields are only returned to the target user themself or to callers who have explicitly added that user as a contact.
 
 `GET /v1/sealed-inbox/{user_id}?since=<message_id>`
 
@@ -927,12 +977,14 @@ Request:
 {
   "display_name": "Alice Example",
   "username": "alice.secure",
+  "username_lookup_enabled": true,
   "avatar_mime": "image/png",
   "avatar_bytes_base64": "base64(opaque_avatar_blob)"
 }
 ```
 
 `username` is optional. When present it is normalized to lowercase, must be 3..=32 characters, and is unique per server.
+`username_lookup_enabled` is optional. When `true`, exact `GET /v1/usernames/{username}` lookup stays enabled. When `false`, the account keeps its shareable `@username` for manual sharing, but exact server-side username lookup and username-bundle bootstrap return `404`.
 
 Both `avatar_mime` and `avatar_bytes_base64` MUST be supplied together or omitted together.
 
@@ -940,7 +992,7 @@ Both `avatar_mime` and `avatar_bytes_base64` MUST be supplied together or omitte
 
 Requires authenticated transport headers.
 
-`sealed_delivery_token` is withheld unless the caller is `{user_id}` or has explicitly added `{user_id}` as a contact.
+`display_name`, `username`, `avatar_*`, and `sealed_delivery_token` are withheld unless the caller is `{user_id}` or has explicitly added `{user_id}` as a contact.
 
 Response:
 
@@ -949,6 +1001,7 @@ Response:
   "user_id": "alice",
   "display_name": "Alice Example",
   "username": "alice.secure",
+  "username_lookup_enabled": true,
   "avatar_mime": "image/png",
   "avatar_bytes_base64": "base64(opaque_avatar_blob)",
   "sealed_delivery_token": "base64(12-byte recipient delivery token)",
@@ -1227,6 +1280,9 @@ Response:
   "prekey_bundle_reserve_count": 0,
   "pq_ratchet_interval": 1,
   "contact_discovery_supported": false,
+  "contact_discovery_mode": "manual_only",
+  "contact_discovery_ticket_supported": false,
+  "contact_discovery_service_origin": null,
   "group_messaging_supported": false,
   "sealed_sender_required": true,
   "sender_certificate_supported": true,
@@ -1268,6 +1324,9 @@ Response:
   "prekey_bundle_reserve_count": 2,
   "pq_ratchet_interval": 1,
   "contact_discovery_supported": false,
+  "contact_discovery_mode": "private_service",
+  "contact_discovery_ticket_supported": true,
+  "contact_discovery_service_origin": "https://cdsi.example",
   "group_messaging_supported": false,
   "sealed_sender_required": true,
   "sender_certificate_supported": true,
@@ -1281,6 +1340,9 @@ Response:
 
 Important capability flags:
 
+- `contact_discovery_supported`: raw-hash discovery inside the app server. Hardened deployments report `false`.
+- `contact_discovery_mode`: `manual_only` or `private_service`.
+- `contact_discovery_ticket_supported`: whether the server can mint short-lived tickets for a dedicated private discovery service.
 - `sealed_sender_required`: supported direct messaging must use sealed transport.
 - `sender_certificate_supported`: certified sealed-sender envelopes are available.
 - `sealed_delivery_tokens_supported`: sealed-relay ingress requires recipient delivery tokens.

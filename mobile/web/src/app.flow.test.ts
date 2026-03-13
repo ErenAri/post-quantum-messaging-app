@@ -178,6 +178,7 @@ async function bootApp(options: BootOptions = {}) {
     existingUsers: new Set(options.existingUsers ?? ["test1", "test2"]),
     bundleUsers: new Set(options.bundleUsers ?? options.existingUsers ?? ["test1", "test2"]),
     usernames: new Map<string, string>((options.existingUsers ?? ["test1", "test2"]).map((userId) => [userId, userId] as const)),
+    usernameLookupEnabledByUser: new Map<string, boolean>((options.existingUsers ?? ["test1", "test2"]).map((userId) => [userId, true] as const)),
     contacts: new Set<string>(),
     relays: [] as Array<{ peerId: string; body: string }>,
     presenceCalls: 0,
@@ -206,6 +207,9 @@ async function bootApp(options: BootOptions = {}) {
       prekey_bundle_reserve_count: 0,
       pq_ratchet_interval: 1,
       contact_discovery_supported: false,
+      contact_discovery_mode: "manual_only",
+      contact_discovery_ticket_supported: false,
+      contact_discovery_service_origin: null,
       presence_supported: false,
       typing_indicators_supported: false,
       read_receipts_supported: false,
@@ -486,35 +490,40 @@ async function bootApp(options: BootOptions = {}) {
           user_id: userId,
           display_name: userId,
           username,
+          username_lookup_enabled: apiState.usernameLookupEnabledByUser.get(userId) ?? Boolean(username),
           sealed_delivery_token:
-            options.profileTokensRequireContact && !apiState.contacts.has(userId)
-              ? null
-              : `delivery-token:${userId}`,
+              options.profileTokensRequireContact && !apiState.contacts.has(userId)
+                ? null
+                : `delivery-token:${userId}`,
         };
       }
 
-      async upsertProfile(userId: string, request: { display_name?: string; username?: string }) {
+      async upsertProfile(userId: string, request: { display_name?: string; username?: string; username_lookup_enabled?: boolean }) {
         if (!apiState.existingUsers.has(userId)) {
           throw new Error("HTTP 404: user not found");
         }
         const normalizedUsername = request.username?.trim().replace(/^@/, "").toLowerCase() || "";
+        const usernameLookupEnabled = Boolean(normalizedUsername) && (request.username_lookup_enabled ?? true);
         if (normalizedUsername) {
           const owner = apiState.usernames.get(normalizedUsername);
           if (owner && owner !== userId) {
             throw new Error("HTTP 409: username already claimed");
           }
           apiState.usernames.set(normalizedUsername, userId);
+          apiState.usernameLookupEnabledByUser.set(userId, usernameLookupEnabled);
         } else {
           for (const [candidate, owner] of [...apiState.usernames.entries()]) {
             if (owner === userId && candidate !== userId) {
               apiState.usernames.delete(candidate);
             }
           }
+          apiState.usernameLookupEnabledByUser.set(userId, false);
         }
         return {
           user_id: userId,
           display_name: request.display_name ?? userId,
           username: normalizedUsername || null,
+          username_lookup_enabled: usernameLookupEnabled,
           sealed_delivery_token: `delivery-token:${userId}`,
           updated_at: "2026-03-11T00:00:00Z",
         };
@@ -523,7 +532,7 @@ async function bootApp(options: BootOptions = {}) {
       async resolveUsername(username: string) {
         const normalizedUsername = username.trim().replace(/^@/, "").toLowerCase();
         const userId = apiState.usernames.get(normalizedUsername);
-        if (!userId) {
+        if (!userId || !apiState.usernameLookupEnabledByUser.get(userId)) {
           throw new Error("HTTP 404: username not found");
         }
         return {
@@ -558,6 +567,15 @@ async function bootApp(options: BootOptions = {}) {
       async getContactInviteBundle(inviteToken: string) {
         const mappedUserId = inviteToken === "opaque-token-123" ? "test2" : "test2";
         return this.getBundle(mappedUserId);
+      }
+
+      async getUsernameBundle(username: string) {
+        const normalizedUsername = username.trim().replace(/^@/, "").toLowerCase();
+        const userId = apiState.usernames.get(normalizedUsername);
+        if (!userId || !apiState.usernameLookupEnabledByUser.get(userId)) {
+          throw new Error("HTTP 404: username not found");
+        }
+        return this.getBundle(userId);
       }
 
       async getIdentityLog(userId: string) {

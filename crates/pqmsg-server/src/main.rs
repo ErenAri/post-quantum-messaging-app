@@ -447,6 +447,16 @@ async fn main() -> anyhow::Result<()> {
                 }
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
+    let contact_discovery_service_origin = env::var("PQMSG_CONTACT_DISCOVERY_SERVICE_ORIGIN")
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim().trim_end_matches('/').to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
     let runtime_suite_id = runtime_crypto_profile.suite_id;
     let runtime_pq_enabled = runtime_crypto_profile.pq_oqs_enabled;
     enforce_deployment_contract(DeploymentContract {
@@ -500,7 +510,8 @@ async fn main() -> anyhow::Result<()> {
             .with_sealed_realtime_hub(sealed_realtime_hub)
             .with_blob_store(blob_store)
             .with_ephemeral_state(ephemeral_state)
-            .with_sender_certificate_signing_key(sender_certificate_signing_key);
+            .with_sender_certificate_signing_key(sender_certificate_signing_key)
+            .with_contact_discovery_service_origin(contact_discovery_service_origin);
 
     // Spawn the ephemeral message expiry reaper
     tokio::spawn(pqmsg_server::run_message_expiry_reaper(state.clone()));

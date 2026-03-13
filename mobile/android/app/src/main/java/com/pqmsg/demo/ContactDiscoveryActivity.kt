@@ -105,9 +105,14 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                         textSize = 14f
                     }
                     val contact = currentContacts[position]
-                    val alias = contact.alias?.let { " ($it)" } ?: ""
                     val verified = if (contact.verified_by_qr) " ✓" else ""
-                    tv.text = "${contact.contact_user_id}$alias$verified"
+                    val primary = contactPrimaryLabel(contact)
+                    val secondary = contactSecondaryLabel(contact)
+                    tv.text = if (secondary.isNullOrBlank()) {
+                        "$primary$verified"
+                    } else {
+                        "$primary$verified\n$secondary"
+                    }
                     return tv
                 }
             }
@@ -138,8 +143,14 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                     userId = setup.userId,
                     suiteLabel = setup.suiteLabel,
                 )
-                val validatedBundle = target.inviteToken?.trim()?.takeIf { it.isNotBlank() }?.let {
-                    context.api.getContactInviteBundle(it)
+                val validatedBundle = when {
+                    !target.inviteToken.isNullOrBlank() -> context.api.getContactInviteBundle(
+                        target.inviteToken.trim(),
+                    )
+                    !target.username.isNullOrBlank() -> context.api.getUsernameBundle(
+                        target.username.trim(),
+                    )
+                    else -> null
                 }
                 val resolvedPeerUserId = validatedBundle?.user_id?.trim()?.removePrefix("@")
                     ?.takeIf { it.isNotBlank() }
@@ -180,7 +191,8 @@ class ContactDiscoveryActivity : AppCompatActivity() {
     private fun showContactActions(contact: ContactListItem) {
         val options = arrayOf("Open Chat", "Remove Contact")
         AlertDialog.Builder(this)
-            .setTitle(contact.contact_user_id)
+            .setTitle(contactPrimaryLabel(contact))
+            .setMessage(contactSecondaryLabel(contact))
             .setItems(options) { _, which ->
                 when (which) {
                     0 -> {
@@ -195,6 +207,20 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 }
             }
             .show()
+    }
+
+    private fun contactPrimaryLabel(contact: ContactListItem): String {
+        return contact.alias?.trim()?.takeIf { it.isNotBlank() } ?: contactHandle(contact)
+    }
+
+    private fun contactSecondaryLabel(contact: ContactListItem): String? {
+        val handle = contactHandle(contact)
+        return if (contactPrimaryLabel(contact) == handle) null else handle
+    }
+
+    private fun contactHandle(contact: ContactListItem): String {
+        val username = contact.username?.trim()?.removePrefix("@").orEmpty()
+        return if (username.isNotBlank()) "@$username" else contact.contact_user_id
     }
 
     private fun removeContact(contactUserId: String) {

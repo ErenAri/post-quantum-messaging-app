@@ -191,6 +191,35 @@ describe("PqmsgApi methods", () => {
     expect(opts.headers.get("x-pqmsg-auth-user")).toBeNull();
   });
 
+  it("getUsernameBundle sends unauthenticated GET", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        user_id: "alice",
+        device_id: "alice-dev-1",
+        identity_x25519_pub: "ix-pub",
+        identity_sig_pub: "sig-pub",
+        identity_pq_sig_pub: "pq-sig-pub",
+        signed_prekey_x25519_pub: "spk-pub",
+        sig_over_spk: "spk-sig",
+        pq_signed_prekey_pub_mlkem768: "pq-spk-pub",
+        sig_over_pqspk: "pq-spk-sig",
+        pq_sig_over_spk: "pq-sig-over-spk",
+        pq_sig_over_pqspk: "pq-sig-over-pqspk",
+        one_time_prekey_x25519: null,
+        one_time_prekey_mlkem768: null,
+        identity_key_version: 1,
+        identity_fingerprint_sha256: "ff".repeat(32),
+        bundle_generated_at: "2026-03-26T00:00:00Z",
+      })
+    );
+    const result = await api.getUsernameBundle("@Alice.Secure");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(result.user_id).toBe("alice");
+    expect(url).toBe("http://localhost:8080/v1/usernames/Alice.Secure/bundle");
+    expect(opts.method).toBe("GET");
+    expect(opts.headers.get("x-pqmsg-auth-user")).toBeNull();
+  });
+
   it("getPresence sends GET", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ user_id: "alice", status: "online" }));
     await api.getPresence("alice", fakeHeaders);

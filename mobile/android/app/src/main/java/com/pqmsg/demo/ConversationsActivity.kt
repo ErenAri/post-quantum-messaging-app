@@ -13,6 +13,7 @@ import androidx.lifecycle.lifecycleScope
 import com.google.gson.Gson
 import kotlinx.coroutines.launch
 import uniffi.pqmsg_android.buildContactInviteCreateAuthHeaders
+import uniffi.pqmsg_android.buildContactsListAuthHeaders
 import uniffi.pqmsg_android.buildGroupCreateAuthHeaders
 
 class ConversationsActivity : AppCompatActivity() {
@@ -31,6 +32,7 @@ class ConversationsActivity : AppCompatActivity() {
     private lateinit var conversationsList: ListView
     private lateinit var adapter: ConversationSummaryAdapter
     private var currentConversations: List<ConversationSummary> = emptyList()
+    private var currentContactsByPeer: Map<String, ContactListItem> = emptyMap()
     private var syncInFlight = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -68,6 +70,7 @@ class ConversationsActivity : AppCompatActivity() {
             return
         }
         renderHome()
+        refreshContactLabels()
         syncInbox()
     }
 
@@ -120,6 +123,7 @@ class ConversationsActivity : AppCompatActivity() {
     private fun refreshConversations() {
         val user = store.loadSetup().userId
         currentConversations = store.listConversations(user)
+        adapter.submitContactLabels(currentContactsByPeer)
         adapter.submitList(currentConversations)
         if (currentConversations.isEmpty()) {
             conversationsList.visibility = View.GONE
@@ -129,6 +133,36 @@ class ConversationsActivity : AppCompatActivity() {
             conversationsList.visibility = View.VISIBLE
             emptyText.visibility = View.GONE
             statusText.text = "${currentConversations.size} chat(s) ready."
+        }
+    }
+
+    private fun refreshContactLabels() {
+        val setup = store.loadSetup()
+        if (setup.userId.isBlank() || setup.serverUrl.isBlank()) {
+            return
+        }
+        lifecycleScope.launch {
+            runCatching {
+                val context = MessagingCoordinator.ensureReady(
+                    store = store,
+                    serverUrl = setup.serverUrl,
+                    userId = setup.userId,
+                    suiteLabel = setup.suiteLabel,
+                    deviceId = setup.deviceId,
+                )
+                context.api.listContacts(
+                    userId = context.profile.userId,
+                    headers = buildContactsListAuthHeaders(
+                        keysJson = context.keysJson,
+                        userId = context.profile.userId,
+                    ).toHeaderMap(),
+                ).contacts.associateBy { it.contact_user_id }
+            }.onSuccess { contacts ->
+                if (contacts != currentContactsByPeer) {
+                    currentContactsByPeer = contacts
+                    adapter.submitContactLabels(currentContactsByPeer)
+                }
+            }
         }
     }
 
@@ -210,8 +244,14 @@ class ConversationsActivity : AppCompatActivity() {
                             suiteLabel = setup.suiteLabel,
                             deviceId = setup.deviceId,
                         )
-                        val validatedBundle = target.inviteToken?.trim()?.takeIf { it.isNotBlank() }?.let {
-                            context.api.getContactInviteBundle(it)
+                        val validatedBundle = when {
+                            !target.inviteToken.isNullOrBlank() -> context.api.getContactInviteBundle(
+                                target.inviteToken.trim(),
+                            )
+                            !target.username.isNullOrBlank() -> context.api.getUsernameBundle(
+                                target.username.trim(),
+                            )
+                            else -> null
                         }
                         val resolvedPeerUserId = validatedBundle?.user_id?.trim()?.removePrefix("@")
                             ?.takeIf { it.isNotBlank() }
@@ -244,14 +284,29 @@ class ConversationsActivity : AppCompatActivity() {
             updateRequestsButton()
             return
         }
-        val labels = requests.map { "${it.peerUserId}\n${it.lastPreview}" }.toTypedArray()
+        val labels = requests.map { request ->
+            buildString {
+                append(resolvePeerPrimaryLabel(request.peerUserId))
+                resolvePeerSecondaryLabel(request.peerUserId)?.let { secondary ->
+                    append('\n')
+                    append(secondary)
+                }
+                append('\n')
+                append(request.lastPreview)
+            }
+        }.toTypedArray()
         AlertDialog.Builder(this)
             .setTitle(R.string.message_requests_title)
             .setItems(labels) { _, which ->
                 val request = requests[which]
                 AlertDialog.Builder(this)
-                    .setTitle(request.peerUserId)
-                    .setMessage(request.lastPreview)
+                    .setTitle(resolvePeerPrimaryLabel(request.peerUserId))
+                    .setMessage(
+                        listOfNotNull(
+                            resolvePeerSecondaryLabel(request.peerUserId),
+                            request.lastPreview,
+                        ).joinToString("\n"),
+                    )
                     .setNegativeButton(R.string.button_ignore_request) { _, _ ->
                         store.dismissMessageRequest(user, request.peerUserId)
                         renderHome()
@@ -265,6 +320,22 @@ class ConversationsActivity : AppCompatActivity() {
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    private fun resolvePeerPrimaryLabel(peerUserId: String): String {
+        val contact = currentContactsByPeer[peerUserId] ?: return peerUserId
+        return contact.alias?.trim()?.takeIf { it.isNotBlank() } ?: contactHandle(contact)
+    }
+
+    private fun resolvePeerSecondaryLabel(peerUserId: String): String? {
+        val contact = currentContactsByPeer[peerUserId] ?: return null
+        val handle = contactHandle(contact)
+        return if (resolvePeerPrimaryLabel(peerUserId) == handle) null else handle
+    }
+
+    private fun contactHandle(contact: ContactListItem): String {
+        val username = contact.username?.trim()?.removePrefix("@").orEmpty()
+        return if (username.isNotBlank()) "@$username" else contact.contact_user_id
     }
 
     private fun shareInvite() {

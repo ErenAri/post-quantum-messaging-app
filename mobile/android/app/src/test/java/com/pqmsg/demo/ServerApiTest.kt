@@ -97,6 +97,9 @@ class ServerApiTest {
               "prekey_bundle_reserve_count": 10,
               "pq_ratchet_interval": 1,
               "contact_discovery_supported": false,
+              "contact_discovery_mode": "manual_only",
+              "contact_discovery_ticket_supported": false,
+              "contact_discovery_service_origin": null,
               "presence_supported": false,
               "typing_indicators_supported": false,
               "read_receipts_supported": false,
@@ -119,6 +122,9 @@ class ServerApiTest {
         )
 
         assertEquals("demo_only", parsed.web_client_policy)
+        assertEquals("manual_only", parsed.contact_discovery_mode)
+        assertEquals(false, parsed.contact_discovery_ticket_supported)
+        assertNull(parsed.contact_discovery_service_origin)
         assertEquals("ml-kem-768", parsed.runtime_crypto_profile.kem)
         assertEquals(false, parsed.presence_supported)
         assertEquals(false, parsed.typing_indicators_supported)
@@ -164,6 +170,9 @@ class ServerApiTest {
               "prekey_bundle_reserve_count": 10,
               "pq_ratchet_interval": 5,
               "contact_discovery_supported": false,
+              "contact_discovery_mode": "manual_only",
+              "contact_discovery_ticket_supported": false,
+              "contact_discovery_service_origin": null,
               "presence_supported": false,
               "typing_indicators_supported": false,
               "read_receipts_supported": false,

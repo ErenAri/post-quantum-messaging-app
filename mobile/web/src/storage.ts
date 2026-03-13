@@ -21,6 +21,7 @@ export type SetupConfig = {
   peerUserId: string;
   displayName: string;
   username?: string;
+  usernameLookupEnabled?: boolean;
 };
 
 export type ConversationSummary = {
@@ -103,6 +104,7 @@ export const DEFAULT_SETUP: SetupConfig = {
   peerUserId: "bob",
   displayName: "",
   username: "",
+  usernameLookupEnabled: false,
 };
 
 export async function initMetadataStorage(): Promise<void> {
@@ -135,6 +137,9 @@ export function loadSetup(): SetupConfig {
       peerUserId: typeof parsed.peerUserId === "string" ? parsed.peerUserId : DEFAULT_SETUP.peerUserId,
       displayName: typeof parsed.displayName === "string" ? parsed.displayName : DEFAULT_SETUP.displayName,
       username: typeof parsed.username === "string" ? parsed.username : DEFAULT_SETUP.username,
+      usernameLookupEnabled: typeof parsed.usernameLookupEnabled === "boolean"
+        ? parsed.usernameLookupEnabled
+        : DEFAULT_SETUP.usernameLookupEnabled,
     };
   } catch {
     return DEFAULT_SETUP;

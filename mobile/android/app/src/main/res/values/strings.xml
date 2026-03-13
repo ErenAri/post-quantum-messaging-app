@@ -7,6 +7,9 @@
     <string name="security_title">Security Center</string>
     <string name="hint_server">Server URL</string>
     <string name="hint_user">Username</string>
+    <string name="hint_profile_display_name">Display name</string>
+    <string name="hint_shareable_username">@username</string>
+    <string name="label_allow_username_lookup">Allow exact @username lookup</string>
     <string name="hint_device">Device ID</string>
     <string name="hint_suite">Suite (ml-kem-768 or kyber768)</string>
     <string name="hint_peer">Peer User ID</string>
@@ -46,6 +49,8 @@
     <string name="button_share_invite">Share Invite</string>
     <string name="button_open_security_center">Open Security Center</string>
     <string name="button_refresh_security">Refresh Security Snapshot</string>
+    <string name="button_edit_shareable_profile">Edit Shareable Profile</string>
+    <string name="button_save_shareable_profile">Save Shareable Profile</string>
     <string name="button_list_devices">List Devices</string>
     <string name="button_link_device">Link Device</string>
     <string name="button_revoke_device">Revoke Device</string>

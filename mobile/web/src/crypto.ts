@@ -36,6 +36,7 @@ const AUTH_TAG_PROFILE_DISPLAY_NAME_HASH = criticalType(0x3226);
 const AUTH_TAG_PROFILE_AVATAR_HASH = criticalType(0x3227);
 const AUTH_TAG_PROFILE_AVATAR_MIME_HASH = criticalType(0x3228);
 const AUTH_TAG_PROFILE_USERNAME_HASH = criticalType(0x322d);
+const AUTH_TAG_PROFILE_USERNAME_LOOKUP_ENABLED = criticalType(0x322e);
 const AUTH_TAG_PRESENCE_STATUS = criticalType(0x3229);
 const AUTH_TAG_TYPING_PEER_ID = criticalType(0x322a);
 const AUTH_TAG_TYPING_STATE_FLAG = criticalType(0x322b);
@@ -378,6 +379,7 @@ export function buildProfileUpsertAuthHeaders(
   keys: GeneratedKeys,
   displayName: string,
   username: string,
+  usernameLookupEnabled: boolean,
   avatarMime: string,
   avatarBlob: string
 ): RequestAuthHeaders {
@@ -389,6 +391,10 @@ export function buildProfileUpsertAuthHeaders(
   records.push({
     ty: AUTH_TAG_PROFILE_USERNAME_HASH,
     value: sha256(utf8ToBytes(username.trim().replace(/^@/, "").toLowerCase()))
+  });
+  records.push({
+    ty: AUTH_TAG_PROFILE_USERNAME_LOOKUP_ENABLED,
+    value: new Uint8Array([usernameLookupEnabled ? 1 : 0])
   });
   records.push({ ty: AUTH_TAG_PROFILE_AVATAR_HASH, value: sha256(utf8ToBytes(avatarBlob)) });
   records.push({ ty: AUTH_TAG_PROFILE_AVATAR_MIME_HASH, value: sha256(utf8ToBytes(avatarMime)) });

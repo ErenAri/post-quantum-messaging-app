@@ -407,6 +407,7 @@ data class UpsertContactResponse(
 
 data class ContactListItem(
     val contact_user_id: String,
+    val username: String?,
     val alias: String?,
     val verified_by_qr: Boolean,
     val verified_fingerprint_sha256: String?,
@@ -442,11 +443,20 @@ data class ContactInviteResolveResponse(
     val expires_at: String,
 )
 
+data class ContactDiscoveryTicketResponse(
+    val user_id: String,
+    val device_id: String,
+    val service_origin: String,
+    val ticket: String,
+    val expires_at: String,
+)
+
 // Profile & Presence & Typing
 
 data class UpsertProfileRequest(
     val display_name: String?,
     val username: String?,
+    val username_lookup_enabled: Boolean?,
     val avatar_mime: String?,
     val avatar_bytes_base64: String?,
 )
@@ -455,6 +465,7 @@ data class UserProfileResponse(
     val user_id: String,
     val display_name: String?,
     val username: String?,
+    val username_lookup_enabled: Boolean?,
     val avatar_mime: String?,
     val avatar_bytes_base64: String?,
     val sealed_delivery_token: String?,
@@ -591,6 +602,9 @@ data class ServerCapabilitiesResponse(
     val prekey_bundle_reserve_count: Int,
     val pq_ratchet_interval: Int,
     val contact_discovery_supported: Boolean,
+    val contact_discovery_mode: String,
+    val contact_discovery_ticket_supported: Boolean,
+    val contact_discovery_service_origin: String?,
     val presence_supported: Boolean,
     val typing_indicators_supported: Boolean,
     val read_receipts_supported: Boolean,
@@ -854,6 +868,12 @@ interface PqmsgApi {
         @Body request: DiscoveryMatchRequest,
     ): DiscoveryMatchResponse
 
+    @POST("/v1/users/{user_id}/contact-discovery/ticket")
+    suspend fun issueContactDiscoveryTicket(
+        @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
+    ): ContactDiscoveryTicketResponse
+
     @GET("/v1/users/{user_id}/contacts")
     suspend fun listContacts(
         @Path("user_id") userId: String,
@@ -894,6 +914,11 @@ interface PqmsgApi {
     suspend fun resolveUsername(
         @Path("username") username: String,
     ): UsernameLookupResponse
+
+    @GET("/v1/usernames/{username}/bundle")
+    suspend fun getUsernameBundle(
+        @Path("username") username: String,
+    ): BundleResponse
 
     // Profile & Presence
 

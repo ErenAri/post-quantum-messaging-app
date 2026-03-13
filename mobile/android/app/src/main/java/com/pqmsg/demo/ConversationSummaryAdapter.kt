@@ -13,10 +13,16 @@ class ConversationSummaryAdapter(
 ) : BaseAdapter() {
     private val inflater = LayoutInflater.from(context)
     private val items = mutableListOf<ConversationSummary>()
+    private var contactLabels: Map<String, ContactListItem> = emptyMap()
 
     fun submitList(next: List<ConversationSummary>) {
         items.clear()
         items.addAll(next)
+        notifyDataSetChanged()
+    }
+
+    fun submitContactLabels(next: Map<String, ContactListItem>) {
+        contactLabels = next
         notifyDataSetChanged()
     }
 
@@ -35,7 +41,7 @@ class ConversationSummaryAdapter(
         val metaText = view.findViewById<TextView>(R.id.textConversationMeta)
         val unreadText = view.findViewById<TextView>(R.id.textConversationUnread)
 
-        peerText.text = item.peerUserId
+        peerText.text = buildPeerLabel(item.peerUserId)
         previewText.text = item.lastPreview
         metaText.text = buildMeta(item)
         if (item.unreadCount > 0) {
@@ -63,5 +69,23 @@ class ConversationSummaryAdapter(
         } else {
             freshness
         }
+    }
+
+    private fun buildPeerLabel(peerUserId: String): String {
+        val contact = contactLabels[peerUserId] ?: return peerUserId
+        val primary = contact.alias?.trim()?.takeIf { it.isNotBlank() } ?: contactHandle(contact)
+        val secondary = contactSecondaryLabel(contact)
+        return if (secondary.isNullOrBlank()) primary else "$primary • $secondary"
+    }
+
+    private fun contactSecondaryLabel(contact: ContactListItem): String? {
+        val handle = contactHandle(contact)
+        val primary = contact.alias?.trim()?.takeIf { it.isNotBlank() } ?: handle
+        return if (primary == handle) null else handle
+    }
+
+    private fun contactHandle(contact: ContactListItem): String {
+        val username = contact.username?.trim()?.removePrefix("@").orEmpty()
+        return if (username.isNotBlank()) "@$username" else contact.contact_user_id
     }
 }
