@@ -77,6 +77,14 @@ data class GroupSummary(
     val unreadCount: Int,
 )
 
+data class PrivateGroupLocalState(
+    val groupId: String,
+    val stateJson: String,
+    val memberCredentialJson: String,
+    val stateCommitmentSha256: String?,
+    val updatedAtMillis: Long,
+)
+
 class LocalStateStore(context: Context) {
     private val legacyPrefs = context.getSharedPreferences("pqmsg_android_setup", Context.MODE_PRIVATE)
     private val rootDir = File(context.filesDir, "pqmsg")
@@ -615,6 +623,59 @@ class LocalStateStore(context: Context) {
         deletePath(File(rootDir, "threads/$userId/group_$groupId.json"))
     }
 
+    fun writePrivateGroupState(
+        userId: String,
+        groupId: String,
+        stateJson: String,
+        memberCredentialJson: String,
+        stateCommitmentSha256: String? = null,
+    ) {
+        if (userId.isBlank() || groupId.isBlank()) return
+        val groups = readPrivateGroupIds(userId)
+        groups.add(groupId)
+        prefs.edit()
+            .putStringSet(privateGroupIdsKey(userId), LinkedHashSet(groups))
+            .apply()
+        writeProtectedFile(
+            File(rootDir, "private-groups/$userId/$groupId.json"),
+            gson.toJson(
+                PrivateGroupLocalState(
+                    groupId = groupId,
+                    stateJson = stateJson,
+                    memberCredentialJson = memberCredentialJson,
+                    stateCommitmentSha256 = stateCommitmentSha256?.trim()?.ifBlank { null },
+                    updatedAtMillis = System.currentTimeMillis(),
+                ),
+            ),
+        )
+    }
+
+    fun readPrivateGroupState(userId: String, groupId: String): PrivateGroupLocalState? {
+        if (userId.isBlank() || groupId.isBlank()) return null
+        val path = File(rootDir, "private-groups/$userId/$groupId.json")
+        val raw = readProtectedFile(path) ?: return null
+        return runCatching {
+            gson.fromJson(raw, PrivateGroupLocalState::class.java)
+        }.getOrNull()
+    }
+
+    fun listPrivateGroups(userId: String): List<PrivateGroupLocalState> {
+        if (userId.isBlank()) return emptyList()
+        return readPrivateGroupIds(userId)
+            .mapNotNull { groupId -> readPrivateGroupState(userId, groupId) }
+            .sortedByDescending { it.updatedAtMillis }
+    }
+
+    fun removePrivateGroupState(userId: String, groupId: String) {
+        if (userId.isBlank() || groupId.isBlank()) return
+        val groups = readPrivateGroupIds(userId)
+        groups.remove(groupId)
+        prefs.edit()
+            .putStringSet(privateGroupIdsKey(userId), LinkedHashSet(groups))
+            .apply()
+        deletePath(File(rootDir, "private-groups/$userId/$groupId.json"))
+    }
+
     fun listGroupThreadMessages(userId: String, groupId: String): List<ThreadMessage> {
         if (userId.isBlank() || groupId.isBlank()) return emptyList()
         migrateLegacyGroupThread(userId, groupId)
@@ -650,6 +711,12 @@ class LocalStateStore(context: Context) {
     }
 
     private fun groupIdsKey(userId: String) = "group_ids_$userId"
+
+    private fun readPrivateGroupIds(userId: String): LinkedHashSet<String> {
+        return LinkedHashSet(getStringSet(privateGroupIdsKey(userId)))
+    }
+
+    private fun privateGroupIdsKey(userId: String) = "private_group_ids_$userId"
 
     // Outbox (offline queue)
 
@@ -717,6 +784,7 @@ class LocalStateStore(context: Context) {
         deletePath(File(rootDir, "keys/$userId.json"))
         deletePath(File(rootDir, "sessions/$userId"))
         deletePath(File(rootDir, "threads/$userId"))
+        deletePath(File(rootDir, "private-groups/$userId"))
         deletePath(File(rootDir, "outbox/$userId.json"))
         messageStore.clearUser(userId)
         removePrefsForUser(userId)
@@ -820,6 +888,8 @@ class LocalStateStore(context: Context) {
             exactKeys = setOf(
                 "cursor_$userId",
                 "sealed_cursor_$userId",
+                groupIdsKey(userId),
+                privateGroupIdsKey(userId),
                 conversationPeersKey(userId),
                 messageRequestPeersKey(userId),
                 acceptedPeersKey(userId),
@@ -831,6 +901,7 @@ class LocalStateStore(context: Context) {
                 "bundle_${userId}_",
                 "pin_${userId}_",
                 "conv_${userId}_",
+                "group_${userId}_",
                 "request_${userId}_",
             ),
         )
@@ -839,6 +910,8 @@ class LocalStateStore(context: Context) {
             exactKeys = setOf(
                 "cursor_$userId",
                 "sealed_cursor_$userId",
+                groupIdsKey(userId),
+                privateGroupIdsKey(userId),
                 conversationPeersKey(userId),
                 messageRequestPeersKey(userId),
                 acceptedPeersKey(userId),
@@ -850,6 +923,7 @@ class LocalStateStore(context: Context) {
                 "bundle_${userId}_",
                 "pin_${userId}_",
                 "conv_${userId}_",
+                "group_${userId}_",
                 "request_${userId}_",
             ),
         )

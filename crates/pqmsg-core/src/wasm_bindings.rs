@@ -26,6 +26,12 @@ use crate::alg::{
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::dh::{DhKeyPair, DhPublicKey};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+use crate::groups::{
+    PrivateGroupAttributes, PrivateGroupEncryptedSnapshot, PrivateGroupEpochTransition,
+    PrivateGroupInvitePackage, PrivateGroupJoinPackage, PrivateGroupMember,
+    PrivateGroupMemberCredential, PrivateGroupRole, PrivateGroupState,
+};
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::handshake::{
     alice_initiate, bob_receive, validate_hybrid_prekey_bundle_signatures, InitialMessage,
     SignatureVerifier,
@@ -59,6 +65,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+use sha2::Digest;
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -580,6 +588,24 @@ struct WasmGeneratedKeysFile {
 }
 
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct WasmPrivateGroupRestoreResult {
+    state: PrivateGroupState,
+    member_credential: PrivateGroupMemberCredential,
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct WasmPrivateGroupCredentialMaterial {
+    membership_handle_sha256: String,
+    member_commitment_sha256: String,
+    fetch_key_base64: String,
+    fetch_key_sha256: String,
+    publish_key_base64: Option<String>,
+    publish_key_sha256: Option<String>,
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 #[derive(Clone, Debug, Deserialize)]
 struct WasmServerBundle {
     user_id: String,
@@ -594,6 +620,164 @@ struct WasmServerBundle {
     pq_sig_over_pqspk: String,
     one_time_prekey_x25519: Option<String>,
     one_time_prekey_mlkem768: Option<String>,
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+fn parse_private_group_role(role: &str) -> Result<PrivateGroupRole, JsValue> {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "owner" => Ok(PrivateGroupRole::Owner),
+        "admin" => Ok(PrivateGroupRole::Admin),
+        "member" => Ok(PrivateGroupRole::Member),
+        _ => Err(JsValue::from_str("invalid private group role")),
+    }
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+fn parse_json<T: serde::de::DeserializeOwned>(json: &str) -> Result<T, JsValue> {
+    serde_json::from_str(json).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+fn to_json<T: Serialize>(value: &T) -> Result<String, JsValue> {
+    serde_json::to_string_pretty(value).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+fn hex_string(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+fn private_group_credential_material(
+    credential: &PrivateGroupMemberCredential,
+) -> Result<WasmPrivateGroupCredentialMaterial, JsValue> {
+    let fetch_key = credential
+        .state_fetch_key()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let publish_key = credential
+        .state_publish_key()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(WasmPrivateGroupCredentialMaterial {
+        membership_handle_sha256: hex_string(&credential.membership_handle_sha256()),
+        member_commitment_sha256: hex_string(&credential.member_commitment_sha256()),
+        fetch_key_base64: B64.encode(fetch_key),
+        fetch_key_sha256: hex_string(&sha2::Sha256::digest(fetch_key)),
+        publish_key_base64: publish_key.map(|value| B64.encode(value)),
+        publish_key_sha256: publish_key
+            .map(|value| hex_string(&sha2::Sha256::digest(value))),
+    })
+}
+
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_private_group_create_state(
+    owner_user_id: &str,
+    attributes_json: &str,
+    initial_members_json: &str,
+    created_at_unix_seconds: u64,
+) -> Result<String, JsValue> {
+    let attributes: PrivateGroupAttributes = parse_json(attributes_json)?;
+    let initial_members: Vec<PrivateGroupMember> = parse_json(initial_members_json)?;
+    let state = PrivateGroupState::new(
+        owner_user_id.to_string(),
+        attributes,
+        initial_members,
+        created_at_unix_seconds,
+    )
+    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    to_json(&state)
+}
+
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_private_group_encrypt_snapshot(state_json: &str) -> Result<String, JsValue> {
+    let state: PrivateGroupState = parse_json(state_json)?;
+    let snapshot: PrivateGroupEncryptedSnapshot = state
+        .encrypted_snapshot()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    to_json(&snapshot)
+}
+
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_private_group_export_invite_package(state_json: &str) -> Result<String, JsValue> {
+    let state: PrivateGroupState = parse_json(state_json)?;
+    let invite: PrivateGroupInvitePackage = state
+        .export_invite_package()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    to_json(&invite)
+}
+
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_private_group_export_join_package_for_member(
+    state_json: &str,
+    member_user_id: &str,
+) -> Result<String, JsValue> {
+    let state: PrivateGroupState = parse_json(state_json)?;
+    let join_package: PrivateGroupJoinPackage = state
+        .export_join_package_for_member(member_user_id)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    to_json(&join_package)
+}
+
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_private_group_restore_join_package(join_package_json: &str) -> Result<String, JsValue> {
+    let join_package: PrivateGroupJoinPackage = parse_json(join_package_json)?;
+    let (state, member_credential) = join_package
+        .restore_state_and_credential()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    to_json(&WasmPrivateGroupRestoreResult {
+        state,
+        member_credential,
+    })
+}
+
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_private_group_describe_member_credential(
+    credential_json: &str,
+) -> Result<String, JsValue> {
+    let credential: PrivateGroupMemberCredential = parse_json(credential_json)?;
+    let material = private_group_credential_material(&credential)?;
+    to_json(&material)
+}
+
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_private_group_prepare_add_member_transition(
+    state_json: &str,
+    member_user_id: &str,
+    role: &str,
+    updated_at_unix_seconds: u64,
+) -> Result<String, JsValue> {
+    let state: PrivateGroupState = parse_json(state_json)?;
+    let next_role = parse_private_group_role(role)?;
+    let transition: PrivateGroupEpochTransition = state
+        .prepare_add_member_transition(member_user_id.to_string(), next_role, updated_at_unix_seconds)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    to_json(&transition)
+}
+
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_private_group_prepare_remove_member_transition(
+    state_json: &str,
+    member_user_id: &str,
+    updated_at_unix_seconds: u64,
+) -> Result<String, JsValue> {
+    let state: PrivateGroupState = parse_json(state_json)?;
+    let transition: PrivateGroupEpochTransition = state
+        .prepare_remove_member_transition(member_user_id, updated_at_unix_seconds)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    to_json(&transition)
 }
 
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]

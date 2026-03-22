@@ -6,6 +6,7 @@ pub mod ad;
 pub mod aead;
 pub mod alg;
 pub mod dh;
+pub mod groups;
 pub mod handshake;
 pub mod hsm;
 pub mod kdf;

@@ -107,6 +107,7 @@ class ServerApiTest {
               "stories_supported": false,
               "channels_supported": false,
               "group_messaging_supported": false,
+              "private_group_state_supported": true,
               "sealed_sender_required": true,
               "sender_certificate_supported": true,
               "key_transparency_supported": true,
@@ -135,6 +136,7 @@ class ServerApiTest {
         assertEquals(false, parsed.stories_supported)
         assertEquals(false, parsed.channels_supported)
         assertEquals(false, parsed.group_messaging_supported)
+        assertEquals(true, parsed.private_group_state_supported)
         assertEquals(true, parsed.sealed_sender_required)
         assertEquals(true, parsed.sender_certificate_supported)
         assertEquals(true, parsed.key_transparency_supported)
@@ -182,6 +184,7 @@ class ServerApiTest {
               "stories_supported": false,
               "channels_supported": false,
               "group_messaging_supported": false,
+              "private_group_state_supported": true,
               "sealed_sender_required": true,
               "sender_certificate_supported": true,
               "key_transparency_supported": true,
@@ -239,6 +242,7 @@ class ServerApiTest {
               "stories_supported": false,
               "channels_supported": false,
               "group_messaging_supported": false,
+              "private_group_state_supported": true,
               "sealed_sender_required": true,
               "sender_certificate_supported": true,
               "key_transparency_supported": true,
@@ -365,6 +369,7 @@ class ServerApiTest {
               "stories_supported": false,
               "channels_supported": false,
               "group_messaging_supported": false,
+              "private_group_state_supported": true,
               "sealed_sender_required": true,
               "sender_certificate_supported": true,
               "key_transparency_supported": true,

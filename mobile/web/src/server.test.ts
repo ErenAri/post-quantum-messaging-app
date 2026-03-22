@@ -220,6 +220,104 @@ describe("PqmsgApi methods", () => {
     expect(opts.headers.get("x-pqmsg-auth-user")).toBeNull();
   });
 
+  it("publishPrivateGroupState sends POST to the opaque state endpoint", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        group_id: "pg-1",
+        epoch: 1,
+        stored_member_count: 2,
+        published_at: "2026-03-26T00:00:00Z",
+      })
+    );
+    await api.publishPrivateGroupState({
+      group_id: "pg-1",
+      epoch: 1,
+      state_commitment_sha256: "aa".repeat(32),
+      ciphertext_nonce_base64: "bm9uY2UxMjM0NTY3",
+      ciphertext_base64: "Y2lwaGVydGV4dA==",
+      ciphertext_aad_base64: "YWFk",
+      authorizing_membership_handle_sha256: "bb".repeat(32),
+      authorizing_publish_key_base64: "cHVibGlzaC1rZXk=",
+      members: [],
+    });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("http://localhost:8080/v1/private-groups/state/publish");
+    expect(opts.method).toBe("POST");
+    expect(opts.headers.get("x-pqmsg-auth-user")).toBeNull();
+  });
+
+  it("fetchPrivateGroupState sends POST to the opaque fetch endpoint", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        group_id: "pg-1",
+        epoch: 2,
+        state_commitment_sha256: "cc".repeat(32),
+        ciphertext_nonce_base64: "bm9uY2UxMjM0NTY3",
+        ciphertext_base64: "Y2lwaGVydGV4dA==",
+        ciphertext_aad_base64: "YWFk",
+        published_at: "2026-03-26T00:00:00Z",
+      })
+    );
+    await api.fetchPrivateGroupState({
+      membership_handle_sha256: "aa".repeat(32),
+      fetch_key_base64: "ZmV0Y2gta2V5",
+    });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("http://localhost:8080/v1/private-groups/state/fetch");
+    expect(opts.method).toBe("POST");
+  });
+
+  it("private group invite methods use the opaque invite routes", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        invite_token: "invite-1",
+        group_id: "pg-1",
+        epoch: 1,
+        expires_at: "2026-03-30T00:00:00Z",
+        created_at: "2026-03-26T00:00:00Z",
+      })
+    );
+    await api.createPrivateGroupInvite({
+      group_id: "pg-1",
+      epoch: 1,
+      invite_commitment_sha256: "aa".repeat(32),
+      invite_ciphertext_nonce_base64: "bm9uY2UxMjM0NTY3",
+      invite_ciphertext_base64: "Y2lwaGVydGV4dA==",
+      invite_ciphertext_aad_base64: "YWFk",
+      authorizing_membership_handle_sha256: "bb".repeat(32),
+      authorizing_publish_key_base64: "cHVibGlzaC1rZXk=",
+    });
+    expect(mockFetch.mock.calls[0][0]).toBe("http://localhost:8080/v1/private-groups/invites");
+
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        invite_token: "invite-1",
+        group_id: "pg-1",
+        epoch: 1,
+        invite_commitment_sha256: "aa".repeat(32),
+        invite_ciphertext_nonce_base64: "bm9uY2UxMjM0NTY3",
+        invite_ciphertext_base64: "Y2lwaGVydGV4dA==",
+        invite_ciphertext_aad_base64: "YWFk",
+        created_at: "2026-03-26T00:00:00Z",
+        expires_at: "2026-03-30T00:00:00Z",
+      })
+    );
+    await api.resolvePrivateGroupInvite("invite-1");
+    expect(mockFetch.mock.calls[1][0]).toBe("http://localhost:8080/v1/private-groups/invites/invite-1");
+
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        invite_token: "invite-1",
+        consumed: true,
+        revoked_at: "2026-03-26T00:01:00Z",
+      })
+    );
+    await api.consumePrivateGroupInvite("invite-1");
+    const [url, opts] = mockFetch.mock.calls[2];
+    expect(url).toBe("http://localhost:8080/v1/private-groups/invites/invite-1");
+    expect(opts.method).toBe("POST");
+  });
+
   it("getPresence sends GET", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ user_id: "alice", status: "online" }));
     await api.getPresence("alice", fakeHeaders);

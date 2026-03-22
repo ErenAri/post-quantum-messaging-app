@@ -247,6 +247,94 @@ pub(crate) struct GroupRelayResponse {
     pub(crate) received_at: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct PrivateGroupMemberCredentialRecord {
+    pub(crate) membership_handle_sha256: String,
+    pub(crate) member_commitment_sha256: String,
+    pub(crate) fetch_key_sha256: String,
+    pub(crate) publish_key_sha256: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PublishPrivateGroupStateRequest {
+    pub(crate) group_id: String,
+    pub(crate) epoch: u64,
+    pub(crate) state_commitment_sha256: String,
+    pub(crate) ciphertext_nonce_base64: String,
+    pub(crate) ciphertext_base64: String,
+    pub(crate) ciphertext_aad_base64: String,
+    pub(crate) authorizing_membership_handle_sha256: String,
+    pub(crate) authorizing_publish_key_base64: String,
+    pub(crate) members: Vec<PrivateGroupMemberCredentialRecord>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PublishPrivateGroupStateResponse {
+    pub(crate) group_id: String,
+    pub(crate) epoch: u64,
+    pub(crate) stored_member_count: usize,
+    pub(crate) published_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FetchPrivateGroupStateRequest {
+    pub(crate) membership_handle_sha256: String,
+    pub(crate) fetch_key_base64: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FetchPrivateGroupStateResponse {
+    pub(crate) group_id: String,
+    pub(crate) epoch: u64,
+    pub(crate) state_commitment_sha256: String,
+    pub(crate) ciphertext_nonce_base64: String,
+    pub(crate) ciphertext_base64: String,
+    pub(crate) ciphertext_aad_base64: String,
+    pub(crate) published_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CreatePrivateGroupInviteRequest {
+    pub(crate) group_id: String,
+    pub(crate) epoch: u64,
+    pub(crate) invite_commitment_sha256: String,
+    pub(crate) invite_ciphertext_nonce_base64: String,
+    pub(crate) invite_ciphertext_base64: String,
+    pub(crate) invite_ciphertext_aad_base64: String,
+    pub(crate) authorizing_membership_handle_sha256: String,
+    pub(crate) authorizing_publish_key_base64: String,
+    pub(crate) expires_in_seconds: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CreatePrivateGroupInviteResponse {
+    pub(crate) invite_token: String,
+    pub(crate) group_id: String,
+    pub(crate) epoch: u64,
+    pub(crate) expires_at: String,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ResolvePrivateGroupInviteResponse {
+    pub(crate) invite_token: String,
+    pub(crate) group_id: String,
+    pub(crate) epoch: u64,
+    pub(crate) invite_commitment_sha256: String,
+    pub(crate) invite_ciphertext_nonce_base64: String,
+    pub(crate) invite_ciphertext_base64: String,
+    pub(crate) invite_ciphertext_aad_base64: String,
+    pub(crate) created_at: String,
+    pub(crate) expires_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ConsumePrivateGroupInviteResponse {
+    pub(crate) invite_token: String,
+    pub(crate) consumed: bool,
+    pub(crate) revoked_at: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct SealedRelayRequest {
     pub(crate) delivery_token: String,
@@ -717,6 +805,7 @@ pub(crate) struct ServerCapabilitiesResponse {
     pub(crate) stories_supported: bool,
     pub(crate) channels_supported: bool,
     pub(crate) group_messaging_supported: bool,
+    pub(crate) private_group_state_supported: bool,
     pub(crate) sealed_sender_required: bool,
     pub(crate) sender_certificate_supported: bool,
     pub(crate) key_transparency_supported: bool,

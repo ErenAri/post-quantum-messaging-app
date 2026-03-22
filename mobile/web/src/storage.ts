@@ -39,6 +39,14 @@ export type GroupConversationSummary = {
   updatedAt: number;
 };
 
+export type PrivateGroupLocalState = {
+  groupId: string;
+  stateJson: string;
+  memberCredentialJson: string;
+  stateCommitmentSha256: string | null;
+  updatedAt: number;
+};
+
 export type ConversationKind = "dm" | "group";
 
 export type ConversationRequestState = "accepted" | "pending" | "dismissed";
@@ -78,6 +86,7 @@ export type TransparencyCheckpoint = {
 const SETUP_KEY = "pqmsg.web.setup.v1";
 const CONVERSATIONS_KEY = "pqmsg.web.conversations.v1";
 const GROUP_CONVOS_KEY = "pqmsg.web.groupconvos.v1";
+const PRIVATE_GROUPS_KEY = "pqmsg.web.privategroups.v1";
 const CONVERSATION_META_KEY = "pqmsg.web.conversationmeta.v1";
 const PROFILE_CACHE_KEY = "pqmsg.web.profilecache.v1";
 const PINS_KEY = "pqmsg.web.pins.v1";
@@ -87,6 +96,7 @@ const METADATA_KEYS = [
   SETUP_KEY,
   CONVERSATIONS_KEY,
   GROUP_CONVOS_KEY,
+  PRIVATE_GROUPS_KEY,
   CONVERSATION_META_KEY,
   PROFILE_CACHE_KEY,
   PINS_KEY,
@@ -491,6 +501,7 @@ export function listIdentityPins(userId: string): Array<{ peerUserId: string; pi
 // --- Group conversations ---
 
 type GroupConvoRow = GroupConversationSummary & { userId: string };
+type PrivateGroupRow = PrivateGroupLocalState & { userId: string };
 
 export function loadGroupConversations(userId: string): GroupConversationSummary[] {
   const all = parseRecord<GroupConvoRow[]>(GROUP_CONVOS_KEY, []);
@@ -536,6 +547,65 @@ export function markGroupConversationRead(userId: string, groupId: string): void
   }
 }
 
+export function loadPrivateGroups(userId: string): PrivateGroupLocalState[] {
+  const all = parseRecord<PrivateGroupRow[]>(PRIVATE_GROUPS_KEY, []);
+  return all
+    .filter((item) => item.userId === userId)
+    .map((item) => ({
+      groupId: item.groupId,
+      stateJson: item.stateJson,
+      memberCredentialJson: item.memberCredentialJson,
+      stateCommitmentSha256: item.stateCommitmentSha256 ?? null,
+      updatedAt: item.updatedAt,
+    }))
+    .sort((lhs, rhs) => rhs.updatedAt - lhs.updatedAt);
+}
+
+export function readPrivateGroup(userId: string, groupId: string): PrivateGroupLocalState | null {
+  if (!userId.trim() || !groupId.trim()) {
+    return null;
+  }
+  return loadPrivateGroups(userId).find((item) => item.groupId === groupId) ?? null;
+}
+
+export function upsertPrivateGroup(
+  userId: string,
+  groupId: string,
+  stateJson: string,
+  memberCredentialJson: string,
+  stateCommitmentSha256?: string | null,
+): void {
+  if (!userId.trim() || !groupId.trim()) {
+    return;
+  }
+  const all = parseRecord<PrivateGroupRow[]>(PRIVATE_GROUPS_KEY, []);
+  const idx = all.findIndex((item) => item.userId === userId && item.groupId === groupId);
+  const nextRow: PrivateGroupRow = {
+    userId,
+    groupId,
+    stateJson,
+    memberCredentialJson,
+    stateCommitmentSha256: stateCommitmentSha256?.trim() || null,
+    updatedAt: Date.now(),
+  };
+  if (idx >= 0) {
+    all[idx] = nextRow;
+  } else {
+    all.push(nextRow);
+  }
+  writeRecord(PRIVATE_GROUPS_KEY, all);
+}
+
+export function removePrivateGroup(userId: string, groupId: string): void {
+  if (!userId.trim() || !groupId.trim()) {
+    return;
+  }
+  const all = parseRecord<PrivateGroupRow[]>(PRIVATE_GROUPS_KEY, []).filter(
+    (item) => !(item.userId === userId && item.groupId === groupId)
+  );
+  writeRecord(PRIVATE_GROUPS_KEY, all);
+}
+
 export async function wipeLocalState(userId: string): Promise<void> {
   const normalizedUser = userId.trim();
   if (!normalizedUser) {
@@ -554,6 +624,11 @@ export async function wipeLocalState(userId: string): Promise<void> {
     (item) => item.userId !== normalizedUser
   );
   writeRecord(GROUP_CONVOS_KEY, groupConvos);
+
+  const privateGroups = parseRecord<PrivateGroupRow[]>(PRIVATE_GROUPS_KEY, []).filter(
+    (item) => item.userId !== normalizedUser
+  );
+  writeRecord(PRIVATE_GROUPS_KEY, privateGroups);
 
   const conversationMeta = parseRecord<ConversationMetaRow[]>(CONVERSATION_META_KEY, []).filter(
     (item) => item.userId !== normalizedUser

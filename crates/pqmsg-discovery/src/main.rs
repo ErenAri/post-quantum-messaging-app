@@ -118,18 +118,32 @@ struct DiscoveryRegistry {
 impl DiscoveryRegistry {
     fn replace_handles(&mut self, user_id: &str, phone_hashes: &[String], email_hashes: &[String]) {
         let mut handles = Vec::with_capacity(phone_hashes.len() + email_hashes.len());
-        handles.extend(phone_hashes.iter().cloned().map(|hash_sha256| StoredHandle {
-            hash_sha256,
-            handle_kind: "phone".to_string(),
-        }));
-        handles.extend(email_hashes.iter().cloned().map(|hash_sha256| StoredHandle {
-            hash_sha256,
-            handle_kind: "email".to_string(),
-        }));
+        handles.extend(
+            phone_hashes
+                .iter()
+                .cloned()
+                .map(|hash_sha256| StoredHandle {
+                    hash_sha256,
+                    handle_kind: "phone".to_string(),
+                }),
+        );
+        handles.extend(
+            email_hashes
+                .iter()
+                .cloned()
+                .map(|hash_sha256| StoredHandle {
+                    hash_sha256,
+                    handle_kind: "email".to_string(),
+                }),
+        );
         self.user_handles.insert(user_id.to_string(), handles);
     }
 
-    fn match_hashes(&self, requester_user_id: &str, query_hashes: &[String]) -> Vec<DiscoveryMatchItem> {
+    fn match_hashes(
+        &self,
+        requester_user_id: &str,
+        query_hashes: &[String],
+    ) -> Vec<DiscoveryMatchItem> {
         let query_set: HashSet<&str> = query_hashes.iter().map(String::as_str).collect();
         let mut matches = Vec::new();
         for (user_id, handles) in &self.user_handles {
@@ -244,8 +258,10 @@ async fn upload_handles(
         Utc::now(),
     )
     .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
-    let phone_hashes = normalize_sha256_hashes("phone_hashes_sha256", &request.phone_hashes_sha256)?;
-    let email_hashes = normalize_sha256_hashes("email_hashes_sha256", &request.email_hashes_sha256)?;
+    let phone_hashes =
+        normalize_sha256_hashes("phone_hashes_sha256", &request.phone_hashes_sha256)?;
+    let email_hashes =
+        normalize_sha256_hashes("email_hashes_sha256", &request.email_hashes_sha256)?;
     let now = Utc::now().to_rfc3339();
     state
         .registry
@@ -285,22 +301,18 @@ async fn match_handles(
 }
 
 fn parse_ticket_issuer_verifying_key() -> Result<Arc<VerifyingKey>> {
-    let raw = env::var("PQMSG_CONTACT_DISCOVERY_TICKET_ISSUER_ED25519_PUB").with_context(|| {
-        "PQMSG_CONTACT_DISCOVERY_TICKET_ISSUER_ED25519_PUB is required"
-    })?;
+    let raw = env::var("PQMSG_CONTACT_DISCOVERY_TICKET_ISSUER_ED25519_PUB")
+        .with_context(|| "PQMSG_CONTACT_DISCOVERY_TICKET_ISSUER_ED25519_PUB is required")?;
     let decoded = B64
         .decode(raw.trim().as_bytes())
         .with_context(|| {
             "invalid PQMSG_CONTACT_DISCOVERY_TICKET_ISSUER_ED25519_PUB: expected base64-encoded 32-byte Ed25519 public key"
         })?;
-    let key_bytes: [u8; 32] = decoded
-        .as_slice()
-        .try_into()
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "invalid PQMSG_CONTACT_DISCOVERY_TICKET_ISSUER_ED25519_PUB: expected 32 decoded bytes"
-            )
-        })?;
+    let key_bytes: [u8; 32] = decoded.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "invalid PQMSG_CONTACT_DISCOVERY_TICKET_ISSUER_ED25519_PUB: expected 32 decoded bytes"
+        )
+    })?;
     let verifying_key = VerifyingKey::from_bytes(&key_bytes).with_context(|| {
         "invalid PQMSG_CONTACT_DISCOVERY_TICKET_ISSUER_ED25519_PUB: invalid Ed25519 public key"
     })?;
@@ -337,8 +349,8 @@ pub(crate) fn verify_contact_discovery_ticket(
         .verify(&payload_bytes, &signature)
         .context("verify contact discovery ticket signature")?;
 
-    let claims: ContactDiscoveryTicketClaims = serde_json::from_slice(&payload_bytes)
-        .context("parse contact discovery ticket payload")?;
+    let claims: ContactDiscoveryTicketClaims =
+        serde_json::from_slice(&payload_bytes).context("parse contact discovery ticket payload")?;
     if claims.v != 1 {
         anyhow::bail!("unsupported contact discovery ticket version");
     }
@@ -357,7 +369,9 @@ pub(crate) fn verify_contact_discovery_ticket(
     if expires_at <= issued_at {
         anyhow::bail!("contact discovery ticket expires_at must be after issued_at");
     }
-    if expires_at.signed_duration_since(issued_at).num_seconds() > CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS {
+    if expires_at.signed_duration_since(issued_at).num_seconds()
+        > CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS
+    {
         anyhow::bail!("contact discovery ticket exceeds max ttl");
     }
     if expires_at <= now {
@@ -429,18 +443,18 @@ mod tests {
         };
         let payload = serde_json::to_vec(&claims).expect("serialize claims");
         let signature = signing_key.sign(&payload).to_bytes();
-        (format!("{}.{}", B64.encode(payload), B64.encode(signature)), claims)
+        (
+            format!("{}.{}", B64.encode(payload), B64.encode(signature)),
+            claims,
+        )
     }
 
     #[test]
     fn verify_contact_discovery_ticket_accepts_valid_ticket() {
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
         let verifying_key = signing_key.verifying_key();
-        let (ticket, claims) = signed_ticket(
-            &signing_key,
-            "2026-03-13T12:00:00Z",
-            "2026-03-13T12:05:00Z",
-        );
+        let (ticket, claims) =
+            signed_ticket(&signing_key, "2026-03-13T12:00:00Z", "2026-03-13T12:05:00Z");
         let verified = verify_contact_discovery_ticket(
             &verifying_key,
             &ticket,
@@ -456,11 +470,8 @@ mod tests {
     fn verify_contact_discovery_ticket_rejects_expired_ticket() {
         let signing_key = SigningKey::from_bytes(&[8u8; 32]);
         let verifying_key = signing_key.verifying_key();
-        let (ticket, _) = signed_ticket(
-            &signing_key,
-            "2026-03-13T12:00:00Z",
-            "2026-03-13T12:05:00Z",
-        );
+        let (ticket, _) =
+            signed_ticket(&signing_key, "2026-03-13T12:00:00Z", "2026-03-13T12:05:00Z");
         let error = verify_contact_discovery_ticket(
             &verifying_key,
             &ticket,
@@ -495,11 +506,7 @@ mod tests {
     #[test]
     fn registry_replaces_handles_and_matches_other_users() {
         let mut registry = DiscoveryRegistry::default();
-        registry.replace_handles(
-            "alice",
-            &["11".repeat(32)],
-            &["22".repeat(32)],
-        );
+        registry.replace_handles("alice", &["11".repeat(32)], &["22".repeat(32)]);
         registry.replace_handles(
             "bob",
             &["33".repeat(32)],

@@ -506,6 +506,10 @@ impl AppState {
         false
     }
 
+    pub fn private_group_state_supported(&self) -> bool {
+        true
+    }
+
     pub fn sealed_sender_required(&self) -> bool {
         true
     }
@@ -2002,6 +2006,22 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/v1/usernames/:username", get(resolve_username))
         .route("/v1/usernames/:username/bundle", get(get_username_bundle))
+        .route(
+            "/v1/private-groups/state/publish",
+            post(publish_private_group_state),
+        )
+        .route(
+            "/v1/private-groups/state/fetch",
+            post(fetch_private_group_state),
+        )
+        .route(
+            "/v1/private-groups/invites",
+            post(create_private_group_invite),
+        )
+        .route(
+            "/v1/private-groups/invites/:invite_token",
+            get(resolve_private_group_invite).post(consume_private_group_invite),
+        )
         .route("/v1/users/:user_id/groups", get(list_user_groups))
         .route("/v1/groups", post(create_group))
         .route("/v1/groups/:group_id/members", get(list_group_members))

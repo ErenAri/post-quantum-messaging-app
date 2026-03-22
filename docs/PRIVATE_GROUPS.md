@@ -6,6 +6,8 @@ Current product posture:
 
 - Group messaging is disabled in the hardened Android/web profile.
 - The existing server-side group model is too metadata-visible for a Signal-class privacy claim.
+- `pqmsg-core` now contains the first shared opaque-state primitive: a client-managed private-group state object, an encrypted snapshot format, invite-package roundtrips, a join-package primitive, and an initial opaque member-credential primitive.
+- `pqmsg-server` now exposes the first opaque private-group storage contract: state publish/fetch backed by encrypted snapshots plus hashed membership handles and derived fetch/publish capabilities.
 - This document defines the next honest implementation boundary before groups are re-enabled.
 
 ## Research Baseline
@@ -95,8 +97,11 @@ Group membership and epoch transitions need user-visible trust surfaces:
 ## Recommended Implementation Order
 
 1. Define the opaque group-state object in `pqmsg-core`.
+   Status: implemented as the current `PrivateGroupState`, `PrivateGroupEncryptedSnapshot`, and `PrivateGroupInvitePackage` primitives.
 2. Define the membership-credential model and server storage contract.
+   Status: partially implemented in `pqmsg-core` as `PrivateGroupMemberCredential`, and partially implemented on the server as opaque `private-groups/state/publish` and `private-groups/state/fetch` endpoints backed by encrypted state blobs. Invite/join/remove flows still need to be built on top of that storage layer.
 3. Implement create / invite / join / remove / epoch-rotate flows using opaque state updates.
+   Status: partially implemented on the server with opaque invite issuance/resolution bound to the latest group epoch and current publish capability. Join, remove, and full client flows are still pending.
 4. Add encrypted group message transport on top of that state model.
 5. Add Android/web trust UX for group membership and epoch changes.
 6. Only then re-enable `group_messaging_supported`.

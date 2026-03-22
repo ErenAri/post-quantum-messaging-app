@@ -8,6 +8,7 @@ mod identity;
 mod invites;
 mod messaging;
 mod prekeys;
+mod private_groups;
 mod profile;
 mod receipts;
 mod stories;
@@ -25,6 +26,7 @@ pub(crate) use identity::*;
 pub(crate) use invites::*;
 pub(crate) use messaging::*;
 pub(crate) use prekeys::*;
+pub(crate) use private_groups::*;
 pub(crate) use profile::*;
 pub(crate) use receipts::*;
 pub(crate) use stories::*;
@@ -63,6 +65,7 @@ fn capabilities_response(state: &AppState) -> ServerCapabilitiesResponse {
         stories_supported: state.stories_supported(),
         channels_supported: state.channels_supported(),
         group_messaging_supported: state.group_messaging_supported(),
+        private_group_state_supported: state.private_group_state_supported(),
         sealed_sender_required: state.sealed_sender_required(),
         sender_certificate_supported: state.sender_certificate_supported(),
         key_transparency_supported: state.key_transparency_supported(),

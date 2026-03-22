@@ -90,6 +90,83 @@ export interface WasmTransparencyVerificationResult {
   epoch: number;
 }
 
+export type PrivateGroupRole = "Owner" | "Admin" | "Member";
+
+export interface PrivateGroupAttributes {
+  title: string;
+  description: string | null;
+  avatar_hash_sha256: string | null;
+  disappearing_message_timer_seconds: number | null;
+}
+
+export interface PrivateGroupMember {
+  user_id: string;
+  role: PrivateGroupRole;
+}
+
+export interface PrivateGroupCiphertextEnvelope {
+  nonce: number[];
+  ciphertext: number[];
+  aad: number[];
+}
+
+export interface PrivateGroupEncryptedSnapshot {
+  group_id: string;
+  epoch: number;
+  state_commitment_sha256: number[];
+  ciphertext: PrivateGroupCiphertextEnvelope;
+}
+
+export interface PrivateGroupInvitePackage {
+  group_id: string;
+  epoch: number;
+  root_secret: number[];
+  snapshot: PrivateGroupEncryptedSnapshot;
+}
+
+export interface PrivateGroupMemberCredential {
+  group_id: string;
+  epoch: number;
+  member_user_id: string;
+  role: PrivateGroupRole;
+  credential_secret: number[];
+}
+
+export interface PrivateGroupJoinPackage {
+  invite: PrivateGroupInvitePackage;
+  member_credential: PrivateGroupMemberCredential;
+}
+
+export interface PrivateGroupState {
+  group_id: string;
+  epoch: number;
+  root_secret: number[];
+  attributes: PrivateGroupAttributes;
+  members: PrivateGroupMember[];
+  created_at_unix_seconds: number;
+  updated_at_unix_seconds: number;
+}
+
+export interface PrivateGroupCredentialMaterial {
+  membership_handle_sha256: string;
+  member_commitment_sha256: string;
+  fetch_key_base64: string;
+  fetch_key_sha256: string;
+  publish_key_base64: string | null;
+  publish_key_sha256: string | null;
+}
+
+export interface PrivateGroupRestoreResult {
+  state: PrivateGroupState;
+  member_credential: PrivateGroupMemberCredential;
+}
+
+export interface PrivateGroupEpochTransition {
+  next_state: PrivateGroupState;
+  member_credentials: PrivateGroupMemberCredential[];
+  added_member_join_package: PrivateGroupJoinPackage | null;
+}
+
 export interface KemKeyPair {
   public_key: Uint8Array;
   secret_key: Uint8Array;
@@ -108,6 +185,13 @@ export interface PqSigKeyPair {
 // Lazy-loaded WASM module typed as any because the pkg may not exist at build time.
 let wasmModule: Record<string, (...args: unknown[]) => unknown> | null = null;
 let wasmLoadAttempted = false;
+
+function parseJsonResult<T>(json: unknown): T {
+  if (typeof json !== "string") {
+    throw new Error("Unexpected WASM JSON payload");
+  }
+  return JSON.parse(json) as T;
+}
 
 /** Try to load the WASM module. Returns true if available. */
 export async function initWasm(): Promise<boolean> {
@@ -390,4 +474,122 @@ export function openSealedMessageWithSenderCert(
     sealedMessageBytesBase64,
     serverIssuerEd25519Pub
   ) as WasmOpenedCertifiedSealedMessage;
+}
+
+export function privateGroupBindingsAvailable(): boolean {
+  return wasmModule !== null
+    && typeof wasmModule.wasm_private_group_create_state === "function"
+    && typeof wasmModule.wasm_private_group_describe_member_credential === "function";
+}
+
+export function privateGroupCreateState(
+  ownerUserId: string,
+  attributes: PrivateGroupAttributes,
+  initialMembers: PrivateGroupMember[],
+  createdAtUnixSeconds: number
+): PrivateGroupState {
+  if (!privateGroupBindingsAvailable()) {
+    throw new Error("WASM private group bindings are not available");
+  }
+  return parseJsonResult<PrivateGroupState>(
+    wasmModule!.wasm_private_group_create_state(
+      ownerUserId,
+      JSON.stringify(attributes),
+      JSON.stringify(initialMembers),
+      createdAtUnixSeconds
+    )
+  );
+}
+
+export function privateGroupEncryptSnapshot(state: PrivateGroupState): PrivateGroupEncryptedSnapshot {
+  if (!privateGroupBindingsAvailable()) {
+    throw new Error("WASM private group bindings are not available");
+  }
+  return parseJsonResult<PrivateGroupEncryptedSnapshot>(
+    wasmModule!.wasm_private_group_encrypt_snapshot(JSON.stringify(state))
+  );
+}
+
+export function privateGroupExportInvitePackage(
+  state: PrivateGroupState
+): PrivateGroupInvitePackage {
+  if (!privateGroupBindingsAvailable()) {
+    throw new Error("WASM private group bindings are not available");
+  }
+  return parseJsonResult<PrivateGroupInvitePackage>(
+    wasmModule!.wasm_private_group_export_invite_package(JSON.stringify(state))
+  );
+}
+
+export function privateGroupExportJoinPackageForMember(
+  state: PrivateGroupState,
+  memberUserId: string
+): PrivateGroupJoinPackage {
+  if (!privateGroupBindingsAvailable()) {
+    throw new Error("WASM private group bindings are not available");
+  }
+  return parseJsonResult<PrivateGroupJoinPackage>(
+    wasmModule!.wasm_private_group_export_join_package_for_member(
+      JSON.stringify(state),
+      memberUserId
+    )
+  );
+}
+
+export function privateGroupRestoreJoinPackage(
+  joinPackage: PrivateGroupJoinPackage
+): PrivateGroupRestoreResult {
+  if (!privateGroupBindingsAvailable()) {
+    throw new Error("WASM private group bindings are not available");
+  }
+  return parseJsonResult<PrivateGroupRestoreResult>(
+    wasmModule!.wasm_private_group_restore_join_package(JSON.stringify(joinPackage))
+  );
+}
+
+export function privateGroupDescribeMemberCredential(
+  credential: PrivateGroupMemberCredential
+): PrivateGroupCredentialMaterial {
+  if (!privateGroupBindingsAvailable()) {
+    throw new Error("WASM private group bindings are not available");
+  }
+  return parseJsonResult<PrivateGroupCredentialMaterial>(
+    wasmModule!.wasm_private_group_describe_member_credential(JSON.stringify(credential))
+  );
+}
+
+export function privateGroupPrepareAddMemberTransition(
+  state: PrivateGroupState,
+  memberUserId: string,
+  role: PrivateGroupRole,
+  updatedAtUnixSeconds: number
+): PrivateGroupEpochTransition {
+  if (!privateGroupBindingsAvailable()) {
+    throw new Error("WASM private group bindings are not available");
+  }
+  return parseJsonResult<PrivateGroupEpochTransition>(
+    wasmModule!.wasm_private_group_prepare_add_member_transition(
+      JSON.stringify(state),
+      memberUserId,
+      role,
+      updatedAtUnixSeconds
+    )
+  );
+}
+
+export function privateGroupPrepareRemoveMemberTransition(
+  state: PrivateGroupState,
+  memberUserId: string,
+  updatedAtUnixSeconds: number
+): PrivateGroupEpochTransition {
+  if (!privateGroupBindingsAvailable()) {
+    throw new Error("WASM private group bindings are not available");
+  }
+  return parseJsonResult<PrivateGroupEpochTransition>(
+    wasmModule!.wasm_private_group_prepare_remove_member_transition(
+      JSON.stringify(state),
+      memberUserId,
+      updatedAtUnixSeconds
+    )
+  );
 }

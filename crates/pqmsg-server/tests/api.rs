@@ -1565,6 +1565,43 @@ fn hash_group_recipients(recipients: &[(&str, &[u8])]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+struct PrivateGroupMemberFixture {
+    record: Value,
+    membership_handle_sha256: String,
+    fetch_key_base64: String,
+    publish_key_base64: Option<String>,
+}
+
+fn private_group_member_fixture(seed: u8, allow_publish: bool) -> PrivateGroupMemberFixture {
+    let handle_material = [seed; 16];
+    let member_commitment_material = [seed.wrapping_add(1); 16];
+    let fetch_key = [seed.wrapping_add(2); 32];
+    let publish_key = allow_publish.then(|| [seed.wrapping_add(3); 32]);
+
+    let membership_handle_sha256 = sha256_hex(&handle_material);
+    let member_commitment_sha256 = sha256_hex(&member_commitment_material);
+    let fetch_key_sha256 = sha256_hex(&fetch_key);
+    let publish_key_sha256 = publish_key.as_ref().map(|bytes| sha256_hex(bytes));
+    let fetch_key_base64 = B64.encode(fetch_key);
+    let publish_key_base64 = publish_key.map(|bytes| B64.encode(bytes));
+
+    PrivateGroupMemberFixture {
+        record: json!({
+            "membership_handle_sha256": membership_handle_sha256,
+            "member_commitment_sha256": member_commitment_sha256,
+            "fetch_key_sha256": fetch_key_sha256,
+            "publish_key_sha256": publish_key_sha256,
+        }),
+        membership_handle_sha256,
+        fetch_key_base64,
+        publish_key_base64,
+    }
+}
+
 fn prekeys_auth_headers(
     signing_key: &SigningKey,
     user_id: &str,
@@ -2435,11 +2472,9 @@ async fn capabilities_reports_client_contract() {
         Some(false)
     );
     assert!(body["contact_discovery_service_origin"].is_null());
-    assert!(
-        body["contact_discovery_ticket_issuer_ed25519_pub"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty())
-    );
+    assert!(body["contact_discovery_ticket_issuer_ed25519_pub"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
     assert_eq!(body["presence_supported"].as_bool(), Some(false));
     assert_eq!(body["typing_indicators_supported"].as_bool(), Some(false));
     assert_eq!(
@@ -2451,6 +2486,7 @@ async fn capabilities_reports_client_contract() {
     assert_eq!(body["stories_supported"].as_bool(), Some(false));
     assert_eq!(body["channels_supported"].as_bool(), Some(false));
     assert_eq!(body["group_messaging_supported"].as_bool(), Some(false));
+    assert_eq!(body["private_group_state_supported"].as_bool(), Some(true));
     assert_eq!(body["sealed_sender_required"].as_bool(), Some(true));
     assert_eq!(
         body["sealed_delivery_tokens_supported"].as_bool(),
@@ -6236,6 +6272,506 @@ async fn group_member_mutation_endpoints_are_disabled_before_owner_checks() {
     )
     .await;
     assert_eq!(status_owner_add, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn private_group_state_bootstrap_publish_and_fetch_work() {
+    let app = test_app().await;
+    let admin = private_group_member_fixture(10, true);
+    let member = private_group_member_fixture(20, false);
+
+    let publish_body = json!({
+        "group_id": "private-group-alpha",
+        "epoch": 1,
+        "state_commitment_sha256": sha256_hex(b"private-group-alpha-state-v1"),
+        "ciphertext_nonce_base64": B64.encode([7u8; 12]),
+        "ciphertext_base64": B64.encode(b"encrypted-private-group-state-v1"),
+        "ciphertext_aad_base64": B64.encode(b"private-group-aad-v1"),
+        "authorizing_membership_handle_sha256": admin.membership_handle_sha256,
+        "authorizing_publish_key_base64": admin
+            .publish_key_base64
+            .clone()
+            .expect("admin publish key"),
+        "members": [admin.record.clone(), member.record.clone()],
+    });
+    let (publish_status, publish_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/publish",
+        publish_body,
+    )
+    .await;
+    assert_eq!(publish_status, StatusCode::OK);
+    assert_eq!(
+        publish_payload["group_id"].as_str(),
+        Some("private-group-alpha")
+    );
+    assert_eq!(publish_payload["epoch"].as_u64(), Some(1));
+    assert_eq!(publish_payload["stored_member_count"].as_u64(), Some(2));
+
+    let fetch_body = json!({
+        "membership_handle_sha256": member.membership_handle_sha256,
+        "fetch_key_base64": member.fetch_key_base64,
+    });
+    let (fetch_status, fetch_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/fetch",
+        fetch_body,
+    )
+    .await;
+    assert_eq!(fetch_status, StatusCode::OK);
+    assert_eq!(
+        fetch_payload["group_id"].as_str(),
+        Some("private-group-alpha")
+    );
+    assert_eq!(fetch_payload["epoch"].as_u64(), Some(1));
+    assert_eq!(
+        fetch_payload["state_commitment_sha256"].as_str(),
+        Some(sha256_hex(b"private-group-alpha-state-v1").as_str())
+    );
+    assert_eq!(
+        fetch_payload["ciphertext_base64"].as_str(),
+        Some(B64.encode(b"encrypted-private-group-state-v1").as_str())
+    );
+}
+
+#[tokio::test]
+async fn private_group_state_epoch_rotation_revokes_old_handles() {
+    let app = test_app().await;
+    let admin_v1 = private_group_member_fixture(30, true);
+    let member_v1 = private_group_member_fixture(31, false);
+    let admin_v2 = private_group_member_fixture(40, true);
+    let member_v2 = private_group_member_fixture(41, false);
+
+    let (publish_v1_status, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/publish",
+        json!({
+            "group_id": "private-group-rotation",
+            "epoch": 1,
+            "state_commitment_sha256": sha256_hex(b"private-group-rotation-v1"),
+            "ciphertext_nonce_base64": B64.encode([8u8; 12]),
+            "ciphertext_base64": B64.encode(b"encrypted-private-group-rotation-v1"),
+            "ciphertext_aad_base64": B64.encode(b"private-group-rotation-aad-v1"),
+            "authorizing_membership_handle_sha256": admin_v1.membership_handle_sha256,
+            "authorizing_publish_key_base64": admin_v1
+                .publish_key_base64
+                .clone()
+                .expect("admin v1 publish key"),
+            "members": [admin_v1.record.clone(), member_v1.record.clone()],
+        }),
+    )
+    .await;
+    assert_eq!(publish_v1_status, StatusCode::OK);
+
+    let (publish_v2_status, publish_v2_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/publish",
+        json!({
+            "group_id": "private-group-rotation",
+            "epoch": 2,
+            "state_commitment_sha256": sha256_hex(b"private-group-rotation-v2"),
+            "ciphertext_nonce_base64": B64.encode([9u8; 12]),
+            "ciphertext_base64": B64.encode(b"encrypted-private-group-rotation-v2"),
+            "ciphertext_aad_base64": B64.encode(b"private-group-rotation-aad-v2"),
+            "authorizing_membership_handle_sha256": admin_v1.membership_handle_sha256,
+            "authorizing_publish_key_base64": admin_v1
+                .publish_key_base64
+                .clone()
+                .expect("admin v1 publish key"),
+            "members": [admin_v2.record.clone(), member_v2.record.clone()],
+        }),
+    )
+    .await;
+    assert_eq!(publish_v2_status, StatusCode::OK);
+    assert_eq!(publish_v2_payload["epoch"].as_u64(), Some(2));
+
+    let (old_fetch_status, old_fetch_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/fetch",
+        json!({
+            "membership_handle_sha256": member_v1.membership_handle_sha256,
+            "fetch_key_base64": member_v1.fetch_key_base64,
+        }),
+    )
+    .await;
+    assert_eq!(old_fetch_status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        old_fetch_payload["detail"].as_str(),
+        Some("private group state not found")
+    );
+
+    let (new_fetch_status, new_fetch_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/fetch",
+        json!({
+            "membership_handle_sha256": member_v2.membership_handle_sha256,
+            "fetch_key_base64": member_v2.fetch_key_base64,
+        }),
+    )
+    .await;
+    assert_eq!(new_fetch_status, StatusCode::OK);
+    assert_eq!(new_fetch_payload["epoch"].as_u64(), Some(2));
+    assert_eq!(
+        new_fetch_payload["ciphertext_base64"].as_str(),
+        Some(B64.encode(b"encrypted-private-group-rotation-v2").as_str())
+    );
+}
+
+#[tokio::test]
+async fn private_group_state_rejects_invalid_publish_and_fetch_capabilities() {
+    let app = test_app().await;
+    let admin_v1 = private_group_member_fixture(50, true);
+    let member_v1 = private_group_member_fixture(51, false);
+
+    let (publish_v1_status, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/publish",
+        json!({
+            "group_id": "private-group-invalid-capability",
+            "epoch": 1,
+            "state_commitment_sha256": sha256_hex(b"private-group-invalid-capability-v1"),
+            "ciphertext_nonce_base64": B64.encode([10u8; 12]),
+            "ciphertext_base64": B64.encode(b"encrypted-private-group-invalid-capability-v1"),
+            "ciphertext_aad_base64": B64.encode(b"private-group-invalid-capability-aad-v1"),
+            "authorizing_membership_handle_sha256": admin_v1.membership_handle_sha256,
+            "authorizing_publish_key_base64": admin_v1
+                .publish_key_base64
+                .clone()
+                .expect("admin v1 publish key"),
+            "members": [admin_v1.record.clone(), member_v1.record.clone()],
+        }),
+    )
+    .await;
+    assert_eq!(publish_v1_status, StatusCode::OK);
+
+    let (bad_publish_status, bad_publish_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/publish",
+        json!({
+            "group_id": "private-group-invalid-capability",
+            "epoch": 2,
+            "state_commitment_sha256": sha256_hex(b"private-group-invalid-capability-v2"),
+            "ciphertext_nonce_base64": B64.encode([11u8; 12]),
+            "ciphertext_base64": B64.encode(b"encrypted-private-group-invalid-capability-v2"),
+            "ciphertext_aad_base64": B64.encode(b"private-group-invalid-capability-aad-v2"),
+            "authorizing_membership_handle_sha256": admin_v1.membership_handle_sha256,
+            "authorizing_publish_key_base64": B64.encode([0xFFu8; 32]),
+            "members": [private_group_member_fixture(52, true).record, private_group_member_fixture(53, false).record],
+        }),
+    )
+    .await;
+    assert_eq!(bad_publish_status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        bad_publish_payload["detail"].as_str(),
+        Some("authorizing private group publish key is invalid")
+    );
+
+    let (bad_fetch_status, bad_fetch_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/fetch",
+        json!({
+            "membership_handle_sha256": member_v1.membership_handle_sha256,
+            "fetch_key_base64": B64.encode([0xEEu8; 32]),
+        }),
+    )
+    .await;
+    assert_eq!(bad_fetch_status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        bad_fetch_payload["detail"].as_str(),
+        Some("private group fetch credential is invalid")
+    );
+}
+
+#[tokio::test]
+async fn private_group_invite_create_and_resolve_work() {
+    let app = test_app().await;
+    let admin = private_group_member_fixture(60, true);
+    let member = private_group_member_fixture(61, false);
+
+    let (publish_status, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/publish",
+        json!({
+            "group_id": "private-group-invite-alpha",
+            "epoch": 1,
+            "state_commitment_sha256": sha256_hex(b"private-group-invite-alpha-state-v1"),
+            "ciphertext_nonce_base64": B64.encode([12u8; 12]),
+            "ciphertext_base64": B64.encode(b"encrypted-private-group-invite-alpha-state-v1"),
+            "ciphertext_aad_base64": B64.encode(b"private-group-invite-alpha-aad-v1"),
+            "authorizing_membership_handle_sha256": admin.membership_handle_sha256,
+            "authorizing_publish_key_base64": admin.publish_key_base64.clone().expect("admin publish key"),
+            "members": [admin.record.clone(), member.record.clone()],
+        }),
+    )
+    .await;
+    assert_eq!(publish_status, StatusCode::OK);
+
+    let invite_commitment = sha256_hex(b"opaque-private-group-join-package-v1");
+    let invite_blob = B64.encode(b"opaque-private-group-join-package-v1");
+    let (create_status, create_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/invites",
+        json!({
+            "group_id": "private-group-invite-alpha",
+            "epoch": 1,
+            "invite_commitment_sha256": invite_commitment,
+            "invite_ciphertext_nonce_base64": B64.encode([13u8; 12]),
+            "invite_ciphertext_base64": invite_blob,
+            "invite_ciphertext_aad_base64": B64.encode(b"private-group-invite-envelope-aad"),
+            "authorizing_membership_handle_sha256": admin.membership_handle_sha256,
+            "authorizing_publish_key_base64": admin.publish_key_base64.clone().expect("admin publish key"),
+            "expires_in_seconds": 3600,
+        }),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::OK);
+    let invite_token = create_payload["invite_token"]
+        .as_str()
+        .expect("invite token")
+        .to_string();
+    assert_eq!(
+        create_payload["group_id"].as_str(),
+        Some("private-group-invite-alpha")
+    );
+    assert_eq!(create_payload["epoch"].as_u64(), Some(1));
+
+    let (resolve_status, resolve_payload) = json_request(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/private-groups/invites/{invite_token}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resolve_status, StatusCode::OK);
+    assert_eq!(
+        resolve_payload["invite_token"].as_str(),
+        Some(invite_token.as_str())
+    );
+    assert_eq!(
+        resolve_payload["invite_commitment_sha256"].as_str(),
+        Some(invite_commitment.as_str())
+    );
+    assert_eq!(
+        resolve_payload["invite_ciphertext_base64"].as_str(),
+        Some(invite_blob.as_str())
+    );
+}
+
+#[tokio::test]
+async fn private_group_invite_consume_revokes_token() {
+    let app = test_app().await;
+    let admin = private_group_member_fixture(62, true);
+    let member = private_group_member_fixture(63, false);
+
+    let (publish_status, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/publish",
+        json!({
+            "group_id": "private-group-invite-consume",
+            "epoch": 1,
+            "state_commitment_sha256": sha256_hex(b"private-group-invite-consume-v1"),
+            "ciphertext_nonce_base64": B64.encode([19u8; 12]),
+            "ciphertext_base64": B64.encode(b"encrypted-private-group-invite-consume-v1"),
+            "ciphertext_aad_base64": B64.encode(b"private-group-invite-consume-aad-v1"),
+            "authorizing_membership_handle_sha256": admin.membership_handle_sha256,
+            "authorizing_publish_key_base64": admin.publish_key_base64.clone().expect("admin publish key"),
+            "members": [admin.record.clone(), member.record.clone()],
+        }),
+    )
+    .await;
+    assert_eq!(publish_status, StatusCode::OK);
+
+    let (create_status, create_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/invites",
+        json!({
+            "group_id": "private-group-invite-consume",
+            "epoch": 1,
+            "invite_commitment_sha256": sha256_hex(b"opaque-private-group-join-package-consume"),
+            "invite_ciphertext_nonce_base64": B64.encode([20u8; 12]),
+            "invite_ciphertext_base64": B64.encode(b"opaque-private-group-join-package-consume"),
+            "invite_ciphertext_aad_base64": B64.encode(b"private-group-invite-envelope-aad-consume"),
+            "authorizing_membership_handle_sha256": admin.membership_handle_sha256,
+            "authorizing_publish_key_base64": admin.publish_key_base64.clone().expect("admin publish key"),
+            "expires_in_seconds": 3600,
+        }),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::OK);
+    let invite_token = create_payload["invite_token"]
+        .as_str()
+        .expect("invite token")
+        .to_string();
+
+    let (consume_status, consume_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/v1/private-groups/invites/{invite_token}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(consume_status, StatusCode::OK);
+    assert_eq!(consume_payload["invite_token"].as_str(), Some(invite_token.as_str()));
+    assert_eq!(consume_payload["consumed"].as_bool(), Some(true));
+    assert!(consume_payload["revoked_at"].as_str().is_some());
+
+    let (resolve_status, resolve_payload) = json_request(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/private-groups/invites/{invite_token}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resolve_status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        resolve_payload["detail"].as_str(),
+        Some("private group invite not found or expired")
+    );
+}
+
+#[tokio::test]
+async fn private_group_invite_rejects_stale_epoch_after_rotation() {
+    let app = test_app().await;
+    let admin_v1 = private_group_member_fixture(70, true);
+    let member_v1 = private_group_member_fixture(71, false);
+    let admin_v2 = private_group_member_fixture(72, true);
+    let member_v2 = private_group_member_fixture(73, false);
+
+    let (publish_v1_status, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/publish",
+        json!({
+            "group_id": "private-group-invite-rotation",
+            "epoch": 1,
+            "state_commitment_sha256": sha256_hex(b"private-group-invite-rotation-v1"),
+            "ciphertext_nonce_base64": B64.encode([14u8; 12]),
+            "ciphertext_base64": B64.encode(b"encrypted-private-group-invite-rotation-v1"),
+            "ciphertext_aad_base64": B64.encode(b"private-group-invite-rotation-aad-v1"),
+            "authorizing_membership_handle_sha256": admin_v1.membership_handle_sha256,
+            "authorizing_publish_key_base64": admin_v1.publish_key_base64.clone().expect("admin publish key"),
+            "members": [admin_v1.record.clone(), member_v1.record.clone()],
+        }),
+    )
+    .await;
+    assert_eq!(publish_v1_status, StatusCode::OK);
+
+    let (create_status, create_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/invites",
+        json!({
+            "group_id": "private-group-invite-rotation",
+            "epoch": 1,
+            "invite_commitment_sha256": sha256_hex(b"opaque-private-group-join-package-rotation-v1"),
+            "invite_ciphertext_nonce_base64": B64.encode([15u8; 12]),
+            "invite_ciphertext_base64": B64.encode(b"opaque-private-group-join-package-rotation-v1"),
+            "invite_ciphertext_aad_base64": B64.encode(b"private-group-invite-envelope-aad-v1"),
+            "authorizing_membership_handle_sha256": admin_v1.membership_handle_sha256,
+            "authorizing_publish_key_base64": admin_v1.publish_key_base64.clone().expect("admin publish key"),
+            "expires_in_seconds": 3600,
+        }),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::OK);
+    let invite_token = create_payload["invite_token"]
+        .as_str()
+        .expect("invite token")
+        .to_string();
+
+    let (publish_v2_status, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/publish",
+        json!({
+            "group_id": "private-group-invite-rotation",
+            "epoch": 2,
+            "state_commitment_sha256": sha256_hex(b"private-group-invite-rotation-v2"),
+            "ciphertext_nonce_base64": B64.encode([16u8; 12]),
+            "ciphertext_base64": B64.encode(b"encrypted-private-group-invite-rotation-v2"),
+            "ciphertext_aad_base64": B64.encode(b"private-group-invite-rotation-aad-v2"),
+            "authorizing_membership_handle_sha256": admin_v1.membership_handle_sha256,
+            "authorizing_publish_key_base64": admin_v1.publish_key_base64.clone().expect("admin publish key"),
+            "members": [admin_v2.record.clone(), member_v2.record.clone()],
+        }),
+    )
+    .await;
+    assert_eq!(publish_v2_status, StatusCode::OK);
+
+    let (resolve_status, resolve_payload) = json_request(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/private-groups/invites/{invite_token}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resolve_status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        resolve_payload["detail"].as_str(),
+        Some("private group invite not found or expired")
+    );
+}
+
+#[tokio::test]
+async fn private_group_invite_rejects_invalid_publish_capability() {
+    let app = test_app().await;
+    let admin = private_group_member_fixture(80, true);
+    let member = private_group_member_fixture(81, false);
+
+    let (publish_status, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/publish",
+        json!({
+            "group_id": "private-group-invite-invalid-capability",
+            "epoch": 1,
+            "state_commitment_sha256": sha256_hex(b"private-group-invite-invalid-capability-v1"),
+            "ciphertext_nonce_base64": B64.encode([17u8; 12]),
+            "ciphertext_base64": B64.encode(b"encrypted-private-group-invite-invalid-capability-v1"),
+            "ciphertext_aad_base64": B64.encode(b"private-group-invite-invalid-capability-aad-v1"),
+            "authorizing_membership_handle_sha256": admin.membership_handle_sha256,
+            "authorizing_publish_key_base64": admin.publish_key_base64.clone().expect("admin publish key"),
+            "members": [admin.record.clone(), member.record.clone()],
+        }),
+    )
+    .await;
+    assert_eq!(publish_status, StatusCode::OK);
+
+    let (create_status, create_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/invites",
+        json!({
+            "group_id": "private-group-invite-invalid-capability",
+            "epoch": 1,
+            "invite_commitment_sha256": sha256_hex(b"opaque-private-group-invalid-capability"),
+            "invite_ciphertext_nonce_base64": B64.encode([18u8; 12]),
+            "invite_ciphertext_base64": B64.encode(b"opaque-private-group-invalid-capability"),
+            "invite_ciphertext_aad_base64": B64.encode(b"private-group-invite-envelope-aad-invalid"),
+            "authorizing_membership_handle_sha256": admin.membership_handle_sha256,
+            "authorizing_publish_key_base64": B64.encode([0xAAu8; 32]),
+            "expires_in_seconds": 3600,
+        }),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        create_payload["detail"].as_str(),
+        Some("authorizing private group publish key is invalid")
+    );
 }
 
 // ---- 3. Rate-limiter saturation ------------------------------------------

@@ -326,6 +326,85 @@ data class GroupRelayResponse(
     val received_at: String,
 )
 
+data class PrivateGroupMemberCredentialRecord(
+    val membership_handle_sha256: String,
+    val member_commitment_sha256: String,
+    val fetch_key_sha256: String,
+    val publish_key_sha256: String?,
+)
+
+data class PublishPrivateGroupStateRequest(
+    val group_id: String,
+    val epoch: Long,
+    val state_commitment_sha256: String,
+    val ciphertext_nonce_base64: String,
+    val ciphertext_base64: String,
+    val ciphertext_aad_base64: String,
+    val authorizing_membership_handle_sha256: String,
+    val authorizing_publish_key_base64: String,
+    val members: List<PrivateGroupMemberCredentialRecord>,
+)
+
+data class PublishPrivateGroupStateResponse(
+    val group_id: String,
+    val epoch: Long,
+    val stored_member_count: Int,
+    val published_at: String,
+)
+
+data class FetchPrivateGroupStateRequest(
+    val membership_handle_sha256: String,
+    val fetch_key_base64: String,
+)
+
+data class FetchPrivateGroupStateResponse(
+    val group_id: String,
+    val epoch: Long,
+    val state_commitment_sha256: String,
+    val ciphertext_nonce_base64: String,
+    val ciphertext_base64: String,
+    val ciphertext_aad_base64: String,
+    val published_at: String,
+)
+
+data class CreatePrivateGroupInviteRequest(
+    val group_id: String,
+    val epoch: Long,
+    val invite_commitment_sha256: String,
+    val invite_ciphertext_nonce_base64: String,
+    val invite_ciphertext_base64: String,
+    val invite_ciphertext_aad_base64: String,
+    val authorizing_membership_handle_sha256: String,
+    val authorizing_publish_key_base64: String,
+    val expires_in_seconds: Int?,
+)
+
+data class CreatePrivateGroupInviteResponse(
+    val invite_token: String,
+    val group_id: String,
+    val epoch: Long,
+    val expires_at: String,
+    val created_at: String,
+)
+
+data class ResolvePrivateGroupInviteResponse(
+    val invite_token: String,
+    val group_id: String,
+    val epoch: Long,
+    val invite_commitment_sha256: String,
+    val invite_ciphertext_nonce_base64: String,
+    val invite_ciphertext_base64: String,
+    val invite_ciphertext_aad_base64: String,
+    val created_at: String,
+    val expires_at: String,
+)
+
+data class ConsumePrivateGroupInviteResponse(
+    val invite_token: String,
+    val consumed: Boolean,
+    val revoked_at: String,
+)
+
 // Sealed Sender
 
 data class SealedRelayRequest(
@@ -623,6 +702,7 @@ data class ServerCapabilitiesResponse(
     val stories_supported: Boolean,
     val channels_supported: Boolean,
     val group_messaging_supported: Boolean,
+    val private_group_state_supported: Boolean,
     val sealed_sender_required: Boolean,
     val sender_certificate_supported: Boolean,
     val key_transparency_supported: Boolean,
@@ -841,6 +921,31 @@ interface PqmsgApi {
         @HeaderMap headers: Map<String, String>,
         @Body request: GroupRelayRequest,
     ): GroupRelayResponse
+
+    @POST("/v1/private-groups/state/publish")
+    suspend fun publishPrivateGroupState(
+        @Body request: PublishPrivateGroupStateRequest,
+    ): PublishPrivateGroupStateResponse
+
+    @POST("/v1/private-groups/state/fetch")
+    suspend fun fetchPrivateGroupState(
+        @Body request: FetchPrivateGroupStateRequest,
+    ): FetchPrivateGroupStateResponse
+
+    @POST("/v1/private-groups/invites")
+    suspend fun createPrivateGroupInvite(
+        @Body request: CreatePrivateGroupInviteRequest,
+    ): CreatePrivateGroupInviteResponse
+
+    @GET("/v1/private-groups/invites/{invite_token}")
+    suspend fun resolvePrivateGroupInvite(
+        @Path("invite_token") inviteToken: String,
+    ): ResolvePrivateGroupInviteResponse
+
+    @POST("/v1/private-groups/invites/{invite_token}")
+    suspend fun consumePrivateGroupInvite(
+        @Path("invite_token") inviteToken: String,
+    ): ConsumePrivateGroupInviteResponse
 
     // Sealed sender
 

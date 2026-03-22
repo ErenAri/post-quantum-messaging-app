@@ -321,6 +321,85 @@ export type GroupRelayResponse = {
   received_at: string;
 };
 
+export type PrivateGroupMemberCredentialRecord = {
+  membership_handle_sha256: string;
+  member_commitment_sha256: string;
+  fetch_key_sha256: string;
+  publish_key_sha256: string | null;
+};
+
+export type PublishPrivateGroupStateRequest = {
+  group_id: string;
+  epoch: number;
+  state_commitment_sha256: string;
+  ciphertext_nonce_base64: string;
+  ciphertext_base64: string;
+  ciphertext_aad_base64: string;
+  authorizing_membership_handle_sha256: string;
+  authorizing_publish_key_base64: string;
+  members: PrivateGroupMemberCredentialRecord[];
+};
+
+export type PublishPrivateGroupStateResponse = {
+  group_id: string;
+  epoch: number;
+  stored_member_count: number;
+  published_at: string;
+};
+
+export type FetchPrivateGroupStateRequest = {
+  membership_handle_sha256: string;
+  fetch_key_base64: string;
+};
+
+export type FetchPrivateGroupStateResponse = {
+  group_id: string;
+  epoch: number;
+  state_commitment_sha256: string;
+  ciphertext_nonce_base64: string;
+  ciphertext_base64: string;
+  ciphertext_aad_base64: string;
+  published_at: string;
+};
+
+export type CreatePrivateGroupInviteRequest = {
+  group_id: string;
+  epoch: number;
+  invite_commitment_sha256: string;
+  invite_ciphertext_nonce_base64: string;
+  invite_ciphertext_base64: string;
+  invite_ciphertext_aad_base64: string;
+  authorizing_membership_handle_sha256: string;
+  authorizing_publish_key_base64: string;
+  expires_in_seconds?: number;
+};
+
+export type CreatePrivateGroupInviteResponse = {
+  invite_token: string;
+  group_id: string;
+  epoch: number;
+  expires_at: string;
+  created_at: string;
+};
+
+export type ResolvePrivateGroupInviteResponse = {
+  invite_token: string;
+  group_id: string;
+  epoch: number;
+  invite_commitment_sha256: string;
+  invite_ciphertext_nonce_base64: string;
+  invite_ciphertext_base64: string;
+  invite_ciphertext_aad_base64: string;
+  created_at: string;
+  expires_at: string;
+};
+
+export type ConsumePrivateGroupInviteResponse = {
+  invite_token: string;
+  consumed: boolean;
+  revoked_at: string;
+};
+
 export type FileUploadRequest = {
   recipient_user_id: string;
   device_id: string;
@@ -663,6 +742,7 @@ export type ServerCapabilitiesResponse = {
   stories_supported: boolean;
   channels_supported: boolean;
   group_messaging_supported: boolean;
+  private_group_state_supported: boolean;
   sealed_sender_required: boolean;
   sender_certificate_supported: boolean;
   key_transparency_supported: boolean;
@@ -1038,6 +1118,61 @@ export class PqmsgApi {
   }
 
   // --- Phase 3 API methods ---
+
+  async publishPrivateGroupState(
+    payload: PublishPrivateGroupStateRequest
+  ): Promise<PublishPrivateGroupStateResponse> {
+    return this.request<PublishPrivateGroupStateResponse>(
+      "POST",
+      "/v1/private-groups/state/publish",
+      payload,
+      {}
+    );
+  }
+
+  async fetchPrivateGroupState(
+    payload: FetchPrivateGroupStateRequest
+  ): Promise<FetchPrivateGroupStateResponse> {
+    return this.request<FetchPrivateGroupStateResponse>(
+      "POST",
+      "/v1/private-groups/state/fetch",
+      payload,
+      {}
+    );
+  }
+
+  async createPrivateGroupInvite(
+    payload: CreatePrivateGroupInviteRequest
+  ): Promise<CreatePrivateGroupInviteResponse> {
+    return this.request<CreatePrivateGroupInviteResponse>(
+      "POST",
+      "/v1/private-groups/invites",
+      payload,
+      {}
+    );
+  }
+
+  async resolvePrivateGroupInvite(
+    inviteToken: string
+  ): Promise<ResolvePrivateGroupInviteResponse> {
+    return this.request<ResolvePrivateGroupInviteResponse>(
+      "GET",
+      `/v1/private-groups/invites/${encodeURIComponent(inviteToken)}`,
+      undefined,
+      {}
+    );
+  }
+
+  async consumePrivateGroupInvite(
+    inviteToken: string
+  ): Promise<ConsumePrivateGroupInviteResponse> {
+    return this.request<ConsumePrivateGroupInviteResponse>(
+      "POST",
+      `/v1/private-groups/invites/${encodeURIComponent(inviteToken)}`,
+      undefined,
+      {}
+    );
+  }
 
   async createGroup(
     payload: CreateGroupRequest,

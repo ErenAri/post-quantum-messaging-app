@@ -824,6 +824,8 @@ Response:
 
 ### 4.8B Group Membership and Fan-Out Relay
 
+Legacy clear-roster group routes remain compatibility-only and are disabled on the hardened profile pending the opaque private-group flow.
+
 `POST /v1/groups`
 
 Request:
@@ -912,7 +914,152 @@ Response:
 
 The relay payload remains opaque to the server. Delivery fan-out is computed from active group membership and active recipient devices.
 
-### 4.8C Sealed Sender Transport
+### 4.8C Opaque Private Group State
+
+These endpoints back the new private-group storage layer without restoring the old clear-roster API surface.
+
+`POST /v1/private-groups/state/publish`
+
+Request:
+
+```json
+{
+  "group_id": "alpha-private",
+  "epoch": 1,
+  "state_commitment_sha256": "hex(sha256(encrypted_state))",
+  "ciphertext_nonce_base64": "base64(12 bytes)",
+  "ciphertext_base64": "base64(encrypted_group_state)",
+  "ciphertext_aad_base64": "base64(optional_associated_data)",
+  "authorizing_membership_handle_sha256": "hex(sha256(member_handle))",
+  "authorizing_publish_key_base64": "base64(32 bytes)",
+  "members": [
+    {
+      "membership_handle_sha256": "hex(sha256(member_handle))",
+      "member_commitment_sha256": "hex(sha256(member_commitment))",
+      "fetch_key_sha256": "hex(sha256(fetch_key))",
+      "publish_key_sha256": "hex(sha256(publish_key))"
+    }
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "group_id": "alpha-private",
+  "epoch": 1,
+  "stored_member_count": 2,
+  "published_at": "2026-03-23T12:00:00Z"
+}
+```
+
+Rules:
+
+- Bootstrap publish must start at `epoch = 1`.
+- Later publishes must advance exactly one epoch at a time.
+- The authorizing publish capability must match the latest active stored membership handle for that group.
+- On successful publish, previous epoch membership handles are revoked and replaced by the submitted epoch state.
+
+`POST /v1/private-groups/state/fetch`
+
+Request:
+
+```json
+{
+  "membership_handle_sha256": "hex(sha256(member_handle))",
+  "fetch_key_base64": "base64(32 bytes)"
+}
+```
+
+Response:
+
+```json
+{
+  "group_id": "alpha-private",
+  "epoch": 1,
+  "state_commitment_sha256": "hex(sha256(encrypted_state))",
+  "ciphertext_nonce_base64": "base64(12 bytes)",
+  "ciphertext_base64": "base64(encrypted_group_state)",
+  "ciphertext_aad_base64": "base64(optional_associated_data)",
+  "published_at": "2026-03-23T12:00:00Z"
+}
+```
+
+The server stores only opaque encrypted group-state blobs plus hashed membership handles and hashed fetch/publish capabilities. This is a storage/authorization layer, not full private-group messaging support.
+
+### 4.8D Opaque Private Group Invites
+
+These endpoints distribute join material without restoring the legacy clear-roster group API.
+
+`POST /v1/private-groups/invites`
+
+Request:
+
+```json
+{
+  "group_id": "alpha-private",
+  "epoch": 1,
+  "invite_commitment_sha256": "hex(sha256(opaque_join_package))",
+  "invite_ciphertext_nonce_base64": "base64(12 bytes)",
+  "invite_ciphertext_base64": "base64(opaque_encrypted_join_package)",
+  "invite_ciphertext_aad_base64": "base64(optional_associated_data)",
+  "authorizing_membership_handle_sha256": "hex(sha256(member_handle))",
+  "authorizing_publish_key_base64": "base64(32 bytes)",
+  "expires_in_seconds": 3600
+}
+```
+
+Response:
+
+```json
+{
+  "invite_token": "3b1f0ab8f29d4f4fb3e3b7b6c7fd7e02",
+  "group_id": "alpha-private",
+  "epoch": 1,
+  "expires_at": "2026-03-23T13:00:00Z",
+  "created_at": "2026-03-23T12:00:00Z"
+}
+```
+
+`GET /v1/private-groups/invites/{invite_token}`
+
+Response:
+
+```json
+{
+  "invite_token": "3b1f0ab8f29d4f4fb3e3b7b6c7fd7e02",
+  "group_id": "alpha-private",
+  "epoch": 1,
+  "invite_commitment_sha256": "hex(sha256(opaque_join_package))",
+  "invite_ciphertext_nonce_base64": "base64(12 bytes)",
+  "invite_ciphertext_base64": "base64(opaque_encrypted_join_package)",
+  "invite_ciphertext_aad_base64": "base64(optional_associated_data)",
+  "created_at": "2026-03-23T12:00:00Z",
+  "expires_at": "2026-03-23T13:00:00Z"
+}
+```
+
+`POST /v1/private-groups/invites/{invite_token}`
+
+Response:
+
+```json
+{
+  "invite_token": "3b1f0ab8f29d4f4fb3e3b7b6c7fd7e02",
+  "consumed": true,
+  "revoked_at": "2026-03-23T12:05:00Z"
+}
+```
+
+Rules:
+
+- Invite issuance is authorized by the current epoch's active publish capability.
+- Invite resolution fails when the invite is expired, revoked, or tied to a stale group epoch.
+- Invite consumption revokes the token so it cannot be resolved again.
+- The server stores only opaque invite ciphertext plus epoch metadata; it does not interpret the join package. In `pqmsg-core`, that opaque payload is now represented by `PrivateGroupJoinPackage`.
+
+### 4.8E Sealed Sender Transport
 
 This is the supported direct-message transport on the hardened profile.
 

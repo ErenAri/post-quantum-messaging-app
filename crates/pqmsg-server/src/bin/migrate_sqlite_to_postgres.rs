@@ -221,6 +221,49 @@ async fn main() -> anyhow::Result<()> {
         Vec::new()
     };
 
+    let private_group_states = if sqlite_table_exists(&sqlite, "private_group_states").await? {
+        sqlx::query(
+            "SELECT group_id, epoch, state_commitment_sha256, ciphertext_nonce_base64,
+                    ciphertext_base64, ciphertext_aad_base64,
+                    published_by_membership_handle_sha256, published_at
+             FROM private_group_states
+             ORDER BY group_id ASC, epoch ASC",
+        )
+        .fetch_all(&sqlite)
+        .await?
+    } else {
+        Vec::new()
+    };
+
+    let private_group_member_credentials =
+        if sqlite_table_exists(&sqlite, "private_group_member_credentials").await? {
+            sqlx::query(
+                "SELECT membership_handle_sha256, group_id, epoch, member_commitment_sha256,
+                        fetch_key_sha256, publish_key_sha256, created_at, revoked_at
+                 FROM private_group_member_credentials
+                 ORDER BY group_id ASC, epoch ASC, membership_handle_sha256 ASC",
+            )
+            .fetch_all(&sqlite)
+            .await?
+        } else {
+            Vec::new()
+        };
+
+    let private_group_invites = if sqlite_table_exists(&sqlite, "private_group_invites").await? {
+        sqlx::query(
+            "SELECT invite_token, group_id, epoch, invite_commitment_sha256,
+                    invite_ciphertext_nonce_base64, invite_ciphertext_base64,
+                    invite_ciphertext_aad_base64, created_by_membership_handle_sha256,
+                    created_at, expires_at, revoked_at
+             FROM private_group_invites
+             ORDER BY group_id ASC, epoch ASC, invite_token ASC",
+        )
+        .fetch_all(&sqlite)
+        .await?
+    } else {
+        Vec::new()
+    };
+
     let mut tx = postgres.begin().await?;
 
     for row in &users {
@@ -476,6 +519,113 @@ async fn main() -> anyhow::Result<()> {
         .bind(row.try_get::<String, _>("device_id")?)
         .bind(row.try_get::<i64, _>("last_message_id")?)
         .bind(row.try_get::<String, _>("updated_at")?)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    for row in &private_group_states {
+        sqlx::query(
+            "INSERT INTO private_group_states (
+                group_id,
+                epoch,
+                state_commitment_sha256,
+                ciphertext_nonce_base64,
+                ciphertext_base64,
+                ciphertext_aad_base64,
+                published_by_membership_handle_sha256,
+                published_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (group_id, epoch) DO UPDATE SET
+               state_commitment_sha256 = EXCLUDED.state_commitment_sha256,
+               ciphertext_nonce_base64 = EXCLUDED.ciphertext_nonce_base64,
+               ciphertext_base64 = EXCLUDED.ciphertext_base64,
+               ciphertext_aad_base64 = EXCLUDED.ciphertext_aad_base64,
+               published_by_membership_handle_sha256 = EXCLUDED.published_by_membership_handle_sha256,
+               published_at = EXCLUDED.published_at",
+        )
+        .bind(row.try_get::<String, _>("group_id")?)
+        .bind(row.try_get::<i64, _>("epoch")?)
+        .bind(row.try_get::<String, _>("state_commitment_sha256")?)
+        .bind(row.try_get::<String, _>("ciphertext_nonce_base64")?)
+        .bind(row.try_get::<String, _>("ciphertext_base64")?)
+        .bind(row.try_get::<String, _>("ciphertext_aad_base64")?)
+        .bind(row.try_get::<String, _>("published_by_membership_handle_sha256")?)
+        .bind(row.try_get::<String, _>("published_at")?)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    for row in &private_group_member_credentials {
+        sqlx::query(
+            "INSERT INTO private_group_member_credentials (
+                membership_handle_sha256,
+                group_id,
+                epoch,
+                member_commitment_sha256,
+                fetch_key_sha256,
+                publish_key_sha256,
+                created_at,
+                revoked_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (membership_handle_sha256) DO UPDATE SET
+               group_id = EXCLUDED.group_id,
+               epoch = EXCLUDED.epoch,
+               member_commitment_sha256 = EXCLUDED.member_commitment_sha256,
+               fetch_key_sha256 = EXCLUDED.fetch_key_sha256,
+               publish_key_sha256 = EXCLUDED.publish_key_sha256,
+               created_at = EXCLUDED.created_at,
+               revoked_at = EXCLUDED.revoked_at",
+        )
+        .bind(row.try_get::<String, _>("membership_handle_sha256")?)
+        .bind(row.try_get::<String, _>("group_id")?)
+        .bind(row.try_get::<i64, _>("epoch")?)
+        .bind(row.try_get::<String, _>("member_commitment_sha256")?)
+        .bind(row.try_get::<String, _>("fetch_key_sha256")?)
+        .bind(row.try_get::<Option<String>, _>("publish_key_sha256")?)
+        .bind(row.try_get::<String, _>("created_at")?)
+        .bind(row.try_get::<Option<String>, _>("revoked_at")?)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    for row in &private_group_invites {
+        sqlx::query(
+            "INSERT INTO private_group_invites (
+                invite_token,
+                group_id,
+                epoch,
+                invite_commitment_sha256,
+                invite_ciphertext_nonce_base64,
+                invite_ciphertext_base64,
+                invite_ciphertext_aad_base64,
+                created_by_membership_handle_sha256,
+                created_at,
+                expires_at,
+                revoked_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             ON CONFLICT (invite_token) DO UPDATE SET
+               group_id = EXCLUDED.group_id,
+               epoch = EXCLUDED.epoch,
+               invite_commitment_sha256 = EXCLUDED.invite_commitment_sha256,
+               invite_ciphertext_nonce_base64 = EXCLUDED.invite_ciphertext_nonce_base64,
+               invite_ciphertext_base64 = EXCLUDED.invite_ciphertext_base64,
+               invite_ciphertext_aad_base64 = EXCLUDED.invite_ciphertext_aad_base64,
+               created_by_membership_handle_sha256 = EXCLUDED.created_by_membership_handle_sha256,
+               created_at = EXCLUDED.created_at,
+               expires_at = EXCLUDED.expires_at,
+               revoked_at = EXCLUDED.revoked_at",
+        )
+        .bind(row.try_get::<String, _>("invite_token")?)
+        .bind(row.try_get::<String, _>("group_id")?)
+        .bind(row.try_get::<i64, _>("epoch")?)
+        .bind(row.try_get::<String, _>("invite_commitment_sha256")?)
+        .bind(row.try_get::<String, _>("invite_ciphertext_nonce_base64")?)
+        .bind(row.try_get::<String, _>("invite_ciphertext_base64")?)
+        .bind(row.try_get::<String, _>("invite_ciphertext_aad_base64")?)
+        .bind(row.try_get::<String, _>("created_by_membership_handle_sha256")?)
+        .bind(row.try_get::<String, _>("created_at")?)
+        .bind(row.try_get::<String, _>("expires_at")?)
+        .bind(row.try_get::<Option<String>, _>("revoked_at")?)
         .execute(&mut *tx)
         .await?;
     }

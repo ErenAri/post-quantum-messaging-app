@@ -66,6 +66,10 @@ import {
   loadGroupConversations,
   upsertGroupConversation,
   markGroupConversationRead,
+  loadPrivateGroups,
+  readPrivateGroup,
+  upsertPrivateGroup,
+  removePrivateGroup,
   saveDirectMessageSession,
   loadDirectMessageSession,
   wipeLocalState,
@@ -224,6 +228,26 @@ describe("conversations", () => {
   it("empty preview becomes 'No content'", () => {
     upsertConversation("alice", "bob", "   ", false);
     expect(loadConversations("alice")[0].lastPreview).toBe("No content");
+  });
+});
+
+describe("private groups", () => {
+  it("upsertPrivateGroup stores and reads opaque local group state", () => {
+    upsertPrivateGroup("alice", "pg-1", "{\"epoch\":1}", "{\"role\":\"Owner\"}", "aa".repeat(32));
+    const groups = loadPrivateGroups("alice");
+    expect(groups).toHaveLength(1);
+    expect(groups[0].groupId).toBe("pg-1");
+    expect(groups[0].stateCommitmentSha256).toBe("aa".repeat(32));
+    expect(readPrivateGroup("alice", "pg-1")?.memberCredentialJson).toBe("{\"role\":\"Owner\"}");
+  });
+
+  it("removePrivateGroup deletes only the targeted opaque group state", () => {
+    upsertPrivateGroup("alice", "pg-1", "{\"epoch\":1}", "{\"role\":\"Owner\"}");
+    upsertPrivateGroup("alice", "pg-2", "{\"epoch\":2}", "{\"role\":\"Admin\"}");
+    upsertPrivateGroup("bob", "pg-1", "{\"epoch\":1}", "{\"role\":\"Owner\"}");
+    removePrivateGroup("alice", "pg-1");
+    expect(loadPrivateGroups("alice").map((item) => item.groupId)).toEqual(["pg-2"]);
+    expect(loadPrivateGroups("bob").map((item) => item.groupId)).toEqual(["pg-1"]);
   });
 });
 

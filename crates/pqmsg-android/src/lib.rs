@@ -10,6 +10,11 @@ use pqmsg_core::alg::{
     SUITE_ID_MLKEM768_X25519_HKDF_SHA256_CHACHA20POLY1305,
 };
 use pqmsg_core::dh::{DhKeyPair, DhPublicKey};
+use pqmsg_core::groups::{
+    PrivateGroupAttributes, PrivateGroupEncryptedSnapshot, PrivateGroupEpochTransition,
+    PrivateGroupInvitePackage, PrivateGroupJoinPackage, PrivateGroupMember,
+    PrivateGroupMemberCredential, PrivateGroupRole, PrivateGroupState,
+};
 use pqmsg_core::handshake::{
     alice_initiate, bob_receive, pq_signed_prekey_signature_message,
     signed_prekey_signature_message, validate_hybrid_prekey_bundle_signatures, InitialMessage,
@@ -129,6 +134,22 @@ struct SessionFile {
     peer_user_id: String,
     suite: Suite,
     snapshot: SessionSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PrivateGroupRestoreResult {
+    state: PrivateGroupState,
+    member_credential: PrivateGroupMemberCredential,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PrivateGroupCredentialMaterial {
+    membership_handle_sha256: String,
+    member_commitment_sha256: String,
+    fetch_key_base64: String,
+    fetch_key_sha256: String,
+    publish_key_base64: Option<String>,
+    publish_key_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1298,6 +1319,101 @@ pub fn parse_bundle_json(bundle_json: String) -> Result<ServerBundle, PqmsgAndro
         one_time_prekey_x25519: bundle.one_time_prekey_x25519,
         one_time_prekey_mlkem768: bundle.one_time_prekey_mlkem768,
     })
+}
+
+#[uniffi::export]
+pub fn private_group_create_state(
+    owner_user_id: String,
+    attributes_json: String,
+    initial_members_json: String,
+    created_at_unix_seconds: u64,
+) -> Result<String, PqmsgAndroidError> {
+    let attributes: PrivateGroupAttributes = serde_json::from_str(&attributes_json)?;
+    let initial_members: Vec<PrivateGroupMember> = serde_json::from_str(&initial_members_json)?;
+    let state = PrivateGroupState::new(
+        owner_user_id,
+        attributes,
+        initial_members,
+        created_at_unix_seconds,
+    )?;
+    serde_json::to_string_pretty(&state).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn private_group_encrypt_snapshot(
+    state_json: String,
+) -> Result<String, PqmsgAndroidError> {
+    let state: PrivateGroupState = serde_json::from_str(&state_json)?;
+    let snapshot: PrivateGroupEncryptedSnapshot = state.encrypted_snapshot()?;
+    serde_json::to_string_pretty(&snapshot).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn private_group_export_invite_package(
+    state_json: String,
+) -> Result<String, PqmsgAndroidError> {
+    let state: PrivateGroupState = serde_json::from_str(&state_json)?;
+    let invite: PrivateGroupInvitePackage = state.export_invite_package()?;
+    serde_json::to_string_pretty(&invite).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn private_group_export_join_package_for_member(
+    state_json: String,
+    member_user_id: String,
+) -> Result<String, PqmsgAndroidError> {
+    let state: PrivateGroupState = serde_json::from_str(&state_json)?;
+    let join_package: PrivateGroupJoinPackage =
+        state.export_join_package_for_member(&member_user_id)?;
+    serde_json::to_string_pretty(&join_package).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn private_group_restore_join_package(
+    join_package_json: String,
+) -> Result<String, PqmsgAndroidError> {
+    let join_package: PrivateGroupJoinPackage = serde_json::from_str(&join_package_json)?;
+    let (state, member_credential) = join_package.restore_state_and_credential()?;
+    serde_json::to_string_pretty(&PrivateGroupRestoreResult {
+        state,
+        member_credential,
+    })
+    .map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn private_group_describe_member_credential(
+    credential_json: String,
+) -> Result<String, PqmsgAndroidError> {
+    let credential: PrivateGroupMemberCredential = serde_json::from_str(&credential_json)?;
+    let material = private_group_credential_material(&credential)?;
+    serde_json::to_string_pretty(&material).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn private_group_prepare_add_member_transition(
+    state_json: String,
+    member_user_id: String,
+    role: String,
+    updated_at_unix_seconds: u64,
+) -> Result<String, PqmsgAndroidError> {
+    let state: PrivateGroupState = serde_json::from_str(&state_json)?;
+    let role = parse_private_group_role(&role)?;
+    let transition: PrivateGroupEpochTransition =
+        state.prepare_add_member_transition(member_user_id, role, updated_at_unix_seconds)?;
+    serde_json::to_string_pretty(&transition).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn private_group_prepare_remove_member_transition(
+    state_json: String,
+    member_user_id: String,
+    updated_at_unix_seconds: u64,
+) -> Result<String, PqmsgAndroidError> {
+    let state: PrivateGroupState = serde_json::from_str(&state_json)?;
+    let transition: PrivateGroupEpochTransition =
+        state.prepare_remove_member_transition(&member_user_id, updated_at_unix_seconds)?;
+    serde_json::to_string_pretty(&transition).map_err(Into::into)
 }
 
 #[uniffi::export]
@@ -2916,6 +3032,31 @@ fn make_ad(sender: &str, recipient: &str) -> Result<Vec<u8>, PqmsgAndroidError> 
     conversation_associated_data(sender, recipient).map_err(Into::into)
 }
 
+fn parse_private_group_role(role: &str) -> Result<PrivateGroupRole, PqmsgAndroidError> {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "owner" => Ok(PrivateGroupRole::Owner),
+        "admin" => Ok(PrivateGroupRole::Admin),
+        "member" => Ok(PrivateGroupRole::Member),
+        _ => Err(invalid_input("invalid private group role")),
+    }
+}
+
+fn private_group_credential_material(
+    credential: &PrivateGroupMemberCredential,
+) -> Result<PrivateGroupCredentialMaterial, PqmsgAndroidError> {
+    let fetch_key = credential.state_fetch_key()?;
+    let publish_key = credential.state_publish_key()?;
+    Ok(PrivateGroupCredentialMaterial {
+        membership_handle_sha256: hex_string(&credential.membership_handle_sha256()),
+        member_commitment_sha256: hex_string(&credential.member_commitment_sha256()),
+        fetch_key_base64: B64.encode(fetch_key),
+        fetch_key_sha256: hex_string(&Sha256::digest(fetch_key)),
+        publish_key_base64: publish_key.map(|value| B64.encode(value)),
+        publish_key_sha256: publish_key
+            .map(|value| hex_string(&Sha256::digest(value))),
+    })
+}
+
 fn decode_b64(field: &'static str, value: &str) -> Result<Vec<u8>, PqmsgAndroidError> {
     B64.decode(value.as_bytes())
         .map_err(|_| invalid_input(format!("invalid base64 for field '{field}'")))
@@ -2932,6 +3073,16 @@ fn decode_b64_32(field: &'static str, value: &str) -> Result<[u8; 32], PqmsgAndr
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)
+}
+
+fn hex_string(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 fn invalid_input(message: impl Into<String>) -> PqmsgAndroidError {
@@ -3222,6 +3373,56 @@ mod tests {
         });
         let transcript = tlv_transcript_from_records(records);
         verify_auth_signature(&keys_json, &headers, &transcript);
+    }
+
+    #[test]
+    fn private_group_exports_roundtrip_join_package_and_credential_material() {
+        let attributes_json = serde_json::json!({
+            "title": "Ops",
+            "description": "Private group",
+            "avatar_hash_sha256": serde_json::Value::Null,
+            "disappearing_message_timer_seconds": 3600,
+        })
+        .to_string();
+        let members_json = serde_json::json!([
+            { "user_id": "alice", "role": "Owner" },
+            { "user_id": "bob", "role": "Admin" },
+        ])
+        .to_string();
+
+        let state_json = private_group_create_state(
+            "alice".to_string(),
+            attributes_json,
+            members_json,
+            1_710_000_000,
+        )
+        .expect("create private group state");
+        let join_package_json = private_group_export_join_package_for_member(
+            state_json,
+            "bob".to_string(),
+        )
+        .expect("export join package");
+        let restored_json =
+            private_group_restore_join_package(join_package_json).expect("restore join package");
+        let restored: PrivateGroupRestoreResult =
+            serde_json::from_str(&restored_json).expect("parse restored join package");
+
+        assert_eq!(restored.state.group_id, restored.member_credential.group_id);
+        assert_eq!(restored.member_credential.member_user_id, "bob");
+
+        let material_json = private_group_describe_member_credential(
+            serde_json::to_string(&restored.member_credential).expect("serialize credential"),
+        )
+        .expect("describe member credential");
+        let material: PrivateGroupCredentialMaterial =
+            serde_json::from_str(&material_json).expect("parse member credential material");
+
+        assert_eq!(material.membership_handle_sha256.len(), 64);
+        assert_eq!(material.member_commitment_sha256.len(), 64);
+        assert!(!material.fetch_key_base64.is_empty());
+        assert!(!material.fetch_key_sha256.is_empty());
+        assert!(material.publish_key_base64.is_some());
+        assert!(material.publish_key_sha256.is_some());
     }
 
     #[test]
