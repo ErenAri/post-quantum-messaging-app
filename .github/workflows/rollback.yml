@@ -62,6 +62,7 @@ jobs:
       PQMSG_AUDIT_LOG_PATH: ${{ vars.PQMSG_AUDIT_LOG_PATH }}
       PQMSG_AUDIT_LOG_MAX_BYTES: ${{ vars.PQMSG_AUDIT_LOG_MAX_BYTES }}
       PQMSG_AUDIT_LOG_MAX_FILES: ${{ vars.PQMSG_AUDIT_LOG_MAX_FILES }}
+      PQMSG_ALERTMANAGER_API_URL: ${{ secrets.PQMSG_ALERTMANAGER_API_URL }}
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -198,6 +199,9 @@ jobs:
       - name: capture post-rollback state
         if: ${{ inputs.apply }}
         run: |
+          kubectl get namespace "${{ inputs.namespace }}" -o json > dist/post-rollback-namespace.json
+          kubectl get secret --namespace "${{ inputs.namespace }}" -o json > dist/post-rollback-secrets.json
+          kubectl get configmap --namespace "${{ inputs.namespace }}" -o json > dist/post-rollback-configmaps.json
           kubectl get deployment \
             --namespace "${{ inputs.namespace }}" \
             -l "app.kubernetes.io/instance=${{ inputs.release_name }},app.kubernetes.io/name=pqmsg-server" \
@@ -206,6 +210,23 @@ jobs:
             --namespace "${{ inputs.namespace }}" \
             -l "app.kubernetes.io/instance=${{ inputs.release_name }},app.kubernetes.io/name=pqmsg-server" \
             -o json > dist/post-rollback-pods.json
+          kubectl get deployment "${{ inputs.release_name }}-pqmsg-server" \
+            --namespace "${{ inputs.namespace }}" \
+            -o yaml > dist/post-rollback-deployment.yaml
+          kubectl get service "${{ inputs.release_name }}-pqmsg-server" \
+            --namespace "${{ inputs.namespace }}" \
+            -o yaml > dist/post-rollback-service.yaml
+          kubectl get networkpolicy "${{ inputs.release_name }}-pqmsg-server" \
+            --namespace "${{ inputs.namespace }}" \
+            -o yaml > dist/post-rollback-networkpolicy.yaml
+          if kubectl get ingress "${{ inputs.release_name }}-pqmsg-server" \
+            --namespace "${{ inputs.namespace }}" >/dev/null 2>&1; then
+            kubectl get ingress "${{ inputs.release_name }}-pqmsg-server" \
+              --namespace "${{ inputs.namespace }}" \
+              -o yaml > dist/post-rollback-ingress.yaml
+          else
+            : > dist/post-rollback-ingress.yaml
+          fi
       - name: probe rolled-back runtime contract
         if: ${{ inputs.apply }}
         run: |
@@ -239,6 +260,36 @@ jobs:
             --expected-deployment-mode "${{ inputs.deployment_mode }}" \
             --expected-security-profile "high_assurance" \
             --output dist/post-rollback-verification.json
+      - name: write rollback drift report
+        if: ${{ inputs.apply }}
+        run: |
+          python scripts/release/write_deployment_drift.py \
+            --before-deployments /tmp/pqmsg-current-deployments.json \
+            --after-deployments dist/post-rollback-deployments.json \
+            --before-secrets /tmp/pqmsg-secrets.json \
+            --after-secrets dist/post-rollback-secrets.json \
+            --before-configmaps /tmp/pqmsg-configmaps.json \
+            --after-configmaps dist/post-rollback-configmaps.json \
+            --before-namespace /tmp/pqmsg-namespace.json \
+            --after-namespace dist/post-rollback-namespace.json \
+            --release-name "${{ inputs.release_name }}" \
+            --tls-secret-name "pqmsg-server-tls" \
+            --output dist/rollback-drift.json
+      - name: verify live applied rollback policy
+        if: ${{ inputs.apply }}
+        run: |
+          python scripts/release/write_live_policy_verification.py \
+            --deployment-manifest dist/post-rollback-deployment.yaml \
+            --network-policy-manifest dist/post-rollback-networkpolicy.yaml \
+            --output dist/live-rollback-policy-verification.json
+      - name: verify live applied rollback routing
+        if: ${{ inputs.apply }}
+        run: |
+          python scripts/release/write_live_routing_verification.py \
+            --rendered-chart dist/rollback-chart.yaml \
+            --service-manifest dist/post-rollback-service.yaml \
+            --ingress-manifest dist/post-rollback-ingress.yaml \
+            --output dist/live-rollback-routing-verification.json
       - name: append rollback verification summary
         if: ${{ inputs.apply }}
         run: |
@@ -248,15 +299,129 @@ jobs:
           from pathlib import Path
 
           verification = json.loads(Path("dist/post-rollback-verification.json").read_text(encoding="utf-8"))
+          drift = json.loads(Path("dist/rollback-drift.json").read_text(encoding="utf-8"))
+          live_policy = json.loads(Path("dist/live-rollback-policy-verification.json").read_text(encoding="utf-8"))
+          live_routing = json.loads(Path("dist/live-rollback-routing-verification.json").read_text(encoding="utf-8"))
           summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
           failed = [check["name"] for check in verification["checks"] if not check["passed"]]
           with summary.open("a", encoding="utf-8") as handle:
               handle.write("\n## Post-Rollback Verification\n\n")
               handle.write(f"- Passed: `{verification['passed']}`\n")
+              handle.write(f"- Rollback drift report: `dist/rollback-drift.json`\n")
+              handle.write(f"- Deployment image changed: `{drift['deployment_image_changed']}`\n")
+              handle.write(f"- Suspicious drift count: `{drift['suspicious_change_count']}`\n")
+              handle.write(f"- Namespace policy healthy after rollback: `{drift['namespace_policy_healthy_after']}`\n")
+              handle.write(f"- Live policy verification: `{live_policy['passed']}`\n")
+              handle.write(f"- Live routing verification: `{live_routing['passed']}`\n")
+              handle.write(f"- Ingress expected: `{live_routing['ingress_expected']}`\n")
+              handle.write(f"- Ingress present: `{live_routing['ingress_present']}`\n")
               if failed:
                   handle.write(f"- Failed checks: `{', '.join(failed)}`\n")
               else:
                   handle.write("- Failed checks: `none`\n")
+          PY
+      - name: write rollback failure handoff
+        if: ${{ always() && inputs.apply }}
+        env:
+          PQMSG_JOB_STATUS: ${{ job.status }}
+        run: |
+          python scripts/release/write_failure_handoff_record.py \
+            --operation rollback \
+            --job-status "$PQMSG_JOB_STATUS" \
+            --record dist/rollback-record.json \
+            --cluster-contract dist/cluster-contract.json \
+            --runtime-verification dist/post-rollback-verification.json \
+            --policy-verification dist/live-rollback-policy-verification.json \
+            --routing-verification dist/live-rollback-routing-verification.json \
+            --drift-report dist/rollback-drift.json \
+            --deployments dist/post-rollback-deployments.json \
+            --pods dist/post-rollback-pods.json \
+            --port-forward-log dist/post-rollback-port-forward.log \
+            --output dist/rollback-failure-handoff.json
+      - name: append rollback failure summary
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("dist/rollback-failure-handoff.json")
+          if not path.is_file():
+              raise SystemExit(0)
+          record = json.loads(path.read_text(encoding="utf-8"))
+          if not record.get("incident_required"):
+              raise SystemExit(0)
+
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          failed = ", ".join(item["name"] for item in record.get("failed_checks", [])[:6]) or "none"
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write("\n## Rollback Failure Handoff\n\n")
+              handle.write(f"- Job status: `{record['job_status']}`\n")
+              handle.write(f"- Incident required: `{record['incident_required']}`\n")
+              handle.write(f"- Failed check count: `{record['failed_check_count']}`\n")
+              handle.write(f"- Suspicious drift count: `{record['suspicious_drift_count']}`\n")
+              handle.write(f"- Failure record: `dist/rollback-failure-handoff.json`\n")
+              handle.write(f"- Top failed checks: `{failed}`\n")
+          PY
+      - name: render rollback incident alert payload
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python scripts/release/write_incident_alert_payload.py \
+            --failure-handoff dist/rollback-failure-handoff.json \
+            --output-json dist/rollback-incident-alert.json \
+            --output-md dist/rollback-incident-alert.md
+      - name: submit rollback incident alert
+        if: ${{ always() && inputs.apply && env.PQMSG_ALERTMANAGER_API_URL != '' }}
+        run: |
+          incident_required="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          record = json.loads(Path("dist/rollback-failure-handoff.json").read_text(encoding="utf-8"))
+          print("true" if record.get("incident_required") else "false")
+          PY
+          )"
+          if [ "$incident_required" != "true" ]; then
+            echo "No incident required; skipping Alertmanager submission."
+            exit 0
+          fi
+          curl -fsS \
+            -H "content-type: application/json" \
+            -d @dist/rollback-incident-alert.json \
+            "${PQMSG_ALERTMANAGER_API_URL%/}/api/v2/alerts"
+      - name: append rollback incident alert summary
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("dist/rollback-failure-handoff.json")
+          if not path.is_file():
+              raise SystemExit(0)
+          record = json.loads(path.read_text(encoding="utf-8"))
+          if not record.get("incident_required"):
+              raise SystemExit(0)
+
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write(f"- Incident alert payload: `dist/rollback-incident-alert.json`\n")
+              handle.write(f"- Incident note: `dist/rollback-incident-alert.md`\n")
+              handle.write(f"- Alertmanager configured: `{bool(os.environ.get('PQMSG_ALERTMANAGER_API_URL'))}`\n")
+          PY
+      - name: enforce rollback incident gate
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("dist/rollback-failure-handoff.json")
+          if not path.is_file():
+              raise SystemExit("rollback failure handoff record missing")
+          record = json.loads(path.read_text(encoding="utf-8"))
+          raise SystemExit(1 if record.get("incident_required") else 0)
           PY
       - name: upload rollback bundle
         if: ${{ always() }}

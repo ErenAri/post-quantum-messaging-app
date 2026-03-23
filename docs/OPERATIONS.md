@@ -70,6 +70,10 @@ Production deployment must bind SMTP settings and receiver mailbox targets:
 4. `ALERT_EMAIL_HIGH_TO`,
 5. `ALERT_EMAIL_STANDARD_TO`.
 
+Optional deployment-governance escalation input:
+
+1. `PQMSG_ALERTMANAGER_API_URL` for GitHub promotion/rollback workflows that should submit incident alerts directly to Alertmanager when rollout governance fails.
+
 ## 4. Incident Response Model
 
 ### 4.1 Severity
@@ -103,6 +107,8 @@ Run an escalation drill at least once per release cycle:
 3. verify alert fan-out in sink logs:
    - query Mailpit API (`http://127.0.0.1:8025/api/v1/messages`) in local stack,
 4. attach drill evidence (timestamp + captured output) to release record.
+
+Promotion/rollback failure governance now also emits structured incident handoff records and, when `PQMSG_ALERTMANAGER_API_URL` is configured in the GitHub Environment, submits Alertmanager-compatible incident alerts automatically from the workflow failure path.
 
 ## 5. Backup and Recovery
 

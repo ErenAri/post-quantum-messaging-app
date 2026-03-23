@@ -1,0 +1,1 @@
+{"release_tag": "v1.2.3", "namespace": "pqmsg", "release_name": "pqmsg-server", "environment_name": "prod", "deployment_mode": "production", "target_image": "ghcr.io/example/pqmsg-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}

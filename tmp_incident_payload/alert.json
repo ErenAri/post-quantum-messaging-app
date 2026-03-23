@@ -1,0 +1,20 @@
+[
+  {
+    "labels": {
+      "alertname": "PQMSGReleaseWorkflowIncident",
+      "service": "pqmsg-release-governance",
+      "severity": "critical",
+      "operation": "promote",
+      "environment": "prod",
+      "deployment_mode": "production",
+      "release_name": "pqmsg-server",
+      "namespace": "pqmsg",
+      "release_tag": "v1-2-3"
+    },
+    "annotations": {
+      "summary": "pqmsg promote incident: v1.2.3 (prod/production) severity=critical",
+      "description": "Operation: promote | Release: v1.2.3 | Environment: prod | Deployment mode: production | Release name: pqmsg-server | Namespace: pqmsg | Target image: ghcr.io/example/pqmsg-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | Job status: failure | Failed checks: 2 | Suspicious drift: 1 | Top failed checks: runtime_contract:health_status_ok, live_routing:live_service_routing_contract"
+    },
+    "startsAt": "2026-03-23T14:33:43Z"
+  }
+]

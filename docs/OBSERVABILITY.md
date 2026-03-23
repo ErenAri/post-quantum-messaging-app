@@ -131,6 +131,8 @@ curl -sS http://127.0.0.1:8025/api/v1/messages
 
 Alert handling and escalation policy are defined in `docs/OPERATIONS.md`.
 
+Promotion and rollback workflows can also submit governance-failure incidents directly into Alertmanager when the GitHub Environment provides `PQMSG_ALERTMANAGER_API_URL`. Those workflows render `promotion-incident-alert.json` / `rollback-incident-alert.json` from the incident handoff record and send them through the same Alertmanager v2 API used by the manual drill scripts.
+
 ## 6. Log Aggregation
 
 Promtail scrapes:

@@ -1,0 +1,1 @@
+{"passed": true, "checks": [{"name": "live_service_routing_contract", "passed": true, "failures": []}, {"name": "live_ingress_routing_contract", "passed": true, "skipped": true, "failures": []}]}

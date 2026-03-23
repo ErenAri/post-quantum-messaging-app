@@ -1,0 +1,59 @@
+{
+  "generated_at_utc": "2026-03-23T14:13:20Z",
+  "passed": true,
+  "rendered_chart": "tmp_live_routing\\rendered.yaml",
+  "service_manifest": "tmp_live_routing\\service.yaml",
+  "ingress_manifest": "tmp_live_routing\\ingress.yaml",
+  "service_name": "pqmsg-server",
+  "ingress_expected": true,
+  "ingress_present": true,
+  "checks": [
+    {
+      "name": "live_service_routing_contract",
+      "passed": true,
+      "failures": [],
+      "expected": {
+        "name": "pqmsg-server",
+        "type": "ClusterIP",
+        "selector_name": "pqmsg-server",
+        "selector_instance": null,
+        "port_name": "https",
+        "port": "443",
+        "target_port": "8080"
+      },
+      "observed": {
+        "name": "pqmsg-server",
+        "type": "ClusterIP",
+        "selector_name": "pqmsg-server",
+        "selector_instance": null,
+        "port_name": "https",
+        "port": "443",
+        "target_port": "8080"
+      }
+    },
+    {
+      "name": "live_ingress_routing_contract",
+      "passed": true,
+      "skipped": false,
+      "failures": [],
+      "expected": {
+        "name": "pqmsg-server",
+        "ingress_class_name": null,
+        "host": "pqmsg.example.com",
+        "path_type": "Prefix",
+        "backend_service_name": "pqmsg-server",
+        "backend_service_port": "443",
+        "tls_secret_name": "pqmsg-server-ingress-tls"
+      },
+      "observed": {
+        "name": "pqmsg-server",
+        "ingress_class_name": null,
+        "host": "pqmsg.example.com",
+        "path_type": "Prefix",
+        "backend_service_name": "pqmsg-server",
+        "backend_service_port": "443",
+        "tls_secret_name": "pqmsg-server-ingress-tls"
+      }
+    }
+  ]
+}

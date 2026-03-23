@@ -1,0 +1,142 @@
+{
+  "generated_at_utc": "2026-03-23T14:27:51Z",
+  "operation": "promote",
+  "job_status": "failure",
+  "incident_required": true,
+  "record_context": {
+    "release_tag": "v1.2.3",
+    "namespace": "pqmsg",
+    "release_name": "pqmsg-server",
+    "environment_name": "prod",
+    "deployment_mode": "production",
+    "target_image": "ghcr.io/example/pqmsg-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "artifact_presence": {
+    "record": {
+      "path": "tmp_failure_handoff\\record.json",
+      "present": true,
+      "size_bytes": 260
+    },
+    "cluster_contract": {
+      "path": "tmp_failure_handoff\\cluster.json",
+      "present": true,
+      "size_bytes": 130
+    },
+    "runtime_verification": {
+      "path": "tmp_failure_handoff\\runtime.json",
+      "present": true,
+      "size_bytes": 111
+    },
+    "policy_verification": {
+      "path": "tmp_failure_handoff\\policy.json",
+      "present": true,
+      "size_bytes": 103
+    },
+    "routing_verification": {
+      "path": "tmp_failure_handoff\\routing.json",
+      "present": true,
+      "size_bytes": 128
+    },
+    "drift_report": {
+      "path": "tmp_failure_handoff\\drift.json",
+      "present": true,
+      "size_bytes": 116
+    },
+    "deployments": {
+      "path": "tmp_failure_handoff\\deployments.json",
+      "present": true,
+      "size_bytes": 202
+    },
+    "pods": {
+      "path": "tmp_failure_handoff\\pods.json",
+      "present": true,
+      "size_bytes": 221
+    },
+    "port_forward_log": {
+      "path": "tmp_failure_handoff\\pf.log",
+      "present": true,
+      "size_bytes": 11
+    }
+  },
+  "failed_checks": [
+    {
+      "source": "cluster_contract",
+      "name": "tls_secret_present",
+      "details": {
+        "tls_secret_name": "pqmsg-server-tls"
+      }
+    },
+    {
+      "source": "runtime_contract",
+      "name": "health_status_ok",
+      "details": {
+        "status": "degraded"
+      }
+    },
+    {
+      "source": "live_routing",
+      "name": "live_service_routing_contract",
+      "details": [
+        "service.port mismatch"
+      ]
+    },
+    {
+      "source": "drift_report",
+      "name": "suspicious_cluster_drift",
+      "details": [
+        {
+          "resource": "tls_secret",
+          "reason": "changed unexpectedly"
+        }
+      ]
+    },
+    {
+      "source": "rollout_state",
+      "name": "non_ready_pods_present",
+      "details": {
+        "count": 1
+      }
+    }
+  ],
+  "failed_check_count": 5,
+  "suspicious_drift_count": 1,
+  "suspicious_drift": [
+    {
+      "resource": "tls_secret",
+      "reason": "changed unexpectedly"
+    }
+  ],
+  "deployment_rollout_state": [
+    {
+      "name": "pqmsg-server-pqmsg-server",
+      "resourceVersion": "12",
+      "generation": 2,
+      "observedGeneration": 1,
+      "replicas": 2,
+      "readyReplicas": 1,
+      "availableReplicas": 1
+    }
+  ],
+  "non_ready_pods": [
+    {
+      "pod": "pqmsg-server-pod-1",
+      "phase": "Running",
+      "container": "server",
+      "ready": false,
+      "restartCount": 2,
+      "state": {
+        "waiting": {
+          "reason": "CrashLoopBackOff"
+        }
+      }
+    }
+  ],
+  "next_actions": [
+    "Freeze further promotion or rollback actions until the failing checks are reviewed.",
+    "Review suspicious drift first, especially TLS secret and namespace policy changes.",
+    "Inspect non-ready pods and deployment rollout state before retrying.",
+    "Triage runtime /health and /v1/capabilities mismatches before any further rollout.",
+    "Inspect live Service/Ingress wiring and compare it to the rendered chart.",
+    "Fix namespace labels or missing prerequisite secrets/configmaps before re-running apply."
+  ]
+}

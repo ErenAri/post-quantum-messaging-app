@@ -1,0 +1,1 @@
+{"passed": false, "checks": [{"name": "health_status_ok", "passed": false, "details": {"status": "degraded"}}]}

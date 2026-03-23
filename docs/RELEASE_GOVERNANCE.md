@@ -64,6 +64,12 @@ A release candidate is promotable only when all conditions are true:
 12. applied promotions must record post-deploy verification evidence (`post-deploy-verification.json`) proving rollout success and the runtime `/health` + `/v1/capabilities` contract for the promoted artifact.
 13. rollback execution must consume the saved promotion bundle (`download_promotion_bundle.*` or `rollback.yml`) and record rollback execution plus verification evidence (`rollback-record.json`, `post-rollback-verification.json`).
 14. promotion and rollback apply paths must fail closed if the target namespace and prerequisite secrets/configmaps do not satisfy the hardened cluster contract (`cluster-contract.json`).
+15. applied promotion and rollback evidence must include a resource drift report (`deployment-drift.json` / `rollback-drift.json`) covering deployment image/resourceVersion changes plus generated secret/configmap, TLS secret, and namespace-policy drift, with suspicious changes explicitly classified.
+16. applied promotion and rollback evidence must include live policy verification of the fetched cluster `Deployment` and `NetworkPolicy`, not only pre-render validation (`live-policy-verification.json` / `live-rollback-policy-verification.json`).
+17. applied promotion and rollback evidence must include live routing verification of the fetched `Service` and optional `Ingress`, and fail if the live routing surface diverges from the rendered chart contract (`live-routing-verification.json` / `live-rollback-routing-verification.json`).
+18. failed promotion and rollback runs must still emit an incident-ready handoff record summarizing failed checks, suspicious drift, rollout state, and missing evidence files (`promotion-failure-handoff.json` / `rollback-failure-handoff.json`).
+19. the incident handoff record is itself a blocking gate for applied promotions and rollbacks; any required incident or suspicious drift keeps the workflow red even if Helm apply completed.
+20. when `PQMSG_ALERTMANAGER_API_URL` is configured for the target GitHub Environment, applied promotion and rollback failures must also emit and submit Alertmanager-compatible incident payloads derived from the handoff record.
 
 ## 4. Security Exception Policy
 

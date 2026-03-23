@@ -1,0 +1,76 @@
+{
+  "generated_at_utc": "2026-03-23T14:29:25Z",
+  "operation": "promote",
+  "job_status": "success",
+  "incident_required": false,
+  "record_context": {
+    "release_tag": "v1.2.3",
+    "namespace": "pqmsg",
+    "release_name": "pqmsg-server",
+    "environment_name": "prod",
+    "deployment_mode": "production",
+    "target_image": "ghcr.io/example/pqmsg-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "artifact_presence": {
+    "record": {
+      "path": "tmp_failure_handoff_ok\\record.json",
+      "present": true,
+      "size_bytes": 260
+    },
+    "cluster_contract": {
+      "path": null,
+      "present": false
+    },
+    "runtime_verification": {
+      "path": "tmp_failure_handoff_ok\\runtime.json",
+      "present": true,
+      "size_bytes": 103
+    },
+    "policy_verification": {
+      "path": "tmp_failure_handoff_ok\\policy.json",
+      "present": true,
+      "size_bytes": 103
+    },
+    "routing_verification": {
+      "path": "tmp_failure_handoff_ok\\routing.json",
+      "present": true,
+      "size_bytes": 195
+    },
+    "drift_report": {
+      "path": "tmp_failure_handoff_ok\\drift.json",
+      "present": true,
+      "size_bytes": 56
+    },
+    "deployments": {
+      "path": "tmp_failure_handoff_ok\\deployments.json",
+      "present": true,
+      "size_bytes": 202
+    },
+    "pods": {
+      "path": "tmp_failure_handoff_ok\\pods.json",
+      "present": true,
+      "size_bytes": 192
+    },
+    "port_forward_log": {
+      "path": null,
+      "present": false
+    }
+  },
+  "failed_checks": [],
+  "failed_check_count": 0,
+  "suspicious_drift_count": 0,
+  "suspicious_drift": [],
+  "deployment_rollout_state": [
+    {
+      "name": "pqmsg-server-pqmsg-server",
+      "resourceVersion": "12",
+      "generation": 2,
+      "observedGeneration": 2,
+      "replicas": 2,
+      "readyReplicas": 2,
+      "availableReplicas": 2
+    }
+  ],
+  "non_ready_pods": [],
+  "next_actions": []
+}

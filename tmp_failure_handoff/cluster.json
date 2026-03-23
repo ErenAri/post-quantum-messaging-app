@@ -1,0 +1,1 @@
+{"passed": false, "checks": [{"name": "tls_secret_present", "passed": false, "details": {"tls_secret_name": "pqmsg-server-tls"}}]}

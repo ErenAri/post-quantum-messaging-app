@@ -1,0 +1,1 @@
+{"passed": false, "checks": [{"name": "live_service_routing_contract", "passed": false, "failures": ["service.port mismatch"]}]}

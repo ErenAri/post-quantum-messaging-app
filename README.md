@@ -315,10 +315,15 @@ Manual or workflow-driven promotion can now consume those release artifacts dire
 ```
 
 GitHub Actions also includes a manual `promote` workflow that downloads the signed release bundle, validates it, and renders Helm using the published `helm-image-overrides.yaml` rather than a manually copied digest.
-That workflow now also captures the currently deployed image digest (when cluster access is available), requires hardened audit-log settings, verifies `/health` and `/v1/capabilities` after rollout, and emits `promoted-chart.yaml`, `promotion-record.json`, `rollback-image.txt`, `rollback-helm-overrides.yaml`, and `post-deploy-verification.json`.
+That workflow now also captures the currently deployed image digest (when cluster access is available), requires hardened audit-log settings, verifies `/health` and `/v1/capabilities` after rollout, verifies the live Service/Ingress routing contract, and emits `promoted-chart.yaml`, `promotion-record.json`, `rollback-image.txt`, `rollback-helm-overrides.yaml`, `post-deploy-verification.json`, and `live-routing-verification.json`.
 
-There is also a manual `rollback` workflow that downloads a saved promotion bundle by workflow run ID, verifies the embedded release artifacts, applies the saved `rollback-helm-overrides.yaml`, and emits `rollback-record.json` plus `post-rollback-verification.json`.
+There is also a manual `rollback` workflow that downloads a saved promotion bundle by workflow run ID, verifies the embedded release artifacts, applies the saved `rollback-helm-overrides.yaml`, and emits `rollback-record.json`, `post-rollback-verification.json`, and `live-rollback-routing-verification.json`.
 Both `promote` and `rollback` now fail before apply if the target namespace lacks the required Pod Security Admission labels or if the generated app secret/configmap and TLS secret are missing.
+Applied `promote` and `rollback` runs now also emit drift reports (`deployment-drift.json`, `rollback-drift.json`) that classify expected managed changes separately from suspicious drift, including TLS secret and namespace-policy changes.
+After apply, both workflows also validate the actual live `Deployment` and `NetworkPolicy` pulled back from the cluster and emit `live-policy-verification.json` / `live-rollback-policy-verification.json`.
+Whether failure happens before apply, during rollout, or during post-apply verification, both workflows now emit an incident-ready handoff record (`promotion-failure-handoff.json` / `rollback-failure-handoff.json`) that summarizes failed checks, suspicious drift, rollout state, and missing evidence files.
+That handoff record is also the final workflow gate: suspicious drift or any failed verification keeps the run red even if the raw Helm apply itself completed.
+If the GitHub Environment also provides `PQMSG_ALERTMANAGER_API_URL`, both workflows render Alertmanager-compatible incident payloads (`promotion-incident-alert.json` / `rollback-incident-alert.json`) and submit them automatically when the handoff record requires an incident.
 
 Published release bundles can be validated locally with:
 
