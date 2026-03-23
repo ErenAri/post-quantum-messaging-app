@@ -12,8 +12,9 @@ use pqmsg_core::alg::{
 use pqmsg_core::dh::{DhKeyPair, DhPublicKey};
 use pqmsg_core::groups::{
     PrivateGroupAttributes, PrivateGroupEncryptedSnapshot, PrivateGroupEpochTransition,
-    PrivateGroupInvitePackage, PrivateGroupJoinPackage, PrivateGroupMember,
-    PrivateGroupMemberCredential, PrivateGroupRole, PrivateGroupState,
+    PrivateGroupInvitePackage, PrivateGroupJoinPackage, PrivateGroupLinkInviteEnvelope,
+    PrivateGroupLinkInviteMaterial, PrivateGroupMember, PrivateGroupMemberCredential,
+    PrivateGroupRole, PrivateGroupState,
 };
 use pqmsg_core::handshake::{
     alice_initiate, bob_receive, pq_signed_prekey_signature_message,
@@ -150,6 +151,20 @@ struct PrivateGroupCredentialMaterial {
     fetch_key_sha256: String,
     publish_key_base64: Option<String>,
     publish_key_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PrivateGroupMemberJoinPackage {
+    member_user_id: String,
+    join_package: PrivateGroupJoinPackage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PrivateGroupBootstrapMaterial {
+    snapshot: PrivateGroupEncryptedSnapshot,
+    authorizing_member_credential: PrivateGroupMemberCredential,
+    member_credentials: Vec<PrivateGroupMemberCredential>,
+    member_join_packages: Vec<PrivateGroupMemberJoinPackage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1340,9 +1355,7 @@ pub fn private_group_create_state(
 }
 
 #[uniffi::export]
-pub fn private_group_encrypt_snapshot(
-    state_json: String,
-) -> Result<String, PqmsgAndroidError> {
+pub fn private_group_encrypt_snapshot(state_json: String) -> Result<String, PqmsgAndroidError> {
     let state: PrivateGroupState = serde_json::from_str(&state_json)?;
     let snapshot: PrivateGroupEncryptedSnapshot = state.encrypted_snapshot()?;
     serde_json::to_string_pretty(&snapshot).map_err(Into::into)
@@ -1388,6 +1401,77 @@ pub fn private_group_describe_member_credential(
     let credential: PrivateGroupMemberCredential = serde_json::from_str(&credential_json)?;
     let material = private_group_credential_material(&credential)?;
     serde_json::to_string_pretty(&material).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn private_group_issue_member_credentials(
+    state_json: String,
+) -> Result<String, PqmsgAndroidError> {
+    let state: PrivateGroupState = serde_json::from_str(&state_json)?;
+    let credentials = state.issue_member_credentials_for_all_members()?;
+    serde_json::to_string_pretty(&credentials).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn private_group_prepare_bootstrap_material(
+    state_json: String,
+    authorizing_user_id: String,
+) -> Result<String, PqmsgAndroidError> {
+    let state: PrivateGroupState = serde_json::from_str(&state_json)?;
+    let snapshot = state.encrypted_snapshot()?;
+    let member_credentials = state.issue_member_credentials_for_all_members()?;
+    let authorizing_member_credential = member_credentials
+        .iter()
+        .find(|credential| credential.member_user_id == authorizing_user_id)
+        .cloned()
+        .ok_or_else(|| invalid_input("authorizing private group member missing from state"))?;
+    let member_join_packages = member_credentials
+        .iter()
+        .cloned()
+        .map(|credential| {
+            let member_user_id = credential.member_user_id.clone();
+            state
+                .export_join_package_for_member_credential(credential)
+                .map(|join_package| PrivateGroupMemberJoinPackage {
+                    member_user_id,
+                    join_package,
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    serde_json::to_string_pretty(&PrivateGroupBootstrapMaterial {
+        snapshot,
+        authorizing_member_credential,
+        member_credentials,
+        member_join_packages,
+    })
+    .map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn private_group_encrypt_join_package_for_share_link(
+    join_package_json: String,
+) -> Result<String, PqmsgAndroidError> {
+    let join_package: PrivateGroupJoinPackage = serde_json::from_str(&join_package_json)?;
+    let material: PrivateGroupLinkInviteMaterial = join_package.encrypt_for_share_link()?;
+    serde_json::to_string_pretty(&material).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn private_group_open_share_link_invite(
+    envelope_json: String,
+    invite_secret_base64: String,
+) -> Result<String, PqmsgAndroidError> {
+    let envelope: PrivateGroupLinkInviteEnvelope = serde_json::from_str(&envelope_json)?;
+    let invite_secret = decode_b64("invite_secret_base64", &invite_secret_base64)?;
+    if invite_secret.len() != 32 {
+        return Err(invalid_input(
+            "invite_secret_base64 must decode to 32 bytes",
+        ));
+    }
+    let mut secret_bytes = [0u8; 32];
+    secret_bytes.copy_from_slice(&invite_secret);
+    let join_package = envelope.open_join_package(&secret_bytes)?;
+    serde_json::to_string_pretty(&join_package).map_err(Into::into)
 }
 
 #[uniffi::export]
@@ -3052,8 +3136,7 @@ fn private_group_credential_material(
         fetch_key_base64: B64.encode(fetch_key),
         fetch_key_sha256: hex_string(&Sha256::digest(fetch_key)),
         publish_key_base64: publish_key.map(|value| B64.encode(value)),
-        publish_key_sha256: publish_key
-            .map(|value| hex_string(&Sha256::digest(value))),
+        publish_key_sha256: publish_key.map(|value| hex_string(&Sha256::digest(value))),
     })
 }
 
@@ -3397,11 +3480,9 @@ mod tests {
             1_710_000_000,
         )
         .expect("create private group state");
-        let join_package_json = private_group_export_join_package_for_member(
-            state_json,
-            "bob".to_string(),
-        )
-        .expect("export join package");
+        let join_package_json =
+            private_group_export_join_package_for_member(state_json, "bob".to_string())
+                .expect("export join package");
         let restored_json =
             private_group_restore_join_package(join_package_json).expect("restore join package");
         let restored: PrivateGroupRestoreResult =
@@ -3423,6 +3504,40 @@ mod tests {
         assert!(!material.fetch_key_sha256.is_empty());
         assert!(material.publish_key_base64.is_some());
         assert!(material.publish_key_sha256.is_some());
+
+        let state_json = serde_json::to_string(&restored.state).expect("serialize restored state");
+        let bootstrap_json =
+            private_group_prepare_bootstrap_material(state_json, "alice".to_string())
+                .expect("prepare bootstrap material");
+        let bootstrap: PrivateGroupBootstrapMaterial =
+            serde_json::from_str(&bootstrap_json).expect("parse bootstrap material");
+        assert_eq!(bootstrap.member_credentials.len(), 2);
+        assert_eq!(bootstrap.member_join_packages.len(), 2);
+        assert_eq!(
+            bootstrap.authorizing_member_credential.member_user_id,
+            "alice"
+        );
+
+        let bob_join_package = bootstrap
+            .member_join_packages
+            .iter()
+            .find(|item| item.member_user_id == "bob")
+            .expect("bob join package");
+        let share_link_json = private_group_encrypt_join_package_for_share_link(
+            serde_json::to_string(&bob_join_package.join_package).expect("serialize join package"),
+        )
+        .expect("encrypt join package for share link");
+        let share_link: PrivateGroupLinkInviteMaterial =
+            serde_json::from_str(&share_link_json).expect("parse share link material");
+        let reopened_json = private_group_open_share_link_invite(
+            serde_json::to_string(&share_link.envelope).expect("serialize share link envelope"),
+            B64.encode(share_link.invite_secret),
+        )
+        .expect("open share link invite");
+        let reopened: PrivateGroupJoinPackage =
+            serde_json::from_str(&reopened_json).expect("parse reopened join package");
+        assert_eq!(reopened.member_credential.member_user_id, "bob");
+        assert_eq!(reopened.invite.group_id, restored.state.group_id);
     }
 
     #[test]

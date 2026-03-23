@@ -15,6 +15,7 @@ const MEMBER_CREDENTIAL_HANDLE_LABEL: &str = "pqmsg-private-group-member-handle-
 const MEMBER_CREDENTIAL_COMMITMENT_LABEL: &str = "pqmsg-private-group-member-commitment-v1";
 const MEMBER_CREDENTIAL_FETCH_KEY_LABEL: &str = "pqmsg-private-group-member-fetch-key-v1";
 const MEMBER_CREDENTIAL_PUBLISH_KEY_LABEL: &str = "pqmsg-private-group-member-publish-key-v1";
+const GROUP_INVITE_LINK_KEY_LABEL: &str = "pqmsg-private-group-link-invite-v1";
 
 const TLV_OWNER_USER_ID: u16 = critical_type(0x3001);
 const TLV_GROUP_TITLE: u16 = critical_type(0x3002);
@@ -96,6 +97,20 @@ pub struct PrivateGroupInvitePackage {
 pub struct PrivateGroupJoinPackage {
     pub invite: PrivateGroupInvitePackage,
     pub member_credential: PrivateGroupMemberCredential,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PrivateGroupLinkInviteEnvelope {
+    pub group_id: String,
+    pub epoch: u64,
+    pub invite_commitment_sha256: [u8; 32],
+    pub ciphertext: CiphertextEnvelope,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PrivateGroupLinkInviteMaterial {
+    pub invite_secret: [u8; 32],
+    pub envelope: PrivateGroupLinkInviteEnvelope,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -281,7 +296,12 @@ impl PrivateGroupState {
         role: PrivateGroupRole,
         updated_at_unix_seconds: u64,
     ) -> Result<PrivateGroupEpochTransition, CoreError> {
-        self.prepare_add_member_transition_with_rng(user_id, role, updated_at_unix_seconds, &mut OsRng)
+        self.prepare_add_member_transition_with_rng(
+            user_id,
+            role,
+            updated_at_unix_seconds,
+            &mut OsRng,
+        )
     }
 
     pub fn prepare_add_member_transition_with_rng<R: RngCore + CryptoRng>(
@@ -298,7 +318,8 @@ impl PrivateGroupState {
                 "private group member already has requested role",
             ));
         }
-        let member_credentials = next_state.issue_member_credentials_for_all_members_with_rng(rng)?;
+        let member_credentials =
+            next_state.issue_member_credentials_for_all_members_with_rng(rng)?;
         let added_member_credential = member_credentials
             .iter()
             .find(|credential| credential.member_user_id == user_id)
@@ -338,7 +359,8 @@ impl PrivateGroupState {
                 "private group member is not present",
             ));
         }
-        let member_credentials = next_state.issue_member_credentials_for_all_members_with_rng(rng)?;
+        let member_credentials =
+            next_state.issue_member_credentials_for_all_members_with_rng(rng)?;
         Ok(PrivateGroupEpochTransition {
             next_state,
             member_credentials,
@@ -458,6 +480,12 @@ impl PrivateGroupState {
         role: PrivateGroupRole,
     ) -> Result<PrivateGroupMemberCredential, CoreError> {
         self.issue_member_credential_with_rng(member_user_id, role, &mut OsRng)
+    }
+
+    pub fn issue_member_credentials_for_all_members(
+        &self,
+    ) -> Result<Vec<PrivateGroupMemberCredential>, CoreError> {
+        self.issue_member_credentials_for_all_members_with_rng(&mut OsRng)
     }
 
     pub fn issue_member_credential_with_rng<R: RngCore + CryptoRng>(
@@ -588,6 +616,71 @@ impl PrivateGroupJoinPackage {
         }
         Ok((state, self.member_credential.clone()))
     }
+
+    pub fn encrypt_for_share_link(&self) -> Result<PrivateGroupLinkInviteMaterial, CoreError> {
+        self.encrypt_for_share_link_with_rng(&mut OsRng)
+    }
+
+    pub fn encrypt_for_share_link_with_rng<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+    ) -> Result<PrivateGroupLinkInviteMaterial, CoreError> {
+        let plaintext = serde_json::to_vec(self).map_err(|_| {
+            CoreError::MessageParsing("failed to serialize private group join package")
+        })?;
+        let mut invite_secret = [0u8; ROOT_SECRET_BYTES];
+        rng.fill_bytes(&mut invite_secret);
+        let invite_key =
+            derive_link_invite_key(&invite_secret, &self.invite.group_id, self.invite.epoch)?;
+        let aad = link_invite_aad(&self.invite.group_id, self.invite.epoch);
+        let ciphertext = aead::encrypt_with_rng(&invite_key, &plaintext, &aad, rng)?;
+        Ok(PrivateGroupLinkInviteMaterial {
+            invite_secret,
+            envelope: PrivateGroupLinkInviteEnvelope {
+                group_id: self.invite.group_id.clone(),
+                epoch: self.invite.epoch,
+                invite_commitment_sha256: sha256_bytes(&invite_secret),
+                ciphertext,
+            },
+        })
+    }
+}
+
+impl PrivateGroupLinkInviteEnvelope {
+    pub fn open_join_package(
+        &self,
+        invite_secret: &[u8; ROOT_SECRET_BYTES],
+    ) -> Result<PrivateGroupJoinPackage, CoreError> {
+        if sha256_bytes(invite_secret) != self.invite_commitment_sha256 {
+            return Err(CoreError::PolicyViolation(
+                "private group invite secret commitment mismatch",
+            ));
+        }
+        let invite_key = derive_link_invite_key(invite_secret, &self.group_id, self.epoch)?;
+        let aad = link_invite_aad(&self.group_id, self.epoch);
+        if self.ciphertext.aad != aad {
+            return Err(CoreError::PolicyViolation(
+                "private group invite envelope aad mismatch",
+            ));
+        }
+        let plaintext = aead::decrypt(&invite_key, &self.ciphertext)?;
+        let join_package: PrivateGroupJoinPackage =
+            serde_json::from_slice(&plaintext).map_err(|_| {
+                CoreError::MessageParsing("failed to decode private group join package")
+            })?;
+        if join_package.invite.group_id != self.group_id {
+            return Err(CoreError::PolicyViolation(
+                "private group link invite group_id mismatch",
+            ));
+        }
+        if join_package.invite.epoch != self.epoch {
+            return Err(CoreError::PolicyViolation(
+                "private group link invite epoch mismatch",
+            ));
+        }
+        let _ = join_package.restore_state_and_credential()?;
+        Ok(join_package)
+    }
 }
 
 fn validate_group_attributes(attributes: &PrivateGroupAttributes) -> Result<(), CoreError> {
@@ -616,6 +709,23 @@ fn validate_user_id(user_id: &str) -> Result<(), CoreError> {
         ));
     }
     Ok(())
+}
+
+fn derive_link_invite_key(
+    invite_secret: &[u8; ROOT_SECRET_BYTES],
+    group_id: &str,
+    epoch: u64,
+) -> Result<[u8; 32], CoreError> {
+    let info = format!("{GROUP_INVITE_LINK_KEY_LABEL}:{group_id}:{epoch}");
+    hkdf_sha256_32(invite_secret, None, info.as_bytes())
+}
+
+fn link_invite_aad(group_id: &str, epoch: u64) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(GROUP_INVITE_LINK_KEY_LABEL.len() + group_id.len() + 16);
+    aad.extend_from_slice(GROUP_INVITE_LINK_KEY_LABEL.as_bytes());
+    aad.extend_from_slice(group_id.as_bytes());
+    aad.extend_from_slice(&epoch.to_be_bytes());
+    aad
 }
 
 fn normalize_members(
@@ -1111,6 +1221,71 @@ mod tests {
             .restore_state_and_credential()
             .expect_err("role mismatch should fail");
         assert!(error.to_string().contains("role mismatch"));
+    }
+
+    #[test]
+    fn share_link_invite_roundtrip_restores_join_package() {
+        let mut rng = ChaCha20Rng::from_seed([22u8; 32]);
+        let state = PrivateGroupState::new_with_rng(
+            "alice".to_string(),
+            sample_attributes(),
+            vec![PrivateGroupMember {
+                user_id: "bob".to_string(),
+                role: PrivateGroupRole::Member,
+            }],
+            1_700_000_065,
+            &mut rng,
+        )
+        .expect("create group");
+
+        let join_package = state
+            .export_join_package_for_member_with_rng("bob", &mut rng)
+            .expect("export join package");
+        let link_material = join_package
+            .encrypt_for_share_link_with_rng(&mut rng)
+            .expect("encrypt share link invite");
+        let restored = link_material
+            .envelope
+            .open_join_package(&link_material.invite_secret)
+            .expect("open share link invite");
+
+        assert_eq!(restored.invite.group_id, join_package.invite.group_id);
+        assert_eq!(restored.invite.epoch, join_package.invite.epoch);
+        assert_eq!(
+            restored.member_credential.member_user_id,
+            join_package.member_credential.member_user_id
+        );
+    }
+
+    #[test]
+    fn share_link_invite_rejects_wrong_secret() {
+        let mut rng = ChaCha20Rng::from_seed([24u8; 32]);
+        let state = PrivateGroupState::new_with_rng(
+            "alice".to_string(),
+            sample_attributes(),
+            vec![PrivateGroupMember {
+                user_id: "bob".to_string(),
+                role: PrivateGroupRole::Member,
+            }],
+            1_700_000_066,
+            &mut rng,
+        )
+        .expect("create group");
+
+        let join_package = state
+            .export_join_package_for_member_with_rng("bob", &mut rng)
+            .expect("export join package");
+        let link_material = join_package
+            .encrypt_for_share_link_with_rng(&mut rng)
+            .expect("encrypt share link invite");
+        let mut wrong_secret = link_material.invite_secret;
+        wrong_secret[0] ^= 0x01;
+
+        let error = link_material
+            .envelope
+            .open_join_package(&wrong_secret)
+            .expect_err("wrong secret should fail");
+        assert!(error.to_string().contains("commitment"));
     }
 
     #[test]

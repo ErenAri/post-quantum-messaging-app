@@ -6624,7 +6624,10 @@ async fn private_group_invite_consume_revokes_token() {
     )
     .await;
     assert_eq!(consume_status, StatusCode::OK);
-    assert_eq!(consume_payload["invite_token"].as_str(), Some(invite_token.as_str()));
+    assert_eq!(
+        consume_payload["invite_token"].as_str(),
+        Some(invite_token.as_str())
+    );
     assert_eq!(consume_payload["consumed"].as_bool(), Some(true));
     assert!(consume_payload["revoked_at"].as_str().is_some());
 

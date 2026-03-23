@@ -87,6 +87,17 @@ jobs:
           PQMSG_SECURITY_PROFILE: research
         run: cargo test -p pqmsg-server --all-targets
 
+  sqlite-sqlcipher:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install SQLCipher build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: run SQLCipher SQLite server tests
+        run: cargo test -p pqmsg-server db::tests::sqlite_ --lib
+
   benchmarks:
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest

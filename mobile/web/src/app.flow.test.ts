@@ -1106,7 +1106,7 @@ describe("web app flow coverage", () => {
     expect(document.body.textContent).toContain("Create Account");
   });
 
-  it("keeps unsupported web group and call surfaces in explicit holdback states", async () => {
+  it("shows private-group create and join UI while keeping calls in holdback", async () => {
     const { router } = await bootApp({
       prepare: async (storage) => {
         await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
@@ -1124,7 +1124,9 @@ describe("web app flow coverage", () => {
 
     router.navigateTo({ screen: "create-group" });
     await flushPromises();
-    expect(document.body.textContent).toContain("Web group creation is unavailable");
+    expect(document.body.textContent).toContain("Private groups stay client-managed");
+    expect(document.body.textContent).toContain("Create Private Group");
+    expect(document.body.textContent).toContain("Join Private Group");
 
     router.navigateTo({ screen: "call", peerId: "test2", callType: "audio" });
     await flushPromises();

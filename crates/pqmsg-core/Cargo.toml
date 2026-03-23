@@ -31,7 +31,7 @@ cryptoki = { version = "0.7", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }
 getrandom = { version = "0.2", features = ["js"], optional = true }
-serde_json = { version = "1", optional = true }
+serde_json = "1"
 
 [features]
 default = ["pq-oqs"]
@@ -40,8 +40,8 @@ pq-rust = ["dep:fips203", "dep:fips204"]
 fips = ["pq-oqs"]
 classical-only-INSECURE = []
 hsm-pkcs11 = ["dep:cryptoki"]
-wasm = ["classical-only-INSECURE", "dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:getrandom", "dep:serde_json"]
-wasm-pq = ["pq-rust", "dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:getrandom", "dep:serde_json"]
+wasm = ["classical-only-INSECURE", "dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:getrandom"]
+wasm-pq = ["pq-rust", "dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:getrandom"]
 
 [dev-dependencies]
 rand.workspace = true

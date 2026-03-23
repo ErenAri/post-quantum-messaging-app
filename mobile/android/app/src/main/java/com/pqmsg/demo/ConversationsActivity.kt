@@ -14,7 +14,12 @@ import com.google.gson.Gson
 import kotlinx.coroutines.launch
 import uniffi.pqmsg_android.buildContactInviteCreateAuthHeaders
 import uniffi.pqmsg_android.buildContactsListAuthHeaders
-import uniffi.pqmsg_android.buildGroupCreateAuthHeaders
+import uniffi.pqmsg_android.privateGroupCreateState
+import uniffi.pqmsg_android.privateGroupEncryptJoinPackageForShareLink
+import uniffi.pqmsg_android.privateGroupOpenShareLinkInvite
+import uniffi.pqmsg_android.privateGroupPrepareBootstrapMaterial
+import uniffi.pqmsg_android.privateGroupRestoreJoinPackage
+import java.util.Base64
 
 class ConversationsActivity : AppCompatActivity() {
     private val gson = Gson()
@@ -102,7 +107,7 @@ class ConversationsActivity : AppCompatActivity() {
         openSecurityButton.setOnClickListener {
             startActivity(Intent(this, SecurityInfoActivity::class.java))
         }
-        groupsButton.setOnClickListener { showGroupMessagingUnavailable() }
+        groupsButton.setOnClickListener { showGroupsDialog() }
         contactsButton.setOnClickListener {
             startActivity(Intent(this, ContactDiscoveryActivity::class.java))
         }
@@ -111,7 +116,7 @@ class ConversationsActivity : AppCompatActivity() {
     private fun renderHome() {
         val setup = store.loadSetup()
         profileText.text = "${setup.userId}\n${setup.serverUrl}"
-        groupsButton.alpha = 0.55f
+        groupsButton.alpha = 1f
         refreshConversations()
         updateRequestsButton()
     }
@@ -379,7 +384,7 @@ class ConversationsActivity : AppCompatActivity() {
             return
         }
         val labels = groups.map { "${it.displayName} (${it.memberCount} members)\n${it.lastPreview}" }.toTypedArray()
-        val options = labels + arrayOf("+ Create new group")
+        val options = labels + arrayOf("+ Create private group", "+ Join private group")
         AlertDialog.Builder(this)
             .setTitle(getString(R.string.button_open_groups))
             .setItems(options) { _, which ->
@@ -391,8 +396,10 @@ class ConversationsActivity : AppCompatActivity() {
                             putExtra("group_name", group.displayName)
                         },
                     )
-                } else {
+                } else if (which == groups.size) {
                     showCreateGroupDialog()
+                } else {
+                    showJoinPrivateGroupDialog()
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -419,7 +426,7 @@ class ConversationsActivity : AppCompatActivity() {
             .setPositiveButton(getString(R.string.button_create_group)) { _, _ ->
                 val groupName = nameInput.text.toString().trim()
                 val members = membersInput.text.toString().split(",").map { it.trim() }.filter { it.isNotBlank() }
-                if (groupName.isNotBlank() && members.isNotEmpty()) {
+                if (groupName.isNotBlank()) {
                     createGroup(groupName, members)
                 }
             }
@@ -437,37 +444,178 @@ class ConversationsActivity : AppCompatActivity() {
                     userId = setup.userId,
                     suiteLabel = setup.suiteLabel,
                 )
-                val keysJson = context.keysJson
-                val groupId = "${setup.userId}-${groupName.lowercase().replace(" ", "-")}-${System.currentTimeMillis() % 10000}"
-                val allMembers = (members + setup.userId).distinct()
-                val response = context.api.createGroup(
-                    headers = buildGroupCreateAuthHeaders(
-                        keysJson = keysJson,
-                        groupId = groupId,
-                        memberUserIds = allMembers,
-                    ).toHeaderMap(),
-                    request = CreateGroupRequest(
-                        group_id = groupId,
-                        member_user_ids = allMembers,
+                val resolvedMembers = linkedSetOf<String>()
+                for (rawTarget in members) {
+                    val target = MessagingCoordinator.parseComposeTarget(rawTarget, setup.serverUrl)
+                    require(
+                        ApiClientFactory.normalizeBaseUrl(target.serverUrl) ==
+                            ApiClientFactory.normalizeBaseUrl(setup.serverUrl),
+                    ) { "Private-group members must use the current account server." }
+                    val resolved = MessagingCoordinator.resolvePeerUserId(context.api, target)
+                    require(resolved != context.profile.userId) { "You are already in this private group." }
+                    resolvedMembers.add(resolved)
+                }
+                val stateJson = privateGroupCreateState(
+                    context.profile.userId,
+                    gson.toJson(
+                        PrivateGroupAttributes(
+                            title = groupName,
+                            description = null,
+                            avatar_hash_sha256 = null,
+                            disappearing_message_timer_seconds = null,
+                        ),
                     ),
+                    gson.toJson(
+                        resolvedMembers.map { memberUserId ->
+                            PrivateGroupMember(user_id = memberUserId, role = "Member")
+                        },
+                    ),
+                    (System.currentTimeMillis() / 1000).toULong(),
                 )
-                store.upsertGroupConversation(
-                    userId = setup.userId,
-                    groupId = groupId,
-                    displayName = groupName,
-                    memberCount = response.member_count,
-                    lastPreview = "Group created",
+                val state = parsePrivateGroupStateJson(stateJson)
+                val bootstrap = parsePrivateGroupBootstrapMaterial(
+                    privateGroupPrepareBootstrapMaterial(stateJson, context.profile.userId),
+                )
+                val stateCommitmentSha256 = publishPrivateGroupBootstrap(context.api, bootstrap)
+                updateLocalPrivateGroupState(
+                    store = store,
+                    userId = context.profile.userId,
+                    state = state,
+                    memberCredential = bootstrap.authorizing_member_credential,
+                    stateCommitmentSha256 = stateCommitmentSha256,
+                    preview = "Private group created",
                     incrementUnread = false,
                 )
-                statusText.text = "Group '$groupName' created"
+                val inviteLinks = bootstrap.member_join_packages
+                    .filter { it.member_user_id != context.profile.userId }
+                    .map { joinPackage ->
+                        val inviteMaterial = parsePrivateGroupLinkInviteMaterial(
+                            privateGroupEncryptJoinPackageForShareLink(gson.toJson(joinPackage.join_package)),
+                        )
+                        "${joinPackage.member_user_id}: ${
+                            createPrivateGroupInviteLinkFromJoinPackage(
+                                api = context.api,
+                                serverUrl = setup.serverUrl,
+                                state = state,
+                                authorizingCredential = bootstrap.authorizing_member_credential,
+                                inviteMaterial = inviteMaterial,
+                            )
+                        }"
+                    }
+                statusText.text = "Private group '$groupName' created"
+                if (inviteLinks.isNotEmpty()) {
+                    startActivity(
+                        Intent.createChooser(
+                            Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, inviteLinks.joinToString("\n"))
+                            },
+                            getString(R.string.share_invite_chooser_title),
+                        ),
+                    )
+                }
                 startActivity(
                     Intent(this@ConversationsActivity, GroupChatActivity::class.java).apply {
-                        putExtra("group_id", groupId)
+                        putExtra("group_id", state.group_id)
                         putExtra("group_name", groupName)
                     },
                 )
             }.onFailure {
                 statusText.text = UiErrorMapper.fromThrowable(it, "Create group").headline
+            }
+        }
+    }
+
+    private fun showJoinPrivateGroupDialog() {
+        val input = EditText(this).apply {
+            hint = "Paste a private-group link"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Join private group")
+            .setView(input)
+            .setPositiveButton("Join") { _, _ ->
+                val link = input.text.toString().trim()
+                if (link.isNotBlank()) {
+                    joinPrivateGroup(link)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun joinPrivateGroup(rawLink: String) {
+        val setup = store.loadSetup()
+        lifecycleScope.launch {
+            runCatching {
+                val target = extractPrivateGroupInviteTarget(rawLink, setup.serverUrl)
+                    ?: error("Private-group link is invalid or missing its secret fragment.")
+                require(
+                    ApiClientFactory.normalizeBaseUrl(target.serverUrl) ==
+                        ApiClientFactory.normalizeBaseUrl(setup.serverUrl),
+                ) { "Private-group links must target the current account server." }
+                val context = MessagingCoordinator.ensureReady(
+                    store = store,
+                    serverUrl = setup.serverUrl,
+                    userId = setup.userId,
+                    suiteLabel = setup.suiteLabel,
+                    deviceId = setup.deviceId,
+                )
+                val invite = context.api.resolvePrivateGroupInvite(target.inviteToken)
+                val joinPackageJson = privateGroupOpenShareLinkInvite(
+                    gson.toJson(
+                        PrivateGroupLinkInviteEnvelope(
+                            group_id = invite.group_id,
+                            epoch = invite.epoch,
+                            invite_commitment_sha256 = privateGroupHexToIntList(invite.invite_commitment_sha256),
+                            ciphertext = PrivateGroupCiphertextEnvelope(
+                                nonce = Base64.getDecoder().decode(invite.invite_ciphertext_nonce_base64)
+                                    .map { it.toInt() and 0xff },
+                                ciphertext = Base64.getDecoder().decode(invite.invite_ciphertext_base64)
+                                    .map { it.toInt() and 0xff },
+                                aad = Base64.getDecoder().decode(invite.invite_ciphertext_aad_base64)
+                                    .map { it.toInt() and 0xff },
+                            ),
+                        ),
+                    ),
+                    target.inviteSecretBase64,
+                )
+                val joinPackage = parsePrivateGroupJoinPackage(joinPackageJson)
+                val restored = parsePrivateGroupRestoreResult(
+                    privateGroupRestoreJoinPackage(joinPackageJson),
+                )
+                val memberMaterial = describePrivateGroupMemberCredential(restored.member_credential)
+                val fetchedState = context.api.fetchPrivateGroupState(
+                    FetchPrivateGroupStateRequest(
+                        membership_handle_sha256 = memberMaterial.membership_handle_sha256,
+                        fetch_key_base64 = memberMaterial.fetch_key_base64,
+                    ),
+                )
+                require(fetchedState.group_id == restored.state.group_id && fetchedState.epoch == restored.state.epoch) {
+                    "Private-group state fetch does not match the invite package."
+                }
+                require(
+                    fetchedState.state_commitment_sha256 ==
+                        privateGroupBytesToHex(joinPackage.invite.snapshot.state_commitment_sha256),
+                ) { "Private-group state fetch failed commitment verification." }
+                context.api.consumePrivateGroupInvite(target.inviteToken)
+                updateLocalPrivateGroupState(
+                    store = store,
+                    userId = context.profile.userId,
+                    state = restored.state,
+                    memberCredential = restored.member_credential,
+                    stateCommitmentSha256 = fetchedState.state_commitment_sha256,
+                    preview = "Joined private group",
+                    incrementUnread = false,
+                )
+                statusText.text = "Joined private group '${getPrivateGroupTitle(restored.state)}'"
+                startActivity(
+                    Intent(this@ConversationsActivity, GroupChatActivity::class.java).apply {
+                        putExtra("group_id", restored.state.group_id)
+                        putExtra("group_name", getPrivateGroupTitle(restored.state))
+                    },
+                )
+            }.onFailure {
+                statusText.text = UiErrorMapper.fromThrowable(it, "Join private group").headline
             }
         }
     }

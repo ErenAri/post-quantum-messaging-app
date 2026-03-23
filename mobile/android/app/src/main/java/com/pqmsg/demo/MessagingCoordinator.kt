@@ -346,6 +346,7 @@ object MessagingCoordinator {
         userId: String,
         suiteLabel: String,
         activePeer: String? = null,
+        activeGroup: String? = null,
     ): SyncOutcome {
         val context = ensureReady(
             store = store,
@@ -359,6 +360,7 @@ object MessagingCoordinator {
             0
         }
         val activePeerId = activePeer?.trim().orEmpty()
+        val activeGroupId = activeGroup?.trim().orEmpty()
         val knownPeers = store.listConversations(context.profile.userId)
             .mapTo(mutableSetOf()) { it.peerUserId }
         val transparencyVerifiedPeers = mutableSetOf<String>()
@@ -438,38 +440,72 @@ object MessagingCoordinator {
                 existingSessionJson = existingSession,
             )
             store.writeSession(context.profile.userId, peer, result.sessionJson)
-            val rendered = renderInboundPreview(result.plaintextUtf8)
-            store.appendThreadMessage(
-                userId = context.profile.userId,
-                peerUserId = peer,
-                direction = "inbound",
-                body = rendered,
-                transportMessageId = item.message_id,
+            val privateGroupMessage = decodePrivateGroupMessage(
+                plaintext = result.plaintextUtf8,
+                senderUserId = peer,
+                store = store,
+                localUserId = context.profile.userId,
             )
-            val isAcceptedPeer =
-                peer == activePeerId ||
-                    knownPeers.contains(peer) ||
-                    store.isAcceptedPeer(context.profile.userId, peer)
-            if (isAcceptedPeer) {
-                store.markPeerAccepted(context.profile.userId, peer)
-                store.upsertConversation(
+            val isWrappedPrivateGroup = result.plaintextUtf8.startsWith(PRIVATE_GROUP_MESSAGE_PREFIX)
+            if (privateGroupMessage != null) {
+                val localGroupState = store.readPrivateGroupState(
+                    context.profile.userId,
+                    privateGroupMessage.groupId,
+                ) ?: error("Private-group state is unavailable for ${privateGroupMessage.groupId}")
+                val state = parsePrivateGroupStateJson(localGroupState.stateJson)
+                store.appendGroupThreadMessage(
                     userId = context.profile.userId,
-                    peerUserId = peer,
-                    lastPreview = "$peer: $rendered",
-                    incrementUnread = peer != activePeerId,
+                    groupId = privateGroupMessage.groupId,
+                    senderUserId = peer,
+                    body = privateGroupMessage.body,
+                    transportMessageId = item.message_id,
                 )
-                if (peer == activePeerId) {
-                    store.markConversationRead(context.profile.userId, peer)
+                store.upsertGroupConversation(
+                    userId = context.profile.userId,
+                    groupId = privateGroupMessage.groupId,
+                    displayName = getPrivateGroupTitle(state),
+                    memberCount = state.members.size,
+                    lastPreview = "${peer}: ${privateGroupMessage.body}",
+                    incrementUnread = privateGroupMessage.groupId != activeGroupId,
+                )
+                if (privateGroupMessage.groupId == activeGroupId) {
+                    store.markGroupRead(context.profile.userId, privateGroupMessage.groupId)
                 }
-                knownPeers.add(peer)
                 deliveredMessages += 1
-            } else {
-                store.upsertMessageRequest(
+            } else if (!isWrappedPrivateGroup) {
+                val rendered = renderInboundPreview(result.plaintextUtf8)
+                store.appendThreadMessage(
                     userId = context.profile.userId,
                     peerUserId = peer,
-                    lastPreview = "$peer: $rendered",
+                    direction = "inbound",
+                    body = rendered,
+                    transportMessageId = item.message_id,
                 )
-                pendingRequests += 1
+                val isAcceptedPeer =
+                    peer == activePeerId ||
+                        knownPeers.contains(peer) ||
+                        store.isAcceptedPeer(context.profile.userId, peer)
+                if (isAcceptedPeer) {
+                    store.markPeerAccepted(context.profile.userId, peer)
+                    store.upsertConversation(
+                        userId = context.profile.userId,
+                        peerUserId = peer,
+                        lastPreview = "$peer: $rendered",
+                        incrementUnread = peer != activePeerId,
+                    )
+                    if (peer == activePeerId) {
+                        store.markConversationRead(context.profile.userId, peer)
+                    }
+                    knownPeers.add(peer)
+                    deliveredMessages += 1
+                } else {
+                    store.upsertMessageRequest(
+                        userId = context.profile.userId,
+                        peerUserId = peer,
+                        lastPreview = "$peer: $rendered",
+                    )
+                    pendingRequests += 1
+                }
             }
 
             seenCipherHashes.add(cipherHash)

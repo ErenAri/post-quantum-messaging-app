@@ -124,6 +124,18 @@ export interface PrivateGroupInvitePackage {
   snapshot: PrivateGroupEncryptedSnapshot;
 }
 
+export interface PrivateGroupLinkInviteEnvelope {
+  group_id: string;
+  epoch: number;
+  invite_commitment_sha256: number[];
+  ciphertext: PrivateGroupCiphertextEnvelope;
+}
+
+export interface PrivateGroupLinkInviteMaterial {
+  invite_secret: number[];
+  envelope: PrivateGroupLinkInviteEnvelope;
+}
+
 export interface PrivateGroupMemberCredential {
   group_id: string;
   epoch: number;
@@ -159,6 +171,18 @@ export interface PrivateGroupCredentialMaterial {
 export interface PrivateGroupRestoreResult {
   state: PrivateGroupState;
   member_credential: PrivateGroupMemberCredential;
+}
+
+export interface PrivateGroupMemberJoinPackage {
+  member_user_id: string;
+  join_package: PrivateGroupJoinPackage;
+}
+
+export interface PrivateGroupBootstrapMaterial {
+  snapshot: PrivateGroupEncryptedSnapshot;
+  authorizing_member_credential: PrivateGroupMemberCredential;
+  member_credentials: PrivateGroupMemberCredential[];
+  member_join_packages: PrivateGroupMemberJoinPackage[];
 }
 
 export interface PrivateGroupEpochTransition {
@@ -555,6 +579,60 @@ export function privateGroupDescribeMemberCredential(
   }
   return parseJsonResult<PrivateGroupCredentialMaterial>(
     wasmModule!.wasm_private_group_describe_member_credential(JSON.stringify(credential))
+  );
+}
+
+export function privateGroupIssueMemberCredentials(
+  state: PrivateGroupState
+): PrivateGroupMemberCredential[] {
+  if (!privateGroupBindingsAvailable()) {
+    throw new Error("WASM private group bindings are not available");
+  }
+  return parseJsonResult<PrivateGroupMemberCredential[]>(
+    wasmModule!.wasm_private_group_issue_member_credentials(JSON.stringify(state))
+  );
+}
+
+export function privateGroupPrepareBootstrapMaterial(
+  state: PrivateGroupState,
+  authorizingUserId: string
+): PrivateGroupBootstrapMaterial {
+  if (!privateGroupBindingsAvailable()) {
+    throw new Error("WASM private group bindings are not available");
+  }
+  return parseJsonResult<PrivateGroupBootstrapMaterial>(
+    wasmModule!.wasm_private_group_prepare_bootstrap_material(
+      JSON.stringify(state),
+      authorizingUserId
+    )
+  );
+}
+
+export function privateGroupEncryptJoinPackageForShareLink(
+  joinPackage: PrivateGroupJoinPackage
+): PrivateGroupLinkInviteMaterial {
+  if (!privateGroupBindingsAvailable()) {
+    throw new Error("WASM private group bindings are not available");
+  }
+  return parseJsonResult<PrivateGroupLinkInviteMaterial>(
+    wasmModule!.wasm_private_group_encrypt_join_package_for_share_link(
+      JSON.stringify(joinPackage)
+    )
+  );
+}
+
+export function privateGroupOpenShareLinkInvite(
+  envelope: PrivateGroupLinkInviteEnvelope,
+  inviteSecretBase64: string
+): PrivateGroupJoinPackage {
+  if (!privateGroupBindingsAvailable()) {
+    throw new Error("WASM private group bindings are not available");
+  }
+  return parseJsonResult<PrivateGroupJoinPackage>(
+    wasmModule!.wasm_private_group_open_share_link_invite(
+      JSON.stringify(envelope),
+      inviteSecretBase64
+    )
   );
 }
 

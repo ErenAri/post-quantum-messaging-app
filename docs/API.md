@@ -73,6 +73,10 @@ Server startup is controlled by environment variables:
 - `PQMSG_SECURITY_PROFILE`: `research` | `high_assurance` | `nss_aligned` (default: `high_assurance`)
 - `PQMSG_DEPLOYMENT_MODE`: `development` (default) | `pilot` | `production`
 - `PQMSG_DATABASE_URL`: `sqlite://...` or `postgres://...`
+- `PQMSG_SQLITE_ENCRYPTION_KEY_B64`: optional base64-encoded 32-byte raw SQLCipher key for SQLite-backed at-rest page encryption
+- `PQMSG_SQLITE_MIGRATE_PLAINTEXT`: optional boolean (`true`/`false`) enabling explicit one-way plaintext SQLite to SQLCipher migration at startup when a key is configured
+- `PQMSG_SQLITE_CIPHER_COMPATIBILITY`: optional SQLCipher compatibility mode (`1`..`4`) applied on every SQLite connection when page encryption is enabled
+- `PQMSG_SQLITE_CIPHER_PAGE_SIZE`: optional SQLCipher page size (power of two between `512` and `65536`) applied on every SQLite connection when page encryption is enabled
 - `PQMSG_TLS_CERT_PATH`: PEM certificate path
 - `PQMSG_TLS_KEY_PATH`: PEM private key path
 - `PQMSG_DB_MAX_CONNECTIONS`: pool max connections (default: `20`)
@@ -98,6 +102,12 @@ Server startup is controlled by environment variables:
 - `PQMSG_REGISTRATION_POW_BITS`: optional registration proof-of-work difficulty override
 - `PQMSG_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS`: optional minimum interval between prekey publishes per user/device
 - `PQMSG_PREKEY_BUNDLE_RESERVE_COUNT`: optional one-time prekey reserve floor per device before returning last-resort bundle mode
+
+Notes:
+
+- The SQLite encryption key is only used when `PQMSG_DATABASE_URL` points at SQLite.
+- Existing plaintext SQLite databases now require explicit opt-in migration. If a key is configured against a legacy plaintext file, startup fails closed until `PQMSG_SQLITE_MIGRATE_PLAINTEXT=true` is set for that migration run.
+- On Windows source builds, SQLCipher-backed SQLite requires an OpenSSL development install (headers + libs) visible through `OPENSSL_DIR`, or an equivalent vendored-OpenSSL build environment.
 
 In `high_assurance` and `nss_aligned`, server startup fails unless both TLS paths are provided. In `pilot` and `production` deployment modes, startup also fails unless PostgreSQL, Redis-backed rate limiting, JSON logs, audit logging, and a PQ-enabled runtime are all active.
 
@@ -1000,7 +1010,7 @@ Request:
 {
   "group_id": "alpha-private",
   "epoch": 1,
-  "invite_commitment_sha256": "hex(sha256(opaque_join_package))",
+  "invite_commitment_sha256": "hex(sha256(invite_secret))",
   "invite_ciphertext_nonce_base64": "base64(12 bytes)",
   "invite_ciphertext_base64": "base64(opaque_encrypted_join_package)",
   "invite_ciphertext_aad_base64": "base64(optional_associated_data)",
@@ -1031,7 +1041,7 @@ Response:
   "invite_token": "3b1f0ab8f29d4f4fb3e3b7b6c7fd7e02",
   "group_id": "alpha-private",
   "epoch": 1,
-  "invite_commitment_sha256": "hex(sha256(opaque_join_package))",
+  "invite_commitment_sha256": "hex(sha256(invite_secret))",
   "invite_ciphertext_nonce_base64": "base64(12 bytes)",
   "invite_ciphertext_base64": "base64(opaque_encrypted_join_package)",
   "invite_ciphertext_aad_base64": "base64(optional_associated_data)",
@@ -1058,6 +1068,7 @@ Rules:
 - Invite resolution fails when the invite is expired, revoked, or tied to a stale group epoch.
 - Invite consumption revokes the token so it cannot be resolved again.
 - The server stores only opaque invite ciphertext plus epoch metadata; it does not interpret the join package. In `pqmsg-core`, that opaque payload is now represented by `PrivateGroupJoinPackage`.
+- For shareable group links, the intended client contract is `invite_token` in the server-visible URL path and `invite_secret` in the client-held link fragment / QR payload. The server sees the token and commitment, but not the decryption secret.
 
 ### 4.8E Sealed Sender Transport
 

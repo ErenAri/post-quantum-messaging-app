@@ -244,6 +244,23 @@ $env:PQMSG_SECURITY_PROFILE='research'
 cargo run -p pqmsg-server
 ```
 
+For an encrypted SQLite server database:
+
+```powershell
+$rawKey = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($rawKey)
+$env:PQMSG_SQLITE_ENCRYPTION_KEY_B64 = [Convert]::ToBase64String($rawKey)
+$env:PQMSG_SQLITE_MIGRATE_PLAINTEXT = 'true' # only needed once for a legacy plaintext DB
+$env:PQMSG_DATABASE_URL='sqlite://./pqmsg-server.db?mode=rwc'
+$env:PQMSG_BIND='127.0.0.1:3000'
+$env:PQMSG_SECURITY_PROFILE='research'
+cargo run -p pqmsg-server
+```
+
+On Windows source builds, SQLCipher-backed SQLite needs an OpenSSL development install
+with headers and libraries available through `OPENSSL_DIR`. Existing plaintext SQLite
+server databases require explicit one-way migration via `PQMSG_SQLITE_MIGRATE_PLAINTEXT=true`.
+
 Metrics and health can be inspected with:
 
 ```powershell

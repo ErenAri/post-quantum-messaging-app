@@ -36,7 +36,10 @@ mod types;
 mod validation;
 
 pub use blob_store::BlobStore;
-pub use db::{init_db, parse_db_backend, DbBackend};
+pub use db::{
+    connect_db_pool, init_db, parse_db_backend, prepare_sqlite_encrypted_database, DbBackend,
+    SqliteEncryptionConfig, SqliteEncryptionPreparation,
+};
 pub use ephemeral_state::EphemeralStateStore;
 pub use error::AppError;
 

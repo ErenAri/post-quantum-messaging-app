@@ -2859,6 +2859,7 @@ dependencies = [
  "futures-util",
  "hex",
  "http-body-util",
+ "libsqlite3-sys",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

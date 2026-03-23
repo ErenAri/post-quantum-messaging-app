@@ -1,5 +1,6 @@
 package com.pqmsg.demo
 
+import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.widget.EditText
@@ -10,19 +11,28 @@ import androidx.core.widget.NestedScrollView
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.button.MaterialButton
+import com.google.gson.Gson
 import kotlinx.coroutines.launch
-import uniffi.pqmsg_android.buildGroupMembersAddAuthHeaders
-import uniffi.pqmsg_android.buildGroupMembersListAuthHeaders
-import uniffi.pqmsg_android.buildGroupRelayAuthHeaders
 import uniffi.pqmsg_android.ServerBundle
-import uniffi.pqmsg_android.GroupRelayAuthRecipient
+import uniffi.pqmsg_android.buildContactsUpsertAuthHeaders
+import uniffi.pqmsg_android.buildGroupMembersListAuthHeaders
+import uniffi.pqmsg_android.buildProfileGetAuthHeaders
+import uniffi.pqmsg_android.buildSenderCertificateAuthHeaders
 import uniffi.pqmsg_android.encryptWithSession
 import uniffi.pqmsg_android.initiateSessionAndEncrypt
+import uniffi.pqmsg_android.privateGroupEncryptJoinPackageForShareLink
+import uniffi.pqmsg_android.privateGroupEncryptSnapshot
+import uniffi.pqmsg_android.privateGroupExportJoinPackageForMember
+import uniffi.pqmsg_android.privateGroupPrepareAddMemberTransition
+import uniffi.pqmsg_android.privateGroupPrepareRemoveMemberTransition
+import uniffi.pqmsg_android.sealMessageWithSenderCert
+import java.security.MessageDigest
+import java.util.Base64
 import java.text.DateFormat
 import java.util.Date
 
 class GroupChatActivity : AppCompatActivity() {
-    private val groupMessagingSupported = false
+    private val gson = Gson()
     private lateinit var store: LocalStateStore
     private lateinit var titleText: TextView
     private lateinit var metaText: TextView
@@ -36,6 +46,8 @@ class GroupChatActivity : AppCompatActivity() {
     private var groupId = ""
     private var groupName = ""
     private var syncInFlight = false
+    private var privateGroupState: PrivateGroupState? = null
+    private var privateGroupCredential: PrivateGroupMemberCredential? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,7 +69,8 @@ class GroupChatActivity : AppCompatActivity() {
         chatLogScroll = findViewById(R.id.scrollGroupChatLog)
         chatLog = findViewById(R.id.textGroupChatLog)
 
-        titleText.text = groupName
+        reloadPrivateGroupState()
+        titleText.text = privateGroupState?.let { getPrivateGroupTitle(it, groupName) } ?: groupName
         messageInput.doAfterTextChanged { syncActions() }
         sendButton.setOnClickListener {
             lifecycleScope.launch { runAction("Send group message") { sendGroupMessage() } }
@@ -66,7 +79,7 @@ class GroupChatActivity : AppCompatActivity() {
         infoButton.setOnClickListener { showGroupInfo() }
         backButton.setOnClickListener { finish() }
 
-        if (!groupMessagingSupported) {
+        if (privateGroupState == null || privateGroupCredential == null) {
             renderUnavailableState()
             return
         }
@@ -78,7 +91,9 @@ class GroupChatActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (!groupMessagingSupported) {
+        reloadPrivateGroupState()
+        if (privateGroupState == null || privateGroupCredential == null) {
+            renderUnavailableState()
             return
         }
         renderChatLog()
@@ -88,13 +103,13 @@ class GroupChatActivity : AppCompatActivity() {
     private fun renderUnavailableState() {
         titleText.text = groupName
         messageInput.setText("")
-        messageInput.hint = "Group messaging unavailable"
+        messageInput.hint = "Private-group state unavailable"
         messageInput.isEnabled = false
         sendButton.isEnabled = false
-        syncButton.isEnabled = false
+        syncButton.isEnabled = true
         infoButton.isEnabled = false
-        chatLog.text = "This build supports direct private messaging only."
-        metaText.text = "Group messaging is disabled pending a private group design."
+        chatLog.text = "This device does not have the local opaque state needed to open this private group."
+        metaText.text = "Open the group from an invite link or a device that already has the current epoch state."
     }
 
     private suspend fun runAction(label: String, block: suspend () -> Unit) {
@@ -108,17 +123,27 @@ class GroupChatActivity : AppCompatActivity() {
 
     private fun refreshMeta() {
         val setup = store.loadSetup()
-        metaText.text = "Group: $groupId\nSigned in as ${setup.userId}"
+        val state = privateGroupState
+        val canManage = privateGroupCredential
+            ?.let { describePrivateGroupMemberCredential(it).publish_key_base64?.isNotBlank() == true }
+            ?: false
+        metaText.text = if (state == null) {
+            "Private group state unavailable\nSigned in as ${setup.userId}"
+        } else {
+            "${getPrivateGroupTitle(state)}\nEpoch ${state.epoch} • ${state.members.size} members • ${if (canManage) "manage enabled" else "read/send only"}"
+        }
     }
 
     private fun syncActions() {
         val hasText = messageInput.text.toString().isNotBlank()
-        sendButton.isEnabled = hasText && !syncInFlight
+        sendButton.isEnabled = hasText && !syncInFlight && privateGroupState != null && privateGroupCredential != null
         syncButton.isEnabled = !syncInFlight
+        infoButton.isEnabled = privateGroupState != null && privateGroupCredential != null
     }
 
     private suspend fun sendGroupMessage() {
         val setup = store.loadSetup()
+        val state = privateGroupState ?: error("Private-group state is unavailable on this device.")
         val text = messageInput.text.toString().trim()
         require(text.isNotBlank()) { "message is empty" }
 
@@ -135,91 +160,87 @@ class GroupChatActivity : AppCompatActivity() {
             userId = context.profile.userId,
             keysJson = context.keysJson,
         )
-
-        // Fetch group members and send to each via group relay
-        val members = context.api.listGroupMembers(
-            groupId = groupId,
-            headers = buildGroupMembersListAuthHeaders(
+        val wrappedPlaintext = encodePrivateGroupMessage(groupId, text)
+        val recipients = state.members.map { it.user_id }.filter { it != context.profile.userId }
+        require(recipients.isNotEmpty()) { "Private group has no other members." }
+        val senderCertificateBase64 = context.api.getSenderCertificate(
+            context.profile.userId,
+            buildSenderCertificateAuthHeaders(
                 keysJson = keysJson,
-                groupId = groupId,
+                userId = context.profile.userId,
             ).toHeaderMap(),
-        )
+        ).certificate_base64
 
-        val recipients = members.members
-            .filter { it.user_id != context.profile.userId }
-            .map { member ->
-                val peerUserId = member.user_id
-                val existingSession = MessagingCoordinator.loadCompatibleSession(
-                    store = store,
-                    userId = context.profile.userId,
+        for (peerUserId in recipients) {
+            val existingSession = MessagingCoordinator.loadCompatibleSession(
+                store = store,
+                userId = context.profile.userId,
+                peerUserId = peerUserId,
+                sessionJson = store.readSession(context.profile.userId, peerUserId),
+                requiredPqRatchetInterval = context.capabilities.pq_ratchet_interval,
+            )
+            var peerTransportIdentityX25519Pub =
+                store.readIdentityPin(context.profile.userId, peerUserId)
+                    ?.identityX25519Pub
+                    ?.takeIf { it.isNotBlank() }
+            val sendResult = if (existingSession.isNullOrBlank()) {
+                val bundle = context.api.getBundle(peerUserId)
+                enforceIdentityPin(context.profile.userId, peerUserId, bundle)
+                peerTransportIdentityX25519Pub = bundle.identity_x25519_pub
+                initiateSessionAndEncrypt(
+                    keysJson = keysJson,
+                    fromUserId = context.profile.userId,
                     peerUserId = peerUserId,
-                    sessionJson = store.readSession(context.profile.userId, peerUserId),
-                    requiredPqRatchetInterval = context.capabilities.pq_ratchet_interval,
+                    peerBundle = bundle.toRustBundle(),
+                    plaintextUtf8 = wrappedPlaintext,
+                    suiteOverride = null,
                 )
-                val sendResult = if (existingSession.isNullOrBlank()) {
-                    val bundle = context.api.getBundle(peerUserId)
-                    initiateSessionAndEncrypt(
-                        keysJson = keysJson,
-                        fromUserId = context.profile.userId,
-                        peerUserId = peerUserId,
-                        peerBundle = bundle.toRustBundle(),
-                        plaintextUtf8 = text,
-                        suiteOverride = null,
-                    )
-                } else {
-                    encryptWithSession(
-                        sessionJson = existingSession,
-                        senderUserId = context.profile.userId,
-                        peerUserId = peerUserId,
-                        plaintextUtf8 = text,
-                    )
-                }
-
-                store.writeSession(context.profile.userId, peerUserId, sendResult.sessionJson)
-                val recipient = GroupRelayRecipient(
-                    recipient_user_id = peerUserId,
-                    message_bytes_base64 = sendResult.messageBytesBase64,
-                )
-                Pair(
-                    recipient,
-                    GroupRelayAuthRecipient(
-                        recipientUserId = peerUserId,
-                        messageBytesBase64 = sendResult.messageBytesBase64,
-                    ),
+            } else {
+                encryptWithSession(
+                    sessionJson = existingSession,
+                    senderUserId = context.profile.userId,
+                    peerUserId = peerUserId,
+                    plaintextUtf8 = wrappedPlaintext,
                 )
             }
-
-        require(recipients.isNotEmpty()) { "No other members in group" }
-
-        val relayRecipients = recipients.map { it.first }
-        val authRecipients = recipients.map { it.second }
-        val relayResult = context.api.relayGroupMessage(
-            groupId = groupId,
-            headers = buildGroupRelayAuthHeaders(
+            store.writeSession(context.profile.userId, peerUserId, sendResult.sessionJson)
+            val resolvedPeerIdentityX25519Pub = peerTransportIdentityX25519Pub
+                ?: resolvePeerTransportIdentityX25519(context, context.profile.userId, peerUserId)
+            MessagingCoordinator.ensurePeerTransparencyVerified(
+                store = store,
+                context = context,
+                peerUserId = peerUserId,
+            )
+            val deliveryToken = resolvePeerSealedDeliveryToken(context, peerUserId)
+            val sealedMessageBytesBase64 = sealMessageWithSenderCert(
                 keysJson = keysJson,
-                groupId = groupId,
-                senderUserId = context.profile.userId,
-                recipients = authRecipients,
-            ).toHeaderMap(),
-            request = GroupRelayRequest(
-                sender_user_id = context.profile.userId,
-                device_id = context.profile.deviceId,
-                recipients = relayRecipients,
-            ),
-        )
+                recipientUserId = peerUserId,
+                recipientIdentityX25519Pub = resolvedPeerIdentityX25519Pub,
+                payloadMessageBytesBase64 = sendResult.messageBytesBase64,
+                senderCertificateBase64 = senderCertificateBase64,
+            )
+            context.api.sealedRelay(
+                recipientUserId = peerUserId,
+                headers = emptyMap(),
+                request = SealedRelayRequest(
+                    delivery_token = deliveryToken,
+                    message_bytes_base64 = sealedMessageBytesBase64,
+                ),
+            )
+        }
 
         store.appendGroupThreadMessage(
             userId = context.profile.userId,
             groupId = groupId,
             senderUserId = context.profile.userId,
             body = text,
-            transportMessageId = relayResult.first_message_id,
+            transportMessageId = null,
         )
         store.upsertGroupConversation(
             userId = context.profile.userId,
             groupId = groupId,
-            displayName = groupName,
-            memberCount = members.members.size,
+            displayName = getPrivateGroupTitle(state, groupName),
+            memberCount = state.members.size,
             lastPreview = "You: $text",
             incrementUnread = false,
         )
@@ -239,6 +260,7 @@ class GroupChatActivity : AppCompatActivity() {
                     serverUrl = setup.serverUrl,
                     userId = setup.userId,
                     suiteLabel = setup.suiteLabel,
+                    activeGroup = groupId,
                 )
                 store.markGroupRead(setup.userId, groupId)
             }.onFailure {
@@ -252,6 +274,38 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     private fun showGroupInfo() {
+        val state = privateGroupState ?: run {
+            metaText.text = "Private-group state is unavailable on this device."
+            return
+        }
+        val canManage = privateGroupCredential
+            ?.let { describePrivateGroupMemberCredential(it).publish_key_base64?.isNotBlank() == true }
+            ?: false
+        val memberList = state.members.joinToString("\n") { member ->
+            val you = if (member.user_id == store.loadSetup().userId) " (you)" else ""
+            "- ${member.user_id} [${member.role}]$you"
+        }
+        AlertDialog.Builder(this@GroupChatActivity)
+            .setTitle(getString(R.string.group_info_title))
+            .setMessage(
+                "Group: ${getPrivateGroupTitle(state, groupName)}\n" +
+                    "Epoch ${state.epoch}\n\n" +
+                    "Members (${state.members.size}):\n$memberList",
+            )
+            .setPositiveButton(android.R.string.ok, null)
+            .apply {
+                if (canManage) {
+                    setNeutralButton(getString(R.string.button_add_member)) { _, _ ->
+                        showAddMemberDialog()
+                    }
+                    setNegativeButton("Manage Members") { _, _ ->
+                        showMemberManagementDialog()
+                    }
+                }
+            }
+            .show()
+        return
+
         val setup = store.loadSetup()
         lifecycleScope.launch {
             runCatching {
@@ -288,28 +342,22 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
-    private fun showAddMemberDialog(api: PqmsgApi, keysJson: String, userId: String) {
+    private fun showAddMemberDialog() {
         val input = EditText(this).apply {
-            hint = getString(R.string.hint_member_user_id)
+            hint = getString(R.string.hint_username_or_invite)
         }
         AlertDialog.Builder(this)
             .setTitle(getString(R.string.button_add_member))
             .setView(input)
             .setPositiveButton(getString(R.string.button_add_member)) { _, _ ->
-                val memberId = input.text.toString().trim()
-                if (memberId.isNotBlank()) {
+                val memberTarget = input.text.toString().trim()
+                if (memberTarget.isNotBlank()) {
                     lifecycleScope.launch {
                         runCatching {
-                            api.addGroupMember(
-                                groupId = groupId,
-                                headers = buildGroupMembersAddAuthHeaders(
-                                    keysJson = keysJson,
-                                    groupId = groupId,
-                                    memberUserId = memberId,
-                                ).toHeaderMap(),
-                                request = AddGroupMemberRequest(member_user_id = memberId),
-                            )
-                            metaText.text = "Added $memberId to group"
+                            addGroupMember(memberTarget)
+                            metaText.text = "Added member and rotated the group epoch."
+                            refreshMeta()
+                            renderChatLog()
                         }.onFailure {
                             metaText.text = UiErrorMapper.fromThrowable(it, "Add member").headline
                         }
@@ -318,6 +366,295 @@ class GroupChatActivity : AppCompatActivity() {
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    private suspend fun addGroupMember(rawTarget: String) {
+        val setup = store.loadSetup()
+        val state = privateGroupState ?: error("Private-group state is unavailable on this device.")
+        val credential = privateGroupCredential ?: error("Private-group credential is unavailable on this device.")
+        val context = MessagingCoordinator.ensureReady(
+            store = store,
+            serverUrl = setup.serverUrl,
+            userId = setup.userId,
+            suiteLabel = setup.suiteLabel,
+        )
+        val target = MessagingCoordinator.parseComposeTarget(rawTarget, setup.serverUrl)
+        require(
+            ApiClientFactory.normalizeBaseUrl(target.serverUrl) ==
+                ApiClientFactory.normalizeBaseUrl(setup.serverUrl),
+        ) { "Private-group members must use the current account server." }
+        val memberUserId = MessagingCoordinator.resolvePeerUserId(context.api, target)
+        require(memberUserId != context.profile.userId) { "You are already in this private group." }
+        require(state.members.none { it.user_id == memberUserId }) { "@$memberUserId is already a member." }
+        val transition = parsePrivateGroupEpochTransition(
+            privateGroupPrepareAddMemberTransition(
+                gson.toJson(state),
+                memberUserId,
+                "member",
+                (System.currentTimeMillis() / 1000).toULong(),
+            ),
+        )
+        val nextCredential = findPrivateGroupCredentialForUser(
+            transition.member_credentials,
+            context.profile.userId,
+        )
+        val stateCommitmentSha256 = publishPrivateGroupTransition(
+            api = context.api,
+            state = transition.next_state,
+            authorizingCredential = credential,
+            memberCredentials = transition.member_credentials,
+            encryptedSnapshotJson = privateGroupEncryptSnapshot(gson.toJson(transition.next_state)),
+        )
+        updateLocalPrivateGroupState(
+            store = store,
+            userId = context.profile.userId,
+            state = transition.next_state,
+            memberCredential = nextCredential,
+            stateCommitmentSha256 = stateCommitmentSha256,
+            preview = "Added @$memberUserId",
+            incrementUnread = false,
+        )
+        val joinPackageJson = transition.added_member_join_package?.let { gson.toJson(it) }
+            ?: privateGroupExportJoinPackageForMember(gson.toJson(transition.next_state), memberUserId)
+        val inviteMaterial = parsePrivateGroupLinkInviteMaterial(
+            privateGroupEncryptJoinPackageForShareLink(joinPackageJson),
+        )
+        val inviteLink = createPrivateGroupInviteLinkFromJoinPackage(
+            api = context.api,
+            serverUrl = setup.serverUrl,
+            state = transition.next_state,
+            authorizingCredential = nextCredential,
+            inviteMaterial = inviteMaterial,
+        )
+        privateGroupState = transition.next_state
+        privateGroupCredential = nextCredential
+        startActivity(
+            Intent.createChooser(
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, inviteLink)
+                },
+                getString(R.string.share_invite_chooser_title),
+            ),
+        )
+    }
+
+    private fun showMemberManagementDialog() {
+        val state = privateGroupState ?: return
+        val credential = privateGroupCredential ?: return
+        val canManage = describePrivateGroupMemberCredential(credential).publish_key_base64?.isNotBlank() == true
+        if (!canManage) {
+            metaText.text = "This device cannot rotate private-group membership."
+            return
+        }
+        val actions = mutableListOf<Pair<String, suspend () -> Unit>>()
+        state.members
+            .filter { it.user_id != store.loadSetup().userId }
+            .forEach { member ->
+                actions += "Copy invite for @${member.user_id}" to suspend {
+                    copyInviteForMember(member.user_id)
+                }
+                if (!member.role.equals("Owner", ignoreCase = true)) {
+                    actions += "Remove @${member.user_id}" to suspend {
+                        removeGroupMember(member.user_id)
+                    }
+                }
+            }
+        if (actions.isEmpty()) {
+            metaText.text = "No removable private-group members."
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Manage Members")
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
+                lifecycleScope.launch {
+                    runCatching {
+                        actions[which].second.invoke()
+                        refreshMeta()
+                        renderChatLog()
+                    }.onFailure {
+                        metaText.text = UiErrorMapper.fromThrowable(it, "Manage members").headline
+                    }
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private suspend fun copyInviteForMember(memberUserId: String) {
+        val setup = store.loadSetup()
+        val state = privateGroupState ?: error("Private-group state is unavailable on this device.")
+        val credential = privateGroupCredential ?: error("Private-group credential is unavailable on this device.")
+        val context = MessagingCoordinator.ensureReady(
+            store = store,
+            serverUrl = setup.serverUrl,
+            userId = setup.userId,
+            suiteLabel = setup.suiteLabel,
+        )
+        val inviteMaterial = parsePrivateGroupLinkInviteMaterial(
+            privateGroupEncryptJoinPackageForShareLink(
+                privateGroupExportJoinPackageForMember(gson.toJson(state), memberUserId),
+            ),
+        )
+        val inviteLink = createPrivateGroupInviteLinkFromJoinPackage(
+            api = context.api,
+            serverUrl = setup.serverUrl,
+            state = state,
+            authorizingCredential = credential,
+            inviteMaterial = inviteMaterial,
+        )
+        startActivity(
+            Intent.createChooser(
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, inviteLink)
+                },
+                getString(R.string.share_invite_chooser_title),
+            ),
+        )
+    }
+
+    private suspend fun removeGroupMember(memberUserId: String) {
+        val setup = store.loadSetup()
+        val state = privateGroupState ?: error("Private-group state is unavailable on this device.")
+        val credential = privateGroupCredential ?: error("Private-group credential is unavailable on this device.")
+        val context = MessagingCoordinator.ensureReady(
+            store = store,
+            serverUrl = setup.serverUrl,
+            userId = setup.userId,
+            suiteLabel = setup.suiteLabel,
+        )
+        val transition = parsePrivateGroupEpochTransition(
+            privateGroupPrepareRemoveMemberTransition(
+                gson.toJson(state),
+                memberUserId,
+                (System.currentTimeMillis() / 1000).toULong(),
+            ),
+        )
+        val nextCredential = findPrivateGroupCredentialForUser(
+            transition.member_credentials,
+            context.profile.userId,
+        )
+        val stateCommitmentSha256 = publishPrivateGroupTransition(
+            api = context.api,
+            state = transition.next_state,
+            authorizingCredential = credential,
+            memberCredentials = transition.member_credentials,
+            encryptedSnapshotJson = privateGroupEncryptSnapshot(gson.toJson(transition.next_state)),
+        )
+        updateLocalPrivateGroupState(
+            store = store,
+            userId = context.profile.userId,
+            state = transition.next_state,
+            memberCredential = nextCredential,
+            stateCommitmentSha256 = stateCommitmentSha256,
+            preview = "Removed @$memberUserId",
+            incrementUnread = false,
+        )
+        privateGroupState = transition.next_state
+        privateGroupCredential = nextCredential
+    }
+
+    private fun showAddMemberDialog(api: PqmsgApi, keysJson: String, userId: String) {
+        showAddMemberDialog()
+    }
+
+    private fun reloadPrivateGroupState() {
+        val setup = store.loadSetup()
+        val localState = store.readPrivateGroupState(setup.userId, groupId)
+        if (localState == null) {
+            privateGroupState = null
+            privateGroupCredential = null
+            return
+        }
+        privateGroupState = parsePrivateGroupStateJson(localState.stateJson)
+        privateGroupCredential = parsePrivateGroupCredentialJson(localState.memberCredentialJson)
+        groupName = privateGroupState?.let { getPrivateGroupTitle(it, groupName) } ?: groupName
+    }
+
+    private suspend fun resolvePeerTransportIdentityX25519(
+        context: ReadyMessagingContext,
+        localUserId: String,
+        peerUserId: String,
+    ): String {
+        val pinned = store.readIdentityPin(localUserId, peerUserId)
+        if (pinned?.identityX25519Pub?.isNotBlank() == true) {
+            return pinned.identityX25519Pub
+        }
+        val fetched = context.api.getBundle(peerUserId)
+        enforceIdentityPin(localUserId, peerUserId, fetched)
+        return fetched.identity_x25519_pub
+    }
+
+    private suspend fun resolvePeerSealedDeliveryToken(
+        context: ReadyMessagingContext,
+        peerUserId: String,
+    ): String {
+        val headers = buildProfileGetAuthHeaders(
+            keysJson = context.keysJson,
+            userId = peerUserId,
+        ).toHeaderMap()
+        var profile = context.api.getUserProfile(
+            peerUserId,
+            headers,
+        )
+        if (profile.sealed_delivery_token.isNullOrBlank()) {
+            context.api.upsertContact(
+                userId = context.profile.userId,
+                headers = buildContactsUpsertAuthHeaders(
+                    keysJson = context.keysJson,
+                    userId = context.profile.userId,
+                    contactUserId = peerUserId,
+                    alias = "",
+                    verifiedByQr = false,
+                    verifiedFingerprintSha256 = "",
+                ).toHeaderMap(),
+                request = UpsertContactRequest(
+                    contact_user_id = peerUserId,
+                    alias = null,
+                    verified_by_qr = false,
+                    verified_fingerprint_sha256 = null,
+                ),
+            )
+            store.markPeerAccepted(context.profile.userId, peerUserId)
+            profile = context.api.getUserProfile(
+                peerUserId,
+                headers,
+            )
+        }
+        return profile.sealed_delivery_token
+            ?.takeIf { it.isNotBlank() }
+            ?: error("Direct messaging requires adding this user as a contact first")
+    }
+
+    private suspend fun enforceIdentityPin(localUser: String, peerUser: String, bundle: BundleResponse) {
+        val fingerprint = bundle.identity_fingerprint_sha256
+            ?.takeIf { it.isNotBlank() }
+            ?: computeIdentityFingerprint(
+                identityX25519Pub = bundle.identity_x25519_pub,
+                identityPqSigPub = bundle.identity_pq_sig_pub.orEmpty(),
+            )
+        store.writeIdentityPin(
+            userId = localUser,
+            peerUserId = peerUser,
+            pin = IdentityPin(
+                fingerprintSha256 = fingerprint,
+                identityKeyVersion = bundle.identity_key_version ?: 0,
+                identityX25519Pub = bundle.identity_x25519_pub,
+                identitySigPub = bundle.identity_sig_pub,
+                identityPqSigPub = bundle.identity_pq_sig_pub.orEmpty(),
+                observedAt = bundle.bundle_generated_at,
+            ),
+        )
+    }
+
+    private fun computeIdentityFingerprint(identityX25519Pub: String, identityPqSigPub: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update(Base64.getDecoder().decode(identityX25519Pub))
+        if (identityPqSigPub.isNotBlank()) {
+            digest.update(Base64.getDecoder().decode(identityPqSigPub))
+        }
+        return digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
     }
 
     private fun renderChatLog() {

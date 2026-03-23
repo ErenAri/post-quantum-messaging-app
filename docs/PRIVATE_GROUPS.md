@@ -6,7 +6,7 @@ Current product posture:
 
 - Group messaging is disabled in the hardened Android/web profile.
 - The existing server-side group model is too metadata-visible for a Signal-class privacy claim.
-- `pqmsg-core` now contains the first shared opaque-state primitive: a client-managed private-group state object, an encrypted snapshot format, invite-package roundtrips, a join-package primitive, and an initial opaque member-credential primitive.
+- `pqmsg-core` now contains the first shared opaque-state primitive: a client-managed private-group state object, an encrypted snapshot format, invite-package roundtrips, a join-package primitive, an initial opaque member-credential primitive, and a share-link invite envelope where the decryption secret stays client-side.
 - `pqmsg-server` now exposes the first opaque private-group storage contract: state publish/fetch backed by encrypted snapshots plus hashed membership handles and derived fetch/publish capabilities.
 - This document defines the next honest implementation boundary before groups are re-enabled.
 
@@ -101,7 +101,7 @@ Group membership and epoch transitions need user-visible trust surfaces:
 2. Define the membership-credential model and server storage contract.
    Status: partially implemented in `pqmsg-core` as `PrivateGroupMemberCredential`, and partially implemented on the server as opaque `private-groups/state/publish` and `private-groups/state/fetch` endpoints backed by encrypted state blobs. Invite/join/remove flows still need to be built on top of that storage layer.
 3. Implement create / invite / join / remove / epoch-rotate flows using opaque state updates.
-   Status: partially implemented on the server with opaque invite issuance/resolution bound to the latest group epoch and current publish capability. Join, remove, and full client flows are still pending.
+   Status: partially implemented on the server with opaque invite issuance/resolution bound to the latest group epoch and current publish capability. The shared core now also has a share-link invite envelope (`PrivateGroupLinkInviteMaterial`) that keeps the join secret outside the server-stored ciphertext. Join, remove, and full client flows are still pending.
 4. Add encrypted group message transport on top of that state model.
 5. Add Android/web trust UX for group membership and epoch changes.
 6. Only then re-enable `group_messaging_supported`.
@@ -120,6 +120,7 @@ Group membership and epoch transitions need user-visible trust surfaces:
 
 - Group creation should output an encrypted group-state package, not a clear server-side roster mutation.
 - Joining a group should require invite material plus a current epoch state package.
+- For shareable group links, the server-visible invite token should identify only the opaque ciphertext record; the join secret should remain in the client-shared link fragment or QR payload.
 - Clients must reject stale or unauthenticated epoch transitions.
 - Android and web should share one serialized group-state format from `pqmsg-core`.
 

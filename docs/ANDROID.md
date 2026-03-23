@@ -58,6 +58,7 @@ The Chat screen is intentionally limited to messaging actions for the current be
 - optional push-token registration uses Ed25519-signed auth headers and binds token updates to the authenticated user/device pair,
 - local key/session files are persisted through Android keystore-backed encrypted file storage,
 - local setup, progress, cursor, identity-pin, and conversation metadata are persisted through encrypted shared preferences with lazy migration from legacy plaintext preferences,
+- the local message database now uses SQLCipher full-page encryption with a device-local random passphrase wrapped by Android keystore-backed encrypted preferences, while message bodies remain application-layer encrypted inside the database,
 - the Security Center can list linked devices, link a new device id, and revoke non-current linked devices with authenticated request headers,
 - the Security Center can load the authenticated identity event log and rotate the current account identity to a fresh keypair/device id using the server challenge-confirm flow, then republish prekeys and reset local provisioning state for the new identity version,
 - the Security Center can prepare a secondary-device onboarding package by linking a target device id, rebasing device-local prekeys while preserving the account identity keys, encrypting the package with a user-supplied passphrase, and copying it to the clipboard for transfer,

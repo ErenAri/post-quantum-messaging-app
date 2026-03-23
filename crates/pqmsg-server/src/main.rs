@@ -7,12 +7,12 @@ use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
 use pqmsg_core::alg::{enforce_runtime_security_profile, RuntimeCryptoProfile, SecurityProfile};
 use pqmsg_server::{
-    build_router, init_db, parse_db_backend, AppState, AuditLogger, AuthReplayCache, BlobStore,
-    DbBackend, DeploymentMode, DosHardeningPolicy, EphemeralStateStore, PushNotifier, RateLimiter,
-    RealtimeHub, SealedRealtimeHub,
+    build_router, connect_db_pool, init_db, parse_db_backend, prepare_sqlite_encrypted_database,
+    AppState, AuditLogger, AuthReplayCache, BlobStore, DbBackend, DeploymentMode,
+    DosHardeningPolicy, EphemeralStateStore, PushNotifier, RateLimiter, RealtimeHub,
+    SealedRealtimeHub, SqliteEncryptionConfig, SqliteEncryptionPreparation,
 };
 use sentry::ClientOptions;
-use sqlx::any::AnyPoolOptions;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -60,6 +60,16 @@ fn parse_env_optional_i64(name: &str) -> anyhow::Result<Option<i64>> {
     }
 }
 
+fn parse_env_optional_u32(name: &str) -> anyhow::Result<Option<u32>> {
+    match env::var(name) {
+        Ok(value) => value
+            .parse::<u32>()
+            .with_context(|| format!("invalid {name}='{value}': expected integer"))
+            .map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
 fn parse_env_optional_f64(name: &str) -> anyhow::Result<Option<f64>> {
     match env::var(name) {
         Ok(value) => value
@@ -68,6 +78,67 @@ fn parse_env_optional_f64(name: &str) -> anyhow::Result<Option<f64>> {
             .map(Some),
         Err(_) => Ok(None),
     }
+}
+
+fn parse_env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
+    match env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            other => Err(anyhow::anyhow!(
+                "invalid {name}='{other}': expected true/false, 1/0, yes/no, or on/off"
+            )),
+        },
+        Err(_) => Ok(default),
+    }
+}
+
+fn load_sqlite_encryption_config(
+    db_backend: DbBackend,
+) -> anyhow::Result<Option<SqliteEncryptionConfig>> {
+    let key_b64 = match env::var("PQMSG_SQLITE_ENCRYPTION_KEY_B64") {
+        Ok(value) if !value.trim().is_empty() => value,
+        Ok(_) | Err(_) => {
+            let cipher_compatibility = parse_env_optional_u32("PQMSG_SQLITE_CIPHER_COMPATIBILITY")?;
+            let cipher_page_size = parse_env_optional_u32("PQMSG_SQLITE_CIPHER_PAGE_SIZE")?;
+            if cipher_compatibility.is_some() || cipher_page_size.is_some() {
+                anyhow::bail!(
+                    "PQMSG_SQLITE_CIPHER_COMPATIBILITY and PQMSG_SQLITE_CIPHER_PAGE_SIZE require PQMSG_SQLITE_ENCRYPTION_KEY_B64"
+                );
+            }
+            return Ok(None);
+        }
+    };
+
+    if db_backend != DbBackend::Sqlite {
+        return Ok(None);
+    }
+
+    let key_bytes = B64.decode(key_b64.trim()).with_context(|| {
+        "invalid PQMSG_SQLITE_ENCRYPTION_KEY_B64: expected base64-encoded 32-byte raw key"
+    })?;
+    let mut config = SqliteEncryptionConfig::from_raw_key(&key_bytes)
+        .map_err(|message| anyhow::anyhow!("invalid PQMSG_SQLITE_ENCRYPTION_KEY_B64: {message}"))?;
+
+    if let Some(cipher_compatibility) = parse_env_optional_u32("PQMSG_SQLITE_CIPHER_COMPATIBILITY")?
+    {
+        let cipher_compatibility = u8::try_from(cipher_compatibility).with_context(|| {
+            format!(
+                "invalid PQMSG_SQLITE_CIPHER_COMPATIBILITY '{cipher_compatibility}': expected integer 1..4"
+            )
+        })?;
+        config = config
+            .with_cipher_compatibility(cipher_compatibility)
+            .map_err(anyhow::Error::msg)?;
+    }
+
+    if let Some(cipher_page_size) = parse_env_optional_u32("PQMSG_SQLITE_CIPHER_PAGE_SIZE")? {
+        config = config
+            .with_cipher_page_size(cipher_page_size)
+            .map_err(anyhow::Error::msg)?;
+    }
+
+    Ok(Some(config))
 }
 
 fn load_sender_certificate_signing_key(
@@ -282,6 +353,8 @@ async fn main() -> anyhow::Result<()> {
         env::var("PQMSG_BLOB_STORE_DIR").unwrap_or_else(|_| "./pqmsg-blob-store".to_string());
     let db_backend = parse_db_backend(&database_url)
         .map_err(|message| anyhow::anyhow!("{message} (check PQMSG_DATABASE_URL)"))?;
+    let sqlite_encryption = load_sqlite_encryption_config(db_backend)?;
+    let sqlite_migrate_plaintext = parse_env_bool("PQMSG_SQLITE_MIGRATE_PLAINTEXT", false)?;
     let db_max_connections = parse_env_u32("PQMSG_DB_MAX_CONNECTIONS", 20)?;
     let db_min_connections = parse_env_u32("PQMSG_DB_MIN_CONNECTIONS", 1)?;
     if db_min_connections > db_max_connections {
@@ -343,14 +416,47 @@ async fn main() -> anyhow::Result<()> {
     let tls_key_path = env::var("PQMSG_TLS_KEY_PATH").ok();
     let tls_enabled = tls_cert_path.is_some() && tls_key_path.is_some();
 
-    let pool = AnyPoolOptions::new()
-        .max_connections(db_max_connections)
-        .min_connections(db_min_connections)
-        .acquire_timeout(StdDuration::from_secs(db_acquire_timeout_secs))
-        .idle_timeout(Some(StdDuration::from_secs(db_idle_timeout_secs)))
-        .connect(&database_url)
-        .await
-        .with_context(|| "failed to connect to database (check PQMSG_DATABASE_URL)")?;
+    if db_backend == DbBackend::Sqlite {
+        if let Some(encryption) = &sqlite_encryption {
+            match prepare_sqlite_encrypted_database(
+                &database_url,
+                encryption,
+                sqlite_migrate_plaintext,
+            )
+            .await?
+            {
+                SqliteEncryptionPreparation::NoExistingFile => {
+                    info!("SQLite page encryption enabled for new database file");
+                }
+                SqliteEncryptionPreparation::AlreadyEncrypted => {
+                    info!("SQLite page encryption enabled for existing SQLCipher database");
+                }
+                SqliteEncryptionPreparation::MigratedPlaintext => {
+                    info!("plaintext SQLite database migrated to SQLCipher");
+                }
+            }
+        }
+    }
+
+    let pool = connect_db_pool(
+        &database_url,
+        db_backend,
+        db_max_connections,
+        db_min_connections,
+        StdDuration::from_secs(db_acquire_timeout_secs),
+        StdDuration::from_secs(db_idle_timeout_secs),
+        sqlite_encryption.clone(),
+    )
+    .await
+    .with_context(|| "failed to connect to database (check PQMSG_DATABASE_URL)")?;
+    if sqlite_encryption.is_some() {
+        info!(
+            cipher_page_size = ?parse_env_optional_u32("PQMSG_SQLITE_CIPHER_PAGE_SIZE")?,
+            cipher_compatibility = ?parse_env_optional_u32("PQMSG_SQLITE_CIPHER_COMPATIBILITY")?,
+            plaintext_migration = sqlite_migrate_plaintext,
+            "SQLite page encryption enabled",
+        );
+    }
     let skip_auto_migrate = env::var("PQMSG_SKIP_AUTO_MIGRATE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);

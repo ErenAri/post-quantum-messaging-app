@@ -28,8 +28,9 @@ use crate::dh::{DhKeyPair, DhPublicKey};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::groups::{
     PrivateGroupAttributes, PrivateGroupEncryptedSnapshot, PrivateGroupEpochTransition,
-    PrivateGroupInvitePackage, PrivateGroupJoinPackage, PrivateGroupMember,
-    PrivateGroupMemberCredential, PrivateGroupRole, PrivateGroupState,
+    PrivateGroupInvitePackage, PrivateGroupJoinPackage, PrivateGroupLinkInviteEnvelope,
+    PrivateGroupLinkInviteMaterial, PrivateGroupMember, PrivateGroupMemberCredential,
+    PrivateGroupRole, PrivateGroupState,
 };
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::handshake::{
@@ -606,6 +607,22 @@ struct WasmPrivateGroupCredentialMaterial {
 }
 
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct WasmPrivateGroupMemberJoinPackage {
+    member_user_id: String,
+    join_package: PrivateGroupJoinPackage,
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct WasmPrivateGroupBootstrapMaterial {
+    snapshot: PrivateGroupEncryptedSnapshot,
+    authorizing_member_credential: PrivateGroupMemberCredential,
+    member_credentials: Vec<PrivateGroupMemberCredential>,
+    member_join_packages: Vec<WasmPrivateGroupMemberJoinPackage>,
+}
+
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 #[derive(Clone, Debug, Deserialize)]
 struct WasmServerBundle {
     user_id: String,
@@ -669,8 +686,7 @@ fn private_group_credential_material(
         fetch_key_base64: B64.encode(fetch_key),
         fetch_key_sha256: hex_string(&sha2::Sha256::digest(fetch_key)),
         publish_key_base64: publish_key.map(|value| B64.encode(value)),
-        publish_key_sha256: publish_key
-            .map(|value| hex_string(&sha2::Sha256::digest(value))),
+        publish_key_sha256: publish_key.map(|value| hex_string(&sha2::Sha256::digest(value))),
     })
 }
 
@@ -752,6 +768,91 @@ pub fn wasm_private_group_describe_member_credential(
 
 #[wasm_bindgen]
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_private_group_issue_member_credentials(state_json: &str) -> Result<String, JsValue> {
+    let state: PrivateGroupState = parse_json(state_json)?;
+    let credentials = state
+        .issue_member_credentials_for_all_members()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    to_json(&credentials)
+}
+
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_private_group_prepare_bootstrap_material(
+    state_json: &str,
+    authorizing_user_id: &str,
+) -> Result<String, JsValue> {
+    let state: PrivateGroupState = parse_json(state_json)?;
+    let snapshot = state
+        .encrypted_snapshot()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let member_credentials = state
+        .issue_member_credentials_for_all_members()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let authorizing_member_credential = member_credentials
+        .iter()
+        .find(|credential| credential.member_user_id == authorizing_user_id)
+        .cloned()
+        .ok_or_else(|| JsValue::from_str("authorizing private group member missing from state"))?;
+    let member_join_packages = member_credentials
+        .iter()
+        .cloned()
+        .map(|credential| {
+            let member_user_id = credential.member_user_id.clone();
+            state
+                .export_join_package_for_member_credential(credential)
+                .map(|join_package| WasmPrivateGroupMemberJoinPackage {
+                    member_user_id,
+                    join_package,
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    to_json(&WasmPrivateGroupBootstrapMaterial {
+        snapshot,
+        authorizing_member_credential,
+        member_credentials,
+        member_join_packages,
+    })
+}
+
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_private_group_encrypt_join_package_for_share_link(
+    join_package_json: &str,
+) -> Result<String, JsValue> {
+    let join_package: PrivateGroupJoinPackage = parse_json(join_package_json)?;
+    let material: PrivateGroupLinkInviteMaterial = join_package
+        .encrypt_for_share_link()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    to_json(&material)
+}
+
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_private_group_open_share_link_invite(
+    envelope_json: &str,
+    invite_secret_base64: &str,
+) -> Result<String, JsValue> {
+    let envelope: PrivateGroupLinkInviteEnvelope = parse_json(envelope_json)?;
+    let invite_secret = B64
+        .decode(invite_secret_base64)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    if invite_secret.len() != 32 {
+        return Err(JsValue::from_str(
+            "private group invite secret must decode to 32 bytes",
+        ));
+    }
+    let mut secret_bytes = [0u8; 32];
+    secret_bytes.copy_from_slice(&invite_secret);
+    let join_package = envelope
+        .open_join_package(&secret_bytes)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    to_json(&join_package)
+}
+
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 pub fn wasm_private_group_prepare_add_member_transition(
     state_json: &str,
     member_user_id: &str,
@@ -761,7 +862,11 @@ pub fn wasm_private_group_prepare_add_member_transition(
     let state: PrivateGroupState = parse_json(state_json)?;
     let next_role = parse_private_group_role(role)?;
     let transition: PrivateGroupEpochTransition = state
-        .prepare_add_member_transition(member_user_id.to_string(), next_role, updated_at_unix_seconds)
+        .prepare_add_member_transition(
+            member_user_id.to_string(),
+            next_role,
+            updated_at_unix_seconds,
+        )
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     to_json(&transition)
 }

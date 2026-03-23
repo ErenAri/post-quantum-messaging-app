@@ -71,13 +71,16 @@ import {
   listLocalKeyUsers,
   loadConversations,
   loadGroupConversations,
+  loadPrivateGroups,
   loadProfileDisplayNames,
   readProfileDisplayName,
   readIdentityPin,
+  readPrivateGroup,
   loadKeys,
   loadSetup,
   markConversationRead,
   markGroupConversationRead,
+  removePrivateGroup,
   updateConversationMeta,
   readCursor,
   readSealedCursor,
@@ -87,6 +90,7 @@ import {
   saveSetup,
   upsertConversation,
   upsertGroupConversation,
+  upsertPrivateGroup,
   wipeLocalState,
   writeProfileDisplayName,
   writeCursor,
@@ -99,6 +103,7 @@ import {
   type ConversationRequestState,
   type ConversationSummary,
   type GroupConversationSummary,
+  type PrivateGroupLocalState,
 } from "./storage";
 import {
   saveMessage,
@@ -138,6 +143,28 @@ import {
   isSecureWebOrigin,
   validateWebServerUrl,
 } from "./webEnvironment";
+import {
+  privateGroupBindingsAvailable,
+  privateGroupCreateState,
+  privateGroupDescribeMemberCredential,
+  privateGroupEncryptSnapshot,
+  privateGroupEncryptJoinPackageForShareLink,
+  privateGroupExportJoinPackageForMember,
+  privateGroupOpenShareLinkInvite,
+  privateGroupPrepareAddMemberTransition,
+  privateGroupPrepareBootstrapMaterial,
+  privateGroupPrepareRemoveMemberTransition,
+  privateGroupRestoreJoinPackage,
+  type PrivateGroupBootstrapMaterial,
+  type PrivateGroupCredentialMaterial,
+  type PrivateGroupEpochTransition,
+  type PrivateGroupLinkInviteEnvelope,
+  type PrivateGroupMember,
+  type PrivateGroupMemberCredential,
+  type PrivateGroupRole,
+  type PrivateGroupState,
+} from "./crypto-wasm";
+import { base64ToBytes, bytesToBase64, bytesToHex } from "./base64";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -178,6 +205,395 @@ let cachedCapabilitiesServerUrl: string | null = null;
 
 type InboxFilter = "all" | "unread" | "groups" | "requests" | "archived";
 
+type PrivateGroupInviteTarget = {
+  serverUrl: string;
+  inviteToken: string;
+  inviteSecretBase64: string;
+};
+
+type PrivateGroupWrappedMessage = {
+  kind: "pqmsg-private-group-message-v1";
+  group_id: string;
+  body: string;
+  sent_at_unix_ms: number;
+};
+
+const PRIVATE_GROUP_MESSAGE_PREFIX = "pqmsg-private-group-message-v1:";
+const GROUP_INVITE_SECRET_FRAGMENT_KEY = "group_secret";
+
+function parsePrivateGroupStateJson(stateJson: string): PrivateGroupState | null {
+  try {
+    return JSON.parse(stateJson) as PrivateGroupState;
+  } catch {
+    return null;
+  }
+}
+
+function parsePrivateGroupMemberCredentialJson(
+  memberCredentialJson: string
+): PrivateGroupMemberCredential | null {
+  try {
+    return JSON.parse(memberCredentialJson) as PrivateGroupMemberCredential;
+  } catch {
+    return null;
+  }
+}
+
+function getPrivateGroupLocalState(groupId: string): PrivateGroupLocalState | null {
+  return readPrivateGroup(setup.userId, groupId);
+}
+
+function getPrivateGroupState(groupId: string): PrivateGroupState | null {
+  const local = getPrivateGroupLocalState(groupId);
+  return local ? parsePrivateGroupStateJson(local.stateJson) : null;
+}
+
+function getPrivateGroupCredential(groupId: string): PrivateGroupMemberCredential | null {
+  const local = getPrivateGroupLocalState(groupId);
+  return local ? parsePrivateGroupMemberCredentialJson(local.memberCredentialJson) : null;
+}
+
+function findPrivateGroupCredentialForUser(
+  memberCredentials: PrivateGroupMemberCredential[],
+  userId: string
+): PrivateGroupMemberCredential {
+  const credential = memberCredentials.find((item) => item.member_user_id === userId);
+  if (!credential) {
+    throw new Error(`Private-group credential for @${userId} is missing from the current epoch.`);
+  }
+  return credential;
+}
+
+function getPrivateGroupOwnerUserId(state: PrivateGroupState): string {
+  return state.members.find((member) => member.role === "Owner")?.user_id || setup.userId;
+}
+
+function getPrivateGroupTitle(groupId: string): string {
+  return getPrivateGroupState(groupId)?.attributes.title?.trim() || groupId;
+}
+
+function isPrivateGroupMember(state: PrivateGroupState, userId: string): boolean {
+  return state.members.some((member) => member.user_id === userId);
+}
+
+function buildPrivateGroupInviteLink(
+  serverUrl: string,
+  inviteToken: string,
+  inviteSecretBase64: string
+): string {
+  const url = new URL(location.origin + "/");
+  url.searchParams.set("group_invite_token", inviteToken);
+  url.searchParams.set("server", serverUrl);
+  url.hash = `${GROUP_INVITE_SECRET_FRAGMENT_KEY}=${encodeURIComponent(inviteSecretBase64)}`;
+  return url.toString();
+}
+
+function readHashParam(name: string, value: string = location.hash): string {
+  const hash = value.startsWith("#") ? value.slice(1) : value;
+  const params = new URLSearchParams(hash);
+  return params.get(name)?.trim() || "";
+}
+
+function hexToByteArray(value: string): number[] {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized || normalized.length % 2 !== 0) {
+    throw new Error("Invalid hex value.");
+  }
+  const out: number[] = [];
+  for (let idx = 0; idx < normalized.length; idx += 2) {
+    out.push(Number.parseInt(normalized.slice(idx, idx + 2), 16));
+  }
+  return out;
+}
+
+function extractPrivateGroupInviteTarget(rawInput?: string | null): PrivateGroupInviteTarget | null {
+  const raw = (rawInput || "").trim();
+  const candidate = raw || location.href;
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate, location.origin);
+  } catch {
+    return null;
+  }
+  const inviteToken = (
+    parsed.searchParams.get("group_invite_token")
+    || parsed.searchParams.get("group_token")
+    || parsed.searchParams.get("pg_invite_token")
+    || ""
+  ).trim();
+  const inviteSecretBase64 = (
+    readHashParam(GROUP_INVITE_SECRET_FRAGMENT_KEY, parsed.hash)
+    || parsed.searchParams.get("group_secret")
+    || ""
+  ).trim();
+  if (!inviteToken || !inviteSecretBase64) {
+    return null;
+  }
+  const serverUrl = (parsed.searchParams.get("server") || setup.serverUrl || location.origin).trim();
+  return {
+    serverUrl,
+    inviteToken,
+    inviteSecretBase64,
+  };
+}
+
+function encodePrivateGroupMessage(groupId: string, body: string): string {
+  const payload: PrivateGroupWrappedMessage = {
+    kind: "pqmsg-private-group-message-v1",
+    group_id: groupId,
+    body,
+    sent_at_unix_ms: Date.now(),
+  };
+  return `${PRIVATE_GROUP_MESSAGE_PREFIX}${JSON.stringify(payload)}`;
+}
+
+function decodePrivateGroupMessage(
+  plaintext: string,
+  senderUserId: string
+): { groupId: string; body: string } | null {
+  if (!plaintext.startsWith(PRIVATE_GROUP_MESSAGE_PREFIX)) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(
+      plaintext.slice(PRIVATE_GROUP_MESSAGE_PREFIX.length)
+    ) as PrivateGroupWrappedMessage;
+    if (payload.kind !== "pqmsg-private-group-message-v1") {
+      return null;
+    }
+    if (!payload.group_id.trim() || !payload.body.trim()) {
+      return null;
+    }
+    const state = getPrivateGroupState(payload.group_id);
+    if (!state || !isPrivateGroupMember(state, senderUserId)) {
+      return null;
+    }
+    return {
+      groupId: payload.group_id,
+      body: payload.body,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function privateGroupCredentialRecord(
+  material: PrivateGroupCredentialMaterial
+): import("./server").PrivateGroupMemberCredentialRecord {
+  return {
+    membership_handle_sha256: material.membership_handle_sha256,
+    member_commitment_sha256: material.member_commitment_sha256,
+    fetch_key_sha256: material.fetch_key_sha256,
+    publish_key_sha256: material.publish_key_sha256,
+  };
+}
+
+async function publishPrivateGroupBootstrap(
+  api: PqmsgApi,
+  material: PrivateGroupBootstrapMaterial
+): Promise<string> {
+  const authorizingCredentialMaterial = privateGroupDescribeMemberCredential(
+    material.authorizing_member_credential
+  );
+  if (!authorizingCredentialMaterial.publish_key_base64) {
+    throw new Error("Current private group credential cannot publish state");
+  }
+  const stateCommitmentSha256 = bytesToHex(
+    Uint8Array.from(material.snapshot.state_commitment_sha256)
+  );
+  await api.publishPrivateGroupState({
+    group_id: material.snapshot.group_id,
+    epoch: material.snapshot.epoch,
+    state_commitment_sha256: stateCommitmentSha256,
+    ciphertext_nonce_base64: bytesToBase64(Uint8Array.from(material.snapshot.ciphertext.nonce)),
+    ciphertext_base64: bytesToBase64(Uint8Array.from(material.snapshot.ciphertext.ciphertext)),
+    ciphertext_aad_base64: bytesToBase64(Uint8Array.from(material.snapshot.ciphertext.aad)),
+    authorizing_membership_handle_sha256:
+      authorizingCredentialMaterial.membership_handle_sha256,
+    authorizing_publish_key_base64: authorizingCredentialMaterial.publish_key_base64,
+    members: material.member_credentials.map((credential) =>
+      privateGroupCredentialRecord(privateGroupDescribeMemberCredential(credential))
+    ),
+  });
+  return stateCommitmentSha256;
+}
+
+async function publishPrivateGroupTransition(
+  api: PqmsgApi,
+  state: PrivateGroupState,
+  authorizingCredential: PrivateGroupMemberCredential,
+  memberCredentials: PrivateGroupMemberCredential[],
+): Promise<string> {
+  const authorizingCredentialMaterial = privateGroupDescribeMemberCredential(authorizingCredential);
+  if (!authorizingCredentialMaterial.publish_key_base64) {
+    throw new Error("Current private group credential cannot publish state");
+  }
+  const snapshot = privateGroupEncryptSnapshot(state);
+  const stateCommitmentSha256 = bytesToHex(Uint8Array.from(snapshot.state_commitment_sha256));
+  await api.publishPrivateGroupState({
+    group_id: snapshot.group_id,
+    epoch: snapshot.epoch,
+    state_commitment_sha256: stateCommitmentSha256,
+    ciphertext_nonce_base64: bytesToBase64(Uint8Array.from(snapshot.ciphertext.nonce)),
+    ciphertext_base64: bytesToBase64(Uint8Array.from(snapshot.ciphertext.ciphertext)),
+    ciphertext_aad_base64: bytesToBase64(Uint8Array.from(snapshot.ciphertext.aad)),
+    authorizing_membership_handle_sha256:
+      authorizingCredentialMaterial.membership_handle_sha256,
+    authorizing_publish_key_base64: authorizingCredentialMaterial.publish_key_base64,
+    members: memberCredentials.map((credential) =>
+      privateGroupCredentialRecord(privateGroupDescribeMemberCredential(credential))
+    ),
+  });
+  return stateCommitmentSha256;
+}
+
+function updateLocalPrivateGroupState(
+  state: PrivateGroupState,
+  memberCredential: PrivateGroupMemberCredential,
+  stateCommitmentSha256: string | null,
+  preview: string,
+  incrementUnread: boolean,
+): void {
+  upsertPrivateGroup(
+    setup.userId,
+    state.group_id,
+    JSON.stringify(state),
+    JSON.stringify(memberCredential),
+    stateCommitmentSha256,
+  );
+  upsertGroupConversation(
+    setup.userId,
+    state.group_id,
+    getPrivateGroupOwnerUserId(state),
+    preview,
+    incrementUnread,
+  );
+}
+
+async function createPrivateGroupInviteLinksForMembers(
+  api: PqmsgApi,
+  state: PrivateGroupState,
+  authorizingCredential: PrivateGroupMemberCredential,
+  targetMemberUserIds?: string[],
+): Promise<string[]> {
+  const authorizingCredentialMaterial = privateGroupDescribeMemberCredential(authorizingCredential);
+  if (!authorizingCredentialMaterial.publish_key_base64) {
+    throw new Error("Current private-group credential cannot issue invites.");
+  }
+  const targetSet = targetMemberUserIds ? new Set(targetMemberUserIds) : null;
+  const links: string[] = [];
+  for (const member of state.members) {
+    if (member.user_id === setup.userId) {
+      continue;
+    }
+    if (targetSet && !targetSet.has(member.user_id)) {
+      continue;
+    }
+    const joinPackage = privateGroupExportJoinPackageForMember(state, member.user_id);
+    const shareLinkMaterial = privateGroupEncryptJoinPackageForShareLink(joinPackage);
+    const invite = await api.createPrivateGroupInvite({
+      group_id: state.group_id,
+      epoch: state.epoch,
+      invite_commitment_sha256: bytesToHex(
+        Uint8Array.from(shareLinkMaterial.envelope.invite_commitment_sha256),
+      ),
+      invite_ciphertext_nonce_base64: bytesToBase64(
+        Uint8Array.from(shareLinkMaterial.envelope.ciphertext.nonce),
+      ),
+      invite_ciphertext_base64: bytesToBase64(
+        Uint8Array.from(shareLinkMaterial.envelope.ciphertext.ciphertext),
+      ),
+      invite_ciphertext_aad_base64: bytesToBase64(
+        Uint8Array.from(shareLinkMaterial.envelope.ciphertext.aad),
+      ),
+      authorizing_membership_handle_sha256:
+        authorizingCredentialMaterial.membership_handle_sha256,
+      authorizing_publish_key_base64:
+        authorizingCredentialMaterial.publish_key_base64,
+    });
+    links.push(
+      `${member.user_id}: ${buildPrivateGroupInviteLink(
+        setup.serverUrl,
+        invite.invite_token,
+        bytesToBase64(Uint8Array.from(shareLinkMaterial.invite_secret)),
+      )}`,
+    );
+  }
+  return links;
+}
+
+async function createPrivateGroupInviteLinkFromJoinPackage(
+  api: PqmsgApi,
+  state: PrivateGroupState,
+  authorizingCredential: PrivateGroupMemberCredential,
+  joinPackage: PrivateGroupJoinPackage,
+): Promise<string> {
+  const authorizingCredentialMaterial = privateGroupDescribeMemberCredential(authorizingCredential);
+  if (!authorizingCredentialMaterial.publish_key_base64) {
+    throw new Error("Current private-group credential cannot issue invites.");
+  }
+  const shareLinkMaterial = privateGroupEncryptJoinPackageForShareLink(joinPackage);
+  const invite = await api.createPrivateGroupInvite({
+    group_id: state.group_id,
+    epoch: state.epoch,
+    invite_commitment_sha256: bytesToHex(
+      Uint8Array.from(shareLinkMaterial.envelope.invite_commitment_sha256),
+    ),
+    invite_ciphertext_nonce_base64: bytesToBase64(
+      Uint8Array.from(shareLinkMaterial.envelope.ciphertext.nonce),
+    ),
+    invite_ciphertext_base64: bytesToBase64(
+      Uint8Array.from(shareLinkMaterial.envelope.ciphertext.ciphertext),
+    ),
+    invite_ciphertext_aad_base64: bytesToBase64(
+      Uint8Array.from(shareLinkMaterial.envelope.ciphertext.aad),
+    ),
+    authorizing_membership_handle_sha256:
+      authorizingCredentialMaterial.membership_handle_sha256,
+    authorizing_publish_key_base64:
+      authorizingCredentialMaterial.publish_key_base64,
+  });
+  return buildPrivateGroupInviteLink(
+    setup.serverUrl,
+    invite.invite_token,
+    bytesToBase64(Uint8Array.from(shareLinkMaterial.invite_secret)),
+  );
+}
+
+async function sendPrivateGroupMessage(groupId: string, body: string): Promise<void> {
+  const state = getPrivateGroupState(groupId);
+  if (!state) {
+    throw new Error("Private-group state is not available on this device.");
+  }
+  const recipients = state.members
+    .map((member) => member.user_id)
+    .filter((memberUserId) => memberUserId !== setup.userId);
+  if (recipients.length === 0) {
+    throw new Error("Private group has no other members.");
+  }
+  const k = await ensureKeys();
+  const api = new PqmsgApi(setup.serverUrl);
+  const wrappedPlaintext = encodePrivateGroupMessage(groupId, body);
+  for (const recipientUserId of recipients) {
+    const sealedPayload = await encryptDirectPayload(k, recipientUserId, wrappedPlaintext);
+    await api.sealedRelay(recipientUserId, {
+      device_id: k.deviceId,
+      message_bytes_base64: sealedPayload,
+    });
+  }
+  const ownerUserId = getPrivateGroupOwnerUserId(state);
+  upsertGroupConversation(setup.userId, groupId, ownerUserId, `You: ${body}`, false);
+  await saveMessage({
+    id: `local-group-${groupId}-${Date.now()}`,
+    conversationId: `group:${groupId}`,
+    sender: setup.userId,
+    recipient: groupId,
+    text: `You: ${body}`,
+    timestamp: Date.now(),
+    status: "sent",
+  });
+}
+
 async function bootstrapApp(): Promise<void> {
   try {
     await initMetadataStorage();
@@ -198,7 +614,10 @@ async function bootstrapApp(): Promise<void> {
     const params = new URLSearchParams(location.search);
     const invite = params.get("invite");
     const inviteToken = params.get("invite_token") || params.get("token");
-    if ((invite && invite !== setup.userId) || inviteToken) {
+    const groupInvite = params.get("group_invite_token") || params.get("group_token") || params.get("pg_invite_token");
+    if (groupInvite) {
+      navigateTo({ screen: "create-group" });
+    } else if ((invite && invite !== setup.userId) || inviteToken) {
       navigateTo({ screen: "new-chat" });
     } else {
       navigateTo({ screen: "conversations" });
@@ -446,6 +865,18 @@ async function decryptIncomingPayload(
   }
   await syncUpdatedKeys(result.updatedKeys);
   await persistDirectSession(resolvedSenderUserId, result.sessionJson);
+  const privateGroupMessage = decodePrivateGroupMessage(result.plaintextUtf8, resolvedSenderUserId);
+  if (result.plaintextUtf8.startsWith(PRIVATE_GROUP_MESSAGE_PREFIX)) {
+    if (!privateGroupMessage) {
+      throw new Error("Private-group message could not be matched to local opaque state.");
+    }
+    return {
+      kind: "group",
+      senderUserId: resolvedSenderUserId,
+      recipient: privateGroupMessage.groupId,
+      plaintext: privateGroupMessage.body,
+    };
+  }
   return {
     kind: "dm",
     senderUserId: resolvedSenderUserId,
@@ -743,10 +1174,11 @@ function resolveGroupIdentity(groupId: string, ownerUserId: string): {
   secondaryLabel: string;
   avatarText: string;
 } {
+  const title = getPrivateGroupTitle(groupId);
   return {
-    primaryLabel: groupId,
+    primaryLabel: title,
     secondaryLabel: ownerUserId === setup.userId ? "You created this group" : `Owner @${ownerUserId}`,
-    avatarText: groupId.slice(0, 2).toUpperCase(),
+    avatarText: title.slice(0, 2).toUpperCase() || groupId.slice(0, 2).toUpperCase(),
   };
 }
 
@@ -914,10 +1346,11 @@ function noteIncomingGroupConversation(
 ): void {
   const existing = loadGroupConversations(setup.userId).find((item) => item.groupId === groupId);
   const senderLabel = resolvePeerIdentity(senderUserId).primaryLabel;
+  const state = getPrivateGroupState(groupId);
   upsertGroupConversation(
     setup.userId,
     groupId,
-    existing?.ownerUserId || senderUserId,
+    state ? getPrivateGroupOwnerUserId(state) : (existing?.ownerUserId || senderUserId),
     `${senderLabel}: ${preview}`,
     incrementUnread
   );
@@ -1459,9 +1892,11 @@ function renderConversations(): void {
     menu.className = "fab-menu";
     menu.innerHTML = `
       <button class="fab-menu-item" id="fab-new-chat">New Chat</button>
+      <button class="fab-menu-item" id="fab-new-group">New Group</button>
     `;
     document.body.appendChild(menu);
     q("#fab-new-chat").addEventListener("click", () => { menu.remove(); navigateTo({ screen: "new-chat" }); });
+    q("#fab-new-group").addEventListener("click", () => { menu.remove(); navigateTo({ screen: "create-group" }); });
     // Close on outside click
     setTimeout(() => document.addEventListener("click", function close(e) {
       if (!(e.target as HTMLElement).closest(".fab-menu") && !(e.target as HTMLElement).closest("#fab-new")) {
@@ -2768,7 +3203,34 @@ function renderNewChat(): void {
 // ---------------------------------------------------------------------------
 
 async function renderGroupChat(groupId: string): Promise<void> {
-  const webHoldback = getWebBetaHoldback(await loadServerCapabilitiesCached());
+  const privateGroup = getPrivateGroupState(groupId);
+  if (!privateGroup) {
+    app.innerHTML = `
+      <div class="app-shell">
+        <header class="topbar">
+          <button id="gc-back" class="icon-btn" aria-label="Back to conversations">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 12H5M12 19l-7-7 7-7"/>
+            </svg>
+          </button>
+          <h1 class="topbar-title">Private Group</h1>
+        </header>
+        <div class="settings-body">
+          <div class="beta-banner beta-banner-warning">
+            <strong>Private-group state is missing</strong>
+            <p>This device does not have the opaque state needed to open this group.</p>
+          </div>
+        </div>
+      </div>
+    `;
+    q("#gc-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
+    return;
+  }
+  const localCredential = getPrivateGroupCredential(groupId);
+  const canManage = Boolean(
+    localCredential && privateGroupDescribeMemberCredential(localCredential).publish_key_base64,
+  );
+  const groupTitle = privateGroup.attributes.title || groupId;
   app.innerHTML = `
     <div class="chat-shell">
       <header class="chat-header">
@@ -2778,10 +3240,10 @@ async function renderGroupChat(groupId: string): Promise<void> {
           </svg>
         </button>
         <div class="avatar-wrap">
-          <div class="avatar avatar-sm avatar-group">${groupId.slice(0, 2).toUpperCase()}</div>
+          <div class="avatar avatar-sm avatar-group">${escHtml(groupTitle.slice(0, 2).toUpperCase() || groupId.slice(0, 2).toUpperCase())}</div>
         </div>
         <div class="chat-header-info">
-          <span class="chat-header-name">${escHtml(groupId)}</span>
+          <span class="chat-header-name">${escHtml(groupTitle)}</span>
           <span class="chat-header-status" id="gc-member-count">group</span>
         </div>
         <button id="gc-info" class="icon-btn" title="Group info" aria-label="Group info">
@@ -2792,25 +3254,29 @@ async function renderGroupChat(groupId: string): Promise<void> {
         <div class="chat-header-shield" title="Post-quantum encrypted">🛡️</div>
       </header>
       <div class="chat-context-strip">
-        <strong>${escHtml(webHoldback.title)}</strong>
-        <p>${escHtml(webHoldback.detail)}</p>
+        <strong>Opaque private-group state</strong>
+        <p>${canManage ? "This device can rotate the current epoch and issue member invites." : "This device can read and send group messages, but cannot rotate membership."}</p>
       </div>
       <div class="messages-container" id="messages-container">
         <div class="messages" id="messages-list" role="log" aria-live="polite"></div>
       </div>
       <div class="chat-input-bar">
-        <input id="gc-input" type="text" placeholder="Web group messaging is unavailable" autocomplete="off" aria-label="Group messaging unavailable" disabled />
-        <button id="gc-send" class="send-btn" disabled aria-label="Send message unavailable">
+        <input id="gc-input" type="text" placeholder="Message ${escHtml(groupTitle)}" autocomplete="off" aria-label="Group message" />
+        <button id="gc-send" class="send-btn" aria-label="Send group message">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
           </svg>
         </button>
       </div>
+      <p id="gc-status" class="text-secondary"></p>
     </div>
   `;
 
   const msgList = q("#messages-list");
   const container = q("#messages-container");
+  const input = q<HTMLInputElement>("#gc-input");
+  const sendButton = q<HTMLButtonElement>("#gc-send");
+  const statusEl = q<HTMLElement>("#gc-status");
 
   q("#gc-back").addEventListener("click", () => {
     activeGroupId = null;
@@ -2837,33 +3303,57 @@ async function renderGroupChat(groupId: string): Promise<void> {
       isMine,
       serverMid ? Number(serverMid) : null,
       bubble,
-      q<HTMLInputElement>("#gc-input"),
-      q<HTMLButtonElement>("#gc-send"),
+      input,
+      sendButton,
     );
   });
 
   // Load members count
   void loadGroupMembersCount(groupId);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendButton.click();
+    }
+  });
+  sendButton.addEventListener("click", () => {
+    void (async () => {
+      const text = input.value.trim();
+      if (!text) {
+        return;
+      }
+      sendButton.disabled = true;
+      statusEl.classList.remove("error-text");
+      statusEl.textContent = "Sending...";
+      try {
+        await sendPrivateGroupMessage(groupId, text);
+        input.value = "";
+        statusEl.textContent = "Sent.";
+        const updatedHistory = await getMessages(`group:${groupId}`);
+        renderMessageList(msgList, updatedHistory);
+        scrollToBottom(container);
+        refreshConversationsIfVisible();
+      } catch (error) {
+        statusEl.textContent = errorMsg(error);
+        statusEl.classList.add("error-text");
+      } finally {
+        sendButton.disabled = false;
+      }
+    })();
+  });
 }
 
 async function loadGroupMembersCount(groupId: string): Promise<void> {
-  const capabilities = await loadServerCapabilitiesCached();
-  if (!capabilities?.group_messaging_supported) {
-    const countEl = document.getElementById("gc-member-count");
-    if (countEl) countEl.textContent = "group messaging unavailable";
+  const countEl = document.getElementById("gc-member-count");
+  if (!countEl) {
     return;
   }
-  try {
-    const k = await ensureKeys();
-    const api = new PqmsgApi(setup.serverUrl);
-    const headers = buildGroupMembersListAuthHeaders(k, groupId);
-    const res = await api.listGroupMembers(groupId, headers);
-    cachedGroupMembers[groupId] = res.members;
-    const countEl = document.getElementById("gc-member-count");
-    if (countEl) countEl.textContent = `${res.members.length} members`;
-  } catch {
-    // Best-effort
+  const state = getPrivateGroupState(groupId);
+  if (!state) {
+    countEl.textContent = "private-group state unavailable";
+    return;
   }
+  countEl.textContent = `${state.members.length} members · epoch ${state.epoch}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2871,8 +3361,9 @@ async function loadGroupMembersCount(groupId: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function renderGroupInfo(groupId: string): Promise<void> {
-  const capabilities = await loadServerCapabilitiesCached();
-  if (!capabilities?.group_messaging_supported) {
+  const state = getPrivateGroupState(groupId);
+  const credential = getPrivateGroupCredential(groupId);
+  if (!state || !credential) {
     app.innerHTML = `
       <div class="app-shell">
         <header class="topbar">
@@ -2885,10 +3376,10 @@ async function renderGroupInfo(groupId: string): Promise<void> {
         </header>
         <div class="settings-body">
           <div class="settings-section">
-            <h3>${escHtml(groupId)}</h3>
+            <h3>${escHtml(getPrivateGroupTitle(groupId))}</h3>
             <div class="beta-banner beta-banner-warning">
-              <strong>Group messaging is unavailable</strong>
-              <p>Private groups are disabled in the current privacy profile pending a private group design.</p>
+              <strong>Private-group state is unavailable</strong>
+              <p>This device does not have the local opaque state needed to manage this group.</p>
             </div>
           </div>
         </div>
@@ -2897,6 +3388,219 @@ async function renderGroupInfo(groupId: string): Promise<void> {
     q("#gi-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
     return;
   }
+
+  const credentialMaterial = privateGroupDescribeMemberCredential(credential);
+  const canManage = Boolean(credentialMaterial.publish_key_base64);
+  const groupTitle = state.attributes.title || groupId;
+  const membersHtml = state.members.map((member) => {
+    const identity = resolvePeerIdentity(member.user_id);
+    const canRemoveMember = canManage && member.user_id !== setup.userId && member.role !== "Owner";
+    return `
+      <div class="contact-manage-row">
+        <div>
+          <span>${escHtml(identity.primaryLabel)}</span>
+          <span class="text-secondary">${escHtml(member.role)}</span>
+        </div>
+        <div class="contact-manage-actions">
+          ${member.user_id === setup.userId ? '<span class="text-secondary">you</span>' : ""}
+          ${canManage && member.user_id !== setup.userId
+            ? `<button class="btn-inline" data-private-group-invite="${escHtml(member.user_id)}">Copy Invite</button>`
+            : ""}
+          ${canRemoveMember
+            ? `<button class="btn-inline" data-private-group-remove="${escHtml(member.user_id)}">Remove</button>`
+            : ""}
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  app.innerHTML = `
+    <div class="app-shell">
+      <header class="topbar">
+        <button id="gi-back" class="icon-btn" aria-label="Back to group chat">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 12H5M12 19l-7-7 7-7"/>
+          </svg>
+        </button>
+        <h1 class="topbar-title">Group Info</h1>
+      </header>
+      <div class="settings-body">
+        <div class="settings-section">
+          <h3>${escHtml(groupTitle)}</h3>
+          <p class="text-secondary">Epoch ${state.epoch} | ${state.members.length} members</p>
+          <div class="beta-banner beta-banner-warning">
+            <strong>Opaque private-group state</strong>
+            <p>${canManage ? "This device can rotate membership and issue member invites." : "This device can read the current private-group state but cannot rotate membership."}</p>
+          </div>
+          <div id="gi-members">${membersHtml}</div>
+        </div>
+        ${canManage ? `
+          <div class="settings-section">
+            <h3 class="section-label">Add Member</h3>
+            <label class="field">
+              <span>User</span>
+              <input id="gi-add-member" type="text" placeholder="@username, user ID, or invite link" autocomplete="off" />
+            </label>
+            <button id="gi-add-member-btn" class="btn-primary">Rotate Epoch And Create Invite</button>
+          </div>
+        ` : `
+          <div class="settings-section">
+            <p class="text-secondary">Membership changes require an owner/admin credential for the current epoch.</p>
+          </div>
+        `}
+        <p id="gi-status" class="text-secondary"></p>
+      </div>
+    </div>
+  `;
+
+  q("#gi-back").addEventListener("click", () => navigateTo({ screen: "group-chat", groupId }));
+  const statusEl = q<HTMLElement>("#gi-status");
+  const setStatus = (message: string, isError = false): void => {
+    statusEl.textContent = message;
+    statusEl.classList.toggle("error-text", isError);
+  };
+
+  qAll<HTMLElement>("[data-private-group-invite]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void (async () => {
+        try {
+          const memberUserId = button.dataset.privateGroupInvite?.trim() || "";
+          if (!memberUserId) {
+            throw new Error("Private-group member ID is missing.");
+          }
+          const api = new PqmsgApi(setup.serverUrl);
+          const joinPackage = privateGroupExportJoinPackageForMember(state, memberUserId);
+          const inviteLink = await createPrivateGroupInviteLinkFromJoinPackage(
+            api,
+            state,
+            credential,
+            joinPackage,
+          );
+          await navigator.clipboard.writeText(inviteLink);
+          notify(`Invite link for @${memberUserId} copied.`, "success");
+          setStatus(`Invite link for @${memberUserId} copied.`);
+        } catch (error) {
+          setStatus(errorMsg(error), true);
+        }
+      })();
+    });
+  });
+
+  qAll<HTMLElement>("[data-private-group-remove]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void (async () => {
+        try {
+          const memberUserId = button.dataset.privateGroupRemove?.trim() || "";
+          if (!memberUserId) {
+            throw new Error("Private-group member ID is missing.");
+          }
+          const api = new PqmsgApi(setup.serverUrl);
+          const transition = privateGroupPrepareRemoveMemberTransition(
+            state,
+            memberUserId,
+            Math.floor(Date.now() / 1000),
+          );
+          const nextCredential = findPrivateGroupCredentialForUser(
+            transition.member_credentials,
+            setup.userId,
+          );
+          const stateCommitmentSha256 = await publishPrivateGroupTransition(
+            api,
+            transition.next_state,
+            credential,
+            transition.member_credentials,
+          );
+          updateLocalPrivateGroupState(
+            transition.next_state,
+            nextCredential,
+            stateCommitmentSha256,
+            `Removed @${memberUserId}`,
+            false,
+          );
+          notify(`Removed @${memberUserId} from ${groupTitle}.`, "success");
+          refreshConversationsIfVisible();
+          void loadGroupMembersCount(groupId);
+          await renderGroupInfo(groupId);
+        } catch (error) {
+          setStatus(errorMsg(error), true);
+        }
+      })();
+    });
+  });
+
+  const addMemberButton = document.getElementById("gi-add-member-btn") as HTMLButtonElement | null;
+  const addMemberInput = document.getElementById("gi-add-member") as HTMLInputElement | null;
+  if (addMemberButton && addMemberInput) {
+    addMemberInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        addMemberButton.click();
+      }
+    });
+    addMemberButton.addEventListener("click", () => {
+      void (async () => {
+        try {
+          const rawTarget = addMemberInput.value.trim();
+          if (!rawTarget) {
+            throw new Error("Member target is required.");
+          }
+          const api = new PqmsgApi(setup.serverUrl);
+          const memberUserId = await resolvePeerUserIdFromTarget(rawTarget, api);
+          if (!memberUserId) {
+            throw new Error("Member target could not be resolved.");
+          }
+          if (memberUserId === setup.userId) {
+            throw new Error("You are already in this private group.");
+          }
+          if (state.members.some((member) => member.user_id === memberUserId)) {
+            throw new Error(`@${memberUserId} is already a member of this private group.`);
+          }
+          await ensureDirectChatPeerExists(rawTarget);
+          const transition = privateGroupPrepareAddMemberTransition(
+            state,
+            memberUserId,
+            "Member",
+            Math.floor(Date.now() / 1000),
+          );
+          const nextCredential = findPrivateGroupCredentialForUser(
+            transition.member_credentials,
+            setup.userId,
+          );
+          const stateCommitmentSha256 = await publishPrivateGroupTransition(
+            api,
+            transition.next_state,
+            credential,
+            transition.member_credentials,
+          );
+          updateLocalPrivateGroupState(
+            transition.next_state,
+            nextCredential,
+            stateCommitmentSha256,
+            `Added @${memberUserId}`,
+            false,
+          );
+          const joinPackage =
+            transition.added_member_join_package
+            || privateGroupExportJoinPackageForMember(transition.next_state, memberUserId);
+          const inviteLink = await createPrivateGroupInviteLinkFromJoinPackage(
+            api,
+            transition.next_state,
+            nextCredential,
+            joinPackage,
+          );
+          await navigator.clipboard.writeText(inviteLink);
+          await addContactSilent(memberUserId);
+          notify(`Invite link for @${memberUserId} copied.`, "success");
+          refreshConversationsIfVisible();
+          void loadGroupMembersCount(groupId);
+          await renderGroupInfo(groupId);
+        } catch (error) {
+          setStatus(errorMsg(error), true);
+        }
+      })();
+    });
+  }
+  return;
 
   app.innerHTML = `
     <div class="app-shell">
@@ -2952,6 +3656,7 @@ async function renderGroupInfo(groupId: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function renderCreateGroup(): void {
+  const pendingInviteTarget = extractPrivateGroupInviteTarget();
   const contactRows = cachedContacts.map(c => {
     const identity = resolvePeerIdentity(c.contact_user_id);
     return `
@@ -2975,8 +3680,8 @@ function renderCreateGroup(): void {
       </header>
       <div class="settings-body">
         <div class="beta-banner beta-banner-warning">
-          <strong>Web group creation is unavailable</strong>
-          <p>Private groups are disabled in the current privacy profile pending a private group design.</p>
+          <strong>Private groups stay client-managed</strong>
+          <p>Creation and join use opaque group state plus share links. The server stores encrypted state and invite ciphertext only.</p>
         </div>
         <label class="field">
           <span>Group Name</span>
@@ -2988,12 +3693,186 @@ function renderCreateGroup(): void {
             <div class="contacts-list">${contactRows}</div>
           </div>
         ` : ""}
-        <button id="cg-create" class="btn-primary" disabled>Group creation unavailable on web</button>
+        <button id="cg-create" class="btn-primary">Create Private Group</button>
+        <div class="settings-section">
+          <h3 class="section-label">Join Group Link</h3>
+          <label class="field">
+            <span>Share Link</span>
+            <input id="cg-join-link" type="text" placeholder="Paste a private-group link" value="${escHtml(pendingInviteTarget ? location.href : "")}" autocomplete="off" />
+          </label>
+          <button id="cg-join" class="btn-secondary">Join Private Group</button>
+        </div>
+        <p id="cg-status" class="text-secondary"></p>
       </div>
     </div>
   `;
 
   q("#cg-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
+  const statusEl = q<HTMLElement>("#cg-status");
+  const nameInput = q<HTMLInputElement>("#cg-name");
+  const joinInput = q<HTMLInputElement>("#cg-join-link");
+  q<HTMLButtonElement>("#cg-create").addEventListener("click", () => {
+    void (async () => {
+      try {
+        if (!privateGroupBindingsAvailable()) {
+          throw new Error("Private-group bindings are unavailable in this browser.");
+        }
+        const groupName = nameInput.value.trim();
+        if (!groupName) {
+          throw new Error("Group name is required.");
+        }
+        const selectedMembers = [
+          ...document.querySelectorAll<HTMLInputElement>(".cg-member-cb:checked"),
+        ]
+          .map((input) => input.value.trim())
+          .filter((value) => value && value !== setup.userId);
+        const initialMembers: PrivateGroupMember[] = selectedMembers.map((memberUserId) => ({
+          user_id: memberUserId,
+          role: "Member",
+        }));
+        const state = privateGroupCreateState(
+          setup.userId,
+          {
+            title: groupName,
+            description: null,
+            avatar_hash_sha256: null,
+            disappearing_message_timer_seconds: null,
+          },
+          initialMembers,
+          Math.floor(Date.now() / 1000),
+        );
+        const bootstrap = privateGroupPrepareBootstrapMaterial(state, setup.userId);
+        const api = new PqmsgApi(setup.serverUrl);
+        const stateCommitmentSha256 = await publishPrivateGroupBootstrap(api, bootstrap);
+        updateLocalPrivateGroupState(
+          state,
+          bootstrap.authorizing_member_credential,
+          stateCommitmentSha256,
+          "Private group created",
+          false,
+        );
+
+        const inviteLinks: string[] = [];
+        for (const memberJoinPackage of bootstrap.member_join_packages) {
+          if (memberJoinPackage.member_user_id === setup.userId) {
+            continue;
+          }
+          const shareLinkMaterial = privateGroupEncryptJoinPackageForShareLink(
+            memberJoinPackage.join_package,
+          );
+          const authorizingCredentialMaterial = privateGroupDescribeMemberCredential(
+            bootstrap.authorizing_member_credential,
+          );
+          if (!authorizingCredentialMaterial.publish_key_base64) {
+            throw new Error("Current private-group credential cannot issue invites.");
+          }
+          const invite = await api.createPrivateGroupInvite({
+            group_id: state.group_id,
+            epoch: state.epoch,
+            invite_commitment_sha256: bytesToHex(
+              Uint8Array.from(shareLinkMaterial.envelope.invite_commitment_sha256),
+            ),
+            invite_ciphertext_nonce_base64: bytesToBase64(
+              Uint8Array.from(shareLinkMaterial.envelope.ciphertext.nonce),
+            ),
+            invite_ciphertext_base64: bytesToBase64(
+              Uint8Array.from(shareLinkMaterial.envelope.ciphertext.ciphertext),
+            ),
+            invite_ciphertext_aad_base64: bytesToBase64(
+              Uint8Array.from(shareLinkMaterial.envelope.ciphertext.aad),
+            ),
+            authorizing_membership_handle_sha256:
+              authorizingCredentialMaterial.membership_handle_sha256,
+            authorizing_publish_key_base64:
+              authorizingCredentialMaterial.publish_key_base64,
+          });
+          inviteLinks.push(
+            `${memberJoinPackage.member_user_id}: ${buildPrivateGroupInviteLink(
+              setup.serverUrl,
+              invite.invite_token,
+              bytesToBase64(Uint8Array.from(shareLinkMaterial.invite_secret)),
+            )}`,
+          );
+        }
+
+        if (inviteLinks.length > 0) {
+          await navigator.clipboard.writeText(inviteLinks.join("\n"));
+          notify("Private group created. Invite links copied.", "success");
+        } else {
+          notify("Private group created.", "success");
+        }
+        statusEl.textContent = inviteLinks.length > 0
+          ? "Group created. Invite links were copied to your clipboard."
+          : "Group created.";
+        navigateTo({ screen: "group-chat", groupId: state.group_id });
+      } catch (error) {
+        statusEl.textContent = errorMsg(error);
+        statusEl.classList.add("error-text");
+      }
+    })();
+  });
+  q<HTMLButtonElement>("#cg-join").addEventListener("click", () => {
+    void (async () => {
+      try {
+        if (!privateGroupBindingsAvailable()) {
+          throw new Error("Private-group bindings are unavailable in this browser.");
+        }
+        const target = extractPrivateGroupInviteTarget(joinInput.value.trim());
+        if (!target) {
+          throw new Error("Private-group link is invalid or missing its secret fragment.");
+        }
+        const currentServer = validateWebServerUrl(setup.serverUrl).toString().replace(/\/+$/, "");
+        const targetServer = validateWebServerUrl(target.serverUrl).toString().replace(/\/+$/, "");
+        if (currentServer !== targetServer) {
+          throw new Error("Private-group links must target the current account server.");
+        }
+        const api = new PqmsgApi(target.serverUrl);
+        const invite = await api.resolvePrivateGroupInvite(target.inviteToken);
+        const joinPackage = privateGroupOpenShareLinkInvite(
+          {
+            group_id: invite.group_id,
+            epoch: invite.epoch,
+            invite_commitment_sha256: hexToByteArray(invite.invite_commitment_sha256),
+            ciphertext: {
+              nonce: [...base64ToBytes(invite.invite_ciphertext_nonce_base64)],
+              ciphertext: [...base64ToBytes(invite.invite_ciphertext_base64)],
+              aad: [...base64ToBytes(invite.invite_ciphertext_aad_base64)],
+            },
+          },
+          target.inviteSecretBase64,
+        );
+        const restored = privateGroupRestoreJoinPackage(joinPackage);
+        const memberMaterial = privateGroupDescribeMemberCredential(restored.member_credential);
+        const fetchedState = await api.fetchPrivateGroupState({
+          membership_handle_sha256: memberMaterial.membership_handle_sha256,
+          fetch_key_base64: memberMaterial.fetch_key_base64,
+        });
+        const expectedCommitment = bytesToHex(
+          Uint8Array.from(joinPackage.invite.snapshot.state_commitment_sha256),
+        );
+        if (fetchedState.group_id !== restored.state.group_id || fetchedState.epoch !== restored.state.epoch) {
+          throw new Error("Private-group state fetch does not match the invite package.");
+        }
+        if (expectedCommitment && fetchedState.state_commitment_sha256 !== expectedCommitment) {
+          throw new Error("Private-group state fetch failed commitment verification.");
+        }
+        await api.consumePrivateGroupInvite(target.inviteToken);
+        updateLocalPrivateGroupState(
+          restored.state,
+          restored.member_credential,
+          fetchedState.state_commitment_sha256,
+          "Joined private group",
+          false,
+        );
+        notify("Joined private group.", "success");
+        statusEl.textContent = "Private group joined.";
+        navigateTo({ screen: "group-chat", groupId: restored.state.group_id });
+      } catch (error) {
+        statusEl.textContent = errorMsg(error);
+        statusEl.classList.add("error-text");
+      }
+    })();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -4572,7 +5451,11 @@ async function pollSealedInbox(): Promise<void> {
         );
         const senderId = decrypted.senderUserId;
         const plaintext = decrypted.plaintext;
-        const conversationId = convId(k.userId, senderId);
+        const isDirectMessage = decrypted.kind === "dm";
+        const groupId = isDirectMessage ? null : decrypted.recipient;
+        const conversationId = isDirectMessage
+          ? convId(k.userId, senderId)
+          : `group:${groupId}`;
         const existing = await getMessages(conversationId);
         if (existing.some((msg) => msg.serverMessageId === item.message_id)) {
           nextCursor = Math.max(nextCursor, item.message_id);
@@ -4582,23 +5465,37 @@ async function pollSealedInbox(): Promise<void> {
           id: `sealed-${item.message_id}`,
           conversationId,
           sender: senderId,
-          recipient: k.userId,
-          text: "🕶️ " + plaintext,
+          recipient: isDirectMessage ? k.userId : decrypted.recipient,
+          text: isDirectMessage
+            ? plaintext
+            : `${resolvePeerIdentity(senderId).primaryLabel}: ${plaintext}`,
           timestamp: new Date(item.received_at).getTime(),
           status: "delivered",
+          serverMessageId: item.message_id,
         };
-        msg.text = plaintext;
-        msg.serverMessageId = item.message_id;
         await saveMessage(msg);
         void loadProfileNameBackground(senderId);
-        const isActivePeer = activeChatPeer === senderId;
-        noteIncomingConversation(senderId, plaintext, !isActivePeer);
-        if (isActivePeer) {
-          markConversationRead(k.userId, senderId);
-          const msgList = document.getElementById("messages-list");
-          const container = document.getElementById("messages-container");
-          if (msgList && container) {
-            appendBubble(msgList, msg, container);
+        if (isDirectMessage) {
+          const isActivePeer = activeChatPeer === senderId;
+          noteIncomingConversation(senderId, plaintext, !isActivePeer);
+          if (isActivePeer) {
+            markConversationRead(k.userId, senderId);
+            const msgList = document.getElementById("messages-list");
+            const container = document.getElementById("messages-container");
+            if (msgList && container) {
+              appendBubble(msgList, msg, container);
+            }
+          }
+        } else if (groupId) {
+          const isActiveGroup = activeGroupId === groupId;
+          noteIncomingGroupConversation(groupId, senderId, plaintext, !isActiveGroup);
+          if (isActiveGroup) {
+            markGroupConversationRead(k.userId, groupId);
+            const msgList = document.getElementById("messages-list");
+            const container = document.getElementById("messages-container");
+            if (msgList && container) {
+              appendBubble(msgList, msg, container);
+            }
           }
         }
         conversationListChanged = true;
@@ -5184,6 +6081,10 @@ function q<T extends HTMLElement>(selector: string): T {
   const el = document.querySelector(selector);
   if (!el) throw new Error(`missing element: ${selector}`);
   return el as T;
+}
+
+function qAll<T extends HTMLElement>(selector: string): T[] {
+  return Array.from(document.querySelectorAll(selector)) as T[];
 }
 
 function escHtml(s: string): string {
