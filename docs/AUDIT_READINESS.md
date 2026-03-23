@@ -201,6 +201,7 @@ Full rules: `observability/prometheus/alert-rules.yml`
 | Advisory audit | `cargo-audit` | `dependency-policy` |
 | License/ban/source audit | `cargo-deny` | `dependency-policy` |
 | SBOM generation | `cargo-cyclonedx` (CycloneDX JSON) | `sbom` |
+| Release provenance | GitHub artifact attestations + signed checksum manifest + `release-manifest.json` | `release` |
 | Deny policy | `deny.toml` | Bans, advisories, licenses, sources |
 
 ---
@@ -214,6 +215,9 @@ Full rules: `observability/prometheus/alert-rules.yml`
 | TLS termination | Rustls with certificate files |
 | Secret management | Kubernetes Secrets (base64) |
 | Postgres at-rest declaration | Hardened deployments require `PQMSG_POSTGRES_STORAGE_ENCRYPTION` and `PQMSG_POSTGRES_BACKUP_ENCRYPTION=true` |
+| Pod hardening | CI-enforced `automountServiceAccountToken: false`, `enableServiceLinks: false`, `seccompProfile.type: RuntimeDefault`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]` |
+| Network isolation | CI-enforced `NetworkPolicy` parity across raw K8s and Helm renders |
+| Namespace admission baseline | Raw namespace pins Pod Security Admission `restricted` labels at `v1.34`; Helm target namespaces must match operationally |
 | Horizontal autoscaling | HPA with CPU/memory targets |
 | Network policy | Ingress annotations for rate limiting |
 

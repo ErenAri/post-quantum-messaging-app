@@ -88,6 +88,8 @@ kubectl create secret generic pqmsg-server-secrets \
   --from-literal=PQMSG_APNS_TOPIC='com.example.pqmsgdemo' \
   --from-literal=PQMSG_SENTRY_DSN='https://public@example.ingest.sentry.io/project-id'
 kubectl create secret tls pqmsg-server-tls --namespace pqmsg --cert=server.crt --key=server.key
+
+The raw namespace manifest now labels `pqmsg` with Pod Security Admission `restricted` enforcement/audit/warn at `v1.34`. Helm installs do not create or relabel the namespace, so the target namespace must be pre-labeled to the same policy before `helm upgrade --install`.
 kubectl apply -k deploy/k8s
 ```
 
@@ -146,6 +148,9 @@ Requirements:
   - APNs: `PQMSG_APNS_BEARER_TOKEN`, `PQMSG_APNS_TOPIC` (and optional `PQMSG_APNS_ENDPOINT`).
 12. Configure Sentry (`PQMSG_SENTRY_DSN`, `PQMSG_SENTRY_TRACES_SAMPLE_RATE`) for production error telemetry. `PQMSG_DEPLOYMENT_MODE=production` now fails closed if `PQMSG_SENTRY_DSN` is missing.
 13. The Helm chart now enforces the same production contract at render time; `helm template` fails if `secretEnv.PQMSG_SENTRY_DSN` is blank for `production`, if `env.PQMSG_CORS_ALLOWED_ORIGINS` contains `*`, or if the Postgres at-rest declarations are missing.
+14. Hardened Kubernetes deployments now require `automountServiceAccountToken: false`, `enableServiceLinks: false`, pod `seccompProfile.type: RuntimeDefault`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, and `capabilities.drop: [ALL]`. CI validates both the raw manifest and the rendered Helm chart with `scripts/security/validate_hardened_manifests.py`.
+15. Both raw Kustomize and rendered Helm deployments must also carry a matching `NetworkPolicy` for the `pqmsg-server` pods; CI validates selector parity and the baseline ingress/egress ports with `scripts/security/validate_network_policy.py`.
+16. The raw Kustomize namespace manifest must carry Pod Security Admission `restricted` labels, and Helm operators must pre-label the target namespace to the same policy; CI validates the raw namespace with `scripts/security/validate_namespace_policy.py`.
 
 Windows source-build note for local server work:
 

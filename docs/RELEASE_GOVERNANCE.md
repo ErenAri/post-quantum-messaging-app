@@ -49,7 +49,15 @@ A release candidate is promotable only when all conditions are true:
    - `docs/SPEC.md`,
    - `docs/THREAT_MODEL.md`,
    - `docs/SECURITY_GATES.md`.
-7. release artifact includes signed checksum manifest (`release.yml`).
+7. raw Kubernetes and rendered Helm deployment manifests pass hardened manifest policy:
+   - `automountServiceAccountToken: false`,
+   - `enableServiceLinks: false`,
+   - `seccompProfile.type: RuntimeDefault`,
+   - `runAsNonRoot: true`,
+   - `allowPrivilegeEscalation: false`,
+   - `readOnlyRootFilesystem: true`,
+   - `capabilities.drop: [ALL]`.
+8. release artifact includes a signed checksum manifest, a machine-readable `release-manifest.json`, and GitHub artifact attestations for the server binary, release manifest, and SBOM archive (`release.yml`).
 
 ## 4. Security Exception Policy
 
@@ -93,5 +101,6 @@ Within `48h` of promotion:
 
 1. review security-event counters for abnormal deltas,
 2. verify audit-log continuity and ingestion,
-3. confirm no unresolved critical/high findings were introduced,
-4. store release evidence package (CI logs, artifact signature, incident notes).
+3. confirm release-bundle verification succeeded from the published assets (`scripts/release/verify_release_bundle.*`),
+4. confirm no unresolved critical/high findings were introduced,
+5. store release evidence package (CI logs, artifact signatures/attestations, incident notes).

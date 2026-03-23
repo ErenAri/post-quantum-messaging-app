@@ -8,14 +8,22 @@ on:
 permissions:
   contents: write
   id-token: write
+  attestations: write
 
 jobs:
   release-artifacts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: render hardened production chart
+        run: |
+          helm template pqmsg-server deploy/helm/pqmsg-server \
+            --set-string secretEnv.PQMSG_SENTRY_DSN=https://public@example.ingest.sentry.io/project-id >/tmp/pqmsg-server-chart.yaml
+      - name: verify hardened server boot contract
+        run: cargo test -p pqmsg-server --bin pqmsg-server
       - name: build release binary
         run: cargo build --release -p pqmsg-server
       - name: package artifacts
@@ -23,7 +31,6 @@ jobs:
           mkdir -p dist
           cp target/release/pqmsg-server dist/pqmsg-server-linux-x86_64
           chmod +x dist/pqmsg-server-linux-x86_64
-          sha256sum dist/pqmsg-server-linux-x86_64 > dist/checksums.txt
       - name: install cargo-cyclonedx
         run: cargo install cargo-cyclonedx --locked
       - name: generate SBOM
@@ -33,6 +40,60 @@ jobs:
           mkdir -p dist/sbom
           find . -name 'bom.json' -exec cp --parents {} dist/sbom/ \;
           tar -czf dist/sbom.tar.gz -C dist/sbom .
+      - name: generate release manifest
+        env:
+          PQMSG_RELEASE_TAG: ${{ github.ref_name }}
+          PQMSG_RELEASE_SHA: ${{ github.sha }}
+          PQMSG_RELEASE_RUN_ID: ${{ github.run_id }}
+          PQMSG_RELEASE_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PQMSG_RELEASE_WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          def sha256(path: Path) -> str:
+              h = hashlib.sha256()
+              with path.open("rb") as f:
+                  for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          binary = Path("dist/pqmsg-server-linux-x86_64")
+          sbom = Path("dist/sbom.tar.gz")
+          manifest = {
+              "tag": os.environ["PQMSG_RELEASE_TAG"],
+              "commit_sha": os.environ["PQMSG_RELEASE_SHA"],
+              "workflow_run_id": os.environ["PQMSG_RELEASE_RUN_ID"],
+              "workflow_run_attempt": os.environ["PQMSG_RELEASE_RUN_ATTEMPT"],
+              "workflow_ref": os.environ["PQMSG_RELEASE_WORKFLOW_REF"],
+              "created_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "artifacts": [
+                  {
+                      "path": binary.name,
+                      "sha256": sha256(binary),
+                      "size_bytes": binary.stat().st_size,
+                      "kind": "server-binary"
+                  },
+                  {
+                      "path": sbom.name,
+                      "sha256": sha256(sbom),
+                      "size_bytes": sbom.stat().st_size,
+                      "kind": "sbom-archive"
+                  }
+              ]
+          }
+          Path("dist/release-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+      - name: write checksum manifest
+        run: |
+          sha256sum \
+            dist/pqmsg-server-linux-x86_64 \
+            dist/sbom.tar.gz \
+            dist/release-manifest.json > dist/checksums.txt
       - name: install cosign
         uses: sigstore/cosign-installer@v3
       - name: sign checksums
@@ -43,6 +104,18 @@ jobs:
             --output-signature dist/checksums.txt.sig \
             --output-certificate dist/checksums.txt.pem \
             dist/checksums.txt
+      - name: attest server binary provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/pqmsg-server-linux-x86_64
+      - name: attest release manifest provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/release-manifest.json
+      - name: attest SBOM archive provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/sbom.tar.gz
       - name: upload release artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -56,5 +129,6 @@ jobs:
             dist/checksums.txt
             dist/checksums.txt.sig
             dist/checksums.txt.pem
+            dist/release-manifest.json
             dist/sbom.tar.gz
           generate_release_notes: true

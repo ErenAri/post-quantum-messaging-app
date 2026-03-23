@@ -1,32 +1,29 @@
+{{- if .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: pqmsg-server
-  namespace: pqmsg
+  name: {{ include "pqmsg-server.fullname" . }}
   labels:
-    app.kubernetes.io/name: pqmsg-server
+    {{- include "pqmsg-server.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: pqmsg-server
+      {{- include "pqmsg-server.selectorLabels" . | nindent 6 }}
   policyTypes:
     - Ingress
     - Egress
   ingress:
-    # Allow traffic from the ingress controller
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: ingress-nginx
       ports:
         - protocol: TCP
-          port: 8080
-    # Allow health probes from the kubelet
+          port: {{ .Values.service.targetPort }}
     - ports:
         - protocol: TCP
-          port: 8080
+          port: {{ .Values.service.targetPort }}
   egress:
-    # Allow DNS resolution
     - to:
         - namespaceSelector: {}
       ports:
@@ -34,19 +31,16 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # Allow PostgreSQL
     - to:
         - namespaceSelector: {}
       ports:
         - protocol: TCP
           port: 5432
-    # Allow Redis
     - to:
         - namespaceSelector: {}
       ports:
         - protocol: TCP
           port: 6379
-    # Allow HTTPS egress (push notifications, OTLP, Sentry)
     - to:
         - namespaceSelector: {}
       ports:
@@ -54,3 +48,4 @@ spec:
           port: 443
         - protocol: TCP
           port: 4317
+{{- end }}

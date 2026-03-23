@@ -19,6 +19,7 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         buildConfigField("String", "TLS_PIN_SHA256", "\"\"")
+        buildConfigField("String", "TLS_BACKUP_PIN_SHA256", "\"\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -26,10 +27,12 @@ android {
     buildTypes {
         debug {
             buildConfigField("boolean", "ALLOW_CLEARTEXT_DEMO", "true")
+            manifestPlaceholders["usesCleartextTraffic"] = "true"
         }
         release {
             isMinifyEnabled = false
             buildConfigField("boolean", "ALLOW_CLEARTEXT_DEMO", "false")
+            manifestPlaceholders["usesCleartextTraffic"] = "false"
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

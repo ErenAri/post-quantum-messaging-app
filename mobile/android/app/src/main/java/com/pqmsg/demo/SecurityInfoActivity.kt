@@ -183,11 +183,12 @@ class SecurityInfoActivity : AppCompatActivity() {
                 base = server,
                 allowCleartextDemo = BuildConfig.ALLOW_CLEARTEXT_DEMO,
                 tlsPinSha256 = BuildConfig.TLS_PIN_SHA256,
+                tlsBackupPinSha256 = BuildConfig.TLS_BACKUP_PIN_SHA256,
             )
-            val pinLine = if (policy.certificatePin.isNullOrBlank()) {
-                "TLS pin: none"
+            val pinLine = if (policy.certificatePins.isEmpty()) {
+                "TLS pins: none"
             } else {
-                "TLS pin: ${policy.certificatePin}"
+                "TLS pins:\n${policy.certificatePins.joinToString(separator = "\n") { "- $it" }}"
             }
             "Resolved base URL: ${policy.baseUrl}\n$pinLine"
         }.getOrElse {

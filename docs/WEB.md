@@ -67,6 +67,8 @@ npm run build
 npm run preview
 ```
 
+The hardened production build now emits no JavaScript sourcemaps by default.
+
 ## 6. Runtime Workflow
 
 1. Setup card:

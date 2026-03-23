@@ -18,12 +18,18 @@ ingress:
     enabled: true
     secretName: pqmsg-server-ingress-tls
 
+networkPolicy:
+  enabled: true
+
 autoscaling:
   enabled: true
   minReplicas: 2
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
   targetMemoryUtilizationPercentage: 75
+
+automountServiceAccountToken: false
+enableServiceLinks: false
 
 resources:
   requests:
@@ -69,6 +75,8 @@ podSecurityContext:
   runAsNonRoot: true
   runAsUser: 10001
   runAsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   allowPrivilegeEscalation: false

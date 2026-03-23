@@ -14,6 +14,8 @@ spec:
       labels:
         {{- include "pqmsg-server.selectorLabels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      enableServiceLinks: {{ .Values.enableServiceLinks }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:

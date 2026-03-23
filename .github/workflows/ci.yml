@@ -144,6 +144,30 @@ jobs:
           fi
           grep -q "reject wildcard" /tmp/pqmsg-server-chart.err
 
+  hardened-manifest-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: render hardened production chart
+        run: |
+          helm template pqmsg-server deploy/helm/pqmsg-server \
+            --set-string secretEnv.PQMSG_SENTRY_DSN=https://public@example.ingest.sentry.io/project-id >/tmp/pqmsg-server-chart.yaml
+      - name: validate raw and rendered hardened manifests
+        run: |
+          python scripts/security/validate_hardened_manifests.py \
+            deploy/k8s/deployment.yaml \
+            /tmp/pqmsg-server-chart.yaml
+      - name: validate raw and rendered network policy
+        run: |
+          python scripts/security/validate_network_policy.py \
+            deploy/k8s/networkpolicy.yaml \
+            /tmp/pqmsg-server-chart.yaml
+      - name: validate raw namespace pod-security labels
+        run: |
+          python scripts/security/validate_namespace_policy.py \
+            deploy/k8s/namespace.yaml
+
   benchmarks:
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest

@@ -15,6 +15,11 @@ spec:
       labels:
         app.kubernetes.io/name: pqmsg-server
     spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: pqmsg-server
           image: ghcr.io/your-org/pqmsg-server:0.1.0

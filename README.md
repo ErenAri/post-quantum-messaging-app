@@ -291,6 +291,24 @@ curl http://127.0.0.1:3000/health
 curl http://127.0.0.1:3000/metrics
 ```
 
+Tagged GitHub releases now publish:
+
+- the `pqmsg-server` binary,
+- `checksums.txt` plus `cosign` signature/certificate,
+- `release-manifest.json`,
+- an SBOM archive,
+- GitHub artifact attestations for the binary, manifest, and SBOM archive.
+
+Published release bundles can be validated locally with:
+
+```powershell
+.\scripts\release\verify_release_bundle.ps1 .\dist your-org/your-repo
+```
+
+```bash
+./scripts/release/verify_release_bundle.sh ./dist your-org/your-repo
+```
+
 Formal verification and penetration smoke commands:
 
 ```powershell

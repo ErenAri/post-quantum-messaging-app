@@ -30,6 +30,9 @@ export const WEB_RESPONSE_SECURITY_HEADERS = {
 } as const;
 
 export default defineConfig({
+  build: {
+    sourcemap: false,
+  },
   server: {
     port: 5173,
     headers: WEB_RESPONSE_SECURITY_HEADERS,

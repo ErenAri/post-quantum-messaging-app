@@ -1183,6 +1183,7 @@ object ApiClientFactory {
             base,
             BuildConfig.ALLOW_CLEARTEXT_DEMO,
             BuildConfig.TLS_PIN_SHA256,
+            BuildConfig.TLS_BACKUP_PIN_SHA256,
         )
         val baseUrl = policy.baseUrl.toHttpUrl()
         val clientBuilder = OkHttpClient.Builder()
@@ -1192,13 +1193,13 @@ object ApiClientFactory {
             }
             clientBuilder.addInterceptor(logging)
         }
-        val certificatePin = policy.certificatePin
-        if (certificatePin != null) {
-            clientBuilder.certificatePinner(
-                CertificatePinner.Builder()
-                    .add(baseUrl.host, certificatePin)
-                    .build()
-            )
+        if (policy.certificatePins.isNotEmpty()) {
+            val certificatePinner = CertificatePinner.Builder().apply {
+                policy.certificatePins.forEach { pin ->
+                    add(baseUrl.host, pin)
+                }
+            }.build()
+            clientBuilder.certificatePinner(certificatePinner)
         }
         val client = clientBuilder.build()
         return Retrofit.Builder()
@@ -1210,13 +1211,14 @@ object ApiClientFactory {
 
     data class TransportPolicy(
         val baseUrl: String,
-        val certificatePin: String?,
+        val certificatePins: List<String>,
     )
 
     internal fun resolveTransportPolicy(
         base: String,
         allowCleartextDemo: Boolean,
         tlsPinSha256: String,
+        tlsBackupPinSha256: String,
     ): TransportPolicy {
         val normalized = normalizeBaseUrl(base)
         val url = normalized.toHttpUrl()
@@ -1225,16 +1227,26 @@ object ApiClientFactory {
                 require(allowCleartextDemo && isLocalDemoHost(url.host)) {
                     "HTTP transport is only allowed for local demo hosts in debug mode"
                 }
-                TransportPolicy(baseUrl = normalized, certificatePin = null)
+                TransportPolicy(baseUrl = normalized, certificatePins = emptyList())
             }
 
             "https" -> {
                 val pin = tlsPinSha256.trim()
+                val backupPin = tlsBackupPinSha256.trim()
                 require(pin.isNotBlank()) { "HTTPS requires BuildConfig.TLS_PIN_SHA256" }
+                require(backupPin.isNotBlank()) {
+                    "HTTPS requires BuildConfig.TLS_BACKUP_PIN_SHA256"
+                }
                 require(pin.startsWith("sha256/")) {
                     "TLS pin must start with 'sha256/'"
                 }
-                TransportPolicy(baseUrl = normalized, certificatePin = pin)
+                require(backupPin.startsWith("sha256/")) {
+                    "TLS backup pin must start with 'sha256/'"
+                }
+                require(pin != backupPin) {
+                    "TLS primary and backup pins must be different"
+                }
+                TransportPolicy(baseUrl = normalized, certificatePins = listOf(pin, backupPin))
             }
 
             else -> error("unsupported URL scheme '${url.scheme}'")

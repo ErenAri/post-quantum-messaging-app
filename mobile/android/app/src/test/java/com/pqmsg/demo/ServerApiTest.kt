@@ -34,9 +34,10 @@ class ServerApiTest {
             "http://10.0.2.2:3000",
             allowCleartextDemo = true,
             tlsPinSha256 = "",
+            tlsBackupPinSha256 = "",
         )
         assertEquals("http://10.0.2.2:3000/", policy.baseUrl)
-        assertNull(policy.certificatePin)
+        assertEquals(emptyList<String>(), policy.certificatePins)
     }
 
     @Test
@@ -46,28 +47,54 @@ class ServerApiTest {
                 "http://example.com",
                 allowCleartextDemo = true,
                 tlsPinSha256 = "",
+                tlsBackupPinSha256 = "",
             )
         }
     }
 
     @Test
-    fun resolve_transport_policy_requires_pin_for_https() {
+    fun resolve_transport_policy_requires_primary_and_backup_pins_for_https() {
         assertThrows(IllegalArgumentException::class.java) {
             ApiClientFactory.resolveTransportPolicy(
                 "https://example.com",
                 allowCleartextDemo = false,
                 tlsPinSha256 = "",
+                tlsBackupPinSha256 = "",
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ApiClientFactory.resolveTransportPolicy(
+                "https://example.com",
+                allowCleartextDemo = false,
+                tlsPinSha256 = "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                tlsBackupPinSha256 = "",
             )
         }
         val policy = ApiClientFactory.resolveTransportPolicy(
             "https://example.com",
             allowCleartextDemo = false,
             tlsPinSha256 = "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            tlsBackupPinSha256 = "sha256/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
         )
         assertEquals(
-            "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            policy.certificatePin
+            listOf(
+                "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "sha256/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+            ),
+            policy.certificatePins
         )
+    }
+
+    @Test
+    fun resolve_transport_policy_rejects_duplicate_backup_pin() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ApiClientFactory.resolveTransportPolicy(
+                "https://example.com",
+                allowCleartextDemo = false,
+                tlsPinSha256 = "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                tlsBackupPinSha256 = "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            )
+        }
     }
 
     @Test

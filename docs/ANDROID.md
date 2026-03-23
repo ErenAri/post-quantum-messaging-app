@@ -50,7 +50,8 @@ The Chat screen is intentionally limited to messaging actions for the current be
 - first-seen peer identity fingerprints are pinned locally,
 - detected peer identity key changes trigger explicit user confirmation before send,
 - HTTP transport is allowed only for local emulator/demo hosts in debug mode,
-- HTTPS transport requires certificate pinning configured via `BuildConfig.TLS_PIN_SHA256`,
+- release builds declare an Android network security config that keeps cleartext disabled and trusts system CAs only,
+- HTTPS transport requires certificate pinning configured via `BuildConfig.TLS_PIN_SHA256` and `BuildConfig.TLS_BACKUP_PIN_SHA256`,
 - all Android activities set `FLAG_SECURE`, so screenshots and app-switcher previews are blocked by default,
 - relay and inbox requests include Ed25519-signed auth headers generated from local identity signing keys,
 - inbox processing enforces per-peer monotonic transport message IDs and local seen-ciphertext replay rejection,
@@ -85,7 +86,7 @@ Calling is not part of the Android messaging beta:
 - Rust toolchain,
 - `cargo-ndk`.
 
-For high-assurance deployment testing, configure `TLS_PIN_SHA256` in `mobile/android/app/build.gradle.kts` and use an HTTPS server endpoint.
+For high-assurance deployment testing, configure `TLS_PIN_SHA256` and `TLS_BACKUP_PIN_SHA256` in `mobile/android/app/build.gradle.kts` and use an HTTPS server endpoint.
 
 ## 5. Environment Setup (PowerShell)
 
@@ -177,7 +178,7 @@ sequenceDiagram
 
 ## 11. Transport Security Constraint
 
-The emulator URL pattern (`http://10.0.2.2:...`) is strictly demonstration-only.  
+The emulator URL pattern (`http://10.0.2.2:...`) is strictly demonstration-only and is permitted only in Android debug builds. Release builds now fail closed at the manifest layer with `android:usesCleartextTraffic=false`.  
 Operational deployment requires HTTPS and should include certificate pinning.
 
 ## 12. Certificate Pin Rotation
