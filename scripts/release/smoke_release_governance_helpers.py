@@ -276,8 +276,17 @@ def smoke_publish_and_resolve_incident_issue() -> None:
         ),
         encoding="utf-8",
     )
-    received: dict[str, Any] = {"comments": [], "patches": [], "created_labels": [], "issue_label_posts": []}
+    received: dict[str, Any] = {
+        "comments": [],
+        "patches": [],
+        "created_labels": [],
+        "issue_label_posts": [],
+        "evidence_comments": [],
+        "publish_comments": [],
+    }
     labels_by_name: dict[str, dict[str, Any]] = {}
+    issue_comments: dict[int, list[dict[str, Any]]] = {7: [], 42: []}
+    created_issue: dict[str, Any] | None = None
     scope_marker = "pqmsg-incident-scope: prod|production|pqmsg|pqmsg-server"
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -301,8 +310,12 @@ def smoke_publish_and_resolve_incident_issue() -> None:
                 self.wfile.write(b'{"message":"Not Found"}')
                 return
             if self.path.startswith("/repos/owner/repo/issues"):
-                body = json.dumps(
-                    [
+                if self.path == "/repos/owner/repo/issues/42/comments?per_page=100":
+                    body = json.dumps(issue_comments[42])
+                elif self.path == "/repos/owner/repo/issues/7/comments?per_page=100":
+                    body = json.dumps(issue_comments[7])
+                else:
+                    issues = [
                         {
                             "number": 7,
                             "html_url": "https://github.test/owner/repo/issues/7",
@@ -310,7 +323,9 @@ def smoke_publish_and_resolve_incident_issue() -> None:
                             "labels": [{"name": "pqmsg-status-open"}, {"name": "pqmsg-incident"}],
                         }
                     ]
-                )
+                    if created_issue is not None:
+                        issues.append(created_issue)
+                    body = json.dumps(issues)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -331,14 +346,24 @@ def smoke_publish_and_resolve_incident_issue() -> None:
                 self.wfile.write(json.dumps(payload).encode("utf-8"))
                 return
             if self.path == "/repos/owner/repo/issues":
-                received["create"] = json.loads(body)
+                payload = json.loads(body)
+                received["create"] = payload
+                created_issue_dict = {
+                    "number": 42,
+                    "html_url": "https://github.test/owner/repo/issues/42",
+                    "title": payload["title"],
+                    "body": payload["body"],
+                    "labels": [{"name": label} for label in payload.get("labels", [])],
+                }
+                nonlocal created_issue
+                created_issue = created_issue_dict
                 response = {"number": 42, "html_url": "https://github.test/owner/repo/issues/42"}
                 self.send_response(201)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps(response).encode("utf-8"))
                 return
-            if self.path == "/repos/owner/repo/issues/7/labels":
+            if self.path in {"/repos/owner/repo/issues/7/labels", "/repos/owner/repo/issues/42/labels"}:
                 received["issue_label_posts"].append(json.loads(body))
                 response = [{"name": name} for name in json.loads(body).get("labels", [])]
                 self.send_response(200)
@@ -346,9 +371,29 @@ def smoke_publish_and_resolve_incident_issue() -> None:
                 self.end_headers()
                 self.wfile.write(json.dumps(response).encode("utf-8"))
                 return
+            if self.path == "/repos/owner/repo/issues/42/comments":
+                payload = json.loads(body)
+                if "pqmsg-incident-comment:" in payload.get("body", ""):
+                    received["publish_comments"].append({"issue": 42, "payload": payload})
+                    response = {"html_url": "https://github.test/owner/repo/issues/42#issuecomment-publish"}
+                else:
+                    received["evidence_comments"].append({"issue": 42, "payload": payload})
+                    response = {"html_url": "https://github.test/owner/repo/issues/42#issuecomment-2"}
+                issue_comments[42].append({"body": payload["body"], "html_url": response["html_url"]})
+                self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(response).encode("utf-8"))
+                return
             if self.path == "/repos/owner/repo/issues/7/comments":
-                received["comments"].append(json.loads(body))
-                response = {"html_url": "https://github.test/owner/repo/issues/7#issuecomment-1"}
+                payload = json.loads(body)
+                if "Resolved by successful" in payload.get("body", ""):
+                    received["comments"].append(payload)
+                    response = {"html_url": "https://github.test/owner/repo/issues/7#issuecomment-1"}
+                else:
+                    received["evidence_comments"].append({"issue": 7, "payload": payload})
+                    response = {"html_url": "https://github.test/owner/repo/issues/7#issuecomment-3"}
+                issue_comments[7].append({"body": payload["body"], "html_url": response["html_url"]})
                 self.send_response(201)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -359,9 +404,10 @@ def smoke_publish_and_resolve_incident_issue() -> None:
 
         def do_PATCH(self):  # noqa: N802
             body = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8")
-            if self.path == "/repos/owner/repo/issues/7":
+            if self.path in {"/repos/owner/repo/issues/7", "/repos/owner/repo/issues/42"}:
                 received["patches"].append(json.loads(body))
-                response = {"number": 7, "html_url": "https://github.test/owner/repo/issues/7"}
+                issue_number = 7 if self.path.endswith("/7") else 42
+                response = {"number": issue_number, "html_url": f"https://github.test/owner/repo/issues/{issue_number}"}
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -406,6 +452,52 @@ def smoke_publish_and_resolve_incident_issue() -> None:
         run(
             [
                 "python",
+                "scripts/release/publish_incident_issue.py",
+                "--failure-handoff",
+                str(path / "handoff-open.json"),
+                "--submission-record",
+                str(path / "submission.json"),
+                "--repo",
+                "owner/repo",
+                "--github-api-url",
+                f"http://127.0.0.1:{port}",
+                "--github-repository",
+                "owner/repo",
+                "--github-run-id",
+                "123",
+                "--github-workflow",
+                "promote",
+                "--output",
+                str(path / "issue-open-rerun-1.json"),
+            ],
+            env=env,
+        )
+        run(
+            [
+                "python",
+                "scripts/release/publish_incident_issue.py",
+                "--failure-handoff",
+                str(path / "handoff-open.json"),
+                "--submission-record",
+                str(path / "submission.json"),
+                "--repo",
+                "owner/repo",
+                "--github-api-url",
+                f"http://127.0.0.1:{port}",
+                "--github-repository",
+                "owner/repo",
+                "--github-run-id",
+                "123",
+                "--github-workflow",
+                "promote",
+                "--output",
+                str(path / "issue-open-rerun-2.json"),
+            ],
+            env=env,
+        )
+        run(
+            [
+                "python",
                 "scripts/release/resolve_incident_issue.py",
                 "--failure-handoff",
                 str(path / "handoff-close.json"),
@@ -424,12 +516,106 @@ def smoke_publish_and_resolve_incident_issue() -> None:
             ],
             env=env,
         )
+        dist = path / "dist"
+        dist.mkdir(parents=True, exist_ok=True)
+        (dist / "alpha.json").write_text('{"a":1}\n', encoding="utf-8")
+        (dist / "beta.txt").write_text("beta\n", encoding="utf-8")
+        run(
+            [
+                "python",
+                "scripts/release/write_bundle_manifest.py",
+                "--bundle-kind",
+                "promotion",
+                "--release-tag",
+                "v1.2.3",
+                "--deployment-mode",
+                "production",
+                "--dist-dir",
+                str(dist),
+                "--output",
+                str(dist / "promotion-bundle-manifest.json"),
+            ]
+        )
+        run(
+            [
+                "python",
+                "scripts/release/comment_incident_issue_evidence.py",
+                "--issue-record",
+                str(path / "issue-open.json"),
+                "--bundle-manifest",
+                str(dist / "promotion-bundle-manifest.json"),
+                "--repo",
+                "owner/repo",
+                "--github-api-url",
+                f"http://127.0.0.1:{port}",
+                "--github-repository",
+                "owner/repo",
+                "--github-run-id",
+                "123",
+                "--github-workflow",
+                "promote",
+                "--output",
+                str(path / "issue-open-evidence.json"),
+            ],
+            env=env,
+        )
+        run(
+            [
+                "python",
+                "scripts/release/comment_incident_issue_evidence.py",
+                "--issue-record",
+                str(path / "issue-close.json"),
+                "--bundle-manifest",
+                str(dist / "promotion-bundle-manifest.json"),
+                "--repo",
+                "owner/repo",
+                "--github-api-url",
+                f"http://127.0.0.1:{port}",
+                "--github-repository",
+                "owner/repo",
+                "--github-run-id",
+                "124",
+                "--github-workflow",
+                "rollback",
+                "--output",
+                str(path / "issue-close-evidence.json"),
+            ],
+            env=env,
+        )
+        run(
+            [
+                "python",
+                "scripts/release/comment_incident_issue_evidence.py",
+                "--issue-record",
+                str(path / "issue-open.json"),
+                "--bundle-manifest",
+                str(dist / "promotion-bundle-manifest.json"),
+                "--repo",
+                "owner/repo",
+                "--github-api-url",
+                f"http://127.0.0.1:{port}",
+                "--github-repository",
+                "owner/repo",
+                "--github-run-id",
+                "123",
+                "--github-workflow",
+                "promote",
+                "--output",
+                str(path / "issue-open-evidence-rerun.json"),
+            ],
+            env=env,
+        )
     finally:
         srv.shutdown()
         thread.join()
 
     issue_open = load_json(path / "issue-open.json")
+    issue_open_rerun_1 = load_json(path / "issue-open-rerun-1.json")
+    issue_open_rerun_2 = load_json(path / "issue-open-rerun-2.json")
     issue_close = load_json(path / "issue-close.json")
+    issue_open_evidence = load_json(path / "issue-open-evidence.json")
+    issue_open_evidence_rerun = load_json(path / "issue-open-evidence-rerun.json")
+    issue_close_evidence = load_json(path / "issue-close-evidence.json")
     assert issue_open["outcome"] == "created_issue"
     assert issue_open["scope_key"] == "prod|production|pqmsg|pqmsg-server"
     assert "pqmsg-incident" in issue_open["labels"]
@@ -438,12 +624,25 @@ def smoke_publish_and_resolve_incident_issue() -> None:
     assert "pqmsg-status-open" in received["create"]["labels"]
     assert any(item["name"] == "pqmsg-status-open" for item in received["created_labels"])
     assert any(item["name"] == "pqmsg-status-resolved" for item in received["created_labels"])
+    assert issue_open_rerun_1["outcome"] == "commented_existing_issue"
+    assert issue_open_rerun_2["outcome"] == "existing_comment_already_present"
+    assert len(received["publish_comments"]) == 1
     assert issue_close["outcome"] == "closed_open_issues"
     assert issue_close["resolved"] is True
     assert received["patches"][0]["state"] == "closed"
     assert "pqmsg-status-resolved" in received["patches"][0]["labels"]
     assert "pqmsg-status-open" not in received["patches"][0]["labels"]
     assert "Evidence bundle artifact: `rollback-bundle-v1.2.4-production`" in received["comments"][0]["body"]
+    assert issue_open_evidence["outcome"] == "commented_issue_evidence"
+    assert issue_open_evidence_rerun["outcome"] == "existing_comment_already_present"
+    assert issue_close_evidence["outcome"] == "commented_issue_evidence"
+    assert issue_open_evidence["issue_numbers"] == [42]
+    assert sorted(issue_close_evidence["issue_numbers"]) == [7, 42]
+    assert any("Bundle manifest sha256:" in item["payload"]["body"] for item in received["evidence_comments"])
+    assert any(
+        "Evidence bundle artifact: `promotion-bundle-v1.2.3-production`" in item["payload"]["body"]
+        for item in received["evidence_comments"]
+    )
 
 
 def smoke_bundle_manifest() -> None:

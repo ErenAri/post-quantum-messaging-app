@@ -113,6 +113,8 @@ Promotion/rollback failure governance now also emits structured incident handoff
 The resulting bundle now includes a submission record showing whether the Alertmanager handoff was skipped, attempted, delivered, or failed, so on-call can distinguish governance failure from escalation-delivery failure.
 When `PQMSG_INCIDENT_ISSUE_REPO` is configured, the workflow also creates or updates a GitHub issue for the incident, records that publication outcome in the evidence bundle, and applies the shared `pqmsg-*` incident labels so on-call can filter by environment, deployment mode, operation, and open/resolved state.
 Successful remediation runs now use the same deployment scope to comment on and close older open incident issues, so the issue tracker reflects both incident creation and incident resolution.
+The final uploaded bundle manifest digest is also commented back onto the incident issue thread, so operators can match the issue directly to the exact evidence bundle contents that were archived.
+Those workflow-driven issue comments are deduplicated by hidden markers, so retries update evidence safely without piling duplicate comments onto the same incident.
 
 ## 5. Backup and Recovery
 

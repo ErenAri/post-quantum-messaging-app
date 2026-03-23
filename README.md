@@ -327,6 +327,8 @@ If the GitHub Environment also provides `PQMSG_ALERTMANAGER_API_URL`, both workf
 Both workflows now also emit delivery evidence (`promotion-incident-submission.json` / `rollback-incident-submission.json`) so the bundle shows whether escalation was skipped, submitted successfully, or failed at the Alertmanager handoff step.
 If the GitHub Environment also provides `PQMSG_INCIDENT_ISSUE_REPO`, both workflows publish the same incident into GitHub Issues as a durable system of record, emit `promotion-incident-issue-publication.json` / `rollback-incident-issue-publication.json`, and apply a stable issue-label taxonomy (`pqmsg-incident`, scope, operation, and open/resolved status labels) so operators can filter incidents reliably.
 Each uploaded promotion/rollback bundle now also includes `promotion-bundle-manifest.json` or `rollback-bundle-manifest.json`, a SHA-256 manifest of the evidence files that were actually uploaded.
+When durable incident issues are enabled, the workflows also comment the final bundle-manifest digest back onto the issue thread so the GitHub record points to the uploaded evidence bundle, not just the initial failure summary.
+Those incident-issue and evidence comments are now marker-deduplicated, so rerunning the same promotion/rollback workflow does not spam duplicate issue-thread comments.
 
 Published release bundles can be validated locally with:
 

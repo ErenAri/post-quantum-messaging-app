@@ -137,6 +137,8 @@ That same path now writes delivery evidence (`promotion-incident-submission.json
 If the target GitHub Environment also provides `PQMSG_INCIDENT_ISSUE_REPO`, the workflows publish the incident into that GitHub repository via the Issues API and write `promotion-incident-issue-publication.json` / `rollback-incident-issue-publication.json`.
 Those issue records now include explicit evidence pointers back to the workflow run and bundle artifact names, automatically create/apply the hardened label taxonomy (`pqmsg-incident`, environment, deployment mode, operation, and status labels), and successful applied promotion/rollback runs attempt to close older open incident issues for the same environment/mode/namespace/release scope, recording the result in `promotion-incident-issue-resolution.json` / `rollback-incident-issue-resolution.json`.
 Before upload, each workflow also writes `promotion-bundle-manifest.json` or `rollback-bundle-manifest.json`, a SHA-256 digest inventory of the bundle contents actually emitted for operators and auditors.
+If durable incident issues are enabled, the workflows also add a follow-up issue comment containing the final bundle-manifest filename and SHA-256 digest so the issue thread records the exact uploaded evidence set.
+Both the existing-issue publication comment and the follow-up bundle-evidence comment are marker-deduplicated, so workflow reruns remain idempotent at the GitHub issue layer.
 
 Override example:
 

@@ -74,6 +74,8 @@ A release candidate is promotable only when all conditions are true:
 22. when `PQMSG_INCIDENT_ISSUE_REPO` is configured for the target GitHub Environment, the same incident must be published into GitHub Issues, labeled with the shared `pqmsg-*` incident taxonomy, and leave a publication record in the bundle (`promotion-incident-issue-publication.json` / `rollback-incident-issue-publication.json`).
 23. successful applied remediation runs must attempt to resolve older open incident issues in the same deployment scope, transition the issue status label from open to resolved, and leave a resolution record in the bundle (`promotion-incident-issue-resolution.json` / `rollback-incident-issue-resolution.json`).
 24. every uploaded promotion/rollback bundle must include a SHA-256 inventory of its emitted evidence files (`promotion-bundle-manifest.json` / `rollback-bundle-manifest.json`).
+25. when durable incident issues are enabled, the workflows must also comment the final bundle-manifest filename and SHA-256 digest back onto the corresponding issue thread so the GitHub record references the archived evidence set directly.
+26. workflow-driven GitHub issue comments for incident publication and final evidence must be idempotent on rerun; duplicate retries must resolve to an existing marker-matched comment instead of posting a second copy.
 
 ## 4. Security Exception Policy
 

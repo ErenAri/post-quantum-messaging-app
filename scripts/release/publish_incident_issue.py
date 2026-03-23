@@ -183,6 +183,27 @@ def find_existing_issue(
     return None
 
 
+def find_existing_comment(
+    api_url: str,
+    repo: str,
+    token: str,
+    issue_number: int,
+    marker: str,
+) -> dict[str, Any] | None:
+    encoded_repo = parse.quote(repo, safe="/")
+    status, body = api_request(
+        "GET",
+        f"{api_url.rstrip('/')}/repos/{encoded_repo}/issues/{issue_number}/comments?per_page=100",
+        token,
+    )
+    if status != 200 or not isinstance(body, list):
+        return None
+    for item in body:
+        if marker in str(item.get("body", "")):
+            return item
+    return None
+
+
 def ensure_labels(
     api_url: str,
     repo: str,
@@ -295,6 +316,7 @@ def main() -> int:
     scope_key = build_scope_key(record)
     label_specs = open_issue_label_specs(record)
     label_names = open_issue_label_names(record)
+    comment_marker = f"pqmsg-incident-comment:{args.github_workflow}|{args.github_run_id}|{issue_key}"
     body = build_body(
         record,
         submission,
@@ -313,11 +335,28 @@ def main() -> int:
         if existing is not None:
             issue_number = existing["number"]
             add_labels_to_issue(args.github_api_url, repo, token_value, issue_number, label_names)
+            existing_comment = find_existing_comment(
+                args.github_api_url,
+                repo,
+                token_value,
+                issue_number,
+                comment_marker,
+            )
+            if existing_comment is not None:
+                report["published"] = True
+                report["outcome"] = "existing_comment_already_present"
+                report["issue_number"] = issue_number
+                report["issue_url"] = existing.get("html_url")
+                report["scope_key"] = scope_key
+                report["labels"] = label_names
+                report["comment_url"] = existing_comment.get("html_url")
+                write_report(output, report)
+                return 0
             _, comment_body = api_request(
                 "POST",
                 f"{args.github_api_url.rstrip('/')}/repos/{encoded_repo}/issues/{issue_number}/comments",
                 token_value,
-                {"body": body},
+                {"body": f"<!-- {comment_marker} -->\n{body}"},
             )
             report["published"] = True
             report["outcome"] = "commented_existing_issue"
