@@ -136,3 +136,16 @@ Maintain these artifacts per release cycle:
 2. backup success logs and restore drill output,
 3. on-call handoff log with unresolved risks,
 4. deployment manifest digest and rollback artifact mapping.
+
+## 7. SQLite Key Rotation
+
+If a hardened non-production deployment still uses SQLite, rotate SQLCipher keys offline:
+
+1. stop all writers,
+2. take a backup or snapshot,
+3. run the offline rotation tool from [SQLITE_KEY_ROTATION.md](/C:/projects/post-quantum-messaging-app/docs/SQLITE_KEY_ROTATION.md),
+4. update the secret/config to the new key only,
+5. restart and validate `/health`.
+
+Do not treat SQLite key rotation as an online procedure. The supported operational model is
+maintenance-window rotation with a verified rollback path.

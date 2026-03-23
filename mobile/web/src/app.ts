@@ -6106,11 +6106,12 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
 
 // Service worker
 if ("serviceWorker" in navigator) {
+  const runtimeIssue = getLiveUnsupportedWebRuntimeReason();
   const isSupportedSecureOrigin = isSecureWebOrigin(location);
   const isLocalDevOrigin = location.protocol === "http:" && isLoopbackHostname(location.hostname);
 
-  if (!isSupportedSecureOrigin) {
-    // Unsupported insecure origins never register a service worker.
+  if (!isSupportedSecureOrigin || runtimeIssue) {
+    // Unsupported or fail-closed web environments never register a service worker.
   } else if (isLocalDevOrigin) {
     void navigator.serviceWorker.getRegistrations()
       .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))

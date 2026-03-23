@@ -104,6 +104,14 @@ function installDom(url = "http://localhost/"): JSDOM {
     configurable: true,
     value: { subtle: {} },
   });
+  Object.defineProperty(window, "isSecureContext", {
+    configurable: true,
+    value: true,
+  });
+  Object.defineProperty(window, "crossOriginIsolated", {
+    configurable: true,
+    value: true,
+  });
   const bindings: Record<string, unknown> = {
     window,
     document: window.document,
@@ -125,6 +133,8 @@ function installDom(url = "http://localhost/"): JSDOM {
     Blob: window.Blob,
     crypto: window.crypto,
     indexedDB: window.indexedDB,
+    isSecureContext: window.isSecureContext,
+    crossOriginIsolated: window.crossOriginIsolated,
   };
   for (const [key, value] of Object.entries(bindings)) {
     Object.defineProperty(globalThis, key, {

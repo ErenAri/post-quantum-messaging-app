@@ -257,9 +257,32 @@ $env:PQMSG_SECURITY_PROFILE='research'
 cargo run -p pqmsg-server
 ```
 
-On Windows source builds, SQLCipher-backed SQLite needs an OpenSSL development install
-with headers and libraries available through `OPENSSL_DIR`. Existing plaintext SQLite
-server databases require explicit one-way migration via `PQMSG_SQLITE_MIGRATE_PLAINTEXT=true`.
+On Windows source builds, `pqmsg-server` now uses the vendored-OpenSSL SQLCipher path by
+default. Install Strawberry Perl if you do not already have a usable `perl.exe`
+(Git for Windows also works), keep the standard MSVC build tools available, and run
+`.\scripts\dev\run_sqlcipher_server_tests_windows.ps1`. Existing plaintext SQLite server
+databases still require explicit one-way migration via
+`PQMSG_SQLITE_MIGRATE_PLAINTEXT=true`.
+
+To rotate an existing SQLCipher SQLite key in place at startup:
+
+```powershell
+$oldRawKey = [Convert]::FromBase64String($env:OLD_SQLITE_KEY_B64)
+$newRawKey = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($newRawKey)
+$env:PQMSG_SQLITE_ROTATE_KEY = 'true'
+$env:PQMSG_SQLITE_ROTATE_FROM_KEY_B64 = [Convert]::ToBase64String($oldRawKey)
+$env:PQMSG_SQLITE_ENCRYPTION_KEY_B64 = [Convert]::ToBase64String($newRawKey)
+cargo run -p pqmsg-server
+```
+
+That rotation path preserves the existing SQLCipher compatibility and page-size settings.
+If you need to change cipher format settings instead of only rotating the raw key, use
+the export/migration path rather than `PRAGMA rekey`.
+
+For hardened Postgres deployments, declare the storage profile with
+`PQMSG_POSTGRES_STORAGE_ENCRYPTION=managed_service|filesystem|block|tde_extension`
+and set `PQMSG_POSTGRES_BACKUP_ENCRYPTION=true` only after encrypted backups are enabled.
 
 Metrics and health can be inspected with:
 
@@ -371,7 +394,7 @@ The server sends wake-only FCM/APNs payloads and never includes plaintext messag
 
 The Android emulator endpoint pattern (`http://10.0.2.2:...`) is demonstration-only.  
 Operational deployment requires TLS and should include certificate pinning.  
-Set `PQMSG_SECURITY_PROFILE=high_assurance` (or `nss_aligned`) with `PQMSG_TLS_CERT_PATH` and `PQMSG_TLS_KEY_PATH` on the server. For pilot/production deployments, also set `PQMSG_DEPLOYMENT_MODE=pilot` (or `production`) so the server refuses SQLite, local-only rate limiting, missing audit logs, and non-PQ runtimes.
+Set `PQMSG_SECURITY_PROFILE=high_assurance` (or `nss_aligned`) with `PQMSG_TLS_CERT_PATH` and `PQMSG_TLS_KEY_PATH` on the server. For pilot/production deployments, also set `PQMSG_DEPLOYMENT_MODE=pilot` (or `production`) so the server refuses SQLite, local-only rate limiting, missing audit logs, wildcard CORS, non-PQ runtimes, and undeclared Postgres at-rest encryption. `production` also requires `PQMSG_SENTRY_DSN`.
 
 ## Containerization and Kubernetes
 

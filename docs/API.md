@@ -75,8 +75,12 @@ Server startup is controlled by environment variables:
 - `PQMSG_DATABASE_URL`: `sqlite://...` or `postgres://...`
 - `PQMSG_SQLITE_ENCRYPTION_KEY_B64`: optional base64-encoded 32-byte raw SQLCipher key for SQLite-backed at-rest page encryption
 - `PQMSG_SQLITE_MIGRATE_PLAINTEXT`: optional boolean (`true`/`false`) enabling explicit one-way plaintext SQLite to SQLCipher migration at startup when a key is configured
+- `PQMSG_SQLITE_ROTATE_KEY`: optional boolean (`true`/`false`) enabling explicit SQLCipher key rotation at startup
+- `PQMSG_SQLITE_ROTATE_FROM_KEY_B64`: optional base64-encoded 32-byte raw SQLCipher key for the currently active SQLite key when `PQMSG_SQLITE_ROTATE_KEY=true`; `PQMSG_SQLITE_ENCRYPTION_KEY_B64` becomes the new target key
 - `PQMSG_SQLITE_CIPHER_COMPATIBILITY`: optional SQLCipher compatibility mode (`1`..`4`) applied on every SQLite connection when page encryption is enabled
 - `PQMSG_SQLITE_CIPHER_PAGE_SIZE`: optional SQLCipher page size (power of two between `512` and `65536`) applied on every SQLite connection when page encryption is enabled
+- `PQMSG_POSTGRES_STORAGE_ENCRYPTION`: Postgres at-rest storage declaration for hardened deployments: `managed_service`, `filesystem`, `block`, or `tde_extension`
+- `PQMSG_POSTGRES_BACKUP_ENCRYPTION`: boolean attestation that Postgres backups are encrypted (`true`/`false`)
 - `PQMSG_TLS_CERT_PATH`: PEM certificate path
 - `PQMSG_TLS_KEY_PATH`: PEM private key path
 - `PQMSG_DB_MAX_CONNECTIONS`: pool max connections (default: `20`)
@@ -107,7 +111,9 @@ Notes:
 
 - The SQLite encryption key is only used when `PQMSG_DATABASE_URL` points at SQLite.
 - Existing plaintext SQLite databases now require explicit opt-in migration. If a key is configured against a legacy plaintext file, startup fails closed until `PQMSG_SQLITE_MIGRATE_PLAINTEXT=true` is set for that migration run.
-- On Windows source builds, SQLCipher-backed SQLite requires an OpenSSL development install (headers + libs) visible through `OPENSSL_DIR`, or an equivalent vendored-OpenSSL build environment.
+- SQLCipher key rotation is explicit and offline-at-startup. Set `PQMSG_SQLITE_ROTATE_KEY=true`, provide the current key in `PQMSG_SQLITE_ROTATE_FROM_KEY_B64`, and set `PQMSG_SQLITE_ENCRYPTION_KEY_B64` to the target key. Rotation keeps the existing cipher compatibility/page-size settings; format changes still require export/migration.
+- `PQMSG_DEPLOYMENT_MODE=pilot` and `production` now require an explicit Postgres at-rest encryption declaration plus encrypted backups via `PQMSG_POSTGRES_STORAGE_ENCRYPTION` and `PQMSG_POSTGRES_BACKUP_ENCRYPTION=true`.
+- On Windows source builds, `pqmsg-server` defaults to the vendored-OpenSSL SQLCipher path. Install Perl plus the normal MSVC build tools; `nasm` is optional for assembly acceleration. `scripts/dev/check_sqlcipher_server_prereqs.ps1` can discover common local Perl and Visual Studio paths, and `scripts/dev/run_sqlcipher_server_tests_windows.ps1` wraps the full SQLCipher test run.
 
 In `high_assurance` and `nss_aligned`, server startup fails unless both TLS paths are provided. In `pilot` and `production` deployment modes, startup also fails unless PostgreSQL, Redis-backed rate limiting, JSON logs, audit logging, and a PQ-enabled runtime are all active.
 

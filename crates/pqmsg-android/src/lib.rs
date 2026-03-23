@@ -240,6 +240,7 @@ pub struct SecondaryDeviceOnboardingPackage {
     pub user_id: String,
     pub device_id: String,
     pub suite: Suite,
+    pub exported_at_unix: i64,
     pub keys_json: String,
 }
 
@@ -1003,6 +1004,7 @@ pub fn open_secondary_device_package(
         user_id: keys.user_id,
         device_id: keys.device_id,
         suite: keys.suite,
+        exported_at_unix: payload.exported_at_unix,
         keys_json: payload.keys_json,
     })
 }
@@ -3284,6 +3286,7 @@ mod tests {
         assert_eq!(package.user_id, "alice");
         assert_eq!(package.device_id, "alice-android-2");
         assert_eq!(package.suite, Suite::MlKem768);
+        assert!(package.exported_at_unix > 0);
         assert_eq!(imported_keys.user_id, source_keys.user_id);
         assert_eq!(imported_keys.device_id, "alice-android-2");
         assert_eq!(

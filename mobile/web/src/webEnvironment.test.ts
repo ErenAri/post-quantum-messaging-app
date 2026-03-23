@@ -11,6 +11,8 @@ describe("webEnvironment", () => {
     expect(
       getUnsupportedWebRuntimeReason({
         pageUrl: { protocol: "https:", hostname: "app.example" },
+        hasSecureContext: true,
+        hasCrossOriginIsolation: true,
         hasIndexedDb: true,
         hasCryptoSubtle: true,
         hasWebAssembly: true,
@@ -23,6 +25,8 @@ describe("webEnvironment", () => {
     expect(
       getUnsupportedWebRuntimeReason({
         pageUrl: { protocol: "http:", hostname: "localhost" },
+        hasSecureContext: true,
+        hasCrossOriginIsolation: false,
         hasIndexedDb: true,
         hasCryptoSubtle: true,
         hasWebAssembly: true,
@@ -37,6 +41,8 @@ describe("webEnvironment", () => {
     expect(
       getUnsupportedWebRuntimeReason({
         pageUrl: { protocol: "http:", hostname: "chat.example" },
+        hasSecureContext: false,
+        hasCrossOriginIsolation: false,
         hasIndexedDb: true,
         hasCryptoSubtle: true,
         hasWebAssembly: true,
@@ -49,12 +55,42 @@ describe("webEnvironment", () => {
     expect(
       getUnsupportedWebRuntimeReason({
         pageUrl: { protocol: "https:", hostname: "app.example" },
+        hasSecureContext: true,
+        hasCrossOriginIsolation: true,
         hasIndexedDb: false,
         hasCryptoSubtle: true,
         hasWebAssembly: true,
         hasTextEncoding: true,
       })
     ).toContain("IndexedDB");
+  });
+
+  it("rejects insecure browser contexts even on https", () => {
+    expect(
+      getUnsupportedWebRuntimeReason({
+        pageUrl: { protocol: "https:", hostname: "app.example" },
+        hasSecureContext: false,
+        hasCrossOriginIsolation: true,
+        hasIndexedDb: true,
+        hasCryptoSubtle: true,
+        hasWebAssembly: true,
+        hasTextEncoding: true,
+      })
+    ).toContain("secure browser context");
+  });
+
+  it("rejects hosted web origins without cross-origin isolation", () => {
+    expect(
+      getUnsupportedWebRuntimeReason({
+        pageUrl: { protocol: "https:", hostname: "app.example" },
+        hasSecureContext: true,
+        hasCrossOriginIsolation: false,
+        hasIndexedDb: true,
+        hasCryptoSubtle: true,
+        hasWebAssembly: true,
+        hasTextEncoding: true,
+      })
+    ).toContain("cross-origin isolation");
   });
 
   it("validates server URLs for secure web messaging", () => {

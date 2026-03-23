@@ -35,8 +35,9 @@ For the current beta:
 - Android is the supported messaging beta client.
 - Web remains demo-only.
 - Outbound web messaging is blocked whenever the server reports `web_client_policy = demo_only`.
-- Web messaging fails closed when the browser lacks HTTPS-or-loopback origin protection, IndexedDB, SubtleCrypto, WebAssembly, or text encoding support.
-- The SPA shell ships an explicit CSP and hardened browser response headers in the Vite dev/preview surface.
+- Web messaging fails closed when the browser lacks HTTPS-or-loopback origin protection, an actual secure browser context, cross-origin isolation on hosted origins, IndexedDB, SubtleCrypto, WebAssembly, or text encoding support.
+- The SPA shell ships an explicit CSP plus hardened COOP/COEP/CORP browser response headers in the Vite dev/preview surface.
+- The service worker only caches same-origin app-shell assets; cross-origin API traffic and `/v1/*` messaging traffic are never cached by the web shell.
 - Calling is unavailable from the web UI.
 
 ## 3. Prerequisites

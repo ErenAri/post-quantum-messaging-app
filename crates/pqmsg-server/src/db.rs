@@ -55,12 +55,26 @@ impl SqliteEncryptionConfig {
         Ok(self)
     }
 
+    pub fn copy_cipher_settings_from(mut self, other: &Self) -> Result<Self, &'static str> {
+        if let Some(version) = other.cipher_compatibility {
+            self = self.with_cipher_compatibility(version)?;
+        }
+        if let Some(page_size) = other.cipher_page_size {
+            self = self.with_cipher_page_size(page_size)?;
+        }
+        Ok(self)
+    }
+
     fn key_pragma_value(&self) -> String {
         format!("\"x'{}'\"", self.key_hex)
     }
 
     fn key_pragma_sql(&self) -> String {
         format!("PRAGMA key = {};", self.key_pragma_value())
+    }
+
+    fn rekey_pragma_sql(&self) -> String {
+        format!("PRAGMA rekey = {};", self.key_pragma_value())
     }
 
     fn connect_pragmas(&self) -> Vec<String> {
@@ -103,6 +117,13 @@ pub enum SqliteEncryptionPreparation {
     NoExistingFile,
     AlreadyEncrypted,
     MigratedPlaintext,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SqliteEncryptionRotation {
+    NoExistingFile,
+    AlreadyUsingTargetKey,
+    Rotated,
 }
 
 impl DbBackend {
@@ -148,12 +169,12 @@ pub async fn prepare_sqlite_encrypted_database(
     }
 
     let base_options = sqlite_connect_options(database_url, false)?;
-    let database_path = base_options.get_filename().to_path_buf();
+    let database_path = sqlite_filesystem_path(base_options.get_filename());
     if !database_path.exists() {
         return Ok(SqliteEncryptionPreparation::NoExistingFile);
     }
 
-    if try_open_sqlite(database_url, Some(encryption))
+    if validate_sqlite_encrypted_file(&database_path, encryption)
         .await
         .is_ok()
     {
@@ -188,6 +209,12 @@ pub async fn prepare_sqlite_encrypted_database(
     let backup_path = sqlite_sibling_path(&database_path, ".plaintext-backup");
     ensure_absent(&migrating_path, "stale SQLCipher migration file")?;
     ensure_absent(&backup_path, "stale plaintext backup file")?;
+    fs::File::create(&migrating_path).with_context(|| {
+        format!(
+            "create SQLCipher migration target '{}'",
+            migrating_path.display()
+        )
+    })?;
 
     let user_version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&mut plaintext)
@@ -198,7 +225,7 @@ pub async fn prepare_sqlite_encrypted_database(
         .await
         .context("read SQLite application_id before migration")?;
 
-    let attach_path = sql_quote_literal(&migrating_path.to_string_lossy());
+    let attach_path = sql_quote_literal(&migrating_path.to_string_lossy().replace('\\', "/"));
     let attach = format!(
         "ATTACH DATABASE '{}' AS encrypted KEY {};",
         attach_path,
@@ -243,6 +270,64 @@ pub async fn prepare_sqlite_encrypted_database(
 
     let _ = fs::remove_file(&backup_path);
     Ok(SqliteEncryptionPreparation::MigratedPlaintext)
+}
+
+pub async fn rotate_sqlite_encrypted_database_key(
+    database_url: &str,
+    current: &SqliteEncryptionConfig,
+    target: &SqliteEncryptionConfig,
+) -> anyhow::Result<SqliteEncryptionRotation> {
+    if sqlite_database_is_memory(database_url) {
+        return Ok(SqliteEncryptionRotation::NoExistingFile);
+    }
+
+    if current.cipher_compatibility != target.cipher_compatibility
+        || current.cipher_page_size != target.cipher_page_size
+    {
+        return Err(anyhow!(
+            "SQLite key rotation only supports the existing cipher compatibility and page-size settings; use plaintext export migration for format changes"
+        ));
+    }
+
+    let base_options = sqlite_connect_options(database_url, false)?;
+    let database_path = sqlite_filesystem_path(base_options.get_filename());
+    if !database_path.exists() {
+        return Ok(SqliteEncryptionRotation::NoExistingFile);
+    }
+
+    if validate_sqlite_encrypted_file(&database_path, target)
+        .await
+        .is_ok()
+    {
+        return Ok(SqliteEncryptionRotation::AlreadyUsingTargetKey);
+    }
+
+    let mut conn = try_open_sqlite(database_url, Some(current))
+        .await
+        .with_context(|| {
+            format!(
+                "failed to open encrypted SQLite database '{}' with the current key",
+                database_path.display()
+            )
+        })?;
+    let _: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master")
+        .fetch_one(&mut conn)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to validate encrypted SQLite database '{}' with the current key before rotation",
+                database_path.display()
+            )
+        })?;
+    conn.execute(target.rekey_pragma_sql().as_str())
+        .await
+        .context("rotate SQLCipher database key via PRAGMA rekey")?;
+    conn.close().await.ok();
+
+    validate_sqlite_encrypted_file(&database_path, target)
+        .await
+        .context("validate SQLite database after SQLCipher key rotation")?;
+    Ok(SqliteEncryptionRotation::Rotated)
 }
 
 pub async fn connect_db_pool(
@@ -311,10 +396,7 @@ async fn validate_sqlite_encrypted_file(
     database_path: &Path,
     encryption: &SqliteEncryptionConfig,
 ) -> anyhow::Result<()> {
-    let database_url = format!(
-        "sqlite://{}",
-        database_path.to_string_lossy().replace('\\', "/")
-    );
+    let database_url = sqlite_database_url_from_path(database_path);
     let mut conn = try_open_sqlite(&database_url, Some(encryption))
         .await
         .with_context(|| format!("open encrypted SQLite file '{}'", database_path.display()))?;
@@ -329,6 +411,32 @@ async fn validate_sqlite_encrypted_file(
         })?;
     conn.close().await.ok();
     Ok(())
+}
+
+fn sqlite_database_url_from_path(database_path: &Path) -> String {
+    let normalized = database_path.to_string_lossy().replace('\\', "/");
+    if database_path.is_absolute() && !normalized.starts_with('/') {
+        format!("sqlite:///{normalized}")
+    } else {
+        format!("sqlite://{normalized}")
+    }
+}
+
+fn sqlite_filesystem_path(database_path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let normalized = database_path.to_string_lossy().replace('\\', "/");
+        let bytes = normalized.as_bytes();
+        if bytes.len() >= 4
+            && bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b':'
+            && bytes[3] == b'/'
+        {
+            return PathBuf::from(&normalized[1..]);
+        }
+    }
+    database_path.to_path_buf()
 }
 
 fn replace_plaintext_sqlite_file(
@@ -491,10 +599,11 @@ pub(crate) async fn load_active_group_member_devices(
 #[cfg(test)]
 mod tests {
     use super::{
-        connect_db_pool, prepare_sqlite_encrypted_database, DbBackend, SqliteEncryptionConfig,
-        SqliteEncryptionPreparation,
+        connect_db_pool, prepare_sqlite_encrypted_database, rotate_sqlite_encrypted_database_key,
+        sqlite_plaintext_sidecars, sqlite_sibling_path, try_open_sqlite, DbBackend,
+        SqliteEncryptionConfig, SqliteEncryptionPreparation, SqliteEncryptionRotation,
     };
-    use sqlx::Row;
+    use sqlx::{ConnectOptions, Connection, Row};
     use std::fs;
     use std::path::PathBuf;
     use std::time::Duration as StdDuration;
@@ -504,11 +613,28 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pqmsg-sqlcipher-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("create temp dir");
         let path = dir.join(format!("{label}.sqlite3"));
-        let url = format!(
-            "sqlite://{}?mode=rwc",
-            path.to_string_lossy().replace('\\', "/")
-        );
+        let url = format!("{}?mode=rwc", super::sqlite_database_url_from_path(&path));
         (path, url)
+    }
+
+    fn cleanup_temp_db(db_path: &PathBuf) {
+        let _ = fs::remove_file(db_path);
+        let _ = fs::remove_file(sqlite_sibling_path(db_path, ".sqlcipher-migrating"));
+        let _ = fs::remove_file(sqlite_sibling_path(db_path, ".plaintext-backup"));
+        for sidecar in sqlite_plaintext_sidecars(db_path) {
+            let _ = fs::remove_file(sidecar);
+        }
+        if let Some(parent) = db_path.parent() {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+
+    async fn create_test_sqlite(database_url: &str) -> sqlx::SqliteConnection {
+        super::sqlite_connect_options(database_url, true)
+            .expect("parse sqlite url")
+            .connect()
+            .await
+            .expect("open plaintext sqlite")
     }
 
     #[tokio::test]
@@ -593,10 +719,7 @@ mod tests {
         assert_eq!(value, "secret");
         pool_with_key.close().await;
 
-        let _ = fs::remove_file(&db_path);
-        if let Some(parent) = db_path.parent() {
-            let _ = fs::remove_dir(parent);
-        }
+        cleanup_temp_db(&db_path);
     }
 
     #[tokio::test]
@@ -604,13 +727,19 @@ mod tests {
         sqlx::any::install_default_drivers();
 
         let (db_path, database_url) = temp_db_path("plaintext");
-        let mut plaintext = super::try_open_sqlite(&database_url, None)
-            .await
-            .expect("open plaintext sqlite");
+        let mut plaintext = create_test_sqlite(&database_url).await;
         sqlx::query("CREATE TABLE demo_plain (value TEXT NOT NULL)")
             .execute(&mut plaintext)
             .await
             .expect("create plaintext table");
+        sqlx::query("PRAGMA user_version = 11")
+            .execute(&mut plaintext)
+            .await
+            .expect("set user_version");
+        sqlx::query("PRAGMA application_id = 777")
+            .execute(&mut plaintext)
+            .await
+            .expect("set application_id");
         sqlx::query("INSERT INTO demo_plain(value) VALUES ($1)")
             .bind("hello")
             .execute(&mut plaintext)
@@ -627,7 +756,7 @@ mod tests {
             .expect("migrate plaintext sqlite");
         assert_eq!(result, SqliteEncryptionPreparation::MigratedPlaintext);
 
-        let mut encrypted = super::try_open_sqlite(&database_url, Some(&encryption))
+        let mut encrypted = try_open_sqlite(&database_url, Some(&encryption))
             .await
             .expect("open encrypted sqlite");
         let row = sqlx::query("SELECT value FROM demo_plain")
@@ -636,9 +765,19 @@ mod tests {
             .expect("read encrypted row");
         let value: String = row.try_get("value").expect("extract value");
         assert_eq!(value, "hello");
+        let user_version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut encrypted)
+            .await
+            .expect("read user_version");
+        let application_id: i64 = sqlx::query_scalar("PRAGMA application_id")
+            .fetch_one(&mut encrypted)
+            .await
+            .expect("read application_id");
+        assert_eq!(user_version, 11);
+        assert_eq!(application_id, 777);
         encrypted.close().await.ok();
 
-        let mut without_key = super::try_open_sqlite(&database_url, None)
+        let mut without_key = try_open_sqlite(&database_url, None)
             .await
             .expect("open encrypted file without key");
         let read_without_key = sqlx::query("SELECT value FROM demo_plain")
@@ -650,9 +789,263 @@ mod tests {
         );
         without_key.close().await.ok();
 
-        let _ = fs::remove_file(&db_path);
-        if let Some(parent) = db_path.parent() {
-            let _ = fs::remove_dir(parent);
+        cleanup_temp_db(&db_path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_plaintext_migration_requires_explicit_opt_in() {
+        sqlx::any::install_default_drivers();
+
+        let (db_path, database_url) = temp_db_path("plaintext-opt-in");
+        let mut plaintext = create_test_sqlite(&database_url).await;
+        sqlx::query("CREATE TABLE demo_plain (value TEXT NOT NULL)")
+            .execute(&mut plaintext)
+            .await
+            .expect("create plaintext table");
+        sqlx::query("INSERT INTO demo_plain(value) VALUES ($1)")
+            .bind("hello")
+            .execute(&mut plaintext)
+            .await
+            .expect("insert plaintext row");
+        plaintext.close().await.ok();
+
+        let encryption = SqliteEncryptionConfig::from_raw_key(&[0x77; 32])
+            .expect("key")
+            .with_cipher_page_size(4096)
+            .expect("page size");
+        let error = prepare_sqlite_encrypted_database(&database_url, &encryption, false)
+            .await
+            .expect_err("plaintext migration should fail closed without explicit opt-in");
+        assert!(error
+            .to_string()
+            .contains("PQMSG_SQLITE_MIGRATE_PLAINTEXT=true"));
+
+        let mut still_plaintext = try_open_sqlite(&database_url, None)
+            .await
+            .expect("open plaintext database after rejected migration");
+        let row = sqlx::query("SELECT value FROM demo_plain")
+            .fetch_one(&mut still_plaintext)
+            .await
+            .expect("read plaintext row after rejected migration");
+        let value: String = row.try_get("value").expect("extract value");
+        assert_eq!(value, "hello");
+        still_plaintext.close().await.ok();
+
+        cleanup_temp_db(&db_path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_plaintext_migration_preserves_metadata_and_cleans_sidecars() {
+        sqlx::any::install_default_drivers();
+
+        let (db_path, database_url) = temp_db_path("plaintext-meta");
+        let mut plaintext = create_test_sqlite(&database_url).await;
+        sqlx::query("PRAGMA user_version = 17")
+            .execute(&mut plaintext)
+            .await
+            .expect("set user_version");
+        sqlx::query("PRAGMA application_id = 4242")
+            .execute(&mut plaintext)
+            .await
+            .expect("set application_id");
+        sqlx::query("CREATE TABLE demo_plain (value TEXT NOT NULL)")
+            .execute(&mut plaintext)
+            .await
+            .expect("create plaintext table");
+        sqlx::query("INSERT INTO demo_plain(value) VALUES ($1)")
+            .bind("hello")
+            .execute(&mut plaintext)
+            .await
+            .expect("insert plaintext row");
+        plaintext.close().await.ok();
+        for sidecar in sqlite_plaintext_sidecars(&db_path) {
+            fs::write(sidecar, b"stale-sidecar").expect("seed sidecar");
         }
+
+        let encryption = SqliteEncryptionConfig::from_raw_key(&[0x21; 32])
+            .expect("key")
+            .with_cipher_page_size(4096)
+            .expect("page size");
+        let result = prepare_sqlite_encrypted_database(&database_url, &encryption, true)
+            .await
+            .expect("migrate plaintext sqlite");
+        assert_eq!(result, SqliteEncryptionPreparation::MigratedPlaintext);
+
+        let mut encrypted = try_open_sqlite(&database_url, Some(&encryption))
+            .await
+            .expect("open encrypted sqlite");
+        let user_version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut encrypted)
+            .await
+            .expect("read user_version");
+        let application_id: i64 = sqlx::query_scalar("PRAGMA application_id")
+            .fetch_one(&mut encrypted)
+            .await
+            .expect("read application_id");
+        assert_eq!(user_version, 17);
+        assert_eq!(application_id, 4242);
+        encrypted.close().await.ok();
+
+        for sidecar in sqlite_plaintext_sidecars(&db_path) {
+            assert!(
+                !sidecar.exists(),
+                "plaintext sidecar '{}' should be removed during migration",
+                sidecar.display()
+            );
+        }
+
+        cleanup_temp_db(&db_path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_plaintext_migration_rejects_stale_intermediate_files() {
+        sqlx::any::install_default_drivers();
+
+        let (db_path, database_url) = temp_db_path("plaintext-stale");
+        let mut plaintext = create_test_sqlite(&database_url).await;
+        sqlx::query("CREATE TABLE demo_plain (value TEXT NOT NULL)")
+            .execute(&mut plaintext)
+            .await
+            .expect("create plaintext table");
+        plaintext.close().await.ok();
+
+        let stale_migrating_path = sqlite_sibling_path(&db_path, ".sqlcipher-migrating");
+        fs::write(&stale_migrating_path, b"stale").expect("seed stale migrating file");
+
+        let encryption = SqliteEncryptionConfig::from_raw_key(&[0x12; 32])
+            .expect("key")
+            .with_cipher_page_size(4096)
+            .expect("page size");
+        let error = prepare_sqlite_encrypted_database(&database_url, &encryption, true)
+            .await
+            .expect_err("stale intermediate file should stop migration");
+        assert!(error.to_string().contains("stale SQLCipher migration file"));
+
+        let mut still_plaintext = try_open_sqlite(&database_url, None)
+            .await
+            .expect("open plaintext database after stale-file rejection");
+        let _: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master")
+            .fetch_one(&mut still_plaintext)
+            .await
+            .expect("read plaintext schema");
+        still_plaintext.close().await.ok();
+
+        cleanup_temp_db(&db_path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_encrypted_database_can_rotate_keys() {
+        sqlx::any::install_default_drivers();
+
+        let (db_path, database_url) = temp_db_path("rotate-key");
+        let current = SqliteEncryptionConfig::from_raw_key(&[0x61; 32])
+            .expect("current key")
+            .with_cipher_page_size(4096)
+            .expect("page size");
+        let target = SqliteEncryptionConfig::from_raw_key(&[0x62; 32])
+            .expect("target key")
+            .copy_cipher_settings_from(&current)
+            .expect("copy cipher settings");
+
+        let pool = connect_db_pool(
+            &database_url,
+            DbBackend::Sqlite,
+            1,
+            1,
+            StdDuration::from_secs(5),
+            StdDuration::from_secs(30),
+            Some(current.clone()),
+        )
+        .await
+        .expect("connect encrypted sqlite");
+        sqlx::query("CREATE TABLE rotate_demo (value TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create table");
+        sqlx::query("INSERT INTO rotate_demo(value) VALUES ($1)")
+            .bind("secret")
+            .execute(&pool)
+            .await
+            .expect("insert row");
+        pool.close().await;
+
+        let result = rotate_sqlite_encrypted_database_key(&database_url, &current, &target)
+            .await
+            .expect("rotate sqlcipher key");
+        assert_eq!(result, SqliteEncryptionRotation::Rotated);
+
+        let old_pool = connect_db_pool(
+            &database_url,
+            DbBackend::Sqlite,
+            1,
+            1,
+            StdDuration::from_secs(5),
+            StdDuration::from_secs(30),
+            Some(current),
+        )
+        .await;
+        assert!(old_pool.is_err(), "old SQLCipher key should no longer work");
+
+        let new_pool = connect_db_pool(
+            &database_url,
+            DbBackend::Sqlite,
+            1,
+            1,
+            StdDuration::from_secs(5),
+            StdDuration::from_secs(30),
+            Some(target),
+        )
+        .await
+        .expect("reconnect with rotated key");
+        let row = sqlx::query("SELECT value FROM rotate_demo")
+            .fetch_one(&new_pool)
+            .await
+            .expect("read rotated row");
+        let value: String = row.try_get("value").expect("extract value");
+        assert_eq!(value, "secret");
+        new_pool.close().await;
+
+        cleanup_temp_db(&db_path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_rotation_rejects_cipher_setting_changes() {
+        sqlx::any::install_default_drivers();
+
+        let (db_path, database_url) = temp_db_path("rotate-settings");
+        let current = SqliteEncryptionConfig::from_raw_key(&[0x71; 32])
+            .expect("current key")
+            .with_cipher_page_size(4096)
+            .expect("page size");
+        let target = SqliteEncryptionConfig::from_raw_key(&[0x72; 32])
+            .expect("target key")
+            .with_cipher_page_size(8192)
+            .expect("page size");
+
+        let pool = connect_db_pool(
+            &database_url,
+            DbBackend::Sqlite,
+            1,
+            1,
+            StdDuration::from_secs(5),
+            StdDuration::from_secs(30),
+            Some(current.clone()),
+        )
+        .await
+        .expect("connect encrypted sqlite");
+        sqlx::query("CREATE TABLE rotate_demo (value TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create table");
+        pool.close().await;
+
+        let error = rotate_sqlite_encrypted_database_key(&database_url, &current, &target)
+            .await
+            .expect_err("rotation should reject cipher format changes");
+        assert!(error
+            .to_string()
+            .contains("existing cipher compatibility and page-size settings"));
+
+        cleanup_temp_db(&db_path);
     }
 }

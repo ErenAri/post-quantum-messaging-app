@@ -30,8 +30,11 @@ Run (example):
 ```bash
 docker run --rm -p 8080:8080 \
   -e PQMSG_BIND=0.0.0.0:8080 \
+  -e PQMSG_DEPLOYMENT_MODE=production \
   -e PQMSG_SECURITY_PROFILE=high_assurance \
   -e PQMSG_DATABASE_URL='postgres://pqmsg:change-me@postgres:5432/pqmsg' \
+  -e PQMSG_POSTGRES_STORAGE_ENCRYPTION=managed_service \
+  -e PQMSG_POSTGRES_BACKUP_ENCRYPTION=true \
   -e PQMSG_TLS_CERT_PATH=/etc/pqmsg/tls/tls.crt \
   -e PQMSG_TLS_KEY_PATH=/etc/pqmsg/tls/tls.key \
   -v $(pwd)/certs:/etc/pqmsg/tls:ro \
@@ -130,14 +133,34 @@ Requirements:
 
 1. Use TLS certificates and set `PQMSG_TLS_CERT_PATH` and `PQMSG_TLS_KEY_PATH`.
 2. Use PostgreSQL for production (`PQMSG_DATABASE_URL=postgres://...`).
-3. Configure distributed rate limiting (`PQMSG_RATE_LIMIT_REDIS_URL=redis://...`).
-4. Set `PQMSG_DEPLOYMENT_MODE=pilot` (or `production`) to enable fail-closed production baseline checks.
-5. Set `PQMSG_LOG_FORMAT=json` and `PQMSG_AUDIT_LOG_PATH` for audit retention.
-6. Keep `PQMSG_SECURITY_PROFILE=high_assurance` or `nss_aligned`.
-7. Configure push provider credentials:
-   - FCM: `PQMSG_FCM_SERVER_KEY` (and optional `PQMSG_FCM_ENDPOINT`),
-   - APNs: `PQMSG_APNS_BEARER_TOKEN`, `PQMSG_APNS_TOPIC` (and optional `PQMSG_APNS_ENDPOINT`).
-8. Configure Sentry (`PQMSG_SENTRY_DSN`, `PQMSG_SENTRY_TRACES_SAMPLE_RATE`) for production error telemetry.
+3. Declare Postgres at-rest encryption with `PQMSG_POSTGRES_STORAGE_ENCRYPTION=managed_service|filesystem|block|tde_extension`.
+4. Set `PQMSG_POSTGRES_BACKUP_ENCRYPTION=true` only when encrypted backups are enabled and tested.
+5. Configure distributed rate limiting (`PQMSG_RATE_LIMIT_REDIS_URL=redis://...`).
+6. Set `PQMSG_DEPLOYMENT_MODE=pilot` (or `production`) to enable fail-closed production baseline checks.
+7. Set `PQMSG_LOG_FORMAT=json` and `PQMSG_AUDIT_LOG_PATH` for audit retention.
+8. If `PQMSG_CORS_ALLOWED_ORIGINS` is set in `pilot` or `production`, it must be an explicit origin list without wildcard entries.
+9. Set `PQMSG_SENTRY_DSN` for `production` runtime error telemetry.
+10. Keep `PQMSG_SECURITY_PROFILE=high_assurance` or `nss_aligned`.
+11. Configure push provider credentials:
+  - FCM: `PQMSG_FCM_SERVER_KEY` (and optional `PQMSG_FCM_ENDPOINT`),
+  - APNs: `PQMSG_APNS_BEARER_TOKEN`, `PQMSG_APNS_TOPIC` (and optional `PQMSG_APNS_ENDPOINT`).
+12. Configure Sentry (`PQMSG_SENTRY_DSN`, `PQMSG_SENTRY_TRACES_SAMPLE_RATE`) for production error telemetry. `PQMSG_DEPLOYMENT_MODE=production` now fails closed if `PQMSG_SENTRY_DSN` is missing.
+13. The Helm chart now enforces the same production contract at render time; `helm template` fails if `secretEnv.PQMSG_SENTRY_DSN` is blank for `production`, if `env.PQMSG_CORS_ALLOWED_ORIGINS` contains `*`, or if the Postgres at-rest declarations are missing.
+
+Windows source-build note for local server work:
+
+- `pqmsg-server` now defaults to vendored-OpenSSL SQLCipher on Windows.
+- Install Strawberry Perl if needed; Git for Windows `perl.exe` also works.
+- Keep the normal MSVC build tools installed so `vcvars64.bat`, `cl.exe`, and `nmake.exe` are available.
+- Optional: install `nasm` for faster OpenSSL assembly builds.
+- Validate with `.\scripts\dev\check_sqlcipher_server_prereqs.ps1` and run the full wrapped server check with `.\scripts\dev\run_sqlcipher_server_tests_windows.ps1`.
+
+SQLite key rotation note:
+
+- For SQLite-backed deployments, use the dedicated offline rotation runbook in [SQLITE_KEY_ROTATION.md](/C:/projects/post-quantum-messaging-app/docs/SQLITE_KEY_ROTATION.md).
+- Prefer the offline helper scripts over booting the full server just to rotate a key:
+  - `.\scripts\dev\rotate_sqlcipher_server_key.ps1`
+  - `./scripts/dev/rotate_sqlcipher_server_key.sh`
 
 ## 7. Observability Stack
 

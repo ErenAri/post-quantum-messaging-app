@@ -4,6 +4,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -33,6 +35,7 @@ import uniffi.pqmsg_android.buildRotateInitPayload
 import uniffi.pqmsg_android.buildPublishPrekeysPayload
 import uniffi.pqmsg_android.generateIdentityKeys
 import uniffi.pqmsg_android.loadUserProfile
+import uniffi.pqmsg_android.openSecondaryDevicePackage
 import uniffi.pqmsg_android.prepareSecondaryDevicePackage
 import uniffi.pqmsg_android.verifyTransparencyProof
 
@@ -43,6 +46,7 @@ class SecurityInfoActivity : AppCompatActivity() {
     private lateinit var managedDeviceInput: EditText
     private lateinit var onboardingPassphraseInput: EditText
     private lateinit var onboardingPackageInput: EditText
+    private lateinit var onboardingPreviewText: TextView
     private lateinit var refreshButton: Button
     private lateinit var editProfileButton: Button
     private lateinit var listDevicesButton: Button
@@ -66,6 +70,8 @@ class SecurityInfoActivity : AppCompatActivity() {
     private var lastTransparencyProofSnapshot: TransparencyProofResponse? = null
     private var lastTransparencyVerification: uniffi.pqmsg_android.TransparencyVerificationResult? = null
     private var lastTransparencyUsedCheckpoint: Boolean = false
+    private val clipboardClearHandler = Handler(Looper.getMainLooper())
+    private var pendingClipboardClear: Runnable? = null
     private val gson = Gson()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -78,6 +84,7 @@ class SecurityInfoActivity : AppCompatActivity() {
         managedDeviceInput = findViewById(R.id.editSecurityManagedDevice)
         onboardingPassphraseInput = findViewById(R.id.editSecurityOnboardingPassphrase)
         onboardingPackageInput = findViewById(R.id.editSecurityOnboardingPackage)
+        onboardingPreviewText = findViewById(R.id.textSecurityOnboardingPackagePreview)
         refreshButton = findViewById(R.id.buttonRefreshSecurityInfo)
         editProfileButton = findViewById(R.id.buttonEditShareableProfile)
         listDevicesButton = findViewById(R.id.buttonListDevices)
@@ -127,6 +134,11 @@ class SecurityInfoActivity : AppCompatActivity() {
             syncActionAvailability()
         }
         onboardingPackageInput.doAfterTextChanged {
+            refreshOnboardingPackagePreview()
+            syncActionAvailability()
+        }
+        onboardingPassphraseInput.doAfterTextChanged {
+            refreshOnboardingPackagePreview()
             syncActionAvailability()
         }
         refreshButton.setOnClickListener { renderSecurityInfo() }
@@ -148,7 +160,14 @@ class SecurityInfoActivity : AppCompatActivity() {
         backButton.setOnClickListener { finish() }
 
         renderSecurityInfo()
+        refreshOnboardingPackagePreview()
         syncActionAvailability()
+    }
+
+    override fun onDestroy() {
+        pendingClipboardClear?.let { clipboardClearHandler.removeCallbacks(it) }
+        pendingClipboardClear = null
+        super.onDestroy()
     }
 
     private fun renderSecurityInfo() {
@@ -191,7 +210,7 @@ class SecurityInfoActivity : AppCompatActivity() {
         val sessionCount = store.countSessions(user)
         val conversations = store.listConversations(user)
         localStateText.text =
-            "Local Security State\nSessions: $sessionCount\nConversations: ${conversations.size}\nCurrent user: $user"
+            "Local Security State\nSessions: $sessionCount\nConversations: ${conversations.size}\nCurrent user: $user\nBackup restore: disabled\nRecovery path: linked-device package or full reprovision"
     }
 
     private fun confirmResetLocalState() {
@@ -337,6 +356,22 @@ class SecurityInfoActivity : AppCompatActivity() {
         prepareSecondaryDeviceButton.isEnabled = hasUser && hasManagedDevice
         copyOnboardingPackageButton.isEnabled = hasOnboardingPackage
         resetButton.isEnabled = hasUser
+    }
+
+    private fun refreshOnboardingPackagePreview() {
+        val packagePassphrase = onboardingPassphraseInput.text.toString()
+        val packageJson = onboardingPackageInput.text.toString().trim()
+        onboardingPreviewText.text = when {
+            packagePassphrase.isBlank() || packageJson.isBlank() ->
+                getString(R.string.onboarding_package_preview_default)
+            else -> runCatching {
+                formatLinkedDevicePackagePreview(
+                    openSecondaryDevicePackage(packageJson, packagePassphrase),
+                )
+            }.getOrElse {
+                "Linked device package preview unavailable\n${it.message ?: "The package or passphrase is invalid."}"
+            }
+        }
     }
 
     private suspend fun resetLocalStateWithRemoteRetire(user: String): String {
@@ -659,7 +694,42 @@ class SecurityInfoActivity : AppCompatActivity() {
         }
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("pqmsg-secondary-device-package", packageJson))
-        Toast.makeText(this, "Copied onboarding package to clipboard.", Toast.LENGTH_SHORT).show()
+        scheduleOnboardingClipboardClear(packageJson)
+        Toast.makeText(
+            this,
+            getString(
+                R.string.linked_device_package_copied_notice,
+                LINKED_DEVICE_PACKAGE_CLIPBOARD_CLEAR_DELAY_SECONDS,
+            ),
+            Toast.LENGTH_SHORT,
+        ).show()
+    }
+
+    private fun scheduleOnboardingClipboardClear(expectedPackageJson: String) {
+        pendingClipboardClear?.let { clipboardClearHandler.removeCallbacks(it) }
+        val runnable = Runnable {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = clipboard.primaryClip
+            val currentText = clip
+                ?.takeIf { it.itemCount > 0 }
+                ?.getItemAt(0)
+                ?.coerceToText(this)
+                ?.toString()
+            if (currentText == expectedPackageJson) {
+                clipboard.setPrimaryClip(
+                    ClipData.newPlainText("pqmsg-secondary-device-package", ""),
+                )
+                statusText.text = getString(
+                    R.string.linked_device_package_clipboard_cleared,
+                    LINKED_DEVICE_PACKAGE_CLIPBOARD_CLEAR_DELAY_SECONDS,
+                )
+            }
+        }
+        pendingClipboardClear = runnable
+        clipboardClearHandler.postDelayed(
+            runnable,
+            LINKED_DEVICE_PACKAGE_CLIPBOARD_CLEAR_DELAY_SECONDS * 1000L,
+        )
     }
 
     private suspend fun loadDeviceManagementContext(user: String): DeviceManagementContext {

@@ -9,10 +9,12 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
+import uniffi.pqmsg_android.SecondaryDeviceOnboardingPackage
 import uniffi.pqmsg_android.activeCryptoProfile
 import uniffi.pqmsg_android.loadUserProfile
 import uniffi.pqmsg_android.openSecondaryDevicePackage
@@ -26,6 +28,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pushTokenInput: EditText
     private lateinit var onboardingPassphraseInput: EditText
     private lateinit var onboardingPackageInput: EditText
+    private lateinit var onboardingPreviewText: TextView
     private lateinit var presetAliceButton: Button
     private lateinit var presetBobButton: Button
     private lateinit var createProfileButton: Button
@@ -54,6 +57,7 @@ class MainActivity : AppCompatActivity() {
         pushTokenInput = findViewById(R.id.editPushToken)
         onboardingPassphraseInput = findViewById(R.id.editOnboardingPassphrase)
         onboardingPackageInput = findViewById(R.id.editOnboardingPackage)
+        onboardingPreviewText = findViewById(R.id.textOnboardingPackagePreview)
         presetAliceButton = findViewById(R.id.buttonPresetAlice)
         presetBobButton = findViewById(R.id.buttonPresetBob)
         createProfileButton = findViewById(R.id.buttonCreateProfile)
@@ -110,11 +114,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         importOnboardingButton.setOnClickListener {
-            lifecycleScope.launch {
-                runAction("Import linked device") {
-                    importSecondaryDevicePackage()
-                }
-            }
+            confirmImportSecondaryDevicePackage()
         }
 
         lifecycleScope.launch {
@@ -129,7 +129,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         refreshSummary()
+        refreshOnboardingPackagePreview()
         refreshAdvancedVisibility()
+        syncActionAvailability()
     }
 
     private fun hasConsumerProfile(setup: SetupConfig): Boolean {
@@ -145,6 +147,14 @@ class MainActivity : AppCompatActivity() {
         suiteInput.doAfterTextChanged { refreshSummary() }
         deviceInput.doAfterTextChanged { refreshSummary() }
         pushTokenInput.doAfterTextChanged { refreshSummary() }
+        onboardingPassphraseInput.doAfterTextChanged {
+            refreshOnboardingPackagePreview()
+            syncActionAvailability()
+        }
+        onboardingPackageInput.doAfterTextChanged {
+            refreshOnboardingPackagePreview()
+            syncActionAvailability()
+        }
     }
 
     private fun configureErrorToggle() {
@@ -194,19 +204,26 @@ class MainActivity : AppCompatActivity() {
         refreshSummary()
     }
 
+    private fun syncActionAvailability() {
+        createProfileButton.isEnabled = userInput.text.toString().trim().isNotBlank()
+        importOnboardingButton.isEnabled =
+            onboardingPassphraseInput.text.toString().isNotBlank() &&
+                onboardingPackageInput.text.toString().trim().isNotBlank()
+    }
+
     private fun refreshSummary() {
         val user = userInput.text.toString().trim()
         val server = serverInput.text.toString().trim()
         val pushToken = pushTokenInput.text.toString().trim()
         setupSummaryText.text = when {
             user.isBlank() ->
-                "Choose a username, create a secure profile, and land directly in your conversation hub."
+                "Choose a username, create a secure profile, or import a linked-device package. Cloud backup restore is disabled for local secure state."
             server.isBlank() ->
                 "Enter the relay address for $user before creating the secure profile."
             pushToken.isBlank() ->
-                "Create a secure profile for $user. Push can be added later from Advanced."
+                "Create a secure profile for $user. Push can be added later from Advanced. Recovery uses linked-device reprovisioning, not cloud backup."
             else ->
-                "Create a secure profile for $user with background registration and push setup."
+                "Create a secure profile for $user with background registration and push setup. Recovery uses linked-device reprovisioning, not cloud backup."
         }
     }
 
@@ -232,13 +249,62 @@ class MainActivity : AppCompatActivity() {
         return "Secure profile ready for $user"
     }
 
-    private suspend fun importSecondaryDevicePackage(): String {
+    private fun requireOpenedOnboardingPackage(): SecondaryDeviceOnboardingPackage {
         val packagePassphrase = onboardingPassphraseInput.text.toString()
         require(packagePassphrase.isNotBlank()) { "onboarding package passphrase is empty" }
         val packageJson = onboardingPackageInput.text.toString().trim()
         require(packageJson.isNotBlank()) { "onboarding package is empty" }
+        return openSecondaryDevicePackage(packageJson, packagePassphrase)
+    }
 
-        val imported = openSecondaryDevicePackage(packageJson, packagePassphrase)
+    private fun refreshOnboardingPackagePreview() {
+        val packagePassphrase = onboardingPassphraseInput.text.toString()
+        val packageJson = onboardingPackageInput.text.toString().trim()
+        onboardingPreviewText.text = when {
+            packagePassphrase.isBlank() || packageJson.isBlank() ->
+                getString(R.string.onboarding_package_preview_default)
+            else -> runCatching {
+                formatLinkedDevicePackagePreview(
+                    openSecondaryDevicePackage(packageJson, packagePassphrase),
+                )
+            }.getOrElse {
+                "Linked device package preview unavailable\n${it.message ?: "The package or passphrase is invalid."}"
+            }
+        }
+    }
+
+    private fun confirmImportSecondaryDevicePackage() {
+        runCatching {
+            val imported = requireOpenedOnboardingPackage()
+            val warnings = buildLinkedDeviceImportWarnings(
+                currentServerUrl = serverInput.text.toString(),
+                currentUserId = userInput.text.toString(),
+                currentDeviceId = deviceInput.text.toString(),
+                hasExistingLocalStateForImportedUser = !store.readKeys(imported.userId).isNullOrBlank(),
+                pkg = imported,
+            )
+            imported to warnings
+        }.onSuccess { (imported, warnings) ->
+            AlertDialog.Builder(this)
+                .setTitle(R.string.linked_device_import_title)
+                .setMessage(buildLinkedDeviceImportConfirmationMessage(imported, warnings))
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.button_import_onboarding_package) { _, _ ->
+                    lifecycleScope.launch {
+                        runAction("Import linked device") {
+                            importSecondaryDevicePackage()
+                        }
+                    }
+                }
+                .show()
+        }.onFailure {
+            renderError(UiErrorMapper.fromThrowable(it, "Inspect linked-device package"))
+            statusText.text = "Import linked device failed"
+        }
+    }
+
+    private suspend fun importSecondaryDevicePackage(): String {
+        val imported = requireOpenedOnboardingPackage()
         val profile = loadUserProfile(imported.keysJson)
         val priorPeer = store.loadSetup().peerUserId.ifBlank { "bob" }
         store.wipeUserState(imported.userId)

@@ -74,6 +74,7 @@ class ChatActivity : AppCompatActivity() {
     private var peerIsTyping = false
     private var sealedSenderEnabled = true
     private var ephemeralTtlSeconds: Long? = null
+    private var localStoreAvailable = true
 
     private val pickAttachmentLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -763,28 +764,39 @@ class ChatActivity : AppCompatActivity() {
 
     private fun renderThreadHistory() {
         val setup = currentSetup()
-        val messages = store.listThreadMessages(setup.userId, activePeerUserId)
-        chatLog.text = if (messages.isEmpty()) {
-            getString(R.string.chat_log_empty)
-        } else {
-            messages.joinToString("\n\n") { message ->
-                val label = if (message.direction == "outbound") "You" else activePeerUserId
-                val timeLabel = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(message.sentAtMillis))
-                "$label  $timeLabel\n${message.body}"
+        runCatching {
+            store.listThreadMessages(setup.userId, activePeerUserId)
+        }.onSuccess { messages ->
+            localStoreAvailable = true
+            chatLog.text = if (messages.isEmpty()) {
+                getString(R.string.chat_log_empty)
+            } else {
+                messages.joinToString("\n\n") { message ->
+                    val label = if (message.direction == "outbound") "You" else activePeerUserId
+                    val timeLabel = DateFormat.getTimeInstance(DateFormat.SHORT)
+                        .format(Date(message.sentAtMillis))
+                    "$label  $timeLabel\n${message.body}"
+                }
             }
+            chatLog.post {
+                chatLogScroll.fullScroll(View.FOCUS_DOWN)
+            }
+        }.onFailure {
+            localStoreAvailable = false
+            renderError(UiErrorMapper.fromThrowable(it, "Open local secure state"))
+            chatLog.text =
+                "Local encrypted message history is unavailable on this device.\nRe-import a linked-device package or fully reprovision this device."
         }
-        chatLog.post {
-            chatLogScroll.fullScroll(View.FOCUS_DOWN)
-        }
+        syncActionAvailability()
     }
 
     private fun syncActionAvailability() {
         val hasPayload = messageInput.text.toString().isNotBlank() || pendingAttachment != null
         val hasIdentity = hasIdentity()
-        sendButton.isEnabled = hasPayload && hasIdentity && !syncInFlight
+        sendButton.isEnabled = hasPayload && hasIdentity && localStoreAvailable && !syncInFlight
         clearAttachmentButton.isEnabled = pendingAttachment != null
-        syncButton.isEnabled = hasIdentity && !syncInFlight
-        verifySafetyButton.isEnabled = hasIdentity && !syncInFlight
+        syncButton.isEnabled = hasIdentity && localStoreAvailable && !syncInFlight
+        verifySafetyButton.isEnabled = hasIdentity && localStoreAvailable && !syncInFlight
     }
 
     private fun hasIdentity(): Boolean {

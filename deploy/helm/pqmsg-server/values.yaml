@@ -35,8 +35,11 @@ resources:
 
 env:
   PQMSG_BIND: 0.0.0.0:8080
+  PQMSG_DEPLOYMENT_MODE: production
   PQMSG_SECURITY_PROFILE: high_assurance
   PQMSG_LOG_FORMAT: json
+  PQMSG_POSTGRES_STORAGE_ENCRYPTION: managed_service
+  PQMSG_POSTGRES_BACKUP_ENCRYPTION: "true"
   RUST_LOG: pqmsg_server=info
   PQMSG_DB_MAX_CONNECTIONS: "30"
   PQMSG_DB_MIN_CONNECTIONS: "5"
@@ -59,6 +62,7 @@ secretEnv:
   PQMSG_FCM_SERVER_KEY: ""
   PQMSG_APNS_BEARER_TOKEN: ""
   PQMSG_APNS_TOPIC: ""
+  # Required when env.PQMSG_DEPLOYMENT_MODE=production.
   PQMSG_SENTRY_DSN: ""
 
 podSecurityContext:

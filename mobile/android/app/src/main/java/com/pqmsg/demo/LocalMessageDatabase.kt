@@ -26,6 +26,15 @@ private const val GCM_IV_BYTES = 12
 private const val DB_SECURITY_PREFS = "pqmsg_android_db_security"
 private const val DB_PASSPHRASE_KEY = "local_message_db_passphrase_v1"
 private const val DB_MIGRATION_COMPLETE_KEY = "local_message_db_sqlcipher_ready_v1"
+private const val SQLCIPHER_MEMORY_SECURITY_PRAGMA = "PRAGMA cipher_memory_security = ON"
+private const val LOCAL_SECURE_STORAGE_UNAVAILABLE_MESSAGE =
+    "Local encrypted message store is unavailable on this device. Recovery requires a linked-device package or full reprovision."
+private const val SQLITE_PLAINTEXT_MAGIC = "SQLite format 3"
+
+class LocalSecureStorageUnavailableException(
+    message: String = LOCAL_SECURE_STORAGE_UNAVAILABLE_MESSAGE,
+    cause: Throwable? = null,
+) : IllegalStateException(message, cause)
 
 private fun loadOrCreateSqlCipherPassphrase(context: Context): ByteArray {
     val appContext = context.applicationContext
@@ -157,11 +166,21 @@ class LocalMessageDatabase(
         )
     }
 
+    override fun onConfigure(db: SqlCipherDatabase) {
+        super.onConfigure(db)
+        // SQLCipher documents this as an opt-in process-wide hardening control.
+        db.rawExecSQL(SQLCIPHER_MEMORY_SECURITY_PRAGMA)
+    }
+
     override fun onUpgrade(db: SqlCipherDatabase, oldVersion: Int, newVersion: Int) = Unit
 
-    private fun readableDb(): SqlCipherDatabase = super.readableDatabase as SqlCipherDatabase
+    private fun readableDb(): SqlCipherDatabase =
+        runCatching { super.readableDatabase as SqlCipherDatabase }
+            .getOrElse { throw LocalSecureStorageUnavailableException(cause = it) }
 
-    private fun writableDb(): SqlCipherDatabase = super.writableDatabase as SqlCipherDatabase
+    private fun writableDb(): SqlCipherDatabase =
+        runCatching { super.writableDatabase as SqlCipherDatabase }
+            .getOrElse { throw LocalSecureStorageUnavailableException(cause = it) }
 
     private fun ensureEncryptedDatabaseReady() {
         if (securityPrefs.getBoolean(DB_MIGRATION_COMPLETE_KEY, false)) {
@@ -169,6 +188,10 @@ class LocalMessageDatabase(
         }
         val dbFile = appContext.getDatabasePath(DATABASE_NAME)
         if (!dbFile.exists()) {
+            securityPrefs.edit().putBoolean(DB_MIGRATION_COMPLETE_KEY, true).apply()
+            return
+        }
+        if (!dbHeaderStartsWithPlaintextMagic(dbFile)) {
             securityPrefs.edit().putBoolean(DB_MIGRATION_COMPLETE_KEY, true).apply()
             return
         }
@@ -246,6 +269,21 @@ class LocalMessageDatabase(
             plaintextDb.close()
             encryptedDb.close()
         }
+    }
+
+    private fun dbHeaderStartsWithPlaintextMagic(path: java.io.File): Boolean {
+        if (!path.exists()) {
+            return false
+        }
+        val header = ByteArray(16)
+        val bytesRead = path.inputStream().use { input -> input.read(header) }
+        if (bytesRead <= 0) {
+            return false
+        }
+        return header
+            .copyOf(bytesRead)
+            .toString(Charsets.US_ASCII)
+            .startsWith(SQLITE_PLAINTEXT_MAGIC)
     }
 
     private fun migrateTable(

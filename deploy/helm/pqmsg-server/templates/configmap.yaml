@@ -1,3 +1,4 @@
+{{- include "pqmsg-server.validateDeploymentContract" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

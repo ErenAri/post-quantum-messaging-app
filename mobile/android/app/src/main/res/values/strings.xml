@@ -28,6 +28,7 @@
     <string name="button_hide_advanced_setup">Hide Advanced Options</string>
     <string name="button_paste_onboarding_package">Paste Linked Device Package</string>
     <string name="button_import_onboarding_package">Import Linked Device Package</string>
+    <string name="linked_device_import_title">Review linked device package</string>
     <string name="button_open_chat">Open Conversations</string>
     <string name="button_preset_alice">Preset Alice</string>
     <string name="button_preset_bob">Preset Bob</string>
@@ -95,8 +96,13 @@
     <string name="security_devices_default">Linked Devices&#10;Not checked</string>
     <string name="security_identity_log_default">Identity Log&#10;Not checked</string>
     <string name="security_local_state_default">Local Security State&#10;Unavailable</string>
+    <string name="security_recovery_notice">Cloud backup and device-transfer backup are disabled for this app. Move accounts with a linked-device package from another trusted device or reprovision from scratch.</string>
+    <string name="setup_linked_device_notice">Use this path when another trusted device prepared an onboarding package for this phone. Cloud backup restore is disabled for local secure state.</string>
+    <string name="onboarding_package_preview_default">Package preview appears here after you enter a matching linked-device passphrase and package.</string>
+    <string name="linked_device_package_copied_notice">Copied linked-device package to clipboard. The app will clear it after %1$d seconds if it is still present.</string>
+    <string name="linked_device_package_clipboard_cleared">Cleared the linked-device package from the clipboard after %1$d seconds.</string>
     <string name="reset_local_state_title">Reset local state</string>
-    <string name="reset_local_state_message">Retire the current device on the server when keys are still available, then delete all local keys, sessions, pins, cursors, conversations, and message history for %1$s on this device?</string>
+    <string name="reset_local_state_message">Retire the current device on the server when keys are still available, then delete all local keys, sessions, pins, cursors, conversations, and message history for %1$s on this device? Recovery requires a linked-device package from another trusted device or full reprovisioning because cloud backup restore is disabled.</string>
     <string name="status_ready">Ready</string>
     <string name="chat_log_empty">Messages will appear here after you start the conversation.</string>
     <string name="safety_number_dialog_title">Safety Number</string>

@@ -100,7 +100,9 @@ class LocalStateStore(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
     private val gson = Gson()
-    private val messageStore = LocalMessageDatabase(appContext, MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+    private val messageStore by lazy(LazyThreadSafetyMode.NONE) {
+        LocalMessageDatabase(appContext, MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+    }
 
     fun loadSetup(): SetupConfig {
         return SetupConfig(

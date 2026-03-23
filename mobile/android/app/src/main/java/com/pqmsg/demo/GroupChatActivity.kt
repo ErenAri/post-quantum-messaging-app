@@ -48,6 +48,7 @@ class GroupChatActivity : AppCompatActivity() {
     private var syncInFlight = false
     private var privateGroupState: PrivateGroupState? = null
     private var privateGroupCredential: PrivateGroupMemberCredential? = null
+    private var localStoreAvailable = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -136,9 +137,10 @@ class GroupChatActivity : AppCompatActivity() {
 
     private fun syncActions() {
         val hasText = messageInput.text.toString().isNotBlank()
-        sendButton.isEnabled = hasText && !syncInFlight && privateGroupState != null && privateGroupCredential != null
-        syncButton.isEnabled = !syncInFlight
-        infoButton.isEnabled = privateGroupState != null && privateGroupCredential != null
+        sendButton.isEnabled =
+            hasText && !syncInFlight && localStoreAvailable && privateGroupState != null && privateGroupCredential != null
+        syncButton.isEnabled = !syncInFlight && localStoreAvailable
+        infoButton.isEnabled = localStoreAvailable && privateGroupState != null && privateGroupCredential != null
     }
 
     private suspend fun sendGroupMessage() {
@@ -659,16 +661,27 @@ class GroupChatActivity : AppCompatActivity() {
 
     private fun renderChatLog() {
         val setup = store.loadSetup()
-        val messages = store.listGroupThreadMessages(setup.userId, groupId)
-        chatLog.text = if (messages.isEmpty()) {
-            getString(R.string.group_chat_log_empty)
-        } else {
-            messages.joinToString("\n\n") { msg ->
-                val timeLabel = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(msg.sentAtMillis))
-                "$timeLabel\n${msg.body}"
+        runCatching {
+            store.listGroupThreadMessages(setup.userId, groupId)
+        }.onSuccess { messages ->
+            localStoreAvailable = true
+            chatLog.text = if (messages.isEmpty()) {
+                getString(R.string.group_chat_log_empty)
+            } else {
+                messages.joinToString("\n\n") { msg ->
+                    val timeLabel = DateFormat.getTimeInstance(DateFormat.SHORT)
+                        .format(Date(msg.sentAtMillis))
+                    "$timeLabel\n${msg.body}"
+                }
             }
+            chatLog.post { chatLogScroll.fullScroll(View.FOCUS_DOWN) }
+        }.onFailure {
+            localStoreAvailable = false
+            metaText.text = UiErrorMapper.fromThrowable(it, "Open local secure state").headline
+            chatLog.text =
+                "Local encrypted group history is unavailable on this device.\nRe-import the current group state from a linked device or fully reprovision this device."
         }
-        chatLog.post { chatLogScroll.fullScroll(View.FOCUS_DOWN) }
+        syncActions()
     }
 
     private fun BundleResponse.toRustBundle(): ServerBundle {

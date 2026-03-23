@@ -229,7 +229,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="Use this path when another trusted device prepared an onboarding package for this phone."
+                    android:text="@string/setup_linked_device_notice"
                     android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
                 <com.google.android.material.textfield.TextInputLayout
@@ -287,6 +287,16 @@
                         android:scrollbars="vertical"
                         android:textIsSelectable="true" />
                 </com.google.android.material.textfield.TextInputLayout>
+
+                <TextView
+                    android:id="@+id/textOnboardingPackagePreview"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/bg_detail_panel"
+                    android:padding="12dp"
+                    android:text="@string/onboarding_package_preview_default"
+                    android:textAppearance="@style/TextAppearance.PQMsg.Mono" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

@@ -15,6 +15,8 @@ export function isSecureWebOrigin(url: UrlShape): boolean {
 
 type WebRuntimeCapabilities = {
   pageUrl: UrlShape;
+  hasSecureContext: boolean;
+  hasCrossOriginIsolation: boolean;
   hasIndexedDb: boolean;
   hasCryptoSubtle: boolean;
   hasWebAssembly: boolean;
@@ -26,6 +28,9 @@ export function getUnsupportedWebRuntimeReason(
 ): string | null {
   if (!isSecureWebOrigin(capabilities.pageUrl)) {
     return "Secure web messaging requires HTTPS or localhost during development.";
+  }
+  if (!capabilities.hasSecureContext) {
+    return "Secure web messaging requires a secure browser context.";
   }
   if (!capabilities.hasIndexedDb) {
     return "Secure web messaging requires IndexedDB for encrypted local storage.";
@@ -39,12 +44,20 @@ export function getUnsupportedWebRuntimeReason(
   if (!capabilities.hasTextEncoding) {
     return "Secure web messaging requires TextEncoder/TextDecoder support.";
   }
+  if (
+    !isLoopbackHostname(capabilities.pageUrl.hostname) &&
+    !capabilities.hasCrossOriginIsolation
+  ) {
+    return "Secure web messaging requires cross-origin isolation (COOP/COEP) on the hosted web origin.";
+  }
   return null;
 }
 
 export function getLiveUnsupportedWebRuntimeReason(): string | null {
   return getUnsupportedWebRuntimeReason({
     pageUrl: window.location,
+    hasSecureContext: window.isSecureContext === true,
+    hasCrossOriginIsolation: window.crossOriginIsolated === true,
     hasIndexedDb: typeof window.indexedDB !== "undefined" && window.indexedDB !== null,
     hasCryptoSubtle: typeof window.crypto !== "undefined" && !!window.crypto?.subtle,
     hasWebAssembly: typeof WebAssembly !== "undefined",

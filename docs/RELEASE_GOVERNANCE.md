@@ -38,11 +38,18 @@ A release candidate is promotable only when all conditions are true:
    - penetration smoke script,
    - formal verification smoke,
    - alert escalation drill evidence (`scripts/security/alert_drill.*`) including mailbox-delivery proof.
-4. threat-model-impacting changes include updated docs in:
+4. hardened deployment candidates document explicit browser origins:
+   - no wildcard CORS entries for `pilot` / `production`,
+   - `production` candidates include runtime error telemetry configuration.
+5. the hardened Helm chart renders only when those deployment-contract values are present:
+   - `secretEnv.PQMSG_SENTRY_DSN` for `production`,
+   - no wildcard `env.PQMSG_CORS_ALLOWED_ORIGINS`,
+   - explicit Postgres encryption + backup declarations.
+6. threat-model-impacting changes include updated docs in:
    - `docs/SPEC.md`,
    - `docs/THREAT_MODEL.md`,
    - `docs/SECURITY_GATES.md`.
-5. release artifact includes signed checksum manifest (`release.yml`).
+7. release artifact includes signed checksum manifest (`release.yml`).
 
 ## 4. Security Exception Policy
 

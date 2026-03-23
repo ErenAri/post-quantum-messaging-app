@@ -8,9 +8,10 @@ use opentelemetry_otlp::WithExportConfig;
 use pqmsg_core::alg::{enforce_runtime_security_profile, RuntimeCryptoProfile, SecurityProfile};
 use pqmsg_server::{
     build_router, connect_db_pool, init_db, parse_db_backend, prepare_sqlite_encrypted_database,
-    AppState, AuditLogger, AuthReplayCache, BlobStore, DbBackend, DeploymentMode,
-    DosHardeningPolicy, EphemeralStateStore, PushNotifier, RateLimiter, RealtimeHub,
-    SealedRealtimeHub, SqliteEncryptionConfig, SqliteEncryptionPreparation,
+    rotate_sqlite_encrypted_database_key, AppState, AuditLogger, AuthReplayCache, BlobStore,
+    DbBackend, DeploymentMode, DosHardeningPolicy, EphemeralStateStore, PushNotifier, RateLimiter,
+    RealtimeHub, SealedRealtimeHub, SqliteEncryptionConfig, SqliteEncryptionPreparation,
+    SqliteEncryptionRotation,
 };
 use sentry::ClientOptions;
 use std::env;
@@ -21,6 +22,41 @@ use tower_http::timeout::TimeoutLayer;
 use tracing::info;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PostgresStorageEncryption {
+    ManagedService,
+    Filesystem,
+    Block,
+    TdeExtension,
+}
+
+impl PostgresStorageEncryption {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "managed_service" | "managed" => Some(Self::ManagedService),
+            "filesystem" | "file_system" => Some(Self::Filesystem),
+            "block" | "block_device" => Some(Self::Block),
+            "tde_extension" | "tde" => Some(Self::TdeExtension),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ManagedService => "managed_service",
+            Self::Filesystem => "filesystem",
+            Self::Block => "block",
+            Self::TdeExtension => "tde_extension",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PostgresEncryptionConfig {
+    storage_encryption: Option<PostgresStorageEncryption>,
+    backups_encrypted: bool,
+}
 
 fn parse_env_u32(name: &str, default: u32) -> anyhow::Result<u32> {
     match env::var(name) {
@@ -141,6 +177,34 @@ fn load_sqlite_encryption_config(
     Ok(Some(config))
 }
 
+fn load_sqlite_rotation_from_config(
+    db_backend: DbBackend,
+    target: Option<&SqliteEncryptionConfig>,
+) -> anyhow::Result<Option<SqliteEncryptionConfig>> {
+    let key_b64 = match env::var("PQMSG_SQLITE_ROTATE_FROM_KEY_B64") {
+        Ok(value) if !value.trim().is_empty() => value,
+        Ok(_) | Err(_) => return Ok(None),
+    };
+
+    if db_backend != DbBackend::Sqlite {
+        anyhow::bail!("PQMSG_SQLITE_ROTATE_FROM_KEY_B64 only applies to sqlite:// databases");
+    }
+
+    let target = target.ok_or_else(|| {
+        anyhow::anyhow!(
+            "PQMSG_SQLITE_ROTATE_FROM_KEY_B64 requires PQMSG_SQLITE_ENCRYPTION_KEY_B64 to be set as the target key"
+        )
+    })?;
+    let key_bytes = B64.decode(key_b64.trim()).with_context(|| {
+        "invalid PQMSG_SQLITE_ROTATE_FROM_KEY_B64: expected base64-encoded 32-byte raw key"
+    })?;
+    let config = SqliteEncryptionConfig::from_raw_key(&key_bytes)
+        .map_err(|message| anyhow::anyhow!("invalid PQMSG_SQLITE_ROTATE_FROM_KEY_B64: {message}"))?
+        .copy_cipher_settings_from(target)
+        .map_err(anyhow::Error::msg)?;
+    Ok(Some(config))
+}
+
 fn load_sender_certificate_signing_key(
     deployment_mode: DeploymentMode,
 ) -> anyhow::Result<Arc<SigningKey>> {
@@ -163,6 +227,33 @@ fn load_sender_certificate_signing_key(
     }
 }
 
+fn load_postgres_encryption_config(
+    db_backend: DbBackend,
+) -> anyhow::Result<PostgresEncryptionConfig> {
+    let storage_encryption = match env::var("PQMSG_POSTGRES_STORAGE_ENCRYPTION") {
+        Ok(value) if !value.trim().is_empty() => PostgresStorageEncryption::parse(&value)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid PQMSG_POSTGRES_STORAGE_ENCRYPTION '{value}': expected managed_service, filesystem, block, or tde_extension"
+                )
+            })
+            .map(Some)?,
+        Ok(_) | Err(_) => None,
+    };
+    let backups_encrypted = parse_env_bool("PQMSG_POSTGRES_BACKUP_ENCRYPTION", false)?;
+
+    if db_backend != DbBackend::Postgres && (storage_encryption.is_some() || backups_encrypted) {
+        anyhow::bail!(
+            "PQMSG_POSTGRES_STORAGE_ENCRYPTION and PQMSG_POSTGRES_BACKUP_ENCRYPTION only apply to postgres:// databases"
+        );
+    }
+
+    Ok(PostgresEncryptionConfig {
+        storage_encryption,
+        backups_encrypted,
+    })
+}
+
 struct DeploymentContract {
     deployment_mode: DeploymentMode,
     security_profile: SecurityProfile,
@@ -172,6 +263,9 @@ struct DeploymentContract {
     audit_enabled: bool,
     redis_enabled: bool,
     structured_logging: bool,
+    sentry_enabled: bool,
+    cors_has_wildcard: bool,
+    postgres_encryption: PostgresEncryptionConfig,
 }
 
 fn enforce_deployment_contract(contract: DeploymentContract) -> anyhow::Result<()> {
@@ -187,6 +281,18 @@ fn enforce_deployment_contract(contract: DeploymentContract) -> anyhow::Result<(
     if contract.db_backend != DbBackend::Postgres {
         anyhow::bail!(
             "PQMSG_DEPLOYMENT_MODE='{}' requires PostgreSQL (set PQMSG_DATABASE_URL=postgres://...)",
+            contract.deployment_mode.as_str()
+        );
+    }
+    if contract.postgres_encryption.storage_encryption.is_none() {
+        anyhow::bail!(
+            "PQMSG_DEPLOYMENT_MODE='{}' requires explicit PostgreSQL storage encryption declaration (set PQMSG_POSTGRES_STORAGE_ENCRYPTION=managed_service|filesystem|block|tde_extension)",
+            contract.deployment_mode.as_str()
+        );
+    }
+    if !contract.postgres_encryption.backups_encrypted {
+        anyhow::bail!(
+            "PQMSG_DEPLOYMENT_MODE='{}' requires encrypted PostgreSQL backups (set PQMSG_POSTGRES_BACKUP_ENCRYPTION=true)",
             contract.deployment_mode.as_str()
         );
     }
@@ -211,6 +317,18 @@ fn enforce_deployment_contract(contract: DeploymentContract) -> anyhow::Result<(
     if !contract.structured_logging {
         anyhow::bail!(
             "PQMSG_DEPLOYMENT_MODE='{}' requires structured JSON logs (set PQMSG_LOG_FORMAT=json)",
+            contract.deployment_mode.as_str()
+        );
+    }
+    if contract.cors_has_wildcard {
+        anyhow::bail!(
+            "PQMSG_DEPLOYMENT_MODE='{}' rejects wildcard CORS origins; set PQMSG_CORS_ALLOWED_ORIGINS to an explicit origin list",
+            contract.deployment_mode.as_str()
+        );
+    }
+    if contract.deployment_mode == DeploymentMode::Production && !contract.sentry_enabled {
+        anyhow::bail!(
+            "PQMSG_DEPLOYMENT_MODE='{}' requires runtime error telemetry (set PQMSG_SENTRY_DSN)",
             contract.deployment_mode.as_str()
         );
     }
@@ -354,11 +472,27 @@ async fn main() -> anyhow::Result<()> {
     let db_backend = parse_db_backend(&database_url)
         .map_err(|message| anyhow::anyhow!("{message} (check PQMSG_DATABASE_URL)"))?;
     let sqlite_encryption = load_sqlite_encryption_config(db_backend)?;
+    let sqlite_rotation_from =
+        load_sqlite_rotation_from_config(db_backend, sqlite_encryption.as_ref())?;
+    let postgres_encryption = load_postgres_encryption_config(db_backend)?;
     let sqlite_migrate_plaintext = parse_env_bool("PQMSG_SQLITE_MIGRATE_PLAINTEXT", false)?;
+    let sqlite_rotate_key = parse_env_bool("PQMSG_SQLITE_ROTATE_KEY", false)?;
     let db_max_connections = parse_env_u32("PQMSG_DB_MAX_CONNECTIONS", 20)?;
     let db_min_connections = parse_env_u32("PQMSG_DB_MIN_CONNECTIONS", 1)?;
     if db_min_connections > db_max_connections {
         anyhow::bail!("PQMSG_DB_MIN_CONNECTIONS cannot exceed PQMSG_DB_MAX_CONNECTIONS");
+    } else if let Some(storage_encryption) = postgres_encryption.storage_encryption {
+        info!(
+            postgres_storage_encryption = storage_encryption.as_str(),
+            postgres_backup_encryption = postgres_encryption.backups_encrypted,
+            "PostgreSQL at-rest encryption policy declared"
+        );
+    }
+    if sqlite_rotate_key && sqlite_rotation_from.is_none() {
+        anyhow::bail!("PQMSG_SQLITE_ROTATE_KEY=true requires PQMSG_SQLITE_ROTATE_FROM_KEY_B64");
+    }
+    if sqlite_rotation_from.is_some() && !sqlite_rotate_key {
+        anyhow::bail!("PQMSG_SQLITE_ROTATE_FROM_KEY_B64 requires PQMSG_SQLITE_ROTATE_KEY=true");
     }
     let db_acquire_timeout_secs = parse_env_u64("PQMSG_DB_ACQUIRE_TIMEOUT_SECS", 5)?;
     let db_idle_timeout_secs = parse_env_u64("PQMSG_DB_IDLE_TIMEOUT_SECS", 300)?;
@@ -417,6 +551,29 @@ async fn main() -> anyhow::Result<()> {
     let tls_enabled = tls_cert_path.is_some() && tls_key_path.is_some();
 
     if db_backend == DbBackend::Sqlite {
+        if sqlite_rotate_key {
+            let current = sqlite_rotation_from.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "PQMSG_SQLITE_ROTATE_KEY=true requires PQMSG_SQLITE_ROTATE_FROM_KEY_B64"
+                )
+            })?;
+            let target = sqlite_encryption.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "PQMSG_SQLITE_ROTATE_KEY=true requires PQMSG_SQLITE_ENCRYPTION_KEY_B64 as the target key"
+                )
+            })?;
+            match rotate_sqlite_encrypted_database_key(&database_url, current, target).await? {
+                SqliteEncryptionRotation::NoExistingFile => {
+                    info!("SQLite key rotation requested but no database file exists yet");
+                }
+                SqliteEncryptionRotation::AlreadyUsingTargetKey => {
+                    info!("SQLite database already uses the configured target key");
+                }
+                SqliteEncryptionRotation::Rotated => {
+                    info!("SQLite SQLCipher key rotation completed successfully");
+                }
+            }
+        }
         if let Some(encryption) = &sqlite_encryption {
             match prepare_sqlite_encrypted_database(
                 &database_url,
@@ -454,6 +611,7 @@ async fn main() -> anyhow::Result<()> {
             cipher_page_size = ?parse_env_optional_u32("PQMSG_SQLITE_CIPHER_PAGE_SIZE")?,
             cipher_compatibility = ?parse_env_optional_u32("PQMSG_SQLITE_CIPHER_COMPATIBILITY")?,
             plaintext_migration = sqlite_migrate_plaintext,
+            key_rotation = sqlite_rotate_key,
             "SQLite page encryption enabled",
         );
     }
@@ -538,6 +696,9 @@ async fn main() -> anyhow::Result<()> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+    let cors_has_wildcard = cors_allowed_origins
+        .iter()
+        .any(|origin| origin.contains('*'));
     let trusted_proxies: Vec<std::net::IpAddr> =
         env::var("PQMSG_TRUSTED_PROXIES")
             .unwrap_or_default()
@@ -574,6 +735,9 @@ async fn main() -> anyhow::Result<()> {
         audit_enabled,
         redis_enabled: rate_limit_redis_url.is_some(),
         structured_logging,
+        sentry_enabled: sentry_dsn.is_some(),
+        cors_has_wildcard,
+        postgres_encryption,
     })?;
     let (realtime_hub, sealed_realtime_hub) = if let Some(redis_url) = &rate_limit_redis_url {
         let client = redis::Client::open(redis_url.as_str()).with_context(|| {
@@ -741,7 +905,10 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{enforce_deployment_contract, DeploymentContract};
+    use super::{
+        enforce_deployment_contract, DeploymentContract, PostgresEncryptionConfig,
+        PostgresStorageEncryption,
+    };
     use pqmsg_core::alg::runtime_crypto_profile;
     use pqmsg_core::alg::SecurityProfile;
     use pqmsg_server::{DbBackend, DeploymentMode};
@@ -758,6 +925,12 @@ mod tests {
             audit_enabled: false,
             redis_enabled: false,
             structured_logging: false,
+            sentry_enabled: false,
+            cors_has_wildcard: true,
+            postgres_encryption: PostgresEncryptionConfig {
+                storage_encryption: None,
+                backups_encrypted: false,
+            },
         })
         .expect("development should remain permissive");
     }
@@ -774,6 +947,12 @@ mod tests {
             audit_enabled: true,
             redis_enabled: true,
             structured_logging: true,
+            sentry_enabled: false,
+            cors_has_wildcard: false,
+            postgres_encryption: PostgresEncryptionConfig {
+                storage_encryption: Some(PostgresStorageEncryption::ManagedService),
+                backups_encrypted: true,
+            },
         })
         .expect_err("pilot should reject research profile");
         assert!(error
@@ -793,9 +972,65 @@ mod tests {
             audit_enabled: true,
             redis_enabled: true,
             structured_logging: true,
+            sentry_enabled: false,
+            cors_has_wildcard: false,
+            postgres_encryption: PostgresEncryptionConfig {
+                storage_encryption: None,
+                backups_encrypted: false,
+            },
         })
         .expect_err("pilot should reject sqlite");
         assert!(error.to_string().contains("requires PostgreSQL"));
+    }
+
+    #[test]
+    fn pilot_requires_postgres_storage_encryption_declaration() {
+        let runtime = runtime_crypto_profile().expect("runtime profile");
+        let error = enforce_deployment_contract(DeploymentContract {
+            deployment_mode: DeploymentMode::Pilot,
+            security_profile: SecurityProfile::HighAssurance,
+            runtime_crypto_profile: runtime,
+            db_backend: DbBackend::Postgres,
+            tls_enabled: true,
+            audit_enabled: true,
+            redis_enabled: true,
+            structured_logging: true,
+            sentry_enabled: false,
+            cors_has_wildcard: false,
+            postgres_encryption: PostgresEncryptionConfig {
+                storage_encryption: None,
+                backups_encrypted: true,
+            },
+        })
+        .expect_err("pilot should reject missing postgres at-rest declaration");
+        assert!(error
+            .to_string()
+            .contains("requires explicit PostgreSQL storage encryption declaration"));
+    }
+
+    #[test]
+    fn production_requires_encrypted_postgres_backups() {
+        let runtime = runtime_crypto_profile().expect("runtime profile");
+        let error = enforce_deployment_contract(DeploymentContract {
+            deployment_mode: DeploymentMode::Production,
+            security_profile: SecurityProfile::HighAssurance,
+            runtime_crypto_profile: runtime,
+            db_backend: DbBackend::Postgres,
+            tls_enabled: true,
+            audit_enabled: true,
+            redis_enabled: true,
+            structured_logging: true,
+            sentry_enabled: true,
+            cors_has_wildcard: false,
+            postgres_encryption: PostgresEncryptionConfig {
+                storage_encryption: Some(PostgresStorageEncryption::Filesystem),
+                backups_encrypted: false,
+            },
+        })
+        .expect_err("production should reject unencrypted backups");
+        assert!(error
+            .to_string()
+            .contains("requires encrypted PostgreSQL backups"));
     }
 
     #[test]
@@ -810,11 +1045,65 @@ mod tests {
             audit_enabled: true,
             redis_enabled: false,
             structured_logging: true,
+            sentry_enabled: true,
+            cors_has_wildcard: false,
+            postgres_encryption: PostgresEncryptionConfig {
+                storage_encryption: Some(PostgresStorageEncryption::ManagedService),
+                backups_encrypted: true,
+            },
         })
         .expect_err("production should reject local redis-free mode");
         assert!(error
             .to_string()
             .contains("requires Redis-backed distributed"));
+    }
+
+    #[test]
+    fn pilot_rejects_wildcard_cors() {
+        let runtime = runtime_crypto_profile().expect("runtime profile");
+        let error = enforce_deployment_contract(DeploymentContract {
+            deployment_mode: DeploymentMode::Pilot,
+            security_profile: SecurityProfile::HighAssurance,
+            runtime_crypto_profile: runtime,
+            db_backend: DbBackend::Postgres,
+            tls_enabled: true,
+            audit_enabled: true,
+            redis_enabled: true,
+            structured_logging: true,
+            sentry_enabled: false,
+            cors_has_wildcard: true,
+            postgres_encryption: PostgresEncryptionConfig {
+                storage_encryption: Some(PostgresStorageEncryption::ManagedService),
+                backups_encrypted: true,
+            },
+        })
+        .expect_err("pilot should reject wildcard cors");
+        assert!(error.to_string().contains("rejects wildcard CORS origins"));
+    }
+
+    #[test]
+    fn production_requires_sentry() {
+        let runtime = runtime_crypto_profile().expect("runtime profile");
+        let error = enforce_deployment_contract(DeploymentContract {
+            deployment_mode: DeploymentMode::Production,
+            security_profile: SecurityProfile::HighAssurance,
+            runtime_crypto_profile: runtime,
+            db_backend: DbBackend::Postgres,
+            tls_enabled: true,
+            audit_enabled: true,
+            redis_enabled: true,
+            structured_logging: true,
+            sentry_enabled: false,
+            cors_has_wildcard: false,
+            postgres_encryption: PostgresEncryptionConfig {
+                storage_encryption: Some(PostgresStorageEncryption::ManagedService),
+                backups_encrypted: true,
+            },
+        })
+        .expect_err("production should reject missing sentry dsn");
+        assert!(error
+            .to_string()
+            .contains("requires runtime error telemetry"));
     }
 
     #[test]
@@ -830,6 +1119,12 @@ mod tests {
                 audit_enabled: true,
                 redis_enabled: true,
                 structured_logging: true,
+                sentry_enabled: true,
+                cors_has_wildcard: false,
+                postgres_encryption: PostgresEncryptionConfig {
+                    storage_encryption: Some(PostgresStorageEncryption::ManagedService),
+                    backups_encrypted: true,
+                },
             })
             .expect("production baseline should accept hardened stack");
         }

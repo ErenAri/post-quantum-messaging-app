@@ -135,6 +135,21 @@ Full rules: `observability/prometheus/alert-rules.yml`
 
 ---
 
+### 4.5 Storage At-Rest Matrix
+
+| Surface | At-rest posture | Evidence |
+|---------|-----------------|----------|
+| Android local message DB | SQLCipher full-page encryption with a device-local random passphrase wrapped in encrypted preferences; message bodies remain app-layer encrypted inside the DB; SQLCipher `cipher_memory_security` is enabled during DB configuration | `mobile/android/app/src/main/java/com/pqmsg/demo/LocalMessageDatabase.kt` |
+| Android backup policy | Auto Backup and device-to-device backup transfer are disabled for app state; device moves require explicit re-link / reprovision flow instead of raw state restore | `mobile/android/app/src/main/AndroidManifest.xml`, `mobile/android/app/src/main/res/xml/backup_rules.xml`, `mobile/android/app/src/main/res/xml/data_extraction_rules.xml` |
+| Android storage regression evidence | Plaintext-to-SQLCipher migration, encrypted cold-reopen coverage, and fail-closed bad-restore coverage when the wrapped SQLCipher passphrase is missing | `mobile/android/app/src/androidTest/java/com/pqmsg/demo/LocalMessageDatabaseMigrationInstrumentationTest.kt` |
+| Server SQLite | SQLCipher page encryption with fail-closed keyed startup, explicit one-way plaintext migration, explicit startup key rotation, offline key-rotation tooling, and migration/rotation guard coverage | `crates/pqmsg-server/src/db.rs`, `crates/pqmsg-server/src/main.rs`, `crates/pqmsg-server/src/bin/sqlite_rotate_key.rs` |
+| Server SQLite Windows path | Vendored-OpenSSL SQLCipher build with repo prerequisite wrapper, CI lane, and locally verified targeted migration tests | `scripts/dev/check_sqlcipher_server_prereqs.ps1`, `scripts/dev/run_sqlcipher_server_tests_windows.ps1`, `.github/workflows/ci.yml`, `crates/pqmsg-server/src/db.rs` |
+| Postgres production profile | Platform/storage-level encryption required by deployment contract; encrypted backups required in hardened modes | `crates/pqmsg-server/src/main.rs`, `docs/DEPLOYMENT.md`, `docs/FULL_PAGE_ENCRYPTION_PLAN.md` |
+| Web local state | No trustworthy page-encryption layer; sensitive state relies on app-layer encryption and hardened storage policy | `mobile/web/src/storage.ts`, `docs/FULL_PAGE_ENCRYPTION_PLAN.md` |
+| Web browser boundary | Hosted web messaging fails closed without secure context and cross-origin isolation, and the service worker does not cache cross-origin or `/v1/*` messaging traffic | `mobile/web/src/webEnvironment.ts`, `mobile/web/public/sw.js`, `mobile/web/vite.config.ts` |
+
+---
+
 ## 5. Formal Verification
 
 ### 5.1 ProVerif (Symbolic)
@@ -198,6 +213,7 @@ Full rules: `observability/prometheus/alert-rules.yml`
 | Distroless base image | `gcr.io/distroless/cc-debian12` |
 | TLS termination | Rustls with certificate files |
 | Secret management | Kubernetes Secrets (base64) |
+| Postgres at-rest declaration | Hardened deployments require `PQMSG_POSTGRES_STORAGE_ENCRYPTION` and `PQMSG_POSTGRES_BACKUP_ENCRYPTION=true` |
 | Horizontal autoscaling | HPA with CPU/memory targets |
 | Network policy | Ingress annotations for rate limiting |
 
@@ -268,7 +284,10 @@ cargo deny check advisories licenses bans sources
 # 7. Generate SBOM
 cargo cyclonedx --manifest-path Cargo.toml --format json --all
 
-# 8. Coverage report
+# 8. Windows SQLCipher SQLite check
+.\scripts\dev\run_sqlcipher_server_tests_windows.ps1
+
+# 9. Coverage report
 cargo llvm-cov --workspace --exclude pqmsg-android --exclude pqmsg-ios --html
 ```
 

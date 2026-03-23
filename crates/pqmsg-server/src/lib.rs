@@ -37,8 +37,9 @@ mod validation;
 
 pub use blob_store::BlobStore;
 pub use db::{
-    connect_db_pool, init_db, parse_db_backend, prepare_sqlite_encrypted_database, DbBackend,
-    SqliteEncryptionConfig, SqliteEncryptionPreparation,
+    connect_db_pool, init_db, parse_db_backend, prepare_sqlite_encrypted_database,
+    rotate_sqlite_encrypted_database_key, DbBackend, SqliteEncryptionConfig,
+    SqliteEncryptionPreparation, SqliteEncryptionRotation,
 };
 pub use ephemeral_state::EphemeralStateStore;
 pub use error::AppError;

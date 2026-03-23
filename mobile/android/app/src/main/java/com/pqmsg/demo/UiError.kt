@@ -15,11 +15,27 @@ object UiErrorMapper {
         val message = error.message ?: "no message"
         val details = "${error::class.java.simpleName}: $message"
         return when (error) {
-            is PqmsgAndroidException.InvalidInput -> UiError(
-                headline = "$action failed due to invalid input",
-                actionHint = "Check user, device, suite, and peer values, then retry.",
+            is LocalSecureStorageUnavailableException -> UiError(
+                headline = "Local secure storage is unavailable on this device",
+                actionHint = "Re-import a linked-device package or fully reprovision this device. Cloud backup restore is intentionally disabled for this state.",
                 technicalDetails = details,
             )
+
+            is PqmsgAndroidException.InvalidInput -> {
+                if (message.contains("onboarding package", ignoreCase = true)) {
+                    UiError(
+                        headline = "$action failed due to linked-device package validation",
+                        actionHint = "Verify the package preview, passphrase, and trusted source before retrying the import.",
+                        technicalDetails = details,
+                    )
+                } else {
+                    UiError(
+                        headline = "$action failed due to invalid input",
+                        actionHint = "Check user, device, suite, and peer values, then retry.",
+                        technicalDetails = details,
+                    )
+                }
+            }
 
             is PqmsgAndroidException.OperationFailed -> UiError(
                 headline = "$action failed in cryptographic operation",

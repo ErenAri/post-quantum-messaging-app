@@ -98,6 +98,52 @@ jobs:
       - name: run SQLCipher SQLite server tests
         run: cargo test -p pqmsg-server db::tests::sqlite_ --lib
 
+  sqlite-sqlcipher-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install Strawberry Perl
+        run: choco install strawberryperl --yes --no-progress
+      - name: add perl to PATH
+        shell: pwsh
+        run: |
+          echo "C:\Strawberry\perl\bin" >> $env:GITHUB_PATH
+          echo "C:\Strawberry\c\bin" >> $env:GITHUB_PATH
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: check SQLCipher prerequisites
+        shell: pwsh
+        run: .\scripts\dev\check_sqlcipher_server_prereqs.ps1
+      - name: run SQLCipher SQLite server tests
+        shell: pwsh
+        run: cargo test -p pqmsg-server db::tests::sqlite_ --lib
+
+  helm-chart-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: render hardened chart with required production secrets
+        run: |
+          helm template pqmsg-server deploy/helm/pqmsg-server \
+            --set-string secretEnv.PQMSG_SENTRY_DSN=https://public@example.ingest.sentry.io/project-id >/tmp/pqmsg-server-chart.yaml
+      - name: production chart fails when Sentry DSN is missing
+        run: |
+          if helm template pqmsg-server deploy/helm/pqmsg-server >/tmp/pqmsg-server-chart-fail.yaml 2>/tmp/pqmsg-server-chart.err; then
+            echo "expected production chart without PQMSG_SENTRY_DSN to fail"
+            exit 1
+          fi
+          grep -q "require secretEnv.PQMSG_SENTRY_DSN" /tmp/pqmsg-server-chart.err
+      - name: hardened chart rejects wildcard cors
+        run: |
+          if helm template pqmsg-server deploy/helm/pqmsg-server \
+            --set-string secretEnv.PQMSG_SENTRY_DSN=https://public@example.ingest.sentry.io/project-id \
+            --set-string env.PQMSG_CORS_ALLOWED_ORIGINS='*' >/tmp/pqmsg-server-chart-fail.yaml 2>/tmp/pqmsg-server-chart.err; then
+            echo "expected wildcard CORS to fail"
+            exit 1
+          fi
+          grep -q "reject wildcard" /tmp/pqmsg-server-chart.err
+
   benchmarks:
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
