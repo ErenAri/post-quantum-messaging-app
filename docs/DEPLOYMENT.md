@@ -139,6 +139,8 @@ Those issue records now include explicit evidence pointers back to the workflow 
 Before upload, each workflow also writes `promotion-bundle-manifest.json` or `rollback-bundle-manifest.json`, a SHA-256 digest inventory of the bundle contents actually emitted for operators and auditors.
 If durable incident issues are enabled, the workflows also add a follow-up issue comment containing the final bundle-manifest filename and SHA-256 digest so the issue thread records the exact uploaded evidence set.
 Both the existing-issue publication comment and the follow-up bundle-evidence comment are marker-deduplicated, so workflow reruns remain idempotent at the GitHub issue layer.
+Those bundle manifests are also GitHub-attested in the promotion/rollback workflows themselves, so the uploaded evidence inventory has the same provenance posture as the main release manifest path.
+Rollback consumes the downloaded promotion bundle only after `scripts/release/verify_workflow_bundle.*` validates the promotion bundle manifest and, when `gh` is available, verifies its GitHub attestation as well.
 
 Override example:
 

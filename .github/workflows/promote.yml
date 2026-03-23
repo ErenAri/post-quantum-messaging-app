@@ -37,7 +37,8 @@ on:
 
 permissions:
   contents: read
-  attestations: read
+  id-token: write
+  attestations: write
   issues: write
 
 jobs:
@@ -511,6 +512,11 @@ jobs:
             --deployment-mode "${{ inputs.deployment_mode }}" \
             --dist-dir dist \
             --output dist/promotion-bundle-manifest.json
+      - name: attest promotion bundle manifest provenance
+        if: ${{ always() }}
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/promotion-bundle-manifest.json
       - name: comment promotion incident issue evidence
         if: ${{ always() && inputs.apply }}
         run: |
@@ -522,7 +528,7 @@ jobs:
             --github-repository "${{ github.repository }}" \
             --github-run-id "${{ github.run_id }}" \
             --github-workflow "${{ github.workflow }}" \
-            --output dist/promotion-incident-issue-evidence.json
+            --output /tmp/promotion-incident-issue-evidence.json
       - name: comment promotion resolution issue evidence
         if: ${{ always() && inputs.apply }}
         run: |
@@ -534,7 +540,7 @@ jobs:
             --github-repository "${{ github.repository }}" \
             --github-run-id "${{ github.run_id }}" \
             --github-workflow "${{ github.workflow }}" \
-            --output dist/promotion-incident-resolution-evidence.json
+            --output /tmp/promotion-incident-resolution-evidence.json
       - name: append promotion bundle evidence summary
         if: ${{ always() }}
         run: |
@@ -552,8 +558,8 @@ jobs:
                   handle.write(f"- Promotion bundle file count: `{manifest.get('file_count', 0)}`\n")
 
           for path_str in [
-              "dist/promotion-incident-issue-evidence.json",
-              "dist/promotion-incident-resolution-evidence.json",
+              "/tmp/promotion-incident-issue-evidence.json",
+              "/tmp/promotion-incident-resolution-evidence.json",
           ]:
               path = Path(path_str)
               if not path.is_file():

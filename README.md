@@ -329,6 +329,8 @@ If the GitHub Environment also provides `PQMSG_INCIDENT_ISSUE_REPO`, both workfl
 Each uploaded promotion/rollback bundle now also includes `promotion-bundle-manifest.json` or `rollback-bundle-manifest.json`, a SHA-256 manifest of the evidence files that were actually uploaded.
 When durable incident issues are enabled, the workflows also comment the final bundle-manifest digest back onto the issue thread so the GitHub record points to the uploaded evidence bundle, not just the initial failure summary.
 Those incident-issue and evidence comments are now marker-deduplicated, so rerunning the same promotion/rollback workflow does not spam duplicate issue-thread comments.
+The promotion and rollback bundle manifests are also GitHub-attested with OIDC in the workflows themselves, and CI now validates that those workflow attestation steps stay in place.
+Rollback now verifies the downloaded promotion bundle with `scripts/release/verify_workflow_bundle.*` before using it, and the local helper smoke covers that consumer-side path too.
 
 Published release bundles can be validated locally with:
 

@@ -180,6 +180,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: validate release governance workflows
+        run: |
+          python scripts/security/validate_release_governance_workflows.py
       - name: smoke release governance helpers
         run: |
           python scripts/release/smoke_release_governance_helpers.py

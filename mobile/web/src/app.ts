@@ -1002,17 +1002,18 @@ async function loadPeerSealedDeliveryToken(
 }
 
 async function ensureWebMessagingAllowed(kind: "direct" | "group"): Promise<boolean> {
+  const holdback = getWebBetaHoldback(await loadServerCapabilitiesCached());
   if (kind === "direct") {
     try {
       await ensureWebPqRuntime();
-      return true;
     } catch (e) {
       notify(errorMsg(e), "error");
       return false;
     }
-  }
-  const holdback = getWebBetaHoldback(await loadServerCapabilitiesCached());
-  if (holdback.messagingAllowed) {
+    if (holdback.directMessagingAllowed) {
+      return true;
+    }
+  } else if (holdback.groupMessagingAllowed) {
     return true;
   }
   const label = kind === "group" ? "group messaging" : "messaging";
@@ -3326,6 +3327,9 @@ async function renderGroupChat(groupId: string): Promise<void> {
       statusEl.classList.remove("error-text");
       statusEl.textContent = "Sending...";
       try {
+        if (!(await ensureWebMessagingAllowed("group"))) {
+          throw new Error("Private-group messaging is disabled for this web profile.");
+        }
         await sendPrivateGroupMessage(groupId, text);
         input.value = "";
         statusEl.textContent = "Sent.";
@@ -3464,6 +3468,9 @@ async function renderGroupInfo(groupId: string): Promise<void> {
     button.addEventListener("click", () => {
       void (async () => {
         try {
+          if (!(await ensureWebMessagingAllowed("group"))) {
+            throw new Error("Private-group messaging is disabled for this web profile.");
+          }
           const memberUserId = button.dataset.privateGroupInvite?.trim() || "";
           if (!memberUserId) {
             throw new Error("Private-group member ID is missing.");
@@ -3490,6 +3497,9 @@ async function renderGroupInfo(groupId: string): Promise<void> {
     button.addEventListener("click", () => {
       void (async () => {
         try {
+          if (!(await ensureWebMessagingAllowed("group"))) {
+            throw new Error("Private-group messaging is disabled for this web profile.");
+          }
           const memberUserId = button.dataset.privateGroupRemove?.trim() || "";
           if (!memberUserId) {
             throw new Error("Private-group member ID is missing.");
@@ -3540,6 +3550,9 @@ async function renderGroupInfo(groupId: string): Promise<void> {
     addMemberButton.addEventListener("click", () => {
       void (async () => {
         try {
+          if (!(await ensureWebMessagingAllowed("group"))) {
+            throw new Error("Private-group messaging is disabled for this web profile.");
+          }
           const rawTarget = addMemberInput.value.trim();
           if (!rawTarget) {
             throw new Error("Member target is required.");
@@ -3714,6 +3727,9 @@ function renderCreateGroup(): void {
   q<HTMLButtonElement>("#cg-create").addEventListener("click", () => {
     void (async () => {
       try {
+        if (!(await ensureWebMessagingAllowed("group"))) {
+          throw new Error("Private-group messaging is disabled for this web profile.");
+        }
         if (!privateGroupBindingsAvailable()) {
           throw new Error("Private-group bindings are unavailable in this browser.");
         }
@@ -3814,6 +3830,9 @@ function renderCreateGroup(): void {
   q<HTMLButtonElement>("#cg-join").addEventListener("click", () => {
     void (async () => {
       try {
+        if (!(await ensureWebMessagingAllowed("group"))) {
+          throw new Error("Private-group messaging is disabled for this web profile.");
+        }
         if (!privateGroupBindingsAvailable()) {
           throw new Error("Private-group bindings are unavailable in this browser.");
         }
@@ -5769,6 +5788,7 @@ async function renderServerInfo(): Promise<void> {
           <div class="settings-row"><span>Stories</span><span>${caps.stories_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Channels</span><span>${caps.channels_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Group Messaging</span><span>${caps.group_messaging_supported ? "Enabled" : "Disabled"}</span></div>
+          <div class="settings-row"><span>Private Groups</span><span>${caps.private_group_messaging_supported ? "Enabled" : "Disabled"}</span></div>
           <div class="settings-row"><span>Sealed Sender</span><span>${caps.sealed_sender_required ? "Required" : "Optional"}</span></div>
           <div class="settings-row"><span>Sender Certs</span><span>${caps.sender_certificate_supported ? "Required" : "Disabled"}</span></div>
           <div class="settings-row"><span>Ephemeral DM</span><span>${caps.ephemeral_messaging_supported ? "Enabled" : "Disabled"}</span></div>

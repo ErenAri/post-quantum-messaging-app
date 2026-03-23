@@ -143,6 +143,12 @@ class GroupChatActivity : AppCompatActivity() {
         infoButton.isEnabled = localStoreAvailable && privateGroupState != null && privateGroupCredential != null
     }
 
+    private fun requirePrivateGroupMessagingEnabled(context: ReadyMessagingContext) {
+        require(context.capabilities.private_group_messaging_supported) {
+            "Private-group messaging is not enabled on this server."
+        }
+    }
+
     private suspend fun sendGroupMessage() {
         val setup = store.loadSetup()
         val state = privateGroupState ?: error("Private-group state is unavailable on this device.")
@@ -156,6 +162,7 @@ class GroupChatActivity : AppCompatActivity() {
             suiteLabel = setup.suiteLabel,
             deviceId = setup.deviceId,
         )
+        requirePrivateGroupMessagingEnabled(context)
         val keysJson = MessagingCoordinator.ensurePrekeysReplenished(
             store = store,
             api = context.api,
@@ -380,6 +387,7 @@ class GroupChatActivity : AppCompatActivity() {
             userId = setup.userId,
             suiteLabel = setup.suiteLabel,
         )
+        requirePrivateGroupMessagingEnabled(context)
         val target = MessagingCoordinator.parseComposeTarget(rawTarget, setup.serverUrl)
         require(
             ApiClientFactory.normalizeBaseUrl(target.serverUrl) ==
@@ -493,6 +501,7 @@ class GroupChatActivity : AppCompatActivity() {
             userId = setup.userId,
             suiteLabel = setup.suiteLabel,
         )
+        requirePrivateGroupMessagingEnabled(context)
         val inviteMaterial = parsePrivateGroupLinkInviteMaterial(
             privateGroupEncryptJoinPackageForShareLink(
                 privateGroupExportJoinPackageForMember(gson.toJson(state), memberUserId),
@@ -526,6 +535,7 @@ class GroupChatActivity : AppCompatActivity() {
             userId = setup.userId,
             suiteLabel = setup.suiteLabel,
         )
+        requirePrivateGroupMessagingEnabled(context)
         val transition = parsePrivateGroupEpochTransition(
             privateGroupPrepareRemoveMemberTransition(
                 gson.toJson(state),

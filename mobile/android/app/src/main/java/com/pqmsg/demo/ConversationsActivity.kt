@@ -125,6 +125,12 @@ class ConversationsActivity : AppCompatActivity() {
         statusText.text = "Group messaging is disabled pending a private group design."
     }
 
+    private fun requirePrivateGroupMessagingEnabled(context: ReadyMessagingContext) {
+        require(context.capabilities.private_group_messaging_supported) {
+            "Private-group messaging is not enabled on this server."
+        }
+    }
+
     private fun refreshConversations() {
         val user = store.loadSetup().userId
         currentConversations = store.listConversations(user)
@@ -444,6 +450,7 @@ class ConversationsActivity : AppCompatActivity() {
                     userId = setup.userId,
                     suiteLabel = setup.suiteLabel,
                 )
+                requirePrivateGroupMessagingEnabled(context)
                 val resolvedMembers = linkedSetOf<String>()
                 for (rawTarget in members) {
                     val target = MessagingCoordinator.parseComposeTarget(rawTarget, setup.serverUrl)
@@ -560,6 +567,7 @@ class ConversationsActivity : AppCompatActivity() {
                     suiteLabel = setup.suiteLabel,
                     deviceId = setup.deviceId,
                 )
+                requirePrivateGroupMessagingEnabled(context)
                 val invite = context.api.resolvePrivateGroupInvite(target.inviteToken)
                 val joinPackageJson = privateGroupOpenShareLinkInvite(
                     gson.toJson(

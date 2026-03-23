@@ -163,6 +163,7 @@ pub(crate) const DEFAULT_REGISTRATION_POW_BITS_RESEARCH: u8 = 0;
 pub(crate) const DEFAULT_PREKEY_PUBLISH_MIN_INTERVAL_SECONDS_RESEARCH: i64 = 0;
 pub(crate) const DEFAULT_PREKEY_BUNDLE_RESERVE_COUNT_RESEARCH: i64 = 0;
 pub(crate) const DEFAULT_RATE_LIMIT_REDIS_KEY_PREFIX: &str = "pqmsg:ratelimit:";
+pub(crate) const DEFAULT_WEB_CLIENT_POLICY: &str = "demo_only";
 /// Maximum age for signed prekeys before the server flags them as stale (7 days).
 pub(crate) const SIGNED_PREKEY_MAX_AGE_SECONDS: i64 = 7 * 24 * 3600;
 pub(crate) const REDIS_RATE_LIMIT_SCRIPT: &str = r#"
@@ -320,6 +321,7 @@ pub struct AppState {
     sender_certificate_signing_key: Arc<SigningKey>,
     authenticated_direct_messaging_supported: bool,
     contact_discovery_service_origin: Option<String>,
+    web_client_policy: String,
 }
 
 impl AppState {
@@ -352,6 +354,7 @@ impl AppState {
             sender_certificate_signing_key: Arc::new(default_sender_certificate_signing_key()),
             authenticated_direct_messaging_supported: false,
             contact_discovery_service_origin: None,
+            web_client_policy: DEFAULT_WEB_CLIENT_POLICY.to_string(),
         }
     }
 
@@ -388,6 +391,7 @@ impl AppState {
             sender_certificate_signing_key: Arc::new(default_sender_certificate_signing_key()),
             authenticated_direct_messaging_supported: false,
             contact_discovery_service_origin: None,
+            web_client_policy: DEFAULT_WEB_CLIENT_POLICY.to_string(),
         }
     }
 
@@ -514,6 +518,13 @@ impl AppState {
         true
     }
 
+    pub fn private_group_messaging_supported(&self) -> bool {
+        self.private_group_state_supported()
+            && self.sealed_sender_required()
+            && self.sender_certificate_supported()
+            && self.key_transparency_supported()
+    }
+
     pub fn sealed_sender_required(&self) -> bool {
         true
     }
@@ -550,6 +561,10 @@ impl AppState {
         false
     }
 
+    pub fn web_client_policy(&self) -> &str {
+        self.web_client_policy.as_str()
+    }
+
     pub fn with_push_notifier(mut self, push_notifier: Arc<PushNotifier>) -> Self {
         self.push_notifier = push_notifier;
         self
@@ -583,6 +598,11 @@ impl AppState {
         contact_discovery_service_origin: Option<String>,
     ) -> Self {
         self.contact_discovery_service_origin = contact_discovery_service_origin;
+        self
+    }
+
+    pub fn with_web_client_policy(mut self, web_client_policy: impl Into<String>) -> Self {
+        self.web_client_policy = web_client_policy.into();
         self
     }
 

@@ -743,6 +743,7 @@ export type ServerCapabilitiesResponse = {
   channels_supported: boolean;
   group_messaging_supported: boolean;
   private_group_state_supported: boolean;
+  private_group_messaging_supported: boolean;
   sealed_sender_required: boolean;
   sender_certificate_supported: boolean;
   key_transparency_supported: boolean;

@@ -806,6 +806,7 @@ pub(crate) struct ServerCapabilitiesResponse {
     pub(crate) channels_supported: bool,
     pub(crate) group_messaging_supported: bool,
     pub(crate) private_group_state_supported: bool,
+    pub(crate) private_group_messaging_supported: bool,
     pub(crate) sealed_sender_required: bool,
     pub(crate) sender_certificate_supported: bool,
     pub(crate) key_transparency_supported: bool,
@@ -815,7 +816,7 @@ pub(crate) struct ServerCapabilitiesResponse {
     pub(crate) transparency_log_issuer_ed25519_pub: String,
     pub(crate) authenticated_direct_messaging_supported: bool,
     pub(crate) ephemeral_messaging_supported: bool,
-    pub(crate) web_client_policy: &'static str,
+    pub(crate) web_client_policy: String,
 }
 
 // ── Delivery receipts ──

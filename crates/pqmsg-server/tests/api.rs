@@ -2487,6 +2487,10 @@ async fn capabilities_reports_client_contract() {
     assert_eq!(body["channels_supported"].as_bool(), Some(false));
     assert_eq!(body["group_messaging_supported"].as_bool(), Some(false));
     assert_eq!(body["private_group_state_supported"].as_bool(), Some(true));
+    assert_eq!(
+        body["private_group_messaging_supported"].as_bool(),
+        Some(true)
+    );
     assert_eq!(body["sealed_sender_required"].as_bool(), Some(true));
     assert_eq!(
         body["sealed_delivery_tokens_supported"].as_bool(),

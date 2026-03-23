@@ -228,6 +228,7 @@ async function bootApp(options: BootOptions = {}) {
       channels_supported: false,
       group_messaging_supported: false,
       private_group_state_supported: true,
+      private_group_messaging_supported: true,
       sealed_sender_required: true,
       sender_certificate_supported: true,
       key_transparency_supported: true,

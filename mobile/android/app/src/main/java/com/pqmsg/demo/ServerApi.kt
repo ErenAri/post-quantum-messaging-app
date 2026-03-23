@@ -703,6 +703,7 @@ data class ServerCapabilitiesResponse(
     val channels_supported: Boolean,
     val group_messaging_supported: Boolean,
     val private_group_state_supported: Boolean,
+    val private_group_messaging_supported: Boolean,
     val sealed_sender_required: Boolean,
     val sender_certificate_supported: Boolean,
     val key_transparency_supported: Boolean,

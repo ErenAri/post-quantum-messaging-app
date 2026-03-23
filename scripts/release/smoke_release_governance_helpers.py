@@ -673,6 +673,16 @@ def smoke_bundle_manifest() -> None:
     assert manifest["deployment_mode"] == "production"
     assert manifest["file_count"] == 2
     assert [item["path"] for item in manifest["files"]] == ["alpha.json", "beta.txt"]
+    run(
+        [
+            "python",
+            "scripts/release/verify_workflow_bundle.py",
+            "--bundle-kind",
+            "promotion",
+            "--dist-dir",
+            str(dist),
+        ]
+    )
 
 
 def main() -> int:

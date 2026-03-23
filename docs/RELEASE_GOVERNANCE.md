@@ -76,6 +76,8 @@ A release candidate is promotable only when all conditions are true:
 24. every uploaded promotion/rollback bundle must include a SHA-256 inventory of its emitted evidence files (`promotion-bundle-manifest.json` / `rollback-bundle-manifest.json`).
 25. when durable incident issues are enabled, the workflows must also comment the final bundle-manifest filename and SHA-256 digest back onto the corresponding issue thread so the GitHub record references the archived evidence set directly.
 26. workflow-driven GitHub issue comments for incident publication and final evidence must be idempotent on rerun; duplicate retries must resolve to an existing marker-matched comment instead of posting a second copy.
+27. the promotion and rollback workflows must GitHub-attest the emitted bundle-manifest artifacts themselves, and CI must validate that those attestation and permission requirements remain present in workflow policy.
+28. any workflow that consumes a previously uploaded promotion/rollback bundle must verify the bundle-manifest inventory before using the bundle, and should verify the bundle-manifest attestation when `gh` is available.
 
 ## 4. Security Exception Policy
 

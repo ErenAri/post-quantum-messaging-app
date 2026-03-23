@@ -724,6 +724,16 @@ async fn main() -> anyhow::Result<()> {
                 Some(trimmed)
             }
         });
+    let web_client_policy = env::var("PQMSG_WEB_CLIENT_POLICY")
+        .unwrap_or_else(|_| DEFAULT_WEB_CLIENT_POLICY.to_string())
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(web_client_policy.as_str(), "demo_only" | "interop_candidate") {
+        anyhow::bail!(
+            "invalid PQMSG_WEB_CLIENT_POLICY '{}': expected 'demo_only' or 'interop_candidate'",
+            web_client_policy
+        );
+    }
     let runtime_suite_id = runtime_crypto_profile.suite_id;
     let runtime_pq_enabled = runtime_crypto_profile.pq_oqs_enabled;
     enforce_deployment_contract(DeploymentContract {
@@ -781,7 +791,8 @@ async fn main() -> anyhow::Result<()> {
             .with_blob_store(blob_store)
             .with_ephemeral_state(ephemeral_state)
             .with_sender_certificate_signing_key(sender_certificate_signing_key)
-            .with_contact_discovery_service_origin(contact_discovery_service_origin);
+            .with_contact_discovery_service_origin(contact_discovery_service_origin)
+            .with_web_client_policy(web_client_policy);
 
     // Spawn the ephemeral message expiry reaper
     tokio::spawn(pqmsg_server::run_message_expiry_reaper(state.clone()));
