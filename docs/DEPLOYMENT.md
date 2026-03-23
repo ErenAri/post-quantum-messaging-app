@@ -25,6 +25,8 @@ Build:
 docker build -t pqmsg-server:0.1.0 .
 ```
 
+For Kubernetes deployment, push the image to your registry and deploy by immutable digest rather than a mutable tag. Tagged GitHub releases now publish `ghcr.io/<owner>/pqmsg-server`, record the exact pushed digest in `release-manifest.json`, and attach `container-image.txt` plus `helm-image-overrides.yaml`; hardened deployments should consume that immutable digest directly.
+
 Run (example):
 
 ```bash
@@ -107,13 +109,33 @@ helm upgrade --install pqmsg-server deploy/helm/pqmsg-server \
   --create-namespace
 ```
 
+Promotion from a tagged release can now consume the published digest automatically instead of copying it by hand:
+
+```bash
+./scripts/release/download_release_bundle.sh v0.1.0 ./dist your-org/your-repo
+./scripts/release/verify_release_bundle.sh ./dist your-org/your-repo
+python scripts/release/render_promotion_values.py \
+  --deployment-mode production \
+  --output /tmp/pqmsg-promotion-values.json
+helm upgrade --install pqmsg-server deploy/helm/pqmsg-server \
+  --namespace pqmsg \
+  -f ./dist/helm-image-overrides.yaml \
+  -f /tmp/pqmsg-promotion-values.json
+```
+
+The repository also includes a manual GitHub Actions `promote` workflow that performs the same download, verification, and Helm render/apply path using GitHub Environment secrets/vars instead of ad hoc local copy/paste.
+When cluster access is configured, the same workflow captures the currently deployed image before promotion, requires `PQMSG_AUDIT_LOG_PATH` in the promotion environment, verifies `/health` and `/v1/capabilities` after rollout through an internal port-forward, and writes `promoted-chart.yaml`, `promotion-record.json`, `rollback-image.txt`, `rollback-helm-overrides.yaml`, and `post-deploy-verification.json`.
+
+The repository also includes a manual GitHub Actions `rollback` workflow. It downloads the saved promotion bundle from a specific workflow run using `gh run download`, verifies the embedded signed release artifacts again, renders Helm from `rollback-helm-overrides.yaml`, and writes `rollback-record.json` plus `post-rollback-verification.json` after an applied rollback.
+Both workflows now validate the pre-apply cluster contract when cluster access is available: the namespace must carry the required Pod Security Admission labels, and the target namespace must already contain the generated app secret/configmap names and the configured TLS secret.
+
 Override example:
 
 ```bash
 helm upgrade --install pqmsg-server deploy/helm/pqmsg-server \
   --namespace pqmsg \
   --set image.repository=ghcr.io/your-org/pqmsg-server \
-  --set image.tag=0.1.0 \
+  --set image.digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
   --set secretEnv.PQMSG_DATABASE_URL='postgres://pqmsg:change-me@postgres.pqmsg.svc.cluster.local:5432/pqmsg'
 ```
 
@@ -151,6 +173,7 @@ Requirements:
 14. Hardened Kubernetes deployments now require `automountServiceAccountToken: false`, `enableServiceLinks: false`, pod `seccompProfile.type: RuntimeDefault`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, and `capabilities.drop: [ALL]`. CI validates both the raw manifest and the rendered Helm chart with `scripts/security/validate_hardened_manifests.py`.
 15. Both raw Kustomize and rendered Helm deployments must also carry a matching `NetworkPolicy` for the `pqmsg-server` pods; CI validates selector parity and the baseline ingress/egress ports with `scripts/security/validate_network_policy.py`.
 16. The raw Kustomize namespace manifest must carry Pod Security Admission `restricted` labels, and Helm operators must pre-label the target namespace to the same policy; CI validates the raw namespace with `scripts/security/validate_namespace_policy.py`.
+17. `pilot` and `production` image references must be pinned by digest, not mutable tags. The Helm chart now requires `image.digest` in `sha256:<64-hex>` format for hardened modes, and CI validates both raw and rendered deployment manifests with `scripts/security/validate_image_pinning.py`.
 
 Windows source-build note for local server work:
 

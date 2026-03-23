@@ -9,6 +9,7 @@ permissions:
   contents: write
   id-token: write
   attestations: write
+  packages: write
 
 jobs:
   release-artifacts:
@@ -16,6 +17,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: derive release image reference
+        id: image
+        env:
+          REGISTRY: ghcr.io
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          image_repo="${REGISTRY}/${owner}/pqmsg-server"
+          echo "repo=${image_repo}" >> "$GITHUB_OUTPUT"
+      - name: login to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.repo }}
+          tags: |
+            type=ref,event=tag
+            type=sha,format=long,prefix=sha-
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: render hardened production chart
@@ -24,6 +48,15 @@ jobs:
             --set-string secretEnv.PQMSG_SENTRY_DSN=https://public@example.ingest.sentry.io/project-id >/tmp/pqmsg-server-chart.yaml
       - name: verify hardened server boot contract
         run: cargo test -p pqmsg-server --bin pqmsg-server
+      - name: build and publish container image
+        id: container
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
       - name: build release binary
         run: cargo build --release -p pqmsg-server
       - name: package artifacts
@@ -47,6 +80,9 @@ jobs:
           PQMSG_RELEASE_RUN_ID: ${{ github.run_id }}
           PQMSG_RELEASE_RUN_ATTEMPT: ${{ github.run_attempt }}
           PQMSG_RELEASE_WORKFLOW_REF: ${{ github.workflow_ref }}
+          PQMSG_RELEASE_IMAGE_REPO: ${{ steps.image.outputs.repo }}
+          PQMSG_RELEASE_IMAGE_DIGEST: ${{ steps.container.outputs.digest }}
+          PQMSG_RELEASE_IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           python - <<'PY'
           import hashlib
@@ -71,6 +107,15 @@ jobs:
               "workflow_run_attempt": os.environ["PQMSG_RELEASE_RUN_ATTEMPT"],
               "workflow_ref": os.environ["PQMSG_RELEASE_WORKFLOW_REF"],
               "created_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "container_images": [
+                  {
+                      "name": os.environ["PQMSG_RELEASE_IMAGE_REPO"],
+                      "digest": os.environ["PQMSG_RELEASE_IMAGE_DIGEST"],
+                      "immutable_ref": f'{os.environ["PQMSG_RELEASE_IMAGE_REPO"]}@{os.environ["PQMSG_RELEASE_IMAGE_DIGEST"]}',
+                      "tags": [tag.strip() for tag in os.environ["PQMSG_RELEASE_IMAGE_TAGS"].splitlines() if tag.strip()],
+                      "kind": "ghcr-container-image"
+                  }
+              ],
               "artifacts": [
                   {
                       "path": binary.name,
@@ -87,13 +132,28 @@ jobs:
               ]
           }
           Path("dist/release-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          immutable_ref = manifest["container_images"][0]["immutable_ref"]
+          Path("dist/container-image.txt").write_text(immutable_ref + "\n", encoding="utf-8")
+          Path("dist/helm-image-overrides.yaml").write_text(
+              "\n".join(
+                  [
+                      "image:",
+                      f"  repository: {manifest['container_images'][0]['name']}",
+                      f"  digest: {manifest['container_images'][0]['digest']}",
+                      "",
+                  ]
+              ),
+              encoding="utf-8",
+          )
           PY
       - name: write checksum manifest
         run: |
           sha256sum \
             dist/pqmsg-server-linux-x86_64 \
             dist/sbom.tar.gz \
-            dist/release-manifest.json > dist/checksums.txt
+            dist/release-manifest.json \
+            dist/container-image.txt \
+            dist/helm-image-overrides.yaml > dist/checksums.txt
       - name: install cosign
         uses: sigstore/cosign-installer@v3
       - name: sign checksums
@@ -104,6 +164,12 @@ jobs:
             --output-signature dist/checksums.txt.sig \
             --output-certificate dist/checksums.txt.pem \
             dist/checksums.txt
+      - name: attest container image provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ steps.image.outputs.repo }}
+          subject-digest: ${{ steps.container.outputs.digest }}
+          push-to-registry: true
       - name: attest server binary provenance
         uses: actions/attest@v4
         with:
@@ -129,6 +195,8 @@ jobs:
             dist/checksums.txt
             dist/checksums.txt.sig
             dist/checksums.txt.pem
+            dist/container-image.txt
+            dist/helm-image-overrides.yaml
             dist/release-manifest.json
             dist/sbom.tar.gz
           generate_release_notes: true

@@ -294,10 +294,31 @@ curl http://127.0.0.1:3000/metrics
 Tagged GitHub releases now publish:
 
 - the `pqmsg-server` binary,
+- the `ghcr.io/<owner>/pqmsg-server` container image and its immutable digest,
+- `container-image.txt` and `helm-image-overrides.yaml` for deployment by immutable digest,
 - `checksums.txt` plus `cosign` signature/certificate,
 - `release-manifest.json`,
 - an SBOM archive,
-- GitHub artifact attestations for the binary, manifest, and SBOM archive.
+- GitHub artifact attestations for the binary, manifest, and SBOM archive,
+- a pushed container-image provenance attestation.
+
+Manual or workflow-driven promotion can now consume those release artifacts directly:
+
+```powershell
+.\scripts\release\download_release_bundle.ps1 -ReleaseTag v0.1.0 -DistDir .\dist -Repo your-org/your-repo
+.\scripts\release\verify_release_bundle.ps1 -DistDir .\dist your-org/your-repo
+```
+
+```bash
+./scripts/release/download_release_bundle.sh v0.1.0 ./dist your-org/your-repo
+./scripts/release/verify_release_bundle.sh ./dist your-org/your-repo
+```
+
+GitHub Actions also includes a manual `promote` workflow that downloads the signed release bundle, validates it, and renders Helm using the published `helm-image-overrides.yaml` rather than a manually copied digest.
+That workflow now also captures the currently deployed image digest (when cluster access is available), requires hardened audit-log settings, verifies `/health` and `/v1/capabilities` after rollout, and emits `promoted-chart.yaml`, `promotion-record.json`, `rollback-image.txt`, `rollback-helm-overrides.yaml`, and `post-deploy-verification.json`.
+
+There is also a manual `rollback` workflow that downloads a saved promotion bundle by workflow run ID, verifies the embedded release artifacts, applies the saved `rollback-helm-overrides.yaml`, and emits `rollback-record.json` plus `post-rollback-verification.json`.
+Both `promote` and `rollback` now fail before apply if the target namespace lacks the required Pod Security Admission labels or if the generated app secret/configmap and TLS secret are missing.
 
 Published release bundles can be validated locally with:
 

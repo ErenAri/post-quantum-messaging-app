@@ -201,7 +201,7 @@ Full rules: `observability/prometheus/alert-rules.yml`
 | Advisory audit | `cargo-audit` | `dependency-policy` |
 | License/ban/source audit | `cargo-deny` | `dependency-policy` |
 | SBOM generation | `cargo-cyclonedx` (CycloneDX JSON) | `sbom` |
-| Release provenance | GitHub artifact attestations + signed checksum manifest + `release-manifest.json` | `release` |
+| Release provenance | GitHub artifact attestations + signed checksum manifest + `release-manifest.json` including published GHCR image digest + deployment-ready image reference artifacts + container provenance attestation + promotion path that consumes the signed bundle + rollback mapping artifacts + post-deploy verification evidence + rollback execution evidence + pre-apply cluster contract validation | `release`, `promote`, `rollback` |
 | Deny policy | `deny.toml` | Bans, advisories, licenses, sources |
 
 ---
@@ -218,6 +218,7 @@ Full rules: `observability/prometheus/alert-rules.yml`
 | Pod hardening | CI-enforced `automountServiceAccountToken: false`, `enableServiceLinks: false`, `seccompProfile.type: RuntimeDefault`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]` |
 | Network isolation | CI-enforced `NetworkPolicy` parity across raw K8s and Helm renders |
 | Namespace admission baseline | Raw namespace pins Pod Security Admission `restricted` labels at `v1.34`; Helm target namespaces must match operationally |
+| Immutable deployment image | CI-enforced digest pinning for raw K8s and rendered Helm manifests |
 | Horizontal autoscaling | HPA with CPU/memory targets |
 | Network policy | Ingress annotations for rate limiting |
 

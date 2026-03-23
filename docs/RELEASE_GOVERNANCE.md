@@ -57,7 +57,13 @@ A release candidate is promotable only when all conditions are true:
    - `allowPrivilegeEscalation: false`,
    - `readOnlyRootFilesystem: true`,
    - `capabilities.drop: [ALL]`.
-8. release artifact includes a signed checksum manifest, a machine-readable `release-manifest.json`, and GitHub artifact attestations for the server binary, release manifest, and SBOM archive (`release.yml`).
+8. raw Kubernetes and rendered Helm deployment manifests use digest-pinned server images for hardened modes; mutable `:latest` or tag-only production references are rejected.
+9. release artifact includes a signed checksum manifest, a machine-readable `release-manifest.json` with the published GHCR server image digest, deployment-ready `container-image.txt` and `helm-image-overrides.yaml` references, GitHub artifact attestations for the server binary, release manifest, and SBOM archive, and a pushed container-image provenance attestation (`release.yml`).
+10. release promotion to hardened environments must consume the published release bundle (`download_release_bundle.*`, `verify_release_bundle.*`, or `promote.yml`) rather than manually transcribing image digests.
+11. promotion evidence must include the live pre-promotion deployment image and rollback mapping (`promotion-record.json`, `rollback-image.txt`, `rollback-helm-overrides.yaml`) whenever cluster access is available.
+12. applied promotions must record post-deploy verification evidence (`post-deploy-verification.json`) proving rollout success and the runtime `/health` + `/v1/capabilities` contract for the promoted artifact.
+13. rollback execution must consume the saved promotion bundle (`download_promotion_bundle.*` or `rollback.yml`) and record rollback execution plus verification evidence (`rollback-record.json`, `post-rollback-verification.json`).
+14. promotion and rollback apply paths must fail closed if the target namespace and prerequisite secrets/configmaps do not satisfy the hardened cluster contract (`cluster-contract.json`).
 
 ## 4. Security Exception Policy
 

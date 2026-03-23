@@ -30,6 +30,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- $databaseUrl := trim (toString (default "" .Values.secretEnv.PQMSG_DATABASE_URL)) -}}
 {{- $redisUrl := trim (toString (default "" .Values.secretEnv.PQMSG_RATE_LIMIT_REDIS_URL)) -}}
 {{- $sentryDsn := trim (toString (default "" .Values.secretEnv.PQMSG_SENTRY_DSN)) -}}
+{{- $imageDigest := trim (toString (default "" .Values.image.digest)) -}}
+{{- $imageTag := trim (toString (default "" .Values.image.tag)) -}}
 {{- if or (eq $mode "pilot") (eq $mode "production") -}}
   {{- if eq $postgresStorage "" -}}
     {{- fail "pqmsg-server hardened deployments require env.PQMSG_POSTGRES_STORAGE_ENCRYPTION" -}}
@@ -46,10 +48,33 @@ app.kubernetes.io/instance: {{ .Release.Name }}
   {{- if eq $redisUrl "" -}}
     {{- fail "pqmsg-server hardened deployments require secretEnv.PQMSG_RATE_LIMIT_REDIS_URL" -}}
   {{- end -}}
+  {{- if eq $imageDigest "" -}}
+    {{- fail "pqmsg-server hardened deployments require image.digest pinned by sha256" -}}
+  {{- end -}}
+  {{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $imageDigest) -}}
+    {{- fail "pqmsg-server hardened deployments require image.digest in sha256:<64-hex> format" -}}
+  {{- end -}}
+  {{- if eq (lower $imageTag) "latest" -}}
+    {{- fail "pqmsg-server hardened deployments reject mutable image.tag=latest" -}}
+  {{- end -}}
 {{- end -}}
 {{- if eq $mode "production" -}}
   {{- if eq $sentryDsn "" -}}
     {{- fail "pqmsg-server production deployments require secretEnv.PQMSG_SENTRY_DSN" -}}
   {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "pqmsg-server.imageRef" -}}
+{{- $repo := trim .Values.image.repository -}}
+{{- $digest := trim (toString (default "" .Values.image.digest)) -}}
+{{- $tag := trim (toString (default "" .Values.image.tag)) -}}
+{{- if eq $repo "" -}}
+  {{- fail "pqmsg-server image.repository is required" -}}
+{{- end -}}
+{{- if ne $digest "" -}}
+  {{- printf "%s@%s" $repo $digest -}}
+{{- else -}}
+  {{- printf "%s:%s" $repo $tag -}}
 {{- end -}}
 {{- end -}}

@@ -1,0 +1,267 @@
+name: rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      promotion_run_id:
+        description: Workflow run ID that produced the promotion bundle
+        required: true
+        type: string
+      release_tag:
+        description: Release tag originally promoted
+        required: true
+        type: string
+      environment_name:
+        description: GitHub Environment providing deployment secrets and vars
+        required: true
+        type: environment
+      deployment_mode:
+        description: Hardened deployment mode
+        required: true
+        type: choice
+        options:
+          - pilot
+          - production
+        default: production
+      namespace:
+        description: Kubernetes namespace
+        required: true
+        default: pqmsg
+        type: string
+      release_name:
+        description: Helm release name
+        required: true
+        default: pqmsg-server
+        type: string
+      apply:
+        description: Apply the rollback after validation
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  attestations: read
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PQMSG_DATABASE_URL: ${{ secrets.PQMSG_DATABASE_URL }}
+      PQMSG_RATE_LIMIT_REDIS_URL: ${{ secrets.PQMSG_RATE_LIMIT_REDIS_URL }}
+      PQMSG_SENTRY_DSN: ${{ secrets.PQMSG_SENTRY_DSN }}
+      PQMSG_FCM_SERVER_KEY: ${{ secrets.PQMSG_FCM_SERVER_KEY }}
+      PQMSG_APNS_BEARER_TOKEN: ${{ secrets.PQMSG_APNS_BEARER_TOKEN }}
+      PQMSG_APNS_TOPIC: ${{ secrets.PQMSG_APNS_TOPIC }}
+      PQMSG_POSTGRES_STORAGE_ENCRYPTION: ${{ vars.PQMSG_POSTGRES_STORAGE_ENCRYPTION }}
+      PQMSG_POSTGRES_BACKUP_ENCRYPTION: ${{ vars.PQMSG_POSTGRES_BACKUP_ENCRYPTION }}
+      PQMSG_CORS_ALLOWED_ORIGINS: ${{ vars.PQMSG_CORS_ALLOWED_ORIGINS }}
+      PQMSG_SENTRY_TRACES_SAMPLE_RATE: ${{ vars.PQMSG_SENTRY_TRACES_SAMPLE_RATE }}
+      PQMSG_AUDIT_LOG_PATH: ${{ vars.PQMSG_AUDIT_LOG_PATH }}
+      PQMSG_AUDIT_LOG_MAX_BYTES: ${{ vars.PQMSG_AUDIT_LOG_MAX_BYTES }}
+      PQMSG_AUDIT_LOG_MAX_FILES: ${{ vars.PQMSG_AUDIT_LOG_MAX_FILES }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - uses: azure/setup-kubectl@v4
+      - name: download promotion bundle
+        run: |
+          chmod +x scripts/release/download_promotion_bundle.sh
+          ./scripts/release/download_promotion_bundle.sh \
+            "${{ inputs.promotion_run_id }}" \
+            "${{ inputs.release_tag }}" \
+            "${{ inputs.deployment_mode }}" \
+            dist \
+            "${{ github.repository }}"
+      - name: verify embedded release bundle
+        run: |
+          chmod +x scripts/release/verify_release_bundle.sh
+          ./scripts/release/verify_release_bundle.sh dist "${{ github.repository }}"
+      - name: verify rollback artifacts exist
+        run: |
+          test -s dist/rollback-image.txt
+          test -f dist/rollback-helm-overrides.yaml
+      - name: render rollback values
+        run: |
+          python scripts/release/render_promotion_values.py \
+            --deployment-mode "${{ inputs.deployment_mode }}" \
+            --output /tmp/pqmsg-rollback-values.json
+      - name: render rollback chart
+        run: |
+          helm template "${{ inputs.release_name }}" deploy/helm/pqmsg-server \
+            --namespace "${{ inputs.namespace }}" \
+            -f dist/rollback-helm-overrides.yaml \
+            -f /tmp/pqmsg-rollback-values.json >dist/rollback-chart.yaml
+      - name: configure kubeconfig
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          if [ -n "${KUBECONFIG_B64:-}" ]; then
+            echo "$KUBECONFIG_B64" | base64 -d >/tmp/kubeconfig
+            echo "KUBECONFIG=/tmp/kubeconfig" >> "$GITHUB_ENV"
+          fi
+      - name: capture current deployed image state
+        run: |
+          if [ -n "${KUBECONFIG:-}" ]; then
+            kubectl get namespace "${{ inputs.namespace }}" -o json > /tmp/pqmsg-namespace.json
+            kubectl get secret --namespace "${{ inputs.namespace }}" -o json > /tmp/pqmsg-secrets.json
+            kubectl get configmap --namespace "${{ inputs.namespace }}" -o json > /tmp/pqmsg-configmaps.json
+            kubectl get deployment \
+              --namespace "${{ inputs.namespace }}" \
+              -l "app.kubernetes.io/instance=${{ inputs.release_name }},app.kubernetes.io/name=pqmsg-server" \
+              -o json > /tmp/pqmsg-current-deployments.json
+          else
+            printf '{"items":[]}\n' > /tmp/pqmsg-current-deployments.json
+            printf '{"metadata":{"labels":{}}}\n' > /tmp/pqmsg-namespace.json
+            printf '{"items":[]}\n' > /tmp/pqmsg-secrets.json
+            printf '{"items":[]}\n' > /tmp/pqmsg-configmaps.json
+          fi
+      - name: validate cluster contract
+        if: ${{ inputs.apply }}
+        run: |
+          python scripts/release/validate_cluster_contract.py \
+            --namespace-json /tmp/pqmsg-namespace.json \
+            --secret-list-json /tmp/pqmsg-secrets.json \
+            --configmap-list-json /tmp/pqmsg-configmaps.json \
+            --release-name "${{ inputs.release_name }}" \
+            --tls-secret-name "pqmsg-server-tls" \
+            --output dist/cluster-contract.json
+      - name: validate rendered rollback chart
+        run: |
+          python scripts/security/validate_hardened_manifests.py dist/rollback-chart.yaml
+          python scripts/security/validate_network_policy.py dist/rollback-chart.yaml
+          python scripts/security/validate_image_pinning.py dist/rollback-chart.yaml
+      - name: write rollback record
+        run: |
+          python scripts/release/write_rollback_record.py \
+            --release-manifest dist/release-manifest.json \
+            --promotion-record dist/promotion-record.json \
+            --rollback-image dist/rollback-image.txt \
+            --rendered-chart dist/rollback-chart.yaml \
+            --current-deployments-json /tmp/pqmsg-current-deployments.json \
+            --namespace "${{ inputs.namespace }}" \
+            --release-name "${{ inputs.release_name }}" \
+            --environment-name "${{ inputs.environment_name }}" \
+            --deployment-mode "${{ inputs.deployment_mode }}" \
+            --apply "${{ inputs.apply }}" \
+            --output dist/rollback-record.json
+      - name: write rollback summary
+        env:
+          PQMSG_ROLLBACK_ENVIRONMENT: ${{ inputs.environment_name }}
+          PQMSG_ROLLBACK_MODE: ${{ inputs.deployment_mode }}
+          PQMSG_ROLLBACK_RELEASE_NAME: ${{ inputs.release_name }}
+          PQMSG_ROLLBACK_NAMESPACE: ${{ inputs.namespace }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          record = json.loads(Path("dist/rollback-record.json").read_text(encoding="utf-8"))
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          summary.write_text(
+              "\n".join(
+                  [
+                      "# Rollback Summary",
+                      "",
+                      f"- Release tag: `{record['release_tag']}`",
+                      f"- Deployment mode: `{os.environ['PQMSG_ROLLBACK_MODE']}`",
+                      f"- GitHub Environment: `{os.environ['PQMSG_ROLLBACK_ENVIRONMENT']}`",
+                      f"- Helm release: `{os.environ['PQMSG_ROLLBACK_RELEASE_NAME']}`",
+                      f"- Namespace: `{os.environ['PQMSG_ROLLBACK_NAMESPACE']}`",
+                      f"- Rollback target image: `{record['rollback_target_image']}`",
+                      "",
+                      "The rendered rollback chart consumed `dist/rollback-helm-overrides.yaml` from the saved promotion bundle.",
+                      "Cluster contract validation is required before apply and is written to `dist/cluster-contract.json`.",
+                  ]
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: apply rollback
+        if: ${{ inputs.apply }}
+        run: |
+          test -n "${KUBECONFIG:-}"
+          helm upgrade --install "${{ inputs.release_name }}" deploy/helm/pqmsg-server \
+            --namespace "${{ inputs.namespace }}" \
+            -f dist/rollback-helm-overrides.yaml \
+            -f /tmp/pqmsg-rollback-values.json
+      - name: wait for rollback rollout
+        if: ${{ inputs.apply }}
+        run: |
+          kubectl rollout status "deployment/${{ inputs.release_name }}-pqmsg-server" \
+            --namespace "${{ inputs.namespace }}" \
+            --timeout=180s
+      - name: capture post-rollback state
+        if: ${{ inputs.apply }}
+        run: |
+          kubectl get deployment \
+            --namespace "${{ inputs.namespace }}" \
+            -l "app.kubernetes.io/instance=${{ inputs.release_name }},app.kubernetes.io/name=pqmsg-server" \
+            -o json > dist/post-rollback-deployments.json
+          kubectl get pods \
+            --namespace "${{ inputs.namespace }}" \
+            -l "app.kubernetes.io/instance=${{ inputs.release_name }},app.kubernetes.io/name=pqmsg-server" \
+            -o json > dist/post-rollback-pods.json
+      - name: probe rolled-back runtime contract
+        if: ${{ inputs.apply }}
+        run: |
+          kubectl port-forward \
+            --namespace "${{ inputs.namespace }}" \
+            "service/${{ inputs.release_name }}-pqmsg-server" \
+            18443:443 >/tmp/pqmsg-rollback-port-forward.log 2>&1 &
+          pf_pid=$!
+          cleanup() {
+            kill "$pf_pid" >/dev/null 2>&1 || true
+            wait "$pf_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for _ in $(seq 1 30); do
+            if curl -kfsS https://127.0.0.1:18443/health -o dist/post-rollback-health.json; then
+              break
+            fi
+            sleep 2
+          done
+          curl -kfsS https://127.0.0.1:18443/v1/capabilities -o dist/post-rollback-capabilities.json
+          cp /tmp/pqmsg-rollback-port-forward.log dist/post-rollback-port-forward.log || true
+      - name: verify rolled-back runtime contract
+        if: ${{ inputs.apply }}
+        run: |
+          python scripts/release/write_post_deploy_verification.py \
+            --health dist/post-rollback-health.json \
+            --capabilities dist/post-rollback-capabilities.json \
+            --deployments dist/post-rollback-deployments.json \
+            --pods dist/post-rollback-pods.json \
+            --promotion-record dist/rollback-record.json \
+            --expected-deployment-mode "${{ inputs.deployment_mode }}" \
+            --expected-security-profile "high_assurance" \
+            --output dist/post-rollback-verification.json
+      - name: append rollback verification summary
+        if: ${{ inputs.apply }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          verification = json.loads(Path("dist/post-rollback-verification.json").read_text(encoding="utf-8"))
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          failed = [check["name"] for check in verification["checks"] if not check["passed"]]
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write("\n## Post-Rollback Verification\n\n")
+              handle.write(f"- Passed: `{verification['passed']}`\n")
+              if failed:
+                  handle.write(f"- Failed checks: `{', '.join(failed)}`\n")
+              else:
+                  handle.write("- Failed checks: `none`\n")
+          PY
+      - name: upload rollback bundle
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollback-bundle-${{ inputs.release_tag }}-${{ inputs.deployment_mode }}
+          path: |
+            dist/*

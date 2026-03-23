@@ -18,6 +18,8 @@ required_files=(
   "pqmsg-server-linux-x86_64"
   "sbom.tar.gz"
   "release-manifest.json"
+  "container-image.txt"
+  "helm-image-overrides.yaml"
   "checksums.txt"
 )
 
@@ -29,6 +31,39 @@ for file in "${required_files[@]}"; do
 done
 
 (cd "$dist_dir" && sha256sum --check checksums.txt)
+
+python - "$dist_dir/release-manifest.json" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+images = manifest.get("container_images") or []
+if not images:
+    raise SystemExit("release manifest does not contain any container image records")
+for image in images:
+    name = image.get("name", "")
+    digest = image.get("digest", "")
+    immutable_ref = image.get("immutable_ref", "")
+    if not name:
+        raise SystemExit("release manifest container image is missing name")
+    if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):
+        raise SystemExit(f"release manifest container image has invalid digest: {digest}")
+    if immutable_ref != f"{name}@{digest}":
+        raise SystemExit(f"release manifest container image has invalid immutable_ref: {immutable_ref}")
+
+container_ref = Path(sys.argv[2]).read_text(encoding="utf-8").strip()
+if container_ref != images[0]["immutable_ref"]:
+    raise SystemExit("container-image.txt does not match release manifest immutable_ref")
+
+helm_overrides = Path(sys.argv[3]).read_text(encoding="utf-8")
+if f"repository: {images[0]['name']}" not in helm_overrides:
+    raise SystemExit("helm-image-overrides.yaml does not contain the manifest image repository")
+if f"digest: {images[0]['digest']}" not in helm_overrides:
+    raise SystemExit("helm-image-overrides.yaml does not contain the manifest image digest")
+PY
+"$dist_dir/container-image.txt" "$dist_dir/helm-image-overrides.yaml"
 
 if [[ -n "$repo" ]]; then
   if ! command -v gh >/dev/null 2>&1; then

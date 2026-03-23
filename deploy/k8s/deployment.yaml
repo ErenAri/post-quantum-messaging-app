@@ -22,7 +22,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: pqmsg-server
-          image: ghcr.io/your-org/pqmsg-server:0.1.0
+          image: ghcr.io/your-org/pqmsg-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080

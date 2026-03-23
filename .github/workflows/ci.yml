@@ -163,6 +163,11 @@ jobs:
           python scripts/security/validate_network_policy.py \
             deploy/k8s/networkpolicy.yaml \
             /tmp/pqmsg-server-chart.yaml
+      - name: validate image pinning
+        run: |
+          python scripts/security/validate_image_pinning.py \
+            deploy/k8s/deployment.yaml \
+            /tmp/pqmsg-server-chart.yaml
       - name: validate raw namespace pod-security labels
         run: |
           python scripts/security/validate_namespace_policy.py \
