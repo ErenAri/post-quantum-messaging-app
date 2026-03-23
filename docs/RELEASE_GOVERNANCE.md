@@ -70,6 +70,10 @@ A release candidate is promotable only when all conditions are true:
 18. failed promotion and rollback runs must still emit an incident-ready handoff record summarizing failed checks, suspicious drift, rollout state, and missing evidence files (`promotion-failure-handoff.json` / `rollback-failure-handoff.json`).
 19. the incident handoff record is itself a blocking gate for applied promotions and rollbacks; any required incident or suspicious drift keeps the workflow red even if Helm apply completed.
 20. when `PQMSG_ALERTMANAGER_API_URL` is configured for the target GitHub Environment, applied promotion and rollback failures must also emit and submit Alertmanager-compatible incident payloads derived from the handoff record.
+21. governance-failure escalation must leave delivery evidence in the bundle (`promotion-incident-submission.json` / `rollback-incident-submission.json`) so reviewers can distinguish skipped escalation from Alertmanager delivery failure.
+22. when `PQMSG_INCIDENT_ISSUE_REPO` is configured for the target GitHub Environment, the same incident must be published into GitHub Issues, labeled with the shared `pqmsg-*` incident taxonomy, and leave a publication record in the bundle (`promotion-incident-issue-publication.json` / `rollback-incident-issue-publication.json`).
+23. successful applied remediation runs must attempt to resolve older open incident issues in the same deployment scope, transition the issue status label from open to resolved, and leave a resolution record in the bundle (`promotion-incident-issue-resolution.json` / `rollback-incident-issue-resolution.json`).
+24. every uploaded promotion/rollback bundle must include a SHA-256 inventory of its emitted evidence files (`promotion-bundle-manifest.json` / `rollback-bundle-manifest.json`).
 
 ## 4. Security Exception Policy
 

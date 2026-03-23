@@ -173,6 +173,17 @@ jobs:
           python scripts/security/validate_namespace_policy.py \
             deploy/k8s/namespace.yaml
 
+  release-governance-helper-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: smoke release governance helpers
+        run: |
+          python scripts/release/smoke_release_governance_helpers.py
+
   benchmarks:
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest

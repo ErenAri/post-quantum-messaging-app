@@ -38,6 +38,7 @@ on:
 permissions:
   contents: read
   attestations: read
+  issues: write
 
 jobs:
   promote:
@@ -59,6 +60,7 @@ jobs:
       PQMSG_AUDIT_LOG_MAX_BYTES: ${{ vars.PQMSG_AUDIT_LOG_MAX_BYTES }}
       PQMSG_AUDIT_LOG_MAX_FILES: ${{ vars.PQMSG_AUDIT_LOG_MAX_FILES }}
       PQMSG_ALERTMANAGER_API_URL: ${{ secrets.PQMSG_ALERTMANAGER_API_URL }}
+      PQMSG_INCIDENT_ISSUE_REPO: ${{ vars.PQMSG_INCIDENT_ISSUE_REPO }}
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -368,23 +370,14 @@ jobs:
             --output-json dist/promotion-incident-alert.json \
             --output-md dist/promotion-incident-alert.md
       - name: submit promotion incident alert
-        if: ${{ always() && inputs.apply && env.PQMSG_ALERTMANAGER_API_URL != '' }}
+        if: ${{ always() && inputs.apply }}
         run: |
-          incident_required="$(python - <<'PY'
-          import json
-          from pathlib import Path
-          record = json.loads(Path("dist/promotion-failure-handoff.json").read_text(encoding="utf-8"))
-          print("true" if record.get("incident_required") else "false")
-          PY
-          )"
-          if [ "$incident_required" != "true" ]; then
-            echo "No incident required; skipping Alertmanager submission."
-            exit 0
-          fi
-          curl -fsS \
-            -H "content-type: application/json" \
-            -d @dist/promotion-incident-alert.json \
-            "${PQMSG_ALERTMANAGER_API_URL%/}/api/v2/alerts"
+          python scripts/release/submit_incident_alert.py \
+            --operation promote \
+            --failure-handoff dist/promotion-failure-handoff.json \
+            --payload-json dist/promotion-incident-alert.json \
+            --alertmanager-api-url "${PQMSG_ALERTMANAGER_API_URL}" \
+            --output dist/promotion-incident-submission.json
       - name: append promotion incident alert summary
         if: ${{ always() && inputs.apply }}
         run: |
@@ -400,11 +393,101 @@ jobs:
           if not record.get("incident_required"):
               raise SystemExit(0)
 
+          submission_path = Path("dist/promotion-incident-submission.json")
+          submission = (
+              json.loads(submission_path.read_text(encoding="utf-8"))
+              if submission_path.is_file()
+              else None
+          )
           summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
           with summary.open("a", encoding="utf-8") as handle:
               handle.write(f"- Incident alert payload: `dist/promotion-incident-alert.json`\n")
               handle.write(f"- Incident note: `dist/promotion-incident-alert.md`\n")
+              handle.write(f"- Incident submission record: `dist/promotion-incident-submission.json`\n")
               handle.write(f"- Alertmanager configured: `{bool(os.environ.get('PQMSG_ALERTMANAGER_API_URL'))}`\n")
+              if submission is not None:
+                  handle.write(f"- Submission outcome: `{submission['outcome']}`\n")
+                  handle.write(f"- Submission attempted: `{submission['attempted']}`\n")
+                  handle.write(f"- Submission delivered: `{submission['submitted']}`\n")
+                  handle.write(f"- Submission status code: `{submission['status_code']}`\n")
+          PY
+      - name: publish promotion incident issue
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python scripts/release/publish_incident_issue.py \
+            --failure-handoff dist/promotion-failure-handoff.json \
+            --submission-record dist/promotion-incident-submission.json \
+            --repo "${PQMSG_INCIDENT_ISSUE_REPO}" \
+            --github-api-url "${{ github.api_url }}" \
+            --github-repository "${{ github.repository }}" \
+            --github-run-id "${{ github.run_id }}" \
+            --github-workflow "${{ github.workflow }}" \
+            --output dist/promotion-incident-issue-publication.json
+      - name: append promotion incident issue summary
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          handoff_path = Path("dist/promotion-failure-handoff.json")
+          if not handoff_path.is_file():
+              raise SystemExit(0)
+          handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+          if not handoff.get("incident_required"):
+              raise SystemExit(0)
+
+          issue_path = Path("dist/promotion-incident-issue-publication.json")
+          issue_record = (
+              json.loads(issue_path.read_text(encoding="utf-8"))
+              if issue_path.is_file()
+              else None
+          )
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write(f"- Incident issue publication record: `dist/promotion-incident-issue-publication.json`\n")
+              handle.write(f"- Incident issue repo configured: `{bool(os.environ.get('PQMSG_INCIDENT_ISSUE_REPO'))}`\n")
+              if issue_record is not None:
+                  handle.write(f"- Issue publication outcome: `{issue_record['outcome']}`\n")
+                  handle.write(f"- Issue publication attempted: `{issue_record['attempted']}`\n")
+                  handle.write(f"- Issue published: `{issue_record['published']}`\n")
+                  handle.write(f"- Issue URL: `{issue_record['issue_url']}`\n")
+                  handle.write(f"- Issue labels: `{', '.join(issue_record.get('labels', []))}`\n")
+          PY
+      - name: resolve prior promotion incident issues
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python scripts/release/resolve_incident_issue.py \
+            --failure-handoff dist/promotion-failure-handoff.json \
+            --repo "${PQMSG_INCIDENT_ISSUE_REPO}" \
+            --github-api-url "${{ github.api_url }}" \
+            --github-repository "${{ github.repository }}" \
+            --github-run-id "${{ github.run_id }}" \
+            --github-workflow "${{ github.workflow }}" \
+            --output dist/promotion-incident-issue-resolution.json
+      - name: append promotion incident issue resolution summary
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("dist/promotion-incident-issue-resolution.json")
+          if not path.is_file():
+              raise SystemExit(0)
+          record = json.loads(path.read_text(encoding="utf-8"))
+          if record.get("incident_required"):
+              raise SystemExit(0)
+
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write(f"- Incident issue resolution record: `dist/promotion-incident-issue-resolution.json`\n")
+              handle.write(f"- Issue resolution outcome: `{record['outcome']}`\n")
+              handle.write(f"- Issue resolution attempted: `{record['attempted']}`\n")
+              handle.write(f"- Incident issues resolved: `{record['resolved']}`\n")
+              handle.write(f"- Resolution labels applied: `{', '.join(record.get('resolved_labels', []))}`\n")
           PY
       - name: enforce promotion incident gate
         if: ${{ always() && inputs.apply }}
@@ -419,6 +502,15 @@ jobs:
           record = json.loads(path.read_text(encoding="utf-8"))
           raise SystemExit(1 if record.get("incident_required") else 0)
           PY
+      - name: write promotion bundle manifest
+        if: ${{ always() }}
+        run: |
+          python scripts/release/write_bundle_manifest.py \
+            --bundle-kind promotion \
+            --release-tag "${{ inputs.release_tag }}" \
+            --deployment-mode "${{ inputs.deployment_mode }}" \
+            --dist-dir dist \
+            --output dist/promotion-bundle-manifest.json
       - name: upload promotion bundle
         if: ${{ always() }}
         uses: actions/upload-artifact@v4

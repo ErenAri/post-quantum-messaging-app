@@ -73,6 +73,7 @@ Production deployment must bind SMTP settings and receiver mailbox targets:
 Optional deployment-governance escalation input:
 
 1. `PQMSG_ALERTMANAGER_API_URL` for GitHub promotion/rollback workflows that should submit incident alerts directly to Alertmanager when rollout governance fails.
+2. `PQMSG_INCIDENT_ISSUE_REPO` for GitHub promotion/rollback workflows that should publish the same incident into a durable GitHub issue record (current repo or dedicated incident repo).
 
 ## 4. Incident Response Model
 
@@ -109,6 +110,9 @@ Run an escalation drill at least once per release cycle:
 4. attach drill evidence (timestamp + captured output) to release record.
 
 Promotion/rollback failure governance now also emits structured incident handoff records and, when `PQMSG_ALERTMANAGER_API_URL` is configured in the GitHub Environment, submits Alertmanager-compatible incident alerts automatically from the workflow failure path.
+The resulting bundle now includes a submission record showing whether the Alertmanager handoff was skipped, attempted, delivered, or failed, so on-call can distinguish governance failure from escalation-delivery failure.
+When `PQMSG_INCIDENT_ISSUE_REPO` is configured, the workflow also creates or updates a GitHub issue for the incident, records that publication outcome in the evidence bundle, and applies the shared `pqmsg-*` incident labels so on-call can filter by environment, deployment mode, operation, and open/resolved state.
+Successful remediation runs now use the same deployment scope to comment on and close older open incident issues, so the issue tracker reflects both incident creation and incident resolution.
 
 ## 5. Backup and Recovery
 

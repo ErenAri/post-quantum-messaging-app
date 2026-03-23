@@ -324,6 +324,9 @@ After apply, both workflows also validate the actual live `Deployment` and `Netw
 Whether failure happens before apply, during rollout, or during post-apply verification, both workflows now emit an incident-ready handoff record (`promotion-failure-handoff.json` / `rollback-failure-handoff.json`) that summarizes failed checks, suspicious drift, rollout state, and missing evidence files.
 That handoff record is also the final workflow gate: suspicious drift or any failed verification keeps the run red even if the raw Helm apply itself completed.
 If the GitHub Environment also provides `PQMSG_ALERTMANAGER_API_URL`, both workflows render Alertmanager-compatible incident payloads (`promotion-incident-alert.json` / `rollback-incident-alert.json`) and submit them automatically when the handoff record requires an incident.
+Both workflows now also emit delivery evidence (`promotion-incident-submission.json` / `rollback-incident-submission.json`) so the bundle shows whether escalation was skipped, submitted successfully, or failed at the Alertmanager handoff step.
+If the GitHub Environment also provides `PQMSG_INCIDENT_ISSUE_REPO`, both workflows publish the same incident into GitHub Issues as a durable system of record, emit `promotion-incident-issue-publication.json` / `rollback-incident-issue-publication.json`, and apply a stable issue-label taxonomy (`pqmsg-incident`, scope, operation, and open/resolved status labels) so operators can filter incidents reliably.
+Each uploaded promotion/rollback bundle now also includes `promotion-bundle-manifest.json` or `rollback-bundle-manifest.json`, a SHA-256 manifest of the evidence files that were actually uploaded.
 
 Published release bundles can be validated locally with:
 

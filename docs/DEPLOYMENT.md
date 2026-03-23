@@ -133,6 +133,10 @@ They also fetch the live applied `Deployment` and `NetworkPolicy` objects after 
 Both workflows now also emit an incident-ready failure handoff record (`promotion-failure-handoff.json` or `rollback-failure-handoff.json`) under `always()`, so failed cluster-contract checks, rollout failures, and post-apply verification failures still leave a structured operator handoff in the uploaded bundle.
 That handoff record is also enforced as the final workflow gate: if it reports an incident is required, the workflow exits non-zero even when Helm itself completed.
 If the target GitHub Environment provides `PQMSG_ALERTMANAGER_API_URL`, both workflows also render Alertmanager v2 payloads (`promotion-incident-alert.json` / `rollback-incident-alert.json`) plus Markdown incident notes and submit them automatically when the handoff record requires escalation.
+That same path now writes delivery evidence (`promotion-incident-submission.json` / `rollback-incident-submission.json`) recording whether submission was skipped, attempted, delivered, or rejected by Alertmanager.
+If the target GitHub Environment also provides `PQMSG_INCIDENT_ISSUE_REPO`, the workflows publish the incident into that GitHub repository via the Issues API and write `promotion-incident-issue-publication.json` / `rollback-incident-issue-publication.json`.
+Those issue records now include explicit evidence pointers back to the workflow run and bundle artifact names, automatically create/apply the hardened label taxonomy (`pqmsg-incident`, environment, deployment mode, operation, and status labels), and successful applied promotion/rollback runs attempt to close older open incident issues for the same environment/mode/namespace/release scope, recording the result in `promotion-incident-issue-resolution.json` / `rollback-incident-issue-resolution.json`.
+Before upload, each workflow also writes `promotion-bundle-manifest.json` or `rollback-bundle-manifest.json`, a SHA-256 digest inventory of the bundle contents actually emitted for operators and auditors.
 
 Override example:
 
