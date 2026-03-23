@@ -141,7 +141,9 @@ pub fn wasm_encrypt(key: &[u8], plaintext: &[u8], ad: &[u8]) -> Result<Vec<u8>, 
     if key.len() != 32 {
         return Err(JsValue::from_str("key must be 32 bytes"));
     }
-    let key_arr: [u8; 32] = key.try_into().unwrap();
+    let key_arr: [u8; 32] = key
+        .try_into()
+        .map_err(|_| JsValue::from_str("key must be exactly 32 bytes"))?;
     let mut nonce = [0u8; 12];
     OsRng.fill_bytes(&mut nonce);
     let envelope = aead::encrypt(&key_arr, plaintext, ad, nonce)
@@ -166,7 +168,9 @@ pub fn wasm_decrypt(
     if ciphertext_with_nonce.len() < 12 {
         return Err(JsValue::from_str("ciphertext too short"));
     }
-    let key_arr: [u8; 32] = key.try_into().unwrap();
+    let key_arr: [u8; 32] = key
+        .try_into()
+        .map_err(|_| JsValue::from_str("key must be exactly 32 bytes"))?;
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&ciphertext_with_nonce[..12]);
     let ciphertext = ciphertext_with_nonce[12..].to_vec();
@@ -187,7 +191,9 @@ pub fn wasm_hkdf_sha256(
     out_len: usize,
 ) -> Result<Vec<u8>, JsValue> {
     let salt_opt = if salt.is_empty() { None } else { Some(salt) };
-    kdf::hkdf_sha256(ikm, salt_opt, info, out_len).map_err(|e| JsValue::from_str(&e.to_string()))
+    kdf::hkdf_sha256(ikm, salt_opt, info, out_len)
+        .map(|z| z.to_vec())
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// X25519 Diffie-Hellman key agreement.
@@ -196,8 +202,16 @@ pub fn wasm_x25519_dh(secret_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>, J
     if secret_key.len() != 32 || public_key.len() != 32 {
         return Err(JsValue::from_str("keys must be 32 bytes"));
     }
-    let sk = dh::DhSecretKey(secret_key.try_into().unwrap());
-    let pk = dh::DhPublicKey(public_key.try_into().unwrap());
+    let sk = dh::DhSecretKey(
+        secret_key
+            .try_into()
+            .map_err(|_| JsValue::from_str("secret_key must be exactly 32 bytes"))?,
+    );
+    let pk = dh::DhPublicKey(
+        public_key
+            .try_into()
+            .map_err(|_| JsValue::from_str("public_key must be exactly 32 bytes"))?,
+    );
     Ok(dh::diffie_hellman(&sk, &pk).to_vec())
 }
 

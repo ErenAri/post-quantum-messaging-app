@@ -4,6 +4,11 @@ use std::collections::{HashMap, HashSet};
 
 pub const CRITICAL_BIT: u16 = 0x8000;
 
+/// Maximum allowed size for a single TLV record value (64 KiB minus header).
+/// This is the natural limit given the u16 length field, but we enforce it
+/// explicitly to prevent allocation of oversized buffers from malformed input.
+pub const MAX_TLV_VALUE_SIZE: usize = u16::MAX as usize;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TlvRecord {
     pub ty: u16,

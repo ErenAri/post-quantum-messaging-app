@@ -381,6 +381,7 @@ pub(crate) async fn relay_message(
 
     let now = Utc::now().to_rfc3339();
     let encoded_blob = B64.encode(&blob);
+    let sender_user_id = request.sender_user_id.clone();
     let mut tx = state.pool.begin().await?;
     let mut deliveries = Vec::with_capacity(recipient_devices.len());
     for recipient_device_id in &recipient_devices {
@@ -397,7 +398,7 @@ pub(crate) async fn relay_message(
         )
         .bind(&recipient_user_id)
         .bind(recipient_device_id)
-        .bind(&request.sender_user_id)
+        .bind(&sender_user_id)
         .bind(&request.device_id)
         .bind(&blob)
         .bind(&now)
@@ -407,7 +408,7 @@ pub(crate) async fn relay_message(
             recipient_device_id.clone(),
             InboxItem {
                 message_id,
-                sender_user_id: request.sender_user_id.clone(),
+                sender_user_id: sender_user_id.clone(),
                 message_bytes_base64: encoded_blob.clone(),
                 received_at: now.clone(),
             },

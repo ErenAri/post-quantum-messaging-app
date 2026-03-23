@@ -370,11 +370,21 @@ pub(crate) async fn relay_group_message(
         group_relay_auth_message(&auth, &group_id, &request.sender_user_id, &auth_recipients)?;
     let inbox_compat_auth_message = inbox_auth_message(&auth, &auth.user_id, 0)?;
     verify_request_auth_any(&state, &auth, &[&auth_message, &inbox_compat_auth_message]).await?;
-    if !is_active_group_member(state.pool(), &group_id, &request.sender_user_id).await? {
+    // Batch-load all active group members in a single query instead of
+    // checking membership per-recipient (N+1 avoidance).
+    let all_member_devices = load_active_group_member_devices(state.pool(), &group_id).await?;
+    if all_member_devices.is_empty() {
+        return Err(AppError::not_found("group not found"));
+    }
+    let active_member_ids: BTreeSet<&str> = all_member_devices
+        .iter()
+        .map(|(user_id, _)| user_id.as_str())
+        .collect();
+    if !active_member_ids.contains(request.sender_user_id.as_str()) {
         return Err(AppError::not_found("group not found"));
     }
     for (recipient_user_id, _, _) in &recipient_blobs {
-        if !is_active_group_member(state.pool(), &group_id, recipient_user_id).await? {
+        if !active_member_ids.contains(recipient_user_id.as_str()) {
             return Err(AppError::not_found("group recipient not found"));
         }
     }
@@ -394,10 +404,6 @@ pub(crate) async fn relay_group_message(
         return Err(AppError::conflict("duplicate group relay payload"));
     }
 
-    let all_member_devices = load_active_group_member_devices(state.pool(), &group_id).await?;
-    if all_member_devices.is_empty() {
-        return Err(AppError::not_found("group not found"));
-    }
     let mut active_devices_by_user: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (recipient_user_id, recipient_device_id) in all_member_devices {
         if recipient_user_id == request.sender_user_id && recipient_device_id == request.device_id {

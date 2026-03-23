@@ -2,7 +2,7 @@ use crate::dh::{diffie_hellman, DhPublicKey, DhSecretKey};
 use crate::kdf::hkdf_sha256;
 use crate::CoreError;
 use std::collections::{HashMap, VecDeque};
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub mod pq;
 
@@ -48,7 +48,7 @@ impl ChainState {
     }
 
     pub fn next_message_key(&mut self) -> Result<(u32, [u8; 32]), CoreError> {
-        let okm = Zeroizing::new(hkdf_sha256(&self.chain_key, None, INFO_CHAIN_STEP, 64)?);
+        let okm = hkdf_sha256(&self.chain_key, None, INFO_CHAIN_STEP, 64)?;
 
         let mut message_key = [0u8; 32];
         message_key.copy_from_slice(&okm[..32]);
@@ -167,7 +167,7 @@ pub fn kdf_root_step(
     dh_output: &[u8; 32],
 ) -> Result<RootStepOutput, CoreError> {
     // Expand to 96 bytes: root_key(32) || chain_key(32) || header_key(32)
-    let okm = Zeroizing::new(hkdf_sha256(dh_output, Some(root_key), INFO_ROOT_STEP, 96)?);
+    let okm = hkdf_sha256(dh_output, Some(root_key), INFO_ROOT_STEP, 96)?;
     let mut next_root = [0u8; 32];
     next_root.copy_from_slice(&okm[..32]);
     let mut chain_key = [0u8; 32];

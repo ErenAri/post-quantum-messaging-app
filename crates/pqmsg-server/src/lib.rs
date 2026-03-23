@@ -150,6 +150,9 @@ pub(crate) const AUTH_TAG_TYPING_STATE_FLAG: u16 = critical_type(0x322B);
 pub(crate) const AUTH_TAG_GROUP_RECIPIENTS_HASH: u16 = critical_type(0x322C);
 pub(crate) const AUTH_TAG_PROFILE_USERNAME_HASH: u16 = critical_type(0x322D);
 pub(crate) const AUTH_TAG_PROFILE_USERNAME_LOOKUP_ENABLED: u16 = critical_type(0x322E);
+/// Development-only sender certificate signing key. Only available in debug
+/// builds to prevent accidental use in production release binaries.
+#[cfg(debug_assertions)]
 const DEVELOPMENT_SENDER_CERT_SIGNING_KEY_BYTES: [u8; 32] = [0x53; 32];
 pub(crate) const AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH: u16 = critical_type(0x3230);
 pub(crate) const AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH: u16 = critical_type(0x3231);
@@ -681,8 +684,21 @@ impl AppState {
     }
 }
 
+#[cfg(debug_assertions)]
 fn default_sender_certificate_signing_key() -> SigningKey {
+    tracing::warn!(
+        "using DEVELOPMENT sender certificate signing key — \
+         set PQMSG_SENDER_CERT_SIGNING_KEY for production"
+    );
     SigningKey::from_bytes(&DEVELOPMENT_SENDER_CERT_SIGNING_KEY_BYTES)
+}
+
+#[cfg(not(debug_assertions))]
+fn default_sender_certificate_signing_key() -> SigningKey {
+    panic!(
+        "PQMSG_SENDER_CERT_SIGNING_KEY must be configured; \
+         default development key is not available in release builds"
+    );
 }
 
 #[derive(Clone)]
