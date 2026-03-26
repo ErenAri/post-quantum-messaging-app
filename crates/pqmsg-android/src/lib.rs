@@ -3,6 +3,7 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::{DateTime, Utc};
+use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -324,6 +325,10 @@ struct ContactDiscoveryManifestPayloadRecord {
     service: String,
     protocol_version: u8,
     attestation_mode: String,
+    attestation_verifier: Option<String>,
+    enclave_measurement_hex: Option<String>,
+    attestation_document_format: Option<String>,
+    attestation_document_sha256: Option<String>,
     ticket_format: String,
     ticket_issuer_ed25519_pub: String,
     ticket_max_ttl_seconds: i64,
@@ -331,6 +336,7 @@ struct ContactDiscoveryManifestPayloadRecord {
     privacy_mode: String,
     match_result_format: String,
     oprf_suite: String,
+    evaluation_proof_mode: String,
     oprf_public_key_ristretto255: String,
     signed_at: String,
     expires_at: String,
@@ -348,6 +354,21 @@ struct ContactDiscoveryManifestRecord {
 struct ContactDiscoveryBlindRequestRecord {
     blinded_elements_base64: Vec<String>,
     blinding_scalars_base64: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContactDiscoveryEvaluateProofRecord {
+    challenge_scalar_base64: String,
+    response_scalar_base64: String,
+    commitment_base_base64: String,
+    commitment_blinded_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContactDiscoveryEvaluateResponseRecord {
+    evaluation_proof_mode: String,
+    evaluated_elements_base64: Vec<String>,
+    dleq_proofs: Vec<ContactDiscoveryEvaluateProofRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
@@ -1358,6 +1379,9 @@ pub fn verify_contact_discovery_manifest(
     manifest_json: String,
     expected_ticket_issuer_ed25519_pub: String,
     expected_manifest_issuer_ed25519_pub: String,
+    expected_attestation_verifier: String,
+    expected_enclave_measurement_hex: String,
+    expected_attestation_document_sha256: String,
 ) -> Result<bool, PqmsgAndroidError> {
     let manifest: ContactDiscoveryManifestRecord = serde_json::from_str(&manifest_json)?;
     if manifest.payload.ticket_issuer_ed25519_pub != expected_ticket_issuer_ed25519_pub {
@@ -1383,6 +1407,42 @@ pub fn verify_contact_discovery_manifest(
     }
     if expires_at <= Utc::now() {
         return Err(operation_failed("contact discovery manifest expired"));
+    }
+    let expected_attestation_verifier = expected_attestation_verifier.trim();
+    if !expected_attestation_verifier.is_empty()
+        && manifest.payload.attestation_verifier.as_deref() != Some(expected_attestation_verifier)
+    {
+        return Err(operation_failed(
+            "contact discovery manifest attestation verifier mismatch",
+        ));
+    }
+    let expected_enclave_measurement_hex = expected_enclave_measurement_hex.trim();
+    if !expected_enclave_measurement_hex.is_empty()
+        && manifest.payload.enclave_measurement_hex.as_deref()
+            != Some(expected_enclave_measurement_hex)
+    {
+        return Err(operation_failed(
+            "contact discovery manifest enclave measurement mismatch",
+        ));
+    }
+    let expected_attestation_document_sha256 = expected_attestation_document_sha256.trim();
+    if !expected_attestation_document_sha256.is_empty()
+        && manifest.payload.attestation_document_sha256.as_deref()
+            != Some(expected_attestation_document_sha256)
+    {
+        return Err(operation_failed(
+            "contact discovery manifest attestation document hash mismatch",
+        ));
+    }
+    if manifest.payload.attestation_mode != "unattested_development"
+        && (manifest.payload.attestation_verifier.is_none()
+            || manifest.payload.enclave_measurement_hex.is_none()
+            || manifest.payload.attestation_document_format.is_none()
+            || manifest.payload.attestation_document_sha256.is_none())
+    {
+        return Err(operation_failed(
+            "contact discovery manifest attestation contract is incomplete",
+        ));
     }
     let payload_bytes = serde_json::to_vec(&manifest.payload)
         .map_err(|_| operation_failed("serialize contact discovery manifest payload"))?;
@@ -1451,6 +1511,27 @@ fn finalize_contact_discovery_token_hex(point: &RistrettoPoint) -> String {
         let _ = write!(&mut hex, "{byte:02x}");
     }
     hex
+}
+
+fn contact_discovery_evaluation_challenge(
+    public_key: &RistrettoPoint,
+    blinded_point: &RistrettoPoint,
+    evaluated_point: &RistrettoPoint,
+    commitment_base: &RistrettoPoint,
+    commitment_blinded: &RistrettoPoint,
+) -> Scalar {
+    let digest = Sha256::new()
+        .chain_update(b"pqmsg-discovery-dleq-proof-v1")
+        .chain_update(RISTRETTO_BASEPOINT_POINT.compress().to_bytes())
+        .chain_update(public_key.compress().to_bytes())
+        .chain_update(blinded_point.compress().to_bytes())
+        .chain_update(evaluated_point.compress().to_bytes())
+        .chain_update(commitment_base.compress().to_bytes())
+        .chain_update(commitment_blinded.compress().to_bytes())
+        .finalize();
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&digest);
+    Scalar::from_bytes_mod_order(bytes)
 }
 
 #[uniffi::export]
@@ -1527,6 +1608,104 @@ pub fn contact_discovery_finalize_tokens(
             Ok(finalize_contact_discovery_token_hex(&unblinded))
         })
         .collect::<Result<Vec<_>, PqmsgAndroidError>>()?;
+    serde_json::to_string_pretty(&tokens).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn contact_discovery_verify_and_finalize_tokens(
+    blinded_elements_json: String,
+    blinding_scalars_json: String,
+    evaluated_response_json: String,
+    expected_oprf_public_key_ristretto255_b64: String,
+) -> Result<String, PqmsgAndroidError> {
+    let blinded_elements_base64: Vec<String> = serde_json::from_str(&blinded_elements_json)?;
+    let blinding_scalars_base64: Vec<String> = serde_json::from_str(&blinding_scalars_json)?;
+    let response: ContactDiscoveryEvaluateResponseRecord =
+        serde_json::from_str(&evaluated_response_json)?;
+    if response.evaluation_proof_mode != "dleq_per_element_preview" {
+        return Err(invalid_input(
+            "unsupported contact discovery evaluation proof mode",
+        ));
+    }
+    if blinded_elements_base64.len() != response.evaluated_elements_base64.len()
+        || blinded_elements_base64.len() != response.dleq_proofs.len()
+        || blinded_elements_base64.len() != blinding_scalars_base64.len()
+    {
+        return Err(invalid_input(
+            "contact discovery evaluation proof count mismatch",
+        ));
+    }
+    let public_key = CompressedRistretto(decode_b64_32(
+        "contact_discovery_oprf_public_key_ristretto255",
+        &expected_oprf_public_key_ristretto255_b64,
+    )?)
+    .decompress()
+    .ok_or_else(|| invalid_input("contact discovery OPRF public key is invalid"))?;
+    let mut tokens = Vec::with_capacity(blinding_scalars_base64.len());
+    for index in 0..blinding_scalars_base64.len() {
+        let blinded_point = CompressedRistretto(decode_b64_32(
+            "contact_discovery_blinded_element",
+            &blinded_elements_base64[index],
+        )?)
+        .decompress()
+        .ok_or_else(|| invalid_input("contact discovery blinded element is invalid"))?;
+        let evaluated_point = CompressedRistretto(decode_b64_32(
+            "contact_discovery_evaluated_element",
+            &response.evaluated_elements_base64[index],
+        )?)
+        .decompress()
+        .ok_or_else(|| invalid_input("contact discovery evaluated element is invalid"))?;
+        let proof = &response.dleq_proofs[index];
+        let challenge = Scalar::from_bytes_mod_order(decode_b64_32(
+            "contact_discovery_proof_challenge_scalar",
+            &proof.challenge_scalar_base64,
+        )?);
+        let response_scalar = Scalar::from_bytes_mod_order(decode_b64_32(
+            "contact_discovery_proof_response_scalar",
+            &proof.response_scalar_base64,
+        )?);
+        let commitment_base = CompressedRistretto(decode_b64_32(
+            "contact_discovery_proof_commitment_base",
+            &proof.commitment_base_base64,
+        )?)
+        .decompress()
+        .ok_or_else(|| invalid_input("contact discovery proof commitment base is invalid"))?;
+        let commitment_blinded = CompressedRistretto(decode_b64_32(
+            "contact_discovery_proof_commitment_blinded",
+            &proof.commitment_blinded_base64,
+        )?)
+        .decompress()
+        .ok_or_else(|| invalid_input("contact discovery proof commitment blinded is invalid"))?;
+        let expected_challenge = contact_discovery_evaluation_challenge(
+            &public_key,
+            &blinded_point,
+            &evaluated_point,
+            &commitment_base,
+            &commitment_blinded,
+        );
+        if challenge != expected_challenge {
+            return Err(invalid_input("contact discovery DLEQ challenge mismatch"));
+        }
+        if RISTRETTO_BASEPOINT_POINT * response_scalar != commitment_base + public_key * challenge {
+            return Err(invalid_input("contact discovery DLEQ base equation failed"));
+        }
+        if blinded_point * response_scalar != commitment_blinded + evaluated_point * challenge {
+            return Err(invalid_input(
+                "contact discovery DLEQ blinded equation failed",
+            ));
+        }
+        let blind_scalar = Scalar::from_bytes_mod_order(decode_b64_32(
+            "contact_discovery_blind_scalar",
+            &blinding_scalars_base64[index],
+        )?);
+        if blind_scalar == Scalar::ZERO {
+            return Err(invalid_input(
+                "contact discovery blinding scalar must not decode to zero",
+            ));
+        }
+        let unblinded = evaluated_point * blind_scalar.invert();
+        tokens.push(finalize_contact_discovery_token_hex(&unblinded));
+    }
     serde_json::to_string_pretty(&tokens).map_err(Into::into)
 }
 
@@ -3638,6 +3817,10 @@ mod tests {
             service: "pqmsg-discovery".to_string(),
             protocol_version: 1,
             attestation_mode: "unattested_development".to_string(),
+            attestation_verifier: None,
+            enclave_measurement_hex: None,
+            attestation_document_format: None,
+            attestation_document_sha256: None,
             ticket_format: "base64(json-payload).base64(ed25519-signature)".to_string(),
             ticket_issuer_ed25519_pub: "ticket-issuer-ed25519-pub".to_string(),
             ticket_max_ttl_seconds: 300,
@@ -3645,6 +3828,7 @@ mod tests {
             privacy_mode: "blind_evaluation_preview".to_string(),
             match_result_format: "contact_invite_token".to_string(),
             oprf_suite: "ristretto255-sha512-preview".to_string(),
+            evaluation_proof_mode: "dleq_per_element_preview".to_string(),
             oprf_public_key_ristretto255: B64.encode([0x33; 32]),
             signed_at: (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
             expires_at: (Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
@@ -3665,6 +3849,9 @@ mod tests {
             manifest_json,
             "ticket-issuer-ed25519-pub".to_string(),
             B64.encode(manifest_signing_key.verifying_key().as_bytes()),
+            String::new(),
+            String::new(),
+            String::new(),
         )
         .expect("verify manifest"));
     }
@@ -3677,6 +3864,10 @@ mod tests {
                 service: "pqmsg-discovery".to_string(),
                 protocol_version: 1,
                 attestation_mode: "unattested_development".to_string(),
+                attestation_verifier: None,
+                enclave_measurement_hex: None,
+                attestation_document_format: None,
+                attestation_document_sha256: None,
                 ticket_format: "base64(json-payload).base64(ed25519-signature)".to_string(),
                 ticket_issuer_ed25519_pub: "ticket-issuer-ed25519-pub".to_string(),
                 ticket_max_ttl_seconds: 300,
@@ -3684,6 +3875,7 @@ mod tests {
                 privacy_mode: "blind_evaluation_preview".to_string(),
                 match_result_format: "contact_invite_token".to_string(),
                 oprf_suite: "ristretto255-sha512-preview".to_string(),
+                evaluation_proof_mode: "dleq_per_element_preview".to_string(),
                 oprf_public_key_ristretto255: B64.encode([0x44; 32]),
                 signed_at: (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
                 expires_at: (Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
@@ -3697,6 +3889,9 @@ mod tests {
             manifest_json,
             "ticket-issuer-ed25519-pub".to_string(),
             B64.encode(manifest_signing_key.verifying_key().as_bytes()),
+            String::new(),
+            String::new(),
+            String::new(),
         )
         .expect_err("manifest signature should fail");
         assert!(error.to_string().contains("signature"));
@@ -3736,6 +3931,59 @@ mod tests {
         assert_eq!(tokens[0].len(), 64);
         assert_eq!(tokens[1].len(), 64);
         assert_ne!(tokens[0], tokens[1]);
+    }
+
+    #[test]
+    fn contact_discovery_verified_evaluation_roundtrips_into_tokens() {
+        let request_json = contact_discovery_prepare_blind_request(
+            serde_json::to_string(&vec!["11".repeat(32)]).expect("serialize handle hashes"),
+        )
+        .expect("prepare blind request");
+        let request: ContactDiscoveryBlindRequestRecord =
+            serde_json::from_str(&request_json).expect("parse blind request");
+        let server_scalar = Scalar::from_bytes_mod_order([0x55; 32]);
+        let public_key = RISTRETTO_BASEPOINT_POINT * server_scalar;
+        let blinded_point = CompressedRistretto(
+            decode_b64_32("blinded", &request.blinded_elements_base64[0])
+                .expect("decode blinded point"),
+        )
+        .decompress()
+        .expect("decompress blinded point");
+        let evaluated_point = blinded_point * server_scalar;
+        let nonce = Scalar::from_bytes_mod_order([0x21; 32]);
+        let commitment_base = RISTRETTO_BASEPOINT_POINT * nonce;
+        let commitment_blinded = blinded_point * nonce;
+        let challenge = contact_discovery_evaluation_challenge(
+            &public_key,
+            &blinded_point,
+            &evaluated_point,
+            &commitment_base,
+            &commitment_blinded,
+        );
+        let response_scalar = nonce + challenge * server_scalar;
+        let response = ContactDiscoveryEvaluateResponseRecord {
+            evaluation_proof_mode: "dleq_per_element_preview".to_string(),
+            evaluated_elements_base64: vec![B64.encode(evaluated_point.compress().to_bytes())],
+            dleq_proofs: vec![ContactDiscoveryEvaluateProofRecord {
+                challenge_scalar_base64: B64.encode(challenge.to_bytes()),
+                response_scalar_base64: B64.encode(response_scalar.to_bytes()),
+                commitment_base_base64: B64.encode(commitment_base.compress().to_bytes()),
+                commitment_blinded_base64: B64.encode(commitment_blinded.compress().to_bytes()),
+            }],
+        };
+
+        let tokens_json = contact_discovery_verify_and_finalize_tokens(
+            serde_json::to_string(&request.blinded_elements_base64)
+                .expect("serialize blinded elements"),
+            serde_json::to_string(&request.blinding_scalars_base64)
+                .expect("serialize blinding scalars"),
+            serde_json::to_string(&response).expect("serialize evaluated response"),
+            B64.encode(public_key.compress().to_bytes()),
+        )
+        .expect("verify and finalize tokens");
+        let tokens: Vec<String> = serde_json::from_str(&tokens_json).expect("parse tokens");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].len(), 64);
     }
 
     #[test]

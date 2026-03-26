@@ -1,5 +1,9 @@
 package com.pqmsg.demo
 
+import java.security.MessageDigest
+import java.time.Instant
+import java.util.Base64
+
 data class ContactDiscoveryManifestCheckpoint(
     val service_origin: String,
     val manifest_issuer_ed25519_pub: String,
@@ -10,10 +14,57 @@ data class ContactDiscoveryManifestCheckpoint(
     val privacy_mode: String,
     val match_result_format: String,
     val oprf_suite: String,
+    val evaluation_proof_mode: String,
     val oprf_public_key_ristretto255: String,
     val attestation_mode: String,
+    val attestation_verifier: String?,
+    val enclave_measurement_hex: String?,
+    val attestation_document_format: String?,
+    val attestation_document_sha256: String?,
     val observed_at: String,
 )
+
+fun verifyContactDiscoveryAttestationDocument(
+    response: ContactDiscoveryAttestationResponse,
+    expectedAttestationMode: String,
+    expectedVerifier: String,
+    expectedMeasurementHex: String,
+    expectedDocumentSha256: String,
+    expectedMaxAgeSeconds: Int,
+) {
+    require(response.attestation_mode == expectedAttestationMode) {
+        "Contact discovery attestation mode mismatch"
+    }
+    require(response.attestation_verifier == expectedVerifier) {
+        "Contact discovery attestation verifier mismatch"
+    }
+    require(response.enclave_measurement_hex == expectedMeasurementHex) {
+        "Contact discovery attestation measurement mismatch"
+    }
+    require(response.document_format == "opaque_b64_v1") {
+        "Unsupported contact discovery attestation document format"
+    }
+    require(response.document_sha256.equals(expectedDocumentSha256, ignoreCase = true)) {
+        "Contact discovery attestation document hash mismatch"
+    }
+    val documentBytes = Base64.getDecoder().decode(response.document_base64)
+    val digest = MessageDigest.getInstance("SHA-256").digest(documentBytes)
+    val computedHex = digest.joinToString("") { "%02x".format(it) }
+    require(computedHex == expectedDocumentSha256.lowercase()) {
+        "Contact discovery attestation document integrity check failed"
+    }
+    require(expectedMaxAgeSeconds > 0) {
+        "Contact discovery attestation max age is invalid"
+    }
+    val publishedAt = Instant.parse(response.published_at)
+    val now = Instant.now()
+    require(!publishedAt.isAfter(now.plusSeconds(300))) {
+        "Contact discovery attestation published_at is in the future"
+    }
+    require(!publishedAt.isBefore(now.minusSeconds(expectedMaxAgeSeconds.toLong()))) {
+        "Contact discovery attestation document is stale"
+    }
+}
 
 fun buildContactDiscoveryManifestCheckpoint(
     serviceOrigin: String,
@@ -30,8 +81,13 @@ fun buildContactDiscoveryManifestCheckpoint(
         privacy_mode = manifest.privacy_mode,
         match_result_format = manifest.match_result_format,
         oprf_suite = manifest.oprf_suite,
+        evaluation_proof_mode = manifest.evaluation_proof_mode,
         oprf_public_key_ristretto255 = manifest.oprf_public_key_ristretto255,
         attestation_mode = manifest.attestation_mode,
+        attestation_verifier = manifest.attestation_verifier,
+        enclave_measurement_hex = manifest.enclave_measurement_hex,
+        attestation_document_format = manifest.attestation_document_format,
+        attestation_document_sha256 = manifest.attestation_document_sha256,
         observed_at = observedAt,
     )
 }
@@ -56,9 +112,24 @@ fun diffContactDiscoveryManifestCheckpoint(
         changedFields += "match_result_format"
     }
     if (previous.oprf_suite != current.oprf_suite) changedFields += "oprf_suite"
+    if (previous.evaluation_proof_mode != current.evaluation_proof_mode) {
+        changedFields += "evaluation_proof_mode"
+    }
     if (previous.oprf_public_key_ristretto255 != current.oprf_public_key_ristretto255) {
         changedFields += "oprf_public_key_ristretto255"
     }
     if (previous.attestation_mode != current.attestation_mode) changedFields += "attestation_mode"
+    if (previous.attestation_verifier != current.attestation_verifier) {
+        changedFields += "attestation_verifier"
+    }
+    if (previous.enclave_measurement_hex != current.enclave_measurement_hex) {
+        changedFields += "enclave_measurement_hex"
+    }
+    if (previous.attestation_document_format != current.attestation_document_format) {
+        changedFields += "attestation_document_format"
+    }
+    if (previous.attestation_document_sha256 != current.attestation_document_sha256) {
+        changedFields += "attestation_document_sha256"
+    }
     return changedFields
 }

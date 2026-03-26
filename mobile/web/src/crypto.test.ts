@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { ed25519, ristretto255 } from "@noble/curves/ed25519";
+import { sha256 } from "@noble/hashes/sha256";
 
 vi.mock("./crypto-wasm", () => ({
   initWasm: vi.fn(async () => true),
@@ -75,10 +76,12 @@ import {
   finalizeContactDiscoveryTokens,
   prepareContactDiscoveryBlindRequest,
   verifyContactDiscoveryManifest,
+  verifyContactDiscoveryAttestationDocument,
+  verifyContactDiscoveryEvaluationProofs,
   type GeneratedKeys,
   type WireEnvelope,
 } from "./crypto";
-import { base64ToBytes, bytesToBase64, bytesToHex, utf8ToBytes } from "./base64";
+import { base64ToBytes, bytesToBase64, bytesToHex, concatBytes, utf8ToBytes } from "./base64";
 
 // Helper: generate a test keyset
 function testKeys(): GeneratedKeys {
@@ -162,6 +165,10 @@ describe("verifyContactDiscoveryManifest", () => {
       service: "pqmsg-discovery",
       protocol_version: 1,
       attestation_mode: "unattested_development",
+      attestation_verifier: null,
+      enclave_measurement_hex: null,
+      attestation_document_format: null,
+      attestation_document_sha256: null,
       ticket_format: "base64(json-payload).base64(ed25519-signature)",
       ticket_issuer_ed25519_pub: "ticket-issuer-ed25519-pub",
       ticket_max_ttl_seconds: 300,
@@ -169,6 +176,7 @@ describe("verifyContactDiscoveryManifest", () => {
       privacy_mode: "blind_evaluation_preview",
       match_result_format: "contact_invite_token",
       oprf_suite: "ristretto255-sha512-preview",
+      evaluation_proof_mode: "dleq_per_element_preview",
       oprf_public_key_ristretto255: bytesToBase64(ristretto255.Point.BASE.toBytes()),
       signed_at: new Date(Date.now() - 60_000).toISOString(),
       expires_at: new Date(Date.now() + 60_000).toISOString(),
@@ -190,6 +198,8 @@ describe("verifyContactDiscoveryManifest", () => {
         manifest,
         "ticket-issuer-ed25519-pub",
         manifest.manifest_issuer_ed25519_pub,
+        null,
+        null,
       );
     }).not.toThrow();
   });
@@ -204,8 +214,60 @@ describe("verifyContactDiscoveryManifest", () => {
         manifest,
         "ticket-issuer-ed25519-pub",
         manifest.manifest_issuer_ed25519_pub,
+        null,
+        null,
       );
     }).toThrow(/signature/i);
+  });
+
+  it("verifies a contact discovery attestation document hash", () => {
+    const documentBytes = utf8ToBytes("{\"tee\":\"sgx\",\"svn\":1}");
+    const documentSha256 = Array.from(sha256(documentBytes))
+      .map((value) => value.toString(16).padStart(2, "0"))
+      .join("");
+    expect(() => {
+      verifyContactDiscoveryAttestationDocument(
+        {
+          attestation_mode: "sgx_preview",
+          attestation_verifier: "sgx-dcap-preview",
+          enclave_measurement_hex: "aa".repeat(32),
+          document_format: "opaque_b64_v1",
+          document_base64: bytesToBase64(documentBytes),
+          document_sha256: documentSha256,
+          published_at: new Date().toISOString(),
+        },
+        "sgx_preview",
+        "sgx-dcap-preview",
+        "aa".repeat(32),
+        documentSha256,
+        900,
+      );
+    }).not.toThrow();
+  });
+
+  it("rejects a stale contact discovery attestation document", () => {
+    const documentBytes = utf8ToBytes("{\"tee\":\"sgx\",\"svn\":1}");
+    const documentSha256 = Array.from(sha256(documentBytes))
+      .map((value) => value.toString(16).padStart(2, "0"))
+      .join("");
+    expect(() => {
+      verifyContactDiscoveryAttestationDocument(
+        {
+          attestation_mode: "sgx_preview",
+          attestation_verifier: "sgx-dcap-preview",
+          enclave_measurement_hex: "aa".repeat(32),
+          document_format: "opaque_b64_v1",
+          document_base64: bytesToBase64(documentBytes),
+          document_sha256: documentSha256,
+          published_at: new Date(Date.now() - 10_000).toISOString(),
+        },
+        "sgx_preview",
+        "sgx-dcap-preview",
+        "aa".repeat(32),
+        documentSha256,
+        1,
+      );
+    }).toThrow(/stale/i);
   });
 
   it("blind-evaluates discovery hashes into finalized tokens", () => {
@@ -227,6 +289,54 @@ describe("verifyContactDiscoveryManifest", () => {
     expect(tokens[0]).toMatch(/^[0-9a-f]{64}$/);
     expect(tokens[1]).toMatch(/^[0-9a-f]{64}$/);
     expect(tokens[0]).not.toBe(tokens[1]);
+  });
+
+  it("verifies DLEQ proofs for discovery evaluations", () => {
+    const prepared = prepareContactDiscoveryBlindRequest(["11".repeat(32)]);
+    const serverScalar = ristretto255.Point.Fn.create(17n);
+    const publicKey = ristretto255.Point.BASE.multiply(serverScalar);
+    const blindedPoint = ristretto255.Point.fromBytes(base64ToBytes(prepared.blindedElementsBase64[0]));
+    const evaluatedPoint = blindedPoint.multiply(serverScalar);
+    const nonce = ristretto255.Point.Fn.create(23n);
+    const commitmentBase = ristretto255.Point.BASE.multiply(nonce);
+    const commitmentBlinded = blindedPoint.multiply(nonce);
+    const challengeDigest = sha256(
+      concatBytes([
+        utf8ToBytes("pqmsg-discovery-dleq-proof-v1"),
+        ristretto255.Point.BASE.toBytes(),
+        publicKey.toBytes(),
+        blindedPoint.toBytes(),
+        evaluatedPoint.toBytes(),
+        commitmentBase.toBytes(),
+        commitmentBlinded.toBytes(),
+      ]),
+    );
+    let challengeBigInt = 0n;
+    for (let index = challengeDigest.length - 1; index >= 0; index -= 1) {
+      challengeBigInt = (challengeBigInt << 8n) + BigInt(challengeDigest[index]);
+    }
+    const challenge = ristretto255.Point.Fn.create(challengeBigInt);
+    const responseScalar = ristretto255.Point.Fn.add(
+      nonce,
+      ristretto255.Point.Fn.mul(challenge, serverScalar),
+    );
+
+    expect(() => {
+      verifyContactDiscoveryEvaluationProofs(
+        prepared.blindedElementsBase64,
+        {
+          evaluation_proof_mode: "dleq_per_element_preview",
+          evaluated_elements_base64: [bytesToBase64(evaluatedPoint.toBytes())],
+          dleq_proofs: [{
+            challenge_scalar_base64: bytesToBase64(ristretto255.Point.Fn.toBytes(challenge)),
+            response_scalar_base64: bytesToBase64(ristretto255.Point.Fn.toBytes(responseScalar)),
+            commitment_base_base64: bytesToBase64(commitmentBase.toBytes()),
+            commitment_blinded_base64: bytesToBase64(commitmentBlinded.toBytes()),
+          }],
+        },
+        bytesToBase64(publicKey.toBytes()),
+      );
+    }).not.toThrow();
   });
 });
 

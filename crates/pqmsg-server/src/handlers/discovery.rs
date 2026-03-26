@@ -17,6 +17,8 @@ use crate::types::*;
 use crate::validation::*;
 use crate::AppState;
 
+const CONTACT_DISCOVERY_TICKET_MAX_USES: u8 = 6;
+
 fn ensure_contact_discovery_supported(_state: &AppState) -> Result<(), AppError> {
     Err(AppError::forbidden(
         "raw-hash contact discovery on the app server is disabled; use the configured private discovery service ticket flow",
@@ -50,6 +52,7 @@ struct ContactDiscoveryTicketPayload {
     contact_invite_expires_at: String,
     issued_at: String,
     expires_at: String,
+    max_uses: u8,
     nonce: String,
 }
 
@@ -87,6 +90,7 @@ pub(crate) async fn create_contact_discovery_ticket(
         contact_invite_expires_at: bootstrap_invite.expires_at,
         issued_at: issued_at.to_rfc3339(),
         expires_at: expires_at.to_rfc3339(),
+        max_uses: CONTACT_DISCOVERY_TICKET_MAX_USES,
         nonce: uuid::Uuid::new_v4().to_string(),
     };
     let payload_bytes = serde_json::to_vec(&payload)

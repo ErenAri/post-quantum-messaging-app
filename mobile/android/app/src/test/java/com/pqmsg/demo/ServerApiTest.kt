@@ -129,6 +129,10 @@ class ServerApiTest {
               "contact_discovery_ticket_supported": false,
               "contact_discovery_service_origin": null,
               "contact_discovery_manifest_issuer_ed25519_pub": null,
+              "contact_discovery_attestation_verifier": null,
+              "contact_discovery_expected_measurement_hex": null,
+              "contact_discovery_attestation_document_sha256": null,
+              "contact_discovery_attestation_max_age_seconds": null,
               "presence_supported": false,
               "typing_indicators_supported": false,
               "read_receipts_supported": false,
@@ -159,6 +163,10 @@ class ServerApiTest {
         assertEquals(false, parsed.contact_discovery_ticket_supported)
         assertNull(parsed.contact_discovery_service_origin)
         assertNull(parsed.contact_discovery_manifest_issuer_ed25519_pub)
+        assertNull(parsed.contact_discovery_attestation_verifier)
+        assertNull(parsed.contact_discovery_expected_measurement_hex)
+        assertNull(parsed.contact_discovery_attestation_document_sha256)
+        assertNull(parsed.contact_discovery_attestation_max_age_seconds)
         assertEquals("issuer-ed25519-pub", parsed.contact_discovery_ticket_issuer_ed25519_pub)
         assertEquals("ml-kem-768", parsed.runtime_crypto_profile.kem)
         assertEquals(false, parsed.presence_supported)
@@ -212,6 +220,10 @@ class ServerApiTest {
               "contact_discovery_ticket_supported": false,
               "contact_discovery_service_origin": null,
               "contact_discovery_manifest_issuer_ed25519_pub": null,
+              "contact_discovery_attestation_verifier": null,
+              "contact_discovery_expected_measurement_hex": null,
+              "contact_discovery_attestation_document_sha256": null,
+              "contact_discovery_attestation_max_age_seconds": null,
               "presence_supported": false,
               "typing_indicators_supported": false,
               "read_receipts_supported": false,
@@ -273,6 +285,10 @@ class ServerApiTest {
               "contact_discovery_ticket_supported": true,
               "contact_discovery_service_origin": null,
               "contact_discovery_manifest_issuer_ed25519_pub": null,
+              "contact_discovery_attestation_verifier": null,
+              "contact_discovery_expected_measurement_hex": null,
+              "contact_discovery_attestation_document_sha256": null,
+              "contact_discovery_attestation_max_age_seconds": null,
               "presence_supported": false,
               "typing_indicators_supported": false,
               "read_receipts_supported": false,
@@ -403,6 +419,75 @@ class ServerApiTest {
               "contact_discovery_ticket_supported": true,
               "contact_discovery_service_origin": "https://cdsi.example",
               "contact_discovery_manifest_issuer_ed25519_pub": "manifest-ed25519-pub",
+              "contact_discovery_attestation_verifier": "sgx-dcap-preview",
+              "contact_discovery_expected_measurement_hex": "${"ab".repeat(32)}",
+              "contact_discovery_attestation_document_sha256": "${"cd".repeat(32)}",
+              "contact_discovery_attestation_max_age_seconds": 900,
+              "presence_supported": false,
+              "typing_indicators_supported": false,
+              "read_receipts_supported": false,
+              "calling_supported": false,
+              "stories_supported": false,
+              "channels_supported": false,
+              "group_messaging_supported": false,
+              "private_group_state_supported": true,
+              "private_group_messaging_supported": true,
+              "sealed_sender_required": true,
+              "sender_certificate_supported": true,
+              "key_transparency_supported": true,
+              "sealed_delivery_tokens_supported": true,
+              "contact_discovery_ticket_issuer_ed25519_pub": "issuer-ed25519-pub",
+              "sender_certificate_issuer_ed25519_pub": "issuer-ed25519-pub",
+              "transparency_log_issuer_ed25519_pub": "issuer-ed25519-pub",
+              "authenticated_direct_messaging_supported": false,
+              "ephemeral_messaging_supported": false,
+              "web_client_policy": "demo_only"
+            }
+            """.trimIndent(),
+            ServerCapabilitiesResponse::class.java,
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            ApiClientFactory.validateCapabilities(parsed, "ml-kem-768")
+        }
+    }
+
+    @Test
+    fun validate_capabilities_rejects_invalid_private_discovery_attestation_max_age() {
+        val parsed = gson.fromJson(
+            """
+            {
+              "capability_schema_version": 1,
+              "security_profile": "research",
+              "deployment_mode": "development",
+              "tls_required": false,
+              "tls_enabled": false,
+              "supported_beta_clients": ["android"],
+              "supported_suite_ids": [1],
+              "runtime_crypto_profile": {
+                "protocol_version": 1,
+                "suite_id": 1,
+                "kem": "ml-kem-768",
+                "dh": "x25519",
+                "kdf": "hkdf-sha256",
+                "aead": "chacha20-poly1305",
+                "signature": "ed25519",
+                "pq_oqs_enabled": true,
+                "fips_mode": false
+              },
+              "production_baseline_met": false,
+              "registration_pow_bits": 0,
+              "prekey_bundle_reserve_count": 10,
+              "pq_ratchet_interval": 1,
+              "contact_discovery_supported": true,
+              "contact_discovery_mode": "private_service",
+              "contact_discovery_ticket_supported": true,
+              "contact_discovery_service_origin": "https://cdsi.example",
+              "contact_discovery_manifest_issuer_ed25519_pub": "manifest-ed25519-pub",
+              "contact_discovery_attestation_verifier": "sgx-dcap-preview",
+              "contact_discovery_expected_measurement_hex": "${"ab".repeat(32)}",
+              "contact_discovery_attestation_document_sha256": "${"cd".repeat(32)}",
+              "contact_discovery_attestation_max_age_seconds": 0,
               "presence_supported": false,
               "typing_indicators_supported": false,
               "read_receipts_supported": false,

@@ -339,7 +339,6 @@ pub(crate) struct ConsumePrivateGroupInviteResponse {
 pub(crate) struct PublishPrivateGroupMessageRequest {
     pub(crate) group_id: String,
     pub(crate) epoch: u64,
-    pub(crate) sender_user_id: String,
     pub(crate) sent_at_unix_ms: u64,
     pub(crate) ciphertext_nonce_base64: String,
     pub(crate) ciphertext_base64: String,
@@ -850,6 +849,10 @@ pub(crate) struct ServerCapabilitiesResponse {
     pub(crate) contact_discovery_ticket_supported: bool,
     pub(crate) contact_discovery_service_origin: Option<String>,
     pub(crate) contact_discovery_manifest_issuer_ed25519_pub: Option<String>,
+    pub(crate) contact_discovery_attestation_verifier: Option<String>,
+    pub(crate) contact_discovery_expected_measurement_hex: Option<String>,
+    pub(crate) contact_discovery_attestation_document_sha256: Option<String>,
+    pub(crate) contact_discovery_attestation_max_age_seconds: Option<u32>,
     pub(crate) presence_supported: bool,
     pub(crate) typing_indicators_supported: bool,
     pub(crate) read_receipts_supported: bool,

@@ -20,8 +20,8 @@ import uniffi.pqmsg_android.buildContactDiscoveryTicketAuthHeaders
 import uniffi.pqmsg_android.buildContactsListAuthHeaders
 import uniffi.pqmsg_android.buildContactsRemoveAuthHeaders
 import uniffi.pqmsg_android.buildContactsUpsertAuthHeaders
-import uniffi.pqmsg_android.contactDiscoveryFinalizeTokens
 import uniffi.pqmsg_android.contactDiscoveryPrepareBlindRequest
+import uniffi.pqmsg_android.contactDiscoveryVerifyAndFinalizeTokens
 import uniffi.pqmsg_android.verifyContactDiscoveryManifest
 
 data class ContactDiscoveryBlindRequestResult(
@@ -208,7 +208,27 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 manifest.attestation_mode,
             )
         }
-        return "$summary\n${getString(R.string.contacts_private_manifest_continuity, verified.continuityStatus)}"
+        val manifestDetails =
+            buildList {
+                add(getString(R.string.contacts_private_manifest_continuity, verified.continuityStatus))
+                if (!manifest.attestation_verifier.isNullOrBlank()) {
+                    add(
+                        getString(
+                            R.string.contacts_private_manifest_attestation_verifier,
+                            manifest.attestation_verifier,
+                        ),
+                    )
+                }
+                if (!manifest.enclave_measurement_hex.isNullOrBlank()) {
+                    add(
+                        getString(
+                            R.string.contacts_private_manifest_measurement,
+                            manifest.enclave_measurement_hex,
+                        ),
+                    )
+                }
+            }
+        return "$summary\n${manifestDetails.joinToString("\n")}"
     }
 
     private suspend fun loadVerifiedDiscoveryManifest(
@@ -232,10 +252,25 @@ class ContactDiscoveryActivity : AppCompatActivity() {
         ) {
             "Contact discovery manifest issuer mismatch"
         }
+        val attestationContractFieldsPresent =
+            listOf(
+                !capabilities.contact_discovery_attestation_verifier.isNullOrBlank(),
+                !capabilities.contact_discovery_expected_measurement_hex.isNullOrBlank(),
+                !capabilities.contact_discovery_attestation_document_sha256.isNullOrBlank(),
+                capabilities.contact_discovery_attestation_max_age_seconds != null,
+            )
+        require(
+            attestationContractFieldsPresent.none { it } || attestationContractFieldsPresent.all { it },
+        ) {
+            "Private discovery attestation contract is incomplete"
+        }
         verifyContactDiscoveryManifest(
             gson.toJson(manifest),
             capabilities.contact_discovery_ticket_issuer_ed25519_pub,
             capabilities.contact_discovery_manifest_issuer_ed25519_pub.orEmpty(),
+            capabilities.contact_discovery_attestation_verifier.orEmpty(),
+            capabilities.contact_discovery_expected_measurement_hex.orEmpty(),
+            capabilities.contact_discovery_attestation_document_sha256.orEmpty(),
         )
         require(
             !capabilities.contact_discovery_manifest_issuer_ed25519_pub.isNullOrBlank(),
@@ -247,9 +282,26 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 manifest.privacy_mode == "blind_evaluation_preview" &&
                 manifest.match_result_format == "contact_invite_token" &&
                 manifest.oprf_suite == "ristretto255-sha512-preview" &&
-                manifest.oprf_public_key_ristretto255.isNotBlank(),
+                manifest.evaluation_proof_mode == "dleq_per_element_preview" &&
+                manifest.oprf_public_key_ristretto255.isNotBlank() &&
+                (manifest.attestation_mode == "unattested_development" ||
+                    (!manifest.attestation_verifier.isNullOrBlank() &&
+                        !manifest.enclave_measurement_hex.isNullOrBlank() &&
+                        !manifest.attestation_document_format.isNullOrBlank() &&
+                        !manifest.attestation_document_sha256.isNullOrBlank())),
         ) {
             "Unsupported contact discovery manifest"
+        }
+        if (!manifest.attestation_document_sha256.isNullOrBlank()) {
+            val attestation = ApiClientFactory.createDiscovery(serviceOrigin).getAttestation()
+            verifyContactDiscoveryAttestationDocument(
+                response = attestation,
+                expectedAttestationMode = manifest.attestation_mode,
+                expectedVerifier = manifest.attestation_verifier.orEmpty(),
+                expectedMeasurementHex = manifest.enclave_measurement_hex.orEmpty(),
+                expectedDocumentSha256 = manifest.attestation_document_sha256.orEmpty(),
+                expectedMaxAgeSeconds = capabilities.contact_discovery_attestation_max_age_seconds ?: 0,
+            )
         }
         val checkpoint = buildContactDiscoveryManifestCheckpoint(
             serviceOrigin = normalizedServiceOrigin,
@@ -306,13 +358,17 @@ class ContactDiscoveryActivity : AppCompatActivity() {
         return gson.fromJson(json, ContactDiscoveryBlindRequestResult::class.java)
     }
 
-    private fun finalizeDiscoveryTokens(
+    private fun verifyAndFinalizeDiscoveryTokens(
+        blindedElementsBase64: List<String>,
         blindingScalarsBase64: List<String>,
-        evaluatedElementsBase64: List<String>,
+        evaluatedResponse: PrivateDiscoveryEvaluateResponse,
+        expectedOprfPublicKeyRistretto255: String,
     ): List<String> {
-        val json = contactDiscoveryFinalizeTokens(
+        val json = contactDiscoveryVerifyAndFinalizeTokens(
+            gson.toJson(blindedElementsBase64),
             gson.toJson(blindingScalarsBase64),
-            gson.toJson(evaluatedElementsBase64),
+            gson.toJson(evaluatedResponse),
+            expectedOprfPublicKeyRistretto255,
         )
         return gson.fromJson(
             json,
@@ -362,40 +418,58 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 ) {
                     "Private contact discovery is unavailable for this profile"
                 }
-                loadVerifiedDiscoveryManifest(context)
+                val manifest = loadVerifiedDiscoveryManifest(context).manifest
                 val ticket = issueDiscoveryTicket(context)
                 val discoveryApi = ApiClientFactory.createDiscovery(ticket.service_origin)
                 val phonePrepared = prepareDiscoveryBlindRequest(phoneHashes)
                 val emailPrepared = prepareDiscoveryBlindRequest(emailHashes)
                 val phoneEvaluated =
                     if (phonePrepared.blinded_elements_base64.isEmpty()) {
-                        emptyList()
+                        PrivateDiscoveryEvaluateResponse(
+                            user_id = context.profile.userId,
+                            device_id = context.profile.deviceId,
+                            evaluation_proof_mode = manifest.evaluation_proof_mode,
+                            evaluated_elements_base64 = emptyList(),
+                            dleq_proofs = emptyList(),
+                            evaluated_at = Instant.now().toString(),
+                        )
                     } else {
                         discoveryApi.evaluateDiscoveryElements(
                             PrivateDiscoveryEvaluateRequest(
                                 ticket = ticket.ticket,
                                 blinded_elements_base64 = phonePrepared.blinded_elements_base64,
                             ),
-                        ).evaluated_elements_base64
+                        )
                     }
                 val emailEvaluated =
                     if (emailPrepared.blinded_elements_base64.isEmpty()) {
-                        emptyList()
+                        PrivateDiscoveryEvaluateResponse(
+                            user_id = context.profile.userId,
+                            device_id = context.profile.deviceId,
+                            evaluation_proof_mode = manifest.evaluation_proof_mode,
+                            evaluated_elements_base64 = emptyList(),
+                            dleq_proofs = emptyList(),
+                            evaluated_at = Instant.now().toString(),
+                        )
                     } else {
                         discoveryApi.evaluateDiscoveryElements(
                             PrivateDiscoveryEvaluateRequest(
                                 ticket = ticket.ticket,
                                 blinded_elements_base64 = emailPrepared.blinded_elements_base64,
                             ),
-                        ).evaluated_elements_base64
+                        )
                     }
-                val phoneTokens = finalizeDiscoveryTokens(
+                val phoneTokens = verifyAndFinalizeDiscoveryTokens(
+                    phonePrepared.blinded_elements_base64,
                     phonePrepared.blinding_scalars_base64,
                     phoneEvaluated,
+                    manifest.oprf_public_key_ristretto255,
                 )
-                val emailTokens = finalizeDiscoveryTokens(
+                val emailTokens = verifyAndFinalizeDiscoveryTokens(
+                    emailPrepared.blinded_elements_base64,
                     emailPrepared.blinding_scalars_base64,
                     emailEvaluated,
+                    manifest.oprf_public_key_ristretto255,
                 )
                 val response = discoveryApi.uploadDiscoveryHandles(
                     PrivateDiscoveryHandlesUploadRequest(
@@ -433,7 +507,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 ) {
                     "Private contact discovery is unavailable for this profile"
                 }
-                loadVerifiedDiscoveryManifest(context)
+                val manifest = loadVerifiedDiscoveryManifest(context).manifest
                 val ticket = issueDiscoveryTicket(context)
                 val discoveryApi = ApiClientFactory.createDiscovery(ticket.service_origin)
                 val prepared = prepareDiscoveryBlindRequest(hashes)
@@ -443,9 +517,11 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                         blinded_elements_base64 = prepared.blinded_elements_base64,
                     ),
                 )
-                val tokens = finalizeDiscoveryTokens(
+                val tokens = verifyAndFinalizeDiscoveryTokens(
+                    prepared.blinded_elements_base64,
                     prepared.blinding_scalars_base64,
-                    evaluated.evaluated_elements_base64,
+                    evaluated,
+                    manifest.oprf_public_key_ristretto255,
                 )
                 val hashByToken = tokens.zip(hashes).toMap()
                 val response = discoveryApi.matchDiscoveryHashes(

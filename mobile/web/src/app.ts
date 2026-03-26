@@ -46,6 +46,8 @@ import {
   regeneratePublishedPrekeys,
   sealTransportEnvelopeWithSenderCert,
   verifyContactDiscoveryManifest,
+  verifyContactDiscoveryAttestationDocument,
+  verifyContactDiscoveryEvaluationProofs,
   verifyTransparencyProof,
   type GeneratedKeys,
 } from "./crypto";
@@ -595,7 +597,6 @@ async function sendPrivateGroupMessage(groupId: string, body: string): Promise<v
   const response = await api.publishPrivateGroupMessage({
     group_id: encrypted.group_id,
     epoch: encrypted.epoch,
-    sender_user_id: encrypted.sender_user_id,
     sent_at_unix_ms: encrypted.sent_at_unix_ms,
     ciphertext_nonce_base64: bytesToBase64(Uint8Array.from(encrypted.ciphertext.nonce)),
     ciphertext_base64: bytesToBase64(Uint8Array.from(encrypted.ciphertext.ciphertext)),
@@ -4186,8 +4187,13 @@ function buildContactDiscoveryCheckpoint(
     privacy_mode: manifest.privacy_mode,
     match_result_format: manifest.match_result_format,
     oprf_suite: manifest.oprf_suite,
+    evaluation_proof_mode: manifest.evaluation_proof_mode,
     oprf_public_key_ristretto255: manifest.oprf_public_key_ristretto255,
     attestation_mode: manifest.attestation_mode,
+    attestation_verifier: manifest.attestation_verifier ?? null,
+    enclave_measurement_hex: manifest.enclave_measurement_hex ?? null,
+    attestation_document_format: manifest.attestation_document_format ?? null,
+    attestation_document_sha256: manifest.attestation_document_sha256 ?? null,
     observed_at: new Date().toISOString(),
   };
 }
@@ -4210,10 +4216,25 @@ function diffContactDiscoveryCheckpoint(
   if (previous.privacy_mode !== current.privacy_mode) changed.push("privacy_mode");
   if (previous.match_result_format !== current.match_result_format) changed.push("match_result_format");
   if (previous.oprf_suite !== current.oprf_suite) changed.push("oprf_suite");
+  if (previous.evaluation_proof_mode !== current.evaluation_proof_mode) {
+    changed.push("evaluation_proof_mode");
+  }
   if (previous.oprf_public_key_ristretto255 !== current.oprf_public_key_ristretto255) {
     changed.push("oprf_public_key_ristretto255");
   }
   if (previous.attestation_mode !== current.attestation_mode) changed.push("attestation_mode");
+  if (previous.attestation_verifier !== current.attestation_verifier) {
+    changed.push("attestation_verifier");
+  }
+  if (previous.enclave_measurement_hex !== current.enclave_measurement_hex) {
+    changed.push("enclave_measurement_hex");
+  }
+  if (previous.attestation_document_format !== current.attestation_document_format) {
+    changed.push("attestation_document_format");
+  }
+  if (previous.attestation_document_sha256 !== current.attestation_document_sha256) {
+    changed.push("attestation_document_sha256");
+  }
   return changed;
 }
 
@@ -4228,20 +4249,49 @@ async function loadVerifiedContactDiscoveryManifest(
   }
   const apiClient = new PqmsgApi(setup.serverUrl);
   const serviceOrigin = validateWebServerUrl(capabilities.contact_discovery_service_origin).origin;
+  const attestationContractFields = [
+    capabilities.contact_discovery_attestation_verifier,
+    capabilities.contact_discovery_expected_measurement_hex,
+    capabilities.contact_discovery_attestation_document_sha256,
+    capabilities.contact_discovery_attestation_max_age_seconds,
+  ].map((value) => value !== null && value !== undefined && value !== "");
+  if (attestationContractFields.some(Boolean) && !attestationContractFields.every(Boolean)) {
+    throw new Error("Private contact discovery attestation contract is incomplete");
+  }
   const manifest = await apiClient.getContactDiscoveryManifest(serviceOrigin);
   verifyContactDiscoveryManifest(
     manifest,
     capabilities.contact_discovery_ticket_issuer_ed25519_pub,
     capabilities.contact_discovery_manifest_issuer_ed25519_pub || "",
+    capabilities.contact_discovery_attestation_verifier,
+    capabilities.contact_discovery_expected_measurement_hex,
+    capabilities.contact_discovery_attestation_document_sha256,
   );
   if (
     manifest.lookup_protocol !== "blind_token_directory_preview"
     || manifest.privacy_mode !== "blind_evaluation_preview"
     || manifest.match_result_format !== "contact_invite_token"
     || manifest.oprf_suite !== "ristretto255-sha512-preview"
+    || manifest.evaluation_proof_mode !== "dleq_per_element_preview"
     || !manifest.oprf_public_key_ristretto255
+    || (manifest.attestation_mode !== "unattested_development"
+      && (!manifest.attestation_verifier
+        || !manifest.enclave_measurement_hex
+        || !manifest.attestation_document_format
+        || !manifest.attestation_document_sha256))
   ) {
     throw new Error("Unsupported contact discovery manifest");
+  }
+  if (manifest.attestation_document_sha256) {
+    const attestation = await apiClient.getContactDiscoveryAttestation(serviceOrigin);
+    verifyContactDiscoveryAttestationDocument(
+      attestation,
+      manifest.attestation_mode,
+      manifest.attestation_verifier || "",
+      manifest.enclave_measurement_hex || "",
+      manifest.attestation_document_sha256,
+      capabilities.contact_discovery_attestation_max_age_seconds || 0,
+    );
   }
   let continuityStatus = "Not pinned";
   if (setup.userId.trim()) {
@@ -4412,7 +4462,11 @@ async function renderSettings(): Promise<void> {
               ? `<div class="settings-row"><span>Manifest</span><span>${escHtml(contactDiscoveryManifestStatus)}</span></div>
           <div class="settings-row"><span>Manifest Continuity</span><span>${escHtml(contactDiscoveryContinuityStatus)}</span></div>
           <div class="settings-row"><span>Service Origin</span><span class="mono">${escHtml(capabilities?.contact_discovery_service_origin || "not configured")}</span></div>
-          <div class="settings-row"><span>Lookup Protocol</span><span>${escHtml(contactDiscoveryManifest?.lookup_protocol || "unknown")}</span></div>`
+          <div class="settings-row"><span>Lookup Protocol</span><span>${escHtml(contactDiscoveryManifest?.lookup_protocol || "unknown")}</span></div>
+          <div class="settings-row"><span>Evaluation Proof</span><span>${escHtml(contactDiscoveryManifest?.evaluation_proof_mode || "unknown")}</span></div>
+          <div class="settings-row"><span>Attestation Verifier</span><span class="mono">${escHtml(contactDiscoveryManifest?.attestation_verifier || "not advertised")}</span></div>
+          <div class="settings-row"><span>Enclave Measurement</span><span class="mono">${escHtml(contactDiscoveryManifest?.enclave_measurement_hex || "not advertised")}</span></div>
+          <div class="settings-row"><span>Attestation Max Age</span><span>${escHtml(capabilities?.contact_discovery_attestation_max_age_seconds ? `${capabilities.contact_discovery_attestation_max_age_seconds}s` : "not advertised")}</span></div>`
               : ""
           }
           <div class="settings-row">
@@ -5984,6 +6038,7 @@ async function renderDiscovery(): Promise<void> {
   async function issueDiscoveryTicket(api: PqmsgApi, keys: GeneratedKeys): Promise<{
     serviceOrigin: string;
     ticket: string;
+    manifest: ContactDiscoveryManifestResponse;
   }> {
     const headers = buildContactDiscoveryTicketAuthHeaders(keys);
     const response = await api.issueContactDiscoveryTicket(keys.userId, headers);
@@ -5994,10 +6049,11 @@ async function renderDiscovery(): Promise<void> {
     if (configuredOrigin && configuredOrigin !== ticketOrigin) {
       throw new Error("Contact discovery service origin mismatch");
     }
-    await loadVerifiedContactDiscoveryManifest(capabilities);
+    const verifiedManifest = await loadVerifiedContactDiscoveryManifest(capabilities);
     return {
       serviceOrigin: ticketOrigin,
       ticket: response.ticket,
+      manifest: verifiedManifest.manifest,
     };
   }
 
@@ -6009,21 +6065,31 @@ async function renderDiscovery(): Promise<void> {
     try {
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
-      const { serviceOrigin, ticket } = await issueDiscoveryTicket(api, k);
+      const { serviceOrigin, ticket, manifest } = await issueDiscoveryTicket(api, k);
       const phonePrepared = prepareContactDiscoveryBlindRequest(phones);
       const emailPrepared = prepareContactDiscoveryBlindRequest(emails);
       const phoneEvaluated = phonePrepared.blindedElementsBase64.length === 0
-        ? { evaluated_elements_base64: [] }
+        ? { evaluation_proof_mode: manifest.evaluation_proof_mode, evaluated_elements_base64: [], dleq_proofs: [] }
         : await api.evaluateDiscoveryElementsAtService(serviceOrigin, {
           ticket,
           blinded_elements_base64: phonePrepared.blindedElementsBase64,
         });
       const emailEvaluated = emailPrepared.blindedElementsBase64.length === 0
-        ? { evaluated_elements_base64: [] }
+        ? { evaluation_proof_mode: manifest.evaluation_proof_mode, evaluated_elements_base64: [], dleq_proofs: [] }
         : await api.evaluateDiscoveryElementsAtService(serviceOrigin, {
           ticket,
           blinded_elements_base64: emailPrepared.blindedElementsBase64,
         });
+      verifyContactDiscoveryEvaluationProofs(
+        phonePrepared.blindedElementsBase64,
+        phoneEvaluated,
+        manifest.oprf_public_key_ristretto255,
+      );
+      verifyContactDiscoveryEvaluationProofs(
+        emailPrepared.blindedElementsBase64,
+        emailEvaluated,
+        manifest.oprf_public_key_ristretto255,
+      );
       const phoneTokens = finalizeContactDiscoveryTokens(
         phonePrepared.blindingScalarsBase64,
         phoneEvaluated.evaluated_elements_base64,
@@ -6051,12 +6117,17 @@ async function renderDiscovery(): Promise<void> {
     try {
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
-      const { serviceOrigin, ticket } = await issueDiscoveryTicket(api, k);
+      const { serviceOrigin, ticket, manifest } = await issueDiscoveryTicket(api, k);
       const prepared = prepareContactDiscoveryBlindRequest(hashes);
       const evaluated = await api.evaluateDiscoveryElementsAtService(serviceOrigin, {
         ticket,
         blinded_elements_base64: prepared.blindedElementsBase64,
       });
+      verifyContactDiscoveryEvaluationProofs(
+        prepared.blindedElementsBase64,
+        evaluated,
+        manifest.oprf_public_key_ristretto255,
+      );
       const tokens = finalizeContactDiscoveryTokens(
         prepared.blindingScalarsBase64,
         evaluated.evaluated_elements_base64,
@@ -6188,6 +6259,9 @@ async function renderServerInfo(): Promise<void> {
           <div class="settings-row"><span>Discovery Tickets</span><span>${caps.contact_discovery_ticket_supported ? "Available" : "Unavailable"}</span></div>
           <div class="settings-row"><span>Discovery Ticket Issuer</span><span class="mono">${escHtml(caps.contact_discovery_ticket_issuer_ed25519_pub)}</span></div>
           <div class="settings-row"><span>Discovery Manifest Issuer</span><span class="mono">${escHtml(caps.contact_discovery_manifest_issuer_ed25519_pub || "not advertised")}</span></div>
+          <div class="settings-row"><span>Discovery Attestation Verifier</span><span class="mono">${escHtml(caps.contact_discovery_attestation_verifier || "not advertised")}</span></div>
+          <div class="settings-row"><span>Discovery Enclave Measurement</span><span class="mono">${escHtml(caps.contact_discovery_expected_measurement_hex || "not advertised")}</span></div>
+          <div class="settings-row"><span>Discovery Attestation Max Age</span><span>${escHtml(caps.contact_discovery_attestation_max_age_seconds ? `${caps.contact_discovery_attestation_max_age_seconds}s` : "not advertised")}</span></div>
           <div class="settings-row"><span>Prod Baseline</span><span>${caps.production_baseline_met ? "✓ Met" : "✗ Not met"}</span></div>
         </div>
         <div class="settings-section">

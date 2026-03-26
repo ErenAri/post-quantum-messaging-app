@@ -93,8 +93,13 @@ export type ContactDiscoveryCheckpoint = {
   privacy_mode: string;
   match_result_format: string;
   oprf_suite: string;
+  evaluation_proof_mode: string;
   oprf_public_key_ristretto255: string;
   attestation_mode: string;
+  attestation_verifier: string | null;
+  enclave_measurement_hex: string | null;
+  attestation_document_format: string | null;
+  attestation_document_sha256: string | null;
   observed_at: string;
 };
 

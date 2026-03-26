@@ -129,6 +129,21 @@ fn parse_env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
     }
 }
 
+fn parse_env_optional_nonempty(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn validate_sha256_hex_env(name: &str, value: &str) -> anyhow::Result<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.len() != 64 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("invalid {name}='{value}': expected 64-character SHA-256 hex");
+    }
+    Ok(normalized)
+}
+
 fn load_sqlite_encryption_config(
     db_backend: DbBackend,
 ) -> anyhow::Result<Option<SqliteEncryptionConfig>> {
@@ -266,6 +281,33 @@ struct DeploymentContract {
     sentry_enabled: bool,
     cors_has_wildcard: bool,
     postgres_encryption: PostgresEncryptionConfig,
+}
+
+fn enforce_contact_discovery_preview_contract(
+    deployment_mode: DeploymentMode,
+    contact_discovery_service_origin: Option<&str>,
+    contact_discovery_manifest_issuer_ed25519_pub: Option<&str>,
+    contact_discovery_attestation_verifier: Option<&str>,
+    contact_discovery_expected_measurement_hex: Option<&str>,
+    contact_discovery_attestation_document_sha256: Option<&str>,
+    contact_discovery_attestation_max_age_seconds: Option<u32>,
+) -> anyhow::Result<()> {
+    if deployment_mode == DeploymentMode::Development {
+        return Ok(());
+    }
+    let preview_configured = contact_discovery_service_origin.is_some()
+        || contact_discovery_manifest_issuer_ed25519_pub.is_some()
+        || contact_discovery_attestation_verifier.is_some()
+        || contact_discovery_expected_measurement_hex.is_some()
+        || contact_discovery_attestation_document_sha256.is_some()
+        || contact_discovery_attestation_max_age_seconds.is_some();
+    if preview_configured {
+        anyhow::bail!(
+            "PQMSG_CONTACT_DISCOVERY_* preview configuration is development-only; unset it for '{}' deployments",
+            deployment_mode.as_str()
+        );
+    }
+    Ok(())
 }
 
 fn enforce_deployment_contract(contract: DeploymentContract) -> anyhow::Result<()> {
@@ -725,16 +767,53 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     let contact_discovery_manifest_issuer_ed25519_pub =
-        env::var("PQMSG_CONTACT_DISCOVERY_MANIFEST_ED25519_PUB")
-            .ok()
-            .and_then(|value| {
-                let trimmed = value.trim().to_string();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed)
-                }
-            });
+        parse_env_optional_nonempty("PQMSG_CONTACT_DISCOVERY_MANIFEST_ED25519_PUB");
+    let contact_discovery_attestation_verifier =
+        parse_env_optional_nonempty("PQMSG_CONTACT_DISCOVERY_ATTESTATION_VERIFIER");
+    let contact_discovery_expected_measurement_hex =
+        parse_env_optional_nonempty("PQMSG_CONTACT_DISCOVERY_ENCLAVE_MEASUREMENT_HEX")
+            .map(|value| {
+                validate_sha256_hex_env("PQMSG_CONTACT_DISCOVERY_ENCLAVE_MEASUREMENT_HEX", &value)
+            })
+            .transpose()?;
+    let contact_discovery_attestation_document_sha256 =
+        parse_env_optional_nonempty("PQMSG_CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_SHA256")
+            .map(|value| {
+                validate_sha256_hex_env(
+                    "PQMSG_CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_SHA256",
+                    &value,
+                )
+            })
+            .transpose()?;
+    let contact_discovery_attestation_max_age_seconds =
+        parse_env_optional_u32("PQMSG_CONTACT_DISCOVERY_ATTESTATION_MAX_AGE_SECONDS")?;
+    if matches!(contact_discovery_attestation_max_age_seconds, Some(0)) {
+        anyhow::bail!(
+            "PQMSG_CONTACT_DISCOVERY_ATTESTATION_MAX_AGE_SECONDS must be greater than zero"
+        );
+    }
+    let discovery_attestation_fields = [
+        contact_discovery_attestation_verifier.is_some(),
+        contact_discovery_expected_measurement_hex.is_some(),
+        contact_discovery_attestation_document_sha256.is_some(),
+        contact_discovery_attestation_max_age_seconds.is_some(),
+    ];
+    if discovery_attestation_fields.iter().any(|present| *present)
+        && !discovery_attestation_fields.iter().all(|present| *present)
+    {
+        anyhow::bail!(
+            "PQMSG_CONTACT_DISCOVERY_ATTESTATION_VERIFIER, PQMSG_CONTACT_DISCOVERY_ENCLAVE_MEASUREMENT_HEX, PQMSG_CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_SHA256, and PQMSG_CONTACT_DISCOVERY_ATTESTATION_MAX_AGE_SECONDS must be configured together"
+        );
+    }
+    enforce_contact_discovery_preview_contract(
+        deployment_mode,
+        contact_discovery_service_origin.as_deref(),
+        contact_discovery_manifest_issuer_ed25519_pub.as_deref(),
+        contact_discovery_attestation_verifier.as_deref(),
+        contact_discovery_expected_measurement_hex.as_deref(),
+        contact_discovery_attestation_document_sha256.as_deref(),
+        contact_discovery_attestation_max_age_seconds,
+    )?;
     let web_client_policy = env::var("PQMSG_WEB_CLIENT_POLICY")
         .unwrap_or_else(|_| "demo_only".to_string())
         .trim()
@@ -808,6 +887,16 @@ async fn main() -> anyhow::Result<()> {
             .with_contact_discovery_service_origin(contact_discovery_service_origin)
             .with_contact_discovery_manifest_issuer_public_key_b64(
                 contact_discovery_manifest_issuer_ed25519_pub,
+            )
+            .with_contact_discovery_attestation_verifier(contact_discovery_attestation_verifier)
+            .with_contact_discovery_expected_measurement_hex(
+                contact_discovery_expected_measurement_hex,
+            )
+            .with_contact_discovery_attestation_document_sha256(
+                contact_discovery_attestation_document_sha256,
+            )
+            .with_contact_discovery_attestation_max_age_seconds(
+                contact_discovery_attestation_max_age_seconds,
             )
             .with_web_client_policy(web_client_policy);
 
@@ -934,8 +1023,8 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::{
-        enforce_deployment_contract, DeploymentContract, PostgresEncryptionConfig,
-        PostgresStorageEncryption,
+        enforce_contact_discovery_preview_contract, enforce_deployment_contract,
+        DeploymentContract, PostgresEncryptionConfig, PostgresStorageEncryption,
     };
     use pqmsg_core::alg::runtime_crypto_profile;
     use pqmsg_core::alg::SecurityProfile;
@@ -1156,5 +1245,24 @@ mod tests {
             })
             .expect("production baseline should accept hardened stack");
         }
+    }
+
+    #[test]
+    fn pilot_rejects_contact_discovery_preview_configuration() {
+        let measurement = "ab".repeat(32);
+        let attestation_hash = "cd".repeat(32);
+        let error = enforce_contact_discovery_preview_contract(
+            DeploymentMode::Pilot,
+            Some("https://cdsi.example"),
+            Some("pubkey"),
+            Some("sgx-dcap-preview"),
+            Some(measurement.as_str()),
+            Some(attestation_hash.as_str()),
+            Some(900),
+        )
+        .expect_err("pilot should reject preview discovery configuration");
+        assert!(error
+            .to_string()
+            .contains("PQMSG_CONTACT_DISCOVERY_* preview configuration is development-only"));
     }
 }

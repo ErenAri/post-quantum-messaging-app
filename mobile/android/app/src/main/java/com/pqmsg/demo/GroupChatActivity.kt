@@ -216,7 +216,6 @@ class GroupChatActivity : AppCompatActivity() {
             PublishPrivateGroupMessageRequest(
                 group_id = encryptedMessage.group_id,
                 epoch = encryptedMessage.epoch,
-                sender_user_id = encryptedMessage.sender_user_id,
                 sent_at_unix_ms = encryptedMessage.sent_at_unix_ms,
                 ciphertext_nonce_base64 = encryptedMessage.ciphertext.nonce.toByteArray().toBase64(),
                 ciphertext_base64 = encryptedMessage.ciphertext.ciphertext.toByteArray().toBase64(),

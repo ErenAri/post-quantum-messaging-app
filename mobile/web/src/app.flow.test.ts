@@ -31,11 +31,19 @@ type BootOptions = {
     contact_discovery_service_origin?: string | null;
     contact_discovery_manifest_issuer_ed25519_pub?: string | null;
     contact_discovery_ticket_issuer_ed25519_pub?: string;
+    contact_discovery_attestation_verifier?: string | null;
+    contact_discovery_expected_measurement_hex?: string | null;
+    contact_discovery_attestation_document_sha256?: string | null;
+    contact_discovery_attestation_max_age_seconds?: number | null;
   };
   discoveryManifest?: {
     service?: string;
     protocol_version?: number;
     attestation_mode?: string;
+    attestation_verifier?: string | null;
+    enclave_measurement_hex?: string | null;
+    attestation_document_format?: string | null;
+    attestation_document_sha256?: string | null;
     ticket_format?: string;
     ticket_issuer_ed25519_pub?: string;
     ticket_max_ttl_seconds?: number;
@@ -43,6 +51,7 @@ type BootOptions = {
     privacy_mode?: string;
     match_result_format?: string;
     oprf_suite?: string;
+    evaluation_proof_mode?: string;
     oprf_public_key_ristretto255?: string;
     signed_at?: string;
     expires_at?: string;
@@ -271,11 +280,24 @@ async function bootApp(options: BootOptions = {}) {
         options.capabilities?.contact_discovery_manifest_issuer_ed25519_pub ?? null,
       contact_discovery_ticket_issuer_ed25519_pub:
         options.capabilities?.contact_discovery_ticket_issuer_ed25519_pub ?? "issuer-ed25519-pub",
+      contact_discovery_attestation_verifier:
+        options.capabilities?.contact_discovery_attestation_verifier ?? null,
+      contact_discovery_expected_measurement_hex:
+        options.capabilities?.contact_discovery_expected_measurement_hex ?? null,
+      contact_discovery_attestation_document_sha256:
+        options.capabilities?.contact_discovery_attestation_document_sha256 ?? null,
+      contact_discovery_attestation_max_age_seconds:
+        options.capabilities?.contact_discovery_attestation_max_age_seconds
+        ?? (options.discoveryManifest?.attestation_document_sha256 ? 86_400 : null),
     },
     contactDiscoveryManifest: {
       service: options.discoveryManifest?.service ?? "cdsi-preview",
       protocol_version: options.discoveryManifest?.protocol_version ?? 1,
-      attestation_mode: options.discoveryManifest?.attestation_mode ?? "service_boundary_only",
+      attestation_mode: options.discoveryManifest?.attestation_mode ?? "unattested_development",
+      attestation_verifier: options.discoveryManifest?.attestation_verifier ?? null,
+      enclave_measurement_hex: options.discoveryManifest?.enclave_measurement_hex ?? null,
+      attestation_document_format: options.discoveryManifest?.attestation_document_format ?? null,
+      attestation_document_sha256: options.discoveryManifest?.attestation_document_sha256 ?? null,
       ticket_format: options.discoveryManifest?.ticket_format ?? "ed25519-ticket-v1",
       ticket_issuer_ed25519_pub:
         options.discoveryManifest?.ticket_issuer_ed25519_pub
@@ -287,6 +309,8 @@ async function bootApp(options: BootOptions = {}) {
       privacy_mode: options.discoveryManifest?.privacy_mode ?? "blind_evaluation_preview",
       match_result_format: options.discoveryManifest?.match_result_format ?? "contact_invite_token",
       oprf_suite: options.discoveryManifest?.oprf_suite ?? "ristretto255-sha512-preview",
+      evaluation_proof_mode:
+        options.discoveryManifest?.evaluation_proof_mode ?? "dleq_per_element_preview",
       oprf_public_key_ristretto255:
         options.discoveryManifest?.oprf_public_key_ristretto255 ?? "oprf-pub-1",
       signed_at: options.discoveryManifest?.signed_at ?? "2026-03-26T00:00:00Z",
@@ -297,6 +321,28 @@ async function bootApp(options: BootOptions = {}) {
         ?? "manifest-issuer-pub",
       manifest_signature_ed25519:
         options.discoveryManifest?.manifest_signature_ed25519 ?? "manifest-sig",
+    },
+    contactDiscoveryAttestation: {
+      attestation_mode: options.discoveryManifest?.attestation_mode ?? "unattested_development",
+      attestation_verifier: options.discoveryManifest?.attestation_verifier ?? "sgx-dcap-preview",
+      enclave_measurement_hex:
+        options.discoveryManifest?.enclave_measurement_hex ?? "ab".repeat(32),
+      document_format: options.discoveryManifest?.attestation_document_format ?? "opaque_b64_v1",
+      document_base64: "eyJ0ZWUiOiJzZ3gifQ==",
+      document_sha256:
+        options.discoveryManifest?.attestation_document_sha256 ?? "cd".repeat(32),
+      published_at: new Date().toISOString(),
+    },
+    contactDiscoveryEvaluate: {
+      evaluation_proof_mode:
+        options.discoveryManifest?.evaluation_proof_mode ?? "dleq_per_element_preview",
+      evaluated_elements_base64: [] as string[],
+      dleq_proofs: [] as Array<{
+        challenge_scalar_base64: string;
+        response_scalar_base64: string;
+        commitment_base_base64: string;
+        commitment_blinded_base64: string;
+      }>,
     },
   };
 
@@ -784,6 +830,10 @@ async function bootApp(options: BootOptions = {}) {
         return apiState.contactDiscoveryManifest;
       }
 
+      async getContactDiscoveryAttestation() {
+        return apiState.contactDiscoveryAttestation;
+      }
+
       async createInboxWsTicket(userId: string) {
         return { ticket: `ticket-${userId}`, expires_at: "2026-03-11T00:00:30Z" };
       }
@@ -1189,8 +1239,13 @@ describe("web app flow coverage", () => {
           privacy_mode: "blind_evaluation_preview",
           match_result_format: "contact_invite_token",
           oprf_suite: "ristretto255-sha512-preview",
+          evaluation_proof_mode: "dleq_per_element_preview",
           oprf_public_key_ristretto255: "oprf-pub-1",
           attestation_mode: "service_boundary_only",
+          attestation_verifier: null,
+          enclave_measurement_hex: null,
+          attestation_document_format: null,
+          attestation_document_sha256: null,
           observed_at: "2026-03-26T00:00:00Z",
         });
         sessionStorage.setItem("pqmsg.passphrase", "pass-1");

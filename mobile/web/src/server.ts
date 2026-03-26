@@ -210,6 +210,10 @@ export type ContactDiscoveryManifestResponse = {
   service: string;
   protocol_version: number;
   attestation_mode: string;
+  attestation_verifier?: string | null;
+  enclave_measurement_hex?: string | null;
+  attestation_document_format?: string | null;
+  attestation_document_sha256?: string | null;
   ticket_format: string;
   ticket_issuer_ed25519_pub: string;
   ticket_max_ttl_seconds: number;
@@ -217,11 +221,22 @@ export type ContactDiscoveryManifestResponse = {
   privacy_mode: string;
   match_result_format: string;
   oprf_suite: string;
+  evaluation_proof_mode: string;
   oprf_public_key_ristretto255: string;
   signed_at: string;
   expires_at: string;
   manifest_issuer_ed25519_pub: string;
   manifest_signature_ed25519: string;
+};
+
+export type ContactDiscoveryAttestationResponse = {
+  attestation_mode: string;
+  attestation_verifier: string;
+  enclave_measurement_hex: string;
+  document_format: string;
+  document_base64: string;
+  document_sha256: string;
+  published_at: string;
 };
 
 export type ContactEntry = {
@@ -410,7 +425,6 @@ export type ConsumePrivateGroupInviteResponse = {
 export type PublishPrivateGroupMessageRequest = {
   group_id: string;
   epoch: number;
-  sender_user_id: string;
   sent_at_unix_ms: number;
   ciphertext_nonce_base64: string;
   ciphertext_base64: string;
@@ -727,7 +741,14 @@ export type PrivateDiscoveryEvaluateRequest = {
 export type PrivateDiscoveryEvaluateResponse = {
   user_id: string;
   device_id: string;
+  evaluation_proof_mode: string;
   evaluated_elements_base64: string[];
+  dleq_proofs: Array<{
+    challenge_scalar_base64: string;
+    response_scalar_base64: string;
+    commitment_base_base64: string;
+    commitment_blinded_base64: string;
+  }>;
   evaluated_at: string;
 };
 
@@ -832,6 +853,10 @@ export type ServerCapabilitiesResponse = {
   contact_discovery_ticket_supported: boolean;
   contact_discovery_service_origin: string | null;
   contact_discovery_manifest_issuer_ed25519_pub: string | null;
+  contact_discovery_attestation_verifier: string | null;
+  contact_discovery_expected_measurement_hex: string | null;
+  contact_discovery_attestation_document_sha256: string | null;
+  contact_discovery_attestation_max_age_seconds: number | null;
   presence_supported: boolean;
   typing_indicators_supported: boolean;
   read_receipts_supported: boolean;
@@ -1566,6 +1591,21 @@ export class PqmsgApi {
       throw new PqmsgApiError(response.status, await response.text());
     }
     return response.json() as Promise<ContactDiscoveryManifestResponse>;
+  }
+
+  async getContactDiscoveryAttestation(
+    serviceOrigin: string
+  ): Promise<ContactDiscoveryAttestationResponse> {
+    const parsed = validateWebServerUrl(serviceOrigin);
+    const normalized = `${parsed.origin}`;
+    const response = await fetch(`${normalized}/v1/attestation`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      throw new PqmsgApiError(response.status, await response.text());
+    }
+    return response.json() as Promise<ContactDiscoveryAttestationResponse>;
   }
 
   async evaluateDiscoveryElementsAtService(

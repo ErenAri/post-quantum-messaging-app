@@ -408,7 +408,6 @@ data class ConsumePrivateGroupInviteResponse(
 data class PublishPrivateGroupMessageRequest(
     val group_id: String,
     val epoch: Long,
-    val sender_user_id: String,
     val sent_at_unix_ms: Long,
     val ciphertext_nonce_base64: String,
     val ciphertext_base64: String,
@@ -579,6 +578,10 @@ data class ContactDiscoveryManifestResponse(
     val service: String,
     val protocol_version: Int,
     val attestation_mode: String,
+    val attestation_verifier: String?,
+    val enclave_measurement_hex: String?,
+    val attestation_document_format: String?,
+    val attestation_document_sha256: String?,
     val ticket_format: String,
     val ticket_issuer_ed25519_pub: String,
     val ticket_max_ttl_seconds: Int,
@@ -586,11 +589,22 @@ data class ContactDiscoveryManifestResponse(
     val privacy_mode: String,
     val match_result_format: String,
     val oprf_suite: String,
+    val evaluation_proof_mode: String,
     val oprf_public_key_ristretto255: String,
     val signed_at: String,
     val expires_at: String,
     val manifest_issuer_ed25519_pub: String,
     val manifest_signature_ed25519: String,
+)
+
+data class ContactDiscoveryAttestationResponse(
+    val attestation_mode: String,
+    val attestation_verifier: String,
+    val enclave_measurement_hex: String,
+    val document_format: String,
+    val document_base64: String,
+    val document_sha256: String,
+    val published_at: String,
 )
 
 data class PrivateDiscoveryEvaluateRequest(
@@ -601,8 +615,17 @@ data class PrivateDiscoveryEvaluateRequest(
 data class PrivateDiscoveryEvaluateResponse(
     val user_id: String,
     val device_id: String,
+    val evaluation_proof_mode: String,
     val evaluated_elements_base64: List<String>,
+    val dleq_proofs: List<PrivateDiscoveryEvaluateProof>,
     val evaluated_at: String,
+)
+
+data class PrivateDiscoveryEvaluateProof(
+    val challenge_scalar_base64: String,
+    val response_scalar_base64: String,
+    val commitment_base_base64: String,
+    val commitment_blinded_base64: String,
 )
 
 data class PrivateDiscoveryHandlesUploadRequest(
@@ -792,6 +815,10 @@ data class ServerCapabilitiesResponse(
     val contact_discovery_ticket_supported: Boolean,
     val contact_discovery_service_origin: String?,
     val contact_discovery_manifest_issuer_ed25519_pub: String?,
+    val contact_discovery_attestation_verifier: String?,
+    val contact_discovery_expected_measurement_hex: String?,
+    val contact_discovery_attestation_document_sha256: String?,
+    val contact_discovery_attestation_max_age_seconds: Int?,
     val presence_supported: Boolean,
     val typing_indicators_supported: Boolean,
     val read_receipts_supported: Boolean,
@@ -1269,6 +1296,9 @@ interface PqmsgDiscoveryApi {
     @GET("/v1/manifest")
     suspend fun getManifest(): ContactDiscoveryManifestResponse
 
+    @GET("/v1/attestation")
+    suspend fun getAttestation(): ContactDiscoveryAttestationResponse
+
     @POST("/v1/discovery/evaluate")
     suspend fun evaluateDiscoveryElements(
         @Body request: PrivateDiscoveryEvaluateRequest,
@@ -1454,6 +1484,23 @@ object ApiClientFactory {
             }
             require(!capabilities.contact_discovery_manifest_issuer_ed25519_pub.isNullOrBlank()) {
                 "Server advertises private contact discovery without a discovery manifest issuer key"
+            }
+            val attestationFieldsPresent =
+                listOf(
+                    !capabilities.contact_discovery_attestation_verifier.isNullOrBlank(),
+                    !capabilities.contact_discovery_expected_measurement_hex.isNullOrBlank(),
+                    !capabilities.contact_discovery_attestation_document_sha256.isNullOrBlank(),
+                    capabilities.contact_discovery_attestation_max_age_seconds != null,
+                )
+            require(
+                attestationFieldsPresent.none { it } || attestationFieldsPresent.all { it },
+            ) {
+                "Server advertises a partial private discovery attestation contract"
+            }
+            capabilities.contact_discovery_attestation_max_age_seconds?.let { maxAge ->
+                require(maxAge > 0) {
+                    "Server advertises an invalid private discovery attestation max age"
+                }
             }
         }
         require(!capabilities.authenticated_direct_messaging_supported) {

@@ -285,8 +285,13 @@ describe("contact discovery checkpoints", () => {
       privacy_mode: "blind_evaluation_preview",
       match_result_format: "contact_invite_token",
       oprf_suite: "ristretto255-sha512-preview",
+      evaluation_proof_mode: "dleq_per_element_preview",
       oprf_public_key_ristretto255: "oprf-pub-1",
       attestation_mode: "service_boundary_only",
+      attestation_verifier: null,
+      enclave_measurement_hex: null,
+      attestation_document_format: null,
+      attestation_document_sha256: null,
       observed_at: "2026-03-26T00:00:00Z",
     };
     writeContactDiscoveryCheckpoint("https://app.example", "alice", checkpoint);
@@ -305,8 +310,13 @@ describe("contact discovery checkpoints", () => {
       privacy_mode: "blind_evaluation_preview",
       match_result_format: "contact_invite_token",
       oprf_suite: "ristretto255-sha512-preview",
+      evaluation_proof_mode: "dleq_per_element_preview",
       oprf_public_key_ristretto255: "oprf-pub-1",
       attestation_mode: "service_boundary_only",
+      attestation_verifier: null,
+      enclave_measurement_hex: null,
+      attestation_document_format: null,
+      attestation_document_sha256: null,
       observed_at: "2026-03-26T00:00:00Z",
     });
     writeContactDiscoveryCheckpoint("https://app.example", "bob", {
@@ -319,8 +329,13 @@ describe("contact discovery checkpoints", () => {
       privacy_mode: "blind_evaluation_preview",
       match_result_format: "contact_invite_token",
       oprf_suite: "ristretto255-sha512-preview",
+      evaluation_proof_mode: "dleq_per_element_preview",
       oprf_public_key_ristretto255: "oprf-pub-1",
       attestation_mode: "service_boundary_only",
+      attestation_verifier: null,
+      enclave_measurement_hex: null,
+      attestation_document_format: null,
+      attestation_document_sha256: null,
       observed_at: "2026-03-26T00:00:00Z",
     });
 

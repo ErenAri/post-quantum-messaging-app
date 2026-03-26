@@ -451,8 +451,6 @@ pub(crate) async fn publish_private_group_message(
 
     validate_id("group_id", &request.group_id)?;
     let epoch = validate_private_group_epoch(request.epoch)?;
-    validate_id("sender_user_id", &request.sender_user_id)?;
-    let sender_user_id = request.sender_user_id.trim().to_string();
     let authorizing_membership_handle_sha256 = validate_sha256_hex(
         "authorizing_membership_handle_sha256",
         &request.authorizing_membership_handle_sha256,
@@ -499,21 +497,17 @@ pub(crate) async fn publish_private_group_message(
         "INSERT INTO private_group_messages (
             group_id,
             epoch,
-            sender_membership_handle_sha256,
-            sender_user_id,
             sent_at_unix_ms,
             ciphertext_nonce_base64,
             ciphertext_base64,
             ciphertext_aad_base64,
             sender_hybrid_signature_base64,
             received_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          RETURNING message_id",
     )
     .bind(request.group_id.trim())
     .bind(epoch)
-    .bind(&authorizing_membership_handle_sha256)
-    .bind(&sender_user_id)
     .bind(
         i64::try_from(request.sent_at_unix_ms)
             .map_err(|_| AppError::bad_request("sent_at_unix_ms is too large"))?,

@@ -234,7 +234,11 @@ async fn test_app_with_contact_discovery_service_origin(service_origin: &str) ->
                 .verifying_key()
                 .to_bytes(),
         ),
-    ));
+    ))
+    .with_contact_discovery_attestation_verifier(Some("sgx-dcap-preview".to_string()))
+    .with_contact_discovery_expected_measurement_hex(Some("ab".repeat(32)))
+    .with_contact_discovery_attestation_document_sha256(Some("cd".repeat(32)))
+    .with_contact_discovery_attestation_max_age_seconds(Some(900));
     build_router(state)
 }
 
@@ -269,7 +273,11 @@ async fn test_app_with_contact_discovery_service_origin_and_deployment_mode(
                 .verifying_key()
                 .to_bytes(),
         ),
-    ));
+    ))
+    .with_contact_discovery_attestation_verifier(Some("sgx-dcap-preview".to_string()))
+    .with_contact_discovery_expected_measurement_hex(Some("ab".repeat(32)))
+    .with_contact_discovery_attestation_document_sha256(Some("cd".repeat(32)))
+    .with_contact_discovery_attestation_max_age_seconds(Some(900));
     build_router(state)
 }
 
@@ -2516,6 +2524,10 @@ async fn capabilities_reports_client_contract() {
     );
     assert!(body["contact_discovery_service_origin"].is_null());
     assert!(body["contact_discovery_manifest_issuer_ed25519_pub"].is_null());
+    assert!(body["contact_discovery_attestation_verifier"].is_null());
+    assert!(body["contact_discovery_expected_measurement_hex"].is_null());
+    assert!(body["contact_discovery_attestation_document_sha256"].is_null());
+    assert!(body["contact_discovery_attestation_max_age_seconds"].is_null());
     assert!(body["contact_discovery_ticket_issuer_ed25519_pub"]
         .as_str()
         .is_some_and(|value| !value.is_empty()));
@@ -2571,6 +2583,22 @@ async fn capabilities_report_private_contact_discovery_service_when_configured()
     assert!(body["contact_discovery_manifest_issuer_ed25519_pub"]
         .as_str()
         .is_some_and(|value| !value.is_empty()));
+    assert_eq!(
+        body["contact_discovery_attestation_verifier"].as_str(),
+        Some("sgx-dcap-preview")
+    );
+    assert_eq!(
+        body["contact_discovery_expected_measurement_hex"].as_str(),
+        Some("abababababababababababababababababababababababababababababababab")
+    );
+    assert_eq!(
+        body["contact_discovery_attestation_document_sha256"].as_str(),
+        Some("cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd")
+    );
+    assert_eq!(
+        body["contact_discovery_attestation_max_age_seconds"].as_u64(),
+        Some(900)
+    );
 }
 
 #[tokio::test]
@@ -2590,6 +2618,10 @@ async fn capabilities_do_not_advertise_development_only_private_discovery_in_pil
     );
     assert!(body["contact_discovery_service_origin"].is_null());
     assert!(body["contact_discovery_manifest_issuer_ed25519_pub"].is_null());
+    assert!(body["contact_discovery_attestation_verifier"].is_null());
+    assert!(body["contact_discovery_expected_measurement_hex"].is_null());
+    assert!(body["contact_discovery_attestation_document_sha256"].is_null());
+    assert!(body["contact_discovery_attestation_max_age_seconds"].is_null());
 }
 
 #[tokio::test]
@@ -7039,7 +7071,6 @@ async fn private_group_message_publish_and_fetch_work() {
         json!({
             "group_id": "private-group-message-alpha",
             "epoch": 1,
-            "sender_user_id": "member-user",
             "sent_at_unix_ms": 1_775_000_000_000u64,
             "ciphertext_nonce_base64": B64.encode([22u8; 12]),
             "ciphertext_base64": B64.encode(b"opaque-private-group-message-v1"),
@@ -7142,7 +7173,6 @@ async fn private_group_message_rejects_stale_epoch_and_revoked_fetch_capability(
         json!({
             "group_id": "private-group-message-rotation",
             "epoch": 1,
-            "sender_user_id": "member-user",
             "sent_at_unix_ms": 1_775_000_000_001u64,
             "ciphertext_nonce_base64": B64.encode([25u8; 12]),
             "ciphertext_base64": B64.encode(b"opaque-private-group-message-stale"),

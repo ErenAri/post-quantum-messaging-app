@@ -325,6 +325,10 @@ pub struct AppState {
     authenticated_direct_messaging_supported: bool,
     contact_discovery_service_origin: Option<String>,
     contact_discovery_manifest_issuer_ed25519_pub: Option<String>,
+    contact_discovery_attestation_verifier: Option<String>,
+    contact_discovery_expected_measurement_hex: Option<String>,
+    contact_discovery_attestation_document_sha256: Option<String>,
+    contact_discovery_attestation_max_age_seconds: Option<u32>,
     web_client_policy: String,
 }
 
@@ -359,6 +363,10 @@ impl AppState {
             authenticated_direct_messaging_supported: false,
             contact_discovery_service_origin: None,
             contact_discovery_manifest_issuer_ed25519_pub: None,
+            contact_discovery_attestation_verifier: None,
+            contact_discovery_expected_measurement_hex: None,
+            contact_discovery_attestation_document_sha256: None,
+            contact_discovery_attestation_max_age_seconds: None,
             web_client_policy: DEFAULT_WEB_CLIENT_POLICY.to_string(),
         }
     }
@@ -397,6 +405,10 @@ impl AppState {
             authenticated_direct_messaging_supported: false,
             contact_discovery_service_origin: None,
             contact_discovery_manifest_issuer_ed25519_pub: None,
+            contact_discovery_attestation_verifier: None,
+            contact_discovery_expected_measurement_hex: None,
+            contact_discovery_attestation_document_sha256: None,
+            contact_discovery_attestation_max_age_seconds: None,
             web_client_policy: DEFAULT_WEB_CLIENT_POLICY.to_string(),
         }
     }
@@ -499,6 +511,38 @@ impl AppState {
     pub fn contact_discovery_manifest_issuer_public_key_b64(&self) -> Option<String> {
         if self.contact_discovery_private_service_allowed() {
             self.contact_discovery_manifest_issuer_ed25519_pub.clone()
+        } else {
+            None
+        }
+    }
+
+    pub fn contact_discovery_attestation_verifier(&self) -> Option<String> {
+        if self.contact_discovery_private_service_allowed() {
+            self.contact_discovery_attestation_verifier.clone()
+        } else {
+            None
+        }
+    }
+
+    pub fn contact_discovery_expected_measurement_hex(&self) -> Option<String> {
+        if self.contact_discovery_private_service_allowed() {
+            self.contact_discovery_expected_measurement_hex.clone()
+        } else {
+            None
+        }
+    }
+
+    pub fn contact_discovery_attestation_document_sha256(&self) -> Option<String> {
+        if self.contact_discovery_private_service_allowed() {
+            self.contact_discovery_attestation_document_sha256.clone()
+        } else {
+            None
+        }
+    }
+
+    pub fn contact_discovery_attestation_max_age_seconds(&self) -> Option<u32> {
+        if self.contact_discovery_private_service_allowed() {
+            self.contact_discovery_attestation_max_age_seconds
         } else {
             None
         }
@@ -638,6 +682,38 @@ impl AppState {
         manifest_issuer_public_key_b64: Option<String>,
     ) -> Self {
         self.contact_discovery_manifest_issuer_ed25519_pub = manifest_issuer_public_key_b64;
+        self
+    }
+
+    pub fn with_contact_discovery_attestation_verifier(
+        mut self,
+        attestation_verifier: Option<String>,
+    ) -> Self {
+        self.contact_discovery_attestation_verifier = attestation_verifier;
+        self
+    }
+
+    pub fn with_contact_discovery_expected_measurement_hex(
+        mut self,
+        expected_measurement_hex: Option<String>,
+    ) -> Self {
+        self.contact_discovery_expected_measurement_hex = expected_measurement_hex;
+        self
+    }
+
+    pub fn with_contact_discovery_attestation_document_sha256(
+        mut self,
+        attestation_document_sha256: Option<String>,
+    ) -> Self {
+        self.contact_discovery_attestation_document_sha256 = attestation_document_sha256;
+        self
+    }
+
+    pub fn with_contact_discovery_attestation_max_age_seconds(
+        mut self,
+        attestation_max_age_seconds: Option<u32>,
+    ) -> Self {
+        self.contact_discovery_attestation_max_age_seconds = attestation_max_age_seconds;
         self
     }
 

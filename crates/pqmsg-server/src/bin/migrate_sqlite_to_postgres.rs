@@ -266,8 +266,7 @@ async fn main() -> anyhow::Result<()> {
 
     let private_group_messages = if sqlite_table_exists(&sqlite, "private_group_messages").await? {
         sqlx::query(
-            "SELECT message_id, group_id, epoch, sender_membership_handle_sha256,
-                    sender_user_id, sent_at_unix_ms, ciphertext_nonce_base64,
+            "SELECT message_id, group_id, epoch, sent_at_unix_ms, ciphertext_nonce_base64,
                     ciphertext_base64, ciphertext_aad_base64,
                     sender_hybrid_signature_base64, received_at
              FROM private_group_messages
@@ -651,20 +650,16 @@ async fn main() -> anyhow::Result<()> {
                 message_id,
                 group_id,
                 epoch,
-                sender_membership_handle_sha256,
-                sender_user_id,
                 sent_at_unix_ms,
                 ciphertext_nonce_base64,
                 ciphertext_base64,
                 ciphertext_aad_base64,
                 sender_hybrid_signature_base64,
                 received_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT (message_id) DO UPDATE SET
                group_id = EXCLUDED.group_id,
                epoch = EXCLUDED.epoch,
-               sender_membership_handle_sha256 = EXCLUDED.sender_membership_handle_sha256,
-               sender_user_id = EXCLUDED.sender_user_id,
                sent_at_unix_ms = EXCLUDED.sent_at_unix_ms,
                ciphertext_nonce_base64 = EXCLUDED.ciphertext_nonce_base64,
                ciphertext_base64 = EXCLUDED.ciphertext_base64,
@@ -675,8 +670,6 @@ async fn main() -> anyhow::Result<()> {
         .bind(row.try_get::<i64, _>("message_id")?)
         .bind(row.try_get::<String, _>("group_id")?)
         .bind(row.try_get::<i64, _>("epoch")?)
-        .bind(row.try_get::<String, _>("sender_membership_handle_sha256")?)
-        .bind(row.try_get::<String, _>("sender_user_id")?)
         .bind(row.try_get::<i64, _>("sent_at_unix_ms")?)
         .bind(row.try_get::<String, _>("ciphertext_nonce_base64")?)
         .bind(row.try_get::<String, _>("ciphertext_base64")?)

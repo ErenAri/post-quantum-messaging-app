@@ -12,7 +12,11 @@ import {
 } from "./base64";
 import { criticalType, encodeTlv, i64ToBeBytes, u16ToBeBytes } from "./tlv";
 import * as wasmCrypto from "./crypto-wasm";
-import type { BundleResponse, ContactDiscoveryManifestResponse } from "./server";
+import type {
+  BundleResponse,
+  ContactDiscoveryAttestationResponse,
+  ContactDiscoveryManifestResponse,
+} from "./server";
 
 const AUTH_TAG_ENDPOINT = criticalType(0x3201);
 const AUTH_TAG_USER_ID = criticalType(0x3202);
@@ -1166,6 +1170,9 @@ export function verifyContactDiscoveryManifest(
   manifest: ContactDiscoveryManifestResponse,
   expectedTicketIssuerPubB64: string,
   expectedManifestIssuerPubB64: string,
+  expectedAttestationVerifier: string | null = null,
+  expectedEnclaveMeasurementHex: string | null = null,
+  expectedAttestationDocumentSha256: string | null = null,
 ): void {
   if (manifest.ticket_issuer_ed25519_pub !== expectedTicketIssuerPubB64) {
     throw new Error("Contact discovery manifest ticket issuer mismatch");
@@ -1181,10 +1188,39 @@ export function verifyContactDiscoveryManifest(
   if (expiresAt <= Date.now()) {
     throw new Error("Contact discovery manifest expired");
   }
+  if ((expectedAttestationVerifier ?? "").trim()) {
+    if (manifest.attestation_verifier !== expectedAttestationVerifier) {
+      throw new Error("Contact discovery manifest attestation verifier mismatch");
+    }
+  }
+  if ((expectedEnclaveMeasurementHex ?? "").trim()) {
+    if (manifest.enclave_measurement_hex !== expectedEnclaveMeasurementHex) {
+      throw new Error("Contact discovery manifest enclave measurement mismatch");
+    }
+  }
+  if ((expectedAttestationDocumentSha256 ?? "").trim()) {
+    if (manifest.attestation_document_sha256 !== expectedAttestationDocumentSha256) {
+      throw new Error("Contact discovery manifest attestation document hash mismatch");
+    }
+  }
+  if (manifest.attestation_mode !== "unattested_development") {
+    if (
+      !manifest.attestation_verifier
+      || !manifest.enclave_measurement_hex
+      || !manifest.attestation_document_format
+      || !manifest.attestation_document_sha256
+    ) {
+      throw new Error("Contact discovery manifest attestation contract is incomplete");
+    }
+  }
   const payloadBytes = utf8ToBytes(JSON.stringify({
     service: manifest.service,
     protocol_version: manifest.protocol_version,
     attestation_mode: manifest.attestation_mode,
+    attestation_verifier: manifest.attestation_verifier ?? null,
+    enclave_measurement_hex: manifest.enclave_measurement_hex ?? null,
+    attestation_document_format: manifest.attestation_document_format ?? null,
+    attestation_document_sha256: manifest.attestation_document_sha256 ?? null,
     ticket_format: manifest.ticket_format,
     ticket_issuer_ed25519_pub: manifest.ticket_issuer_ed25519_pub,
     ticket_max_ttl_seconds: manifest.ticket_max_ttl_seconds,
@@ -1192,6 +1228,7 @@ export function verifyContactDiscoveryManifest(
     privacy_mode: manifest.privacy_mode,
     match_result_format: manifest.match_result_format,
     oprf_suite: manifest.oprf_suite,
+    evaluation_proof_mode: manifest.evaluation_proof_mode,
     oprf_public_key_ristretto255: manifest.oprf_public_key_ristretto255,
     signed_at: manifest.signed_at,
     expires_at: manifest.expires_at,
@@ -1203,10 +1240,84 @@ export function verifyContactDiscoveryManifest(
   }
 }
 
+export function verifyContactDiscoveryAttestationDocument(
+  response: ContactDiscoveryAttestationResponse,
+  expectedAttestationMode: string,
+  expectedVerifier: string,
+  expectedMeasurementHex: string,
+  expectedDocumentSha256: string,
+  expectedMaxAgeSeconds: number,
+): void {
+  if (response.attestation_mode !== expectedAttestationMode) {
+    throw new Error("Contact discovery attestation mode mismatch");
+  }
+  if (response.attestation_verifier !== expectedVerifier) {
+    throw new Error("Contact discovery attestation verifier mismatch");
+  }
+  if (response.enclave_measurement_hex !== expectedMeasurementHex) {
+    throw new Error("Contact discovery attestation measurement mismatch");
+  }
+  if (response.document_format !== "opaque_b64_v1") {
+    throw new Error("Unsupported contact discovery attestation document format");
+  }
+  if (response.document_sha256 !== expectedDocumentSha256) {
+    throw new Error("Contact discovery attestation document hash mismatch");
+  }
+  const documentBytes = base64ToBytes(response.document_base64);
+  const computedSha256 = bytesToHex(sha256(documentBytes));
+  if (computedSha256 !== expectedDocumentSha256.toLowerCase()) {
+    throw new Error("Contact discovery attestation document integrity check failed");
+  }
+  if (!Number.isFinite(expectedMaxAgeSeconds) || expectedMaxAgeSeconds <= 0) {
+    throw new Error("Contact discovery attestation max age is invalid");
+  }
+  const publishedAtMs = Date.parse(response.published_at);
+  if (!Number.isFinite(publishedAtMs)) {
+    throw new Error("Contact discovery attestation published_at is invalid");
+  }
+  const now = Date.now();
+  if (publishedAtMs > now + 5 * 60 * 1000) {
+    throw new Error("Contact discovery attestation published_at is in the future");
+  }
+  if (now - publishedAtMs > expectedMaxAgeSeconds * 1000) {
+    throw new Error("Contact discovery attestation document is stale");
+  }
+}
+
 export type ContactDiscoveryBlindRequest = {
   blindedElementsBase64: string[];
   blindingScalarsBase64: string[];
 };
+
+function discoveryDleqChallenge(
+  publicKey: any,
+  blindedPoint: any,
+  evaluatedPoint: any,
+  commitmentBase: any,
+  commitmentBlinded: any,
+) {
+  return discoveryProofScalarFromBytes(
+    sha256(
+      concatBytes([
+        utf8ToBytes("pqmsg-discovery-dleq-proof-v1"),
+        ristretto255.Point.BASE.toBytes(),
+        publicKey.toBytes(),
+        blindedPoint.toBytes(),
+        evaluatedPoint.toBytes(),
+        commitmentBase.toBytes(),
+        commitmentBlinded.toBytes(),
+      ]),
+    ),
+  );
+}
+
+function discoveryProofScalarFromBytes(bytes: Uint8Array) {
+  let asBigInt = 0n;
+  for (let index = bytes.length - 1; index >= 0; index -= 1) {
+    asBigInt = (asBigInt << 8n) + BigInt(bytes[index]);
+  }
+  return ristretto255.Point.Fn.create(asBigInt);
+}
 
 function decodeDiscoveryHashHex(value: string): Uint8Array {
   const normalized = value.trim().toLowerCase();
@@ -1267,6 +1378,74 @@ export function finalizeContactDiscoveryTokens(
       ),
     );
   });
+}
+
+export function verifyContactDiscoveryEvaluationProofs(
+  blindedElementsBase64: string[],
+  response: {
+    evaluation_proof_mode: string;
+    evaluated_elements_base64: string[];
+    dleq_proofs: Array<{
+      challenge_scalar_base64: string;
+      response_scalar_base64: string;
+      commitment_base_base64: string;
+      commitment_blinded_base64: string;
+    }>;
+  },
+  expectedOprfPublicKeyRistretto255B64: string,
+): void {
+  if (response.evaluation_proof_mode !== "dleq_per_element_preview") {
+    throw new Error("Unsupported contact discovery evaluation proof mode");
+  }
+  if (
+    blindedElementsBase64.length !== response.evaluated_elements_base64.length
+    || blindedElementsBase64.length !== response.dleq_proofs.length
+  ) {
+    throw new Error("Contact discovery evaluation proof count mismatch");
+  }
+  const publicKey = ristretto255.Point.fromBytes(
+    base64ToBytes(expectedOprfPublicKeyRistretto255B64),
+  );
+  for (let index = 0; index < blindedElementsBase64.length; index += 1) {
+    const blindedPoint = ristretto255.Point.fromBytes(base64ToBytes(blindedElementsBase64[index]));
+    const evaluatedPoint = ristretto255.Point.fromBytes(
+      base64ToBytes(response.evaluated_elements_base64[index]),
+    );
+    const proof = response.dleq_proofs[index];
+    const challenge = discoveryProofScalarFromBytes(base64ToBytes(proof.challenge_scalar_base64));
+    const responseScalar = discoveryProofScalarFromBytes(
+      base64ToBytes(proof.response_scalar_base64),
+    );
+    const commitmentBase = ristretto255.Point.fromBytes(
+      base64ToBytes(proof.commitment_base_base64),
+    );
+    const commitmentBlinded = ristretto255.Point.fromBytes(
+      base64ToBytes(proof.commitment_blinded_base64),
+    );
+    const expectedChallenge = discoveryDleqChallenge(
+      publicKey,
+      blindedPoint,
+      evaluatedPoint,
+      commitmentBase,
+      commitmentBlinded,
+    );
+    if (
+      bytesToBase64(ristretto255.Point.Fn.toBytes(challenge))
+      !== bytesToBase64(ristretto255.Point.Fn.toBytes(expectedChallenge))
+    ) {
+      throw new Error("Contact discovery DLEQ challenge mismatch");
+    }
+    const lhsBase = ristretto255.Point.BASE.multiply(responseScalar);
+    const rhsBase = commitmentBase.add(publicKey.multiply(challenge));
+    const lhsBlinded = blindedPoint.multiply(responseScalar);
+    const rhsBlinded = commitmentBlinded.add(evaluatedPoint.multiply(challenge));
+    if (bytesToBase64(lhsBase.toBytes()) !== bytesToBase64(rhsBase.toBytes())) {
+      throw new Error("Contact discovery DLEQ base equation failed");
+    }
+    if (bytesToBase64(lhsBlinded.toBytes()) !== bytesToBase64(rhsBlinded.toBytes())) {
+      throw new Error("Contact discovery DLEQ blinded equation failed");
+    }
+  }
 }
 
 export function identityFingerprint(identityX25519PubB64: string, identityPqSigPubB64?: string): string {

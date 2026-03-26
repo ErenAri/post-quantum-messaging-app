@@ -61,6 +61,13 @@ fn capabilities_response(state: &AppState) -> ServerCapabilitiesResponse {
         contact_discovery_service_origin: state.contact_discovery_service_origin(),
         contact_discovery_manifest_issuer_ed25519_pub: state
             .contact_discovery_manifest_issuer_public_key_b64(),
+        contact_discovery_attestation_verifier: state.contact_discovery_attestation_verifier(),
+        contact_discovery_expected_measurement_hex: state
+            .contact_discovery_expected_measurement_hex(),
+        contact_discovery_attestation_document_sha256: state
+            .contact_discovery_attestation_document_sha256(),
+        contact_discovery_attestation_max_age_seconds: state
+            .contact_discovery_attestation_max_age_seconds(),
         presence_supported: state.presence_supported(),
         typing_indicators_supported: state.typing_indicators_supported(),
         read_receipts_supported: state.read_receipts_supported(),

@@ -330,7 +330,6 @@ describe("PqmsgApi methods", () => {
     await api.publishPrivateGroupMessage({
       group_id: "pg-1",
       epoch: 2,
-      sender_user_id: "alice",
       sent_at_unix_ms: 1_775_000_000_000,
       ciphertext_nonce_base64: "bm9uY2UxMjM0NTY3",
       ciphertext_base64: "Y2lwaGVydGV4dA==",
@@ -567,6 +566,8 @@ describe("PqmsgApi methods", () => {
         service: "pqmsg-discovery",
         protocol_version: 1,
         attestation_mode: "unattested_development",
+        attestation_verifier: null,
+        enclave_measurement_hex: null,
         ticket_format: "base64(json-payload).base64(ed25519-signature)",
         ticket_issuer_ed25519_pub: "issuer-ed25519-pub",
         ticket_max_ttl_seconds: 300,
@@ -588,12 +589,38 @@ describe("PqmsgApi methods", () => {
     expect(opts.method).toBe("GET");
   });
 
+  it("getContactDiscoveryAttestation fetches the separate discovery service attestation", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        attestation_mode: "sgx_preview",
+        attestation_verifier: "sgx-dcap-preview",
+        enclave_measurement_hex: "ab".repeat(32),
+        document_format: "opaque_b64_v1",
+        document_base64: "eyJ0ZWUiOiJzZ3gifQ==",
+        document_sha256: "cd".repeat(32),
+        published_at: "2026-03-26T12:00:00Z",
+      })
+    );
+    const attestation = await api.getContactDiscoveryAttestation("https://cdsi.example");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(attestation.attestation_verifier).toBe("sgx-dcap-preview");
+    expect(url).toBe("https://cdsi.example/v1/attestation");
+    expect(opts.method).toBe("GET");
+  });
+
   it("evaluateDiscoveryElementsAtService sends POST to the blind-evaluation endpoint", async () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
         user_id: "alice",
         device_id: "alice-dev-1",
+        evaluation_proof_mode: "dleq_per_element_preview",
         evaluated_elements_base64: ["ZXZhbHVhdGVk"],
+        dleq_proofs: [{
+          challenge_scalar_base64: "Y2hhbGxlbmdl",
+          response_scalar_base64: "cmVzcG9uc2U=",
+          commitment_base_base64: "Y29tbWl0LWJhc2U=",
+          commitment_blinded_base64: "Y29tbWl0LWJsaW5kZWQ=",
+        }],
         evaluated_at: "2026-03-13T00:00:00Z",
       })
     );

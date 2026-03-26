@@ -145,6 +145,8 @@
     <string name="contacts_private_manifest_verified">Manifest verified: %1$s / %2$s (%3$s)</string>
     <string name="contacts_private_manifest_mismatch">Manifest issuer mismatch: %1$s / %2$s (%3$s)</string>
     <string name="contacts_private_manifest_continuity">Continuity: %1$s</string>
+    <string name="contacts_private_manifest_attestation_verifier">Attestation verifier: %1$s</string>
+    <string name="contacts_private_manifest_measurement">Enclave measurement: %1$s</string>
     <string name="contacts_private_manifest_continuity_saved">saved on this device</string>
     <string name="contacts_private_manifest_continuity_pinned">pinned on this device</string>
     <string name="contacts_private_service_status">%1$d manual contact(s); separate discovery service available</string>

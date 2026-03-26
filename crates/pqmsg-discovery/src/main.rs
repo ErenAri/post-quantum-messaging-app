@@ -11,8 +11,10 @@ use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256, Sha512};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::net::SocketAddr;
@@ -23,12 +25,15 @@ use tracing::info;
 const DEFAULT_BIND: &str = "127.0.0.1:8082";
 const DEFAULT_ATTESTATION_MODE: &str = "unattested_development";
 const CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS: i64 = 300;
+const CONTACT_DISCOVERY_TICKET_MAX_USES: u8 = 6;
 const CONTACT_DISCOVERY_MANIFEST_MAX_TTL_SECONDS: i64 = 3600;
 const MAX_DISCOVERY_HASHES_PER_REQUEST: usize = 2048;
 const CONTACT_DISCOVERY_LOOKUP_PROTOCOL: &str = "blind_token_directory_preview";
 const CONTACT_DISCOVERY_PRIVACY_MODE: &str = "blind_evaluation_preview";
 const CONTACT_DISCOVERY_MATCH_RESULT_FORMAT: &str = "contact_invite_token";
 const CONTACT_DISCOVERY_OPRF_SUITE: &str = "ristretto255-sha512-preview";
+const CONTACT_DISCOVERY_EVALUATION_PROOF_MODE: &str = "dleq_per_element_preview";
+const CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_FORMAT: &str = "opaque_b64_v1";
 const CONTACT_DISCOVERY_HANDLE_DOMAIN: &[u8] = b"pqmsg-discovery-handle-v1";
 
 #[derive(Clone)]
@@ -36,6 +41,10 @@ struct AppState {
     ticket_issuer_verifying_key: Arc<VerifyingKey>,
     manifest_signing_key: Arc<SigningKey>,
     attestation_mode: String,
+    attestation_verifier: Option<String>,
+    enclave_measurement_hex: Option<String>,
+    attestation_document_base64: Option<String>,
+    attestation_document_sha256: Option<String>,
     registry: Arc<RwLock<DiscoveryRegistry>>,
     oprf_secret_scalar: Arc<Scalar>,
     oprf_public_key_ristretto255_b64: String,
@@ -63,6 +72,10 @@ struct ManifestPayload {
     service: &'static str,
     protocol_version: u8,
     attestation_mode: String,
+    attestation_verifier: Option<String>,
+    enclave_measurement_hex: Option<String>,
+    attestation_document_format: Option<String>,
+    attestation_document_sha256: Option<String>,
     ticket_format: &'static str,
     ticket_issuer_ed25519_pub: String,
     ticket_max_ttl_seconds: i64,
@@ -70,9 +83,18 @@ struct ManifestPayload {
     privacy_mode: &'static str,
     match_result_format: &'static str,
     oprf_suite: &'static str,
+    evaluation_proof_mode: &'static str,
     oprf_public_key_ristretto255: String,
     signed_at: String,
     expires_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct DiscoveryEvaluateProof {
+    challenge_scalar_base64: String,
+    response_scalar_base64: String,
+    commitment_base_base64: String,
+    commitment_blinded_base64: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -81,6 +103,17 @@ struct ManifestResponse {
     payload: ManifestPayload,
     manifest_issuer_ed25519_pub: String,
     manifest_signature_ed25519: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AttestationResponse {
+    attestation_mode: String,
+    attestation_verifier: String,
+    enclave_measurement_hex: String,
+    document_format: &'static str,
+    document_base64: String,
+    document_sha256: String,
+    published_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -133,6 +166,7 @@ pub(crate) struct ContactDiscoveryTicketClaims {
     contact_invite_expires_at: String,
     issued_at: String,
     expires_at: String,
+    max_uses: u8,
     nonce: String,
 }
 
@@ -149,12 +183,53 @@ struct StoredUserHandles {
     handles: Vec<StoredHandle>,
 }
 
+#[derive(Debug, Clone)]
+struct TicketUsage {
+    expires_at: DateTime<Utc>,
+    used: u8,
+    max_uses: u8,
+}
+
 #[derive(Debug, Default)]
 struct DiscoveryRegistry {
     user_handles: HashMap<String, StoredUserHandles>,
+    ticket_usage: HashMap<String, TicketUsage>,
 }
 
 impl DiscoveryRegistry {
+    fn consume_ticket_use(
+        &mut self,
+        claims: &ContactDiscoveryTicketClaims,
+        now: DateTime<Utc>,
+    ) -> Result<(), DiscoveryError> {
+        self.ticket_usage.retain(|_, usage| usage.expires_at > now);
+        let expires_at = DateTime::parse_from_rfc3339(&claims.expires_at)
+            .map_err(|_| {
+                DiscoveryError::bad_request("contact discovery ticket expires_at is invalid")
+            })?
+            .with_timezone(&Utc);
+        let entry = self
+            .ticket_usage
+            .entry(claims.nonce.clone())
+            .or_insert(TicketUsage {
+                expires_at,
+                used: 0,
+                max_uses: claims.max_uses,
+            });
+        if entry.expires_at != expires_at || entry.max_uses != claims.max_uses {
+            return Err(DiscoveryError::bad_request(
+                "contact discovery ticket nonce reuse detected with conflicting contract",
+            ));
+        }
+        if entry.used >= entry.max_uses {
+            return Err(DiscoveryError::bad_request(
+                "contact discovery ticket exceeded max uses",
+            ));
+        }
+        entry.used += 1;
+        Ok(())
+    }
+
     fn replace_tokens(
         &mut self,
         user_id: &str,
@@ -242,7 +317,9 @@ struct DiscoveryEvaluateRequest {
 struct DiscoveryEvaluateResponse {
     user_id: String,
     device_id: String,
+    evaluation_proof_mode: &'static str,
     evaluated_elements_base64: Vec<String>,
+    dleq_proofs: Vec<DiscoveryEvaluateProof>,
     evaluated_at: String,
 }
 
@@ -336,6 +413,84 @@ fn normalize_blinded_elements(
     Ok(points)
 }
 
+fn encode_scalar_b64(scalar: &Scalar) -> String {
+    B64.encode(scalar.to_bytes())
+}
+
+fn decode_scalar_b64(field: &str, value: &str) -> Result<Scalar, DiscoveryError> {
+    let decoded = B64.decode(value.trim().as_bytes()).map_err(|_| {
+        DiscoveryError::bad_request(format!(
+            "{field} must be base64-encoded 32-byte scalar material"
+        ))
+    })?;
+    if decoded.len() != 32 {
+        return Err(DiscoveryError::bad_request(format!(
+            "{field} must decode to exactly 32 bytes"
+        )));
+    }
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&decoded);
+    Ok(Scalar::from_bytes_mod_order(bytes))
+}
+
+fn random_nonzero_scalar() -> Scalar {
+    let mut rng = OsRng;
+    loop {
+        let mut wide = [0u8; 64];
+        rng.fill_bytes(&mut wide);
+        let candidate = Scalar::from_bytes_mod_order_wide(&wide);
+        if candidate != Scalar::ZERO {
+            return candidate;
+        }
+    }
+}
+
+fn discovery_evaluation_challenge(
+    public_key: &RistrettoPoint,
+    blinded_point: &RistrettoPoint,
+    evaluated_point: &RistrettoPoint,
+    commitment_base: &RistrettoPoint,
+    commitment_blinded: &RistrettoPoint,
+) -> Scalar {
+    let digest = Sha256::new()
+        .chain_update(b"pqmsg-discovery-dleq-proof-v1")
+        .chain_update(RISTRETTO_BASEPOINT_POINT.compress().to_bytes())
+        .chain_update(public_key.compress().to_bytes())
+        .chain_update(blinded_point.compress().to_bytes())
+        .chain_update(evaluated_point.compress().to_bytes())
+        .chain_update(commitment_base.compress().to_bytes())
+        .chain_update(commitment_blinded.compress().to_bytes())
+        .finalize();
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&digest);
+    Scalar::from_bytes_mod_order(bytes)
+}
+
+fn generate_discovery_evaluate_proof(
+    secret_scalar: &Scalar,
+    public_key: &RistrettoPoint,
+    blinded_point: &RistrettoPoint,
+    evaluated_point: &RistrettoPoint,
+) -> DiscoveryEvaluateProof {
+    let nonce = random_nonzero_scalar();
+    let commitment_base = RISTRETTO_BASEPOINT_POINT * nonce;
+    let commitment_blinded = blinded_point * nonce;
+    let challenge = discovery_evaluation_challenge(
+        public_key,
+        blinded_point,
+        evaluated_point,
+        &commitment_base,
+        &commitment_blinded,
+    );
+    let response = nonce + challenge * secret_scalar;
+    DiscoveryEvaluateProof {
+        challenge_scalar_base64: encode_scalar_b64(&challenge),
+        response_scalar_base64: encode_scalar_b64(&response),
+        commitment_base_base64: B64.encode(commitment_base.compress().to_bytes()),
+        commitment_blinded_base64: B64.encode(commitment_blinded.compress().to_bytes()),
+    }
+}
+
 fn decode_hex_32(field: &str, value: &str) -> Result<[u8; 32], DiscoveryError> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(DiscoveryError::bad_request(format!(
@@ -382,6 +537,13 @@ async fn manifest(State(state): State<AppState>) -> Json<ManifestResponse> {
         service: "pqmsg-discovery",
         protocol_version: 1,
         attestation_mode: state.attestation_mode.clone(),
+        attestation_verifier: state.attestation_verifier.clone(),
+        enclave_measurement_hex: state.enclave_measurement_hex.clone(),
+        attestation_document_format: state
+            .attestation_document_sha256
+            .as_ref()
+            .map(|_| CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_FORMAT.to_string()),
+        attestation_document_sha256: state.attestation_document_sha256.clone(),
         ticket_format: "base64(json-payload).base64(ed25519-signature)",
         ticket_issuer_ed25519_pub: state.ticket_issuer_public_key_b64(),
         ticket_max_ttl_seconds: CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS,
@@ -389,6 +551,7 @@ async fn manifest(State(state): State<AppState>) -> Json<ManifestResponse> {
         privacy_mode: CONTACT_DISCOVERY_PRIVACY_MODE,
         match_result_format: CONTACT_DISCOVERY_MATCH_RESULT_FORMAT,
         oprf_suite: CONTACT_DISCOVERY_OPRF_SUITE,
+        evaluation_proof_mode: CONTACT_DISCOVERY_EVALUATION_PROOF_MODE,
         oprf_public_key_ristretto255: state.oprf_public_key_ristretto255_b64.clone(),
         signed_at: signed_at.to_rfc3339(),
         expires_at: expires_at.to_rfc3339(),
@@ -402,34 +565,76 @@ async fn manifest(State(state): State<AppState>) -> Json<ManifestResponse> {
     })
 }
 
+async fn attestation(
+    State(state): State<AppState>,
+) -> Result<Json<AttestationResponse>, DiscoveryError> {
+    let verifier = state
+        .attestation_verifier
+        .clone()
+        .ok_or_else(|| DiscoveryError::bad_request("discovery attestation is not configured"))?;
+    let measurement = state
+        .enclave_measurement_hex
+        .clone()
+        .ok_or_else(|| DiscoveryError::bad_request("discovery attestation is not configured"))?;
+    let document_base64 = state
+        .attestation_document_base64
+        .clone()
+        .ok_or_else(|| DiscoveryError::bad_request("discovery attestation is not configured"))?;
+    let document_sha256 = state
+        .attestation_document_sha256
+        .clone()
+        .ok_or_else(|| DiscoveryError::bad_request("discovery attestation is not configured"))?;
+    Ok(Json(AttestationResponse {
+        attestation_mode: state.attestation_mode.clone(),
+        attestation_verifier: verifier,
+        enclave_measurement_hex: measurement,
+        document_format: CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_FORMAT,
+        document_base64,
+        document_sha256,
+        published_at: Utc::now().to_rfc3339(),
+    }))
+}
+
 async fn evaluate_blinded_elements(
     State(state): State<AppState>,
     Json(request): Json<DiscoveryEvaluateRequest>,
 ) -> Result<Json<DiscoveryEvaluateResponse>, DiscoveryError> {
-    let claims = verify_contact_discovery_ticket(
-        &state.ticket_issuer_verifying_key,
-        &request.ticket,
-        Utc::now(),
-    )
-    .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
+    let now = Utc::now();
+    let claims =
+        verify_contact_discovery_ticket(&state.ticket_issuer_verifying_key, &request.ticket, now)
+            .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
+    state
+        .registry
+        .write()
+        .await
+        .consume_ticket_use(&claims, now)?;
     let blinded_elements =
         normalize_blinded_elements("blinded_elements_base64", &request.blinded_elements_base64)?;
-    let evaluated_elements_base64 = blinded_elements
-        .into_iter()
-        .map(|compressed| {
-            let point = compressed.decompress().ok_or_else(|| {
-                DiscoveryError::bad_request(
-                    "blinded_elements_base64 entries must decode to valid compressed ristretto points",
-                )
-            })?;
-            let evaluated = (point * *state.oprf_secret_scalar).compress().to_bytes();
-            Ok(B64.encode(evaluated))
-        })
-        .collect::<Result<Vec<_>, DiscoveryError>>()?;
+    let public_key = RISTRETTO_BASEPOINT_POINT * *state.oprf_secret_scalar;
+    let mut evaluated_elements_base64 = Vec::with_capacity(blinded_elements.len());
+    let mut dleq_proofs = Vec::with_capacity(blinded_elements.len());
+    for compressed in blinded_elements {
+        let point = compressed.decompress().ok_or_else(|| {
+            DiscoveryError::bad_request(
+                "blinded_elements_base64 entries must decode to valid compressed ristretto points",
+            )
+        })?;
+        let evaluated_point = point * *state.oprf_secret_scalar;
+        let proof = generate_discovery_evaluate_proof(
+            &state.oprf_secret_scalar,
+            &public_key,
+            &point,
+            &evaluated_point,
+        );
+        evaluated_elements_base64.push(B64.encode(evaluated_point.compress().to_bytes()));
+        dleq_proofs.push(proof);
+    }
     Ok(Json(DiscoveryEvaluateResponse {
         user_id: claims.user_id,
         device_id: claims.device_id,
+        evaluation_proof_mode: CONTACT_DISCOVERY_EVALUATION_PROOF_MODE,
         evaluated_elements_base64,
+        dleq_proofs,
         evaluated_at: Utc::now().to_rfc3339(),
     }))
 }
@@ -438,18 +643,18 @@ async fn upload_handles(
     State(state): State<AppState>,
     Json(request): Json<DiscoveryHandlesUploadRequest>,
 ) -> Result<Json<DiscoveryHandlesUploadResponse>, DiscoveryError> {
-    let claims = verify_contact_discovery_ticket(
-        &state.ticket_issuer_verifying_key,
-        &request.ticket,
-        Utc::now(),
-    )
-    .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
+    let now = Utc::now();
+    let claims =
+        verify_contact_discovery_ticket(&state.ticket_issuer_verifying_key, &request.ticket, now)
+            .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
+    let mut registry = state.registry.write().await;
+    registry.consume_ticket_use(&claims, now)?;
     let phone_tokens =
         normalize_sha256_hex_values("phone_tokens_sha256", &request.phone_tokens_sha256)?;
     let email_tokens =
         normalize_sha256_hex_values("email_tokens_sha256", &request.email_tokens_sha256)?;
     let now = Utc::now().to_rfc3339();
-    state.registry.write().await.replace_tokens(
+    registry.replace_tokens(
         &claims.user_id,
         &claims.contact_invite_token,
         &claims.contact_invite_expires_at,
@@ -469,12 +674,15 @@ async fn match_handles(
     State(state): State<AppState>,
     Json(request): Json<DiscoveryMatchRequest>,
 ) -> Result<Json<DiscoveryMatchResponse>, DiscoveryError> {
-    let claims = verify_contact_discovery_ticket(
-        &state.ticket_issuer_verifying_key,
-        &request.ticket,
-        Utc::now(),
-    )
-    .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
+    let now = Utc::now();
+    let claims =
+        verify_contact_discovery_ticket(&state.ticket_issuer_verifying_key, &request.ticket, now)
+            .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
+    state
+        .registry
+        .write()
+        .await
+        .consume_ticket_use(&claims, now)?;
     let query_tokens = normalize_sha256_hex_values("tokens_sha256", &request.tokens_sha256)?;
     let matches =
         state
@@ -547,6 +755,43 @@ fn parse_oprf_secret_scalar() -> Result<(Arc<Scalar>, String)> {
     Ok((Arc::new(scalar), B64.encode(public_key)))
 }
 
+fn parse_optional_env_nonempty(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn validate_sha256_hex(name: &str, value: &str) -> Result<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.len() != 64 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("{name} must be a 64-character SHA-256 hex string");
+    }
+    Ok(normalized)
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
+fn parse_optional_base64(name: &str) -> Result<Option<Vec<u8>>> {
+    match parse_optional_env_nonempty(name) {
+        Some(value) => {
+            let decoded = B64.decode(value.as_bytes()).with_context(|| {
+                format!("invalid {name}: expected base64-encoded attestation document bytes")
+            })?;
+            if decoded.is_empty() {
+                anyhow::bail!("{name} must not decode to empty bytes");
+            }
+            Ok(Some(decoded))
+        }
+        None => Ok(None),
+    }
+}
+
 pub(crate) fn verify_contact_discovery_ticket(
     verifying_key: &VerifyingKey,
     ticket: &str,
@@ -614,6 +859,9 @@ pub(crate) fn verify_contact_discovery_ticket(
             "contact discovery ticket bootstrap invite expires_at must be after issued_at"
         );
     }
+    if claims.max_uses == 0 || claims.max_uses > CONTACT_DISCOVERY_TICKET_MAX_USES {
+        anyhow::bail!("contact discovery ticket max_uses is invalid");
+    }
     if expires_at.signed_duration_since(issued_at).num_seconds()
         > CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS
     {
@@ -642,6 +890,43 @@ async fn main() -> Result<()> {
         .with_context(|| format!("invalid PQMSG_DISCOVERY_BIND '{bind}'"))?;
     let attestation_mode = env::var("PQMSG_CONTACT_DISCOVERY_ATTESTATION_MODE")
         .unwrap_or_else(|_| DEFAULT_ATTESTATION_MODE.to_string());
+    let attestation_verifier =
+        parse_optional_env_nonempty("PQMSG_CONTACT_DISCOVERY_ATTESTATION_VERIFIER");
+    let enclave_measurement_hex =
+        parse_optional_env_nonempty("PQMSG_CONTACT_DISCOVERY_ENCLAVE_MEASUREMENT_HEX")
+            .map(|value| {
+                validate_sha256_hex("PQMSG_CONTACT_DISCOVERY_ENCLAVE_MEASUREMENT_HEX", &value)
+            })
+            .transpose()?;
+    let attestation_document_bytes =
+        parse_optional_base64("PQMSG_CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_B64")?;
+    let attestation_document_base64 = attestation_document_bytes
+        .as_ref()
+        .map(|value| B64.encode(value));
+    let attestation_document_sha256 = attestation_document_bytes
+        .as_ref()
+        .map(|value| bytes_to_hex(&sha2::Sha256::digest(value)));
+    if attestation_mode != DEFAULT_ATTESTATION_MODE
+        && (attestation_verifier.is_none()
+            || enclave_measurement_hex.is_none()
+            || attestation_document_sha256.is_none())
+    {
+        anyhow::bail!(
+            "PQMSG_CONTACT_DISCOVERY_ATTESTATION_VERIFIER, PQMSG_CONTACT_DISCOVERY_ENCLAVE_MEASUREMENT_HEX, and PQMSG_CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_B64 are required when PQMSG_CONTACT_DISCOVERY_ATTESTATION_MODE is not '{DEFAULT_ATTESTATION_MODE}'"
+        );
+    }
+    let attestation_fields_present = [
+        attestation_verifier.is_some(),
+        enclave_measurement_hex.is_some(),
+        attestation_document_sha256.is_some(),
+    ];
+    if attestation_fields_present.iter().any(|present| *present)
+        && !attestation_fields_present.iter().all(|present| *present)
+    {
+        anyhow::bail!(
+            "PQMSG_CONTACT_DISCOVERY_ATTESTATION_VERIFIER, PQMSG_CONTACT_DISCOVERY_ENCLAVE_MEASUREMENT_HEX, and PQMSG_CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_B64 must be configured together"
+        );
+    }
     let ticket_issuer_verifying_key = parse_ticket_issuer_verifying_key()?;
     let manifest_signing_key = parse_manifest_signing_key()?;
     let (oprf_secret_scalar, oprf_public_key_ristretto255_b64) = parse_oprf_secret_scalar()?;
@@ -650,6 +935,10 @@ async fn main() -> Result<()> {
         ticket_issuer_verifying_key,
         manifest_signing_key,
         attestation_mode,
+        attestation_verifier,
+        enclave_measurement_hex,
+        attestation_document_base64,
+        attestation_document_sha256,
         registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
         oprf_secret_scalar,
         oprf_public_key_ristretto255_b64,
@@ -657,6 +946,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/v1/manifest", get(manifest))
+        .route("/v1/attestation", get(attestation))
         .route("/v1/discovery/evaluate", post(evaluate_blinded_elements))
         .route("/v1/discovery/handles", post(upload_handles))
         .route("/v1/discovery/match", post(match_handles))
@@ -679,6 +969,7 @@ mod tests {
     use super::*;
     use chrono::Duration;
     use ed25519_dalek::SigningKey;
+    use sha2::Sha256;
 
     fn signed_ticket(
         signing_key: &SigningKey,
@@ -693,6 +984,7 @@ mod tests {
             contact_invite_expires_at: "2026-03-27T12:00:00Z".to_string(),
             issued_at: issued_at.to_string(),
             expires_at: expires_at.to_string(),
+            max_uses: CONTACT_DISCOVERY_TICKET_MAX_USES,
             nonce: "nonce-1".to_string(),
         };
         let payload = serde_json::to_vec(&claims).expect("serialize claims");
@@ -766,6 +1058,27 @@ mod tests {
         assert!(error.to_string().contains("signature"));
     }
 
+    #[test]
+    fn verify_contact_discovery_ticket_rejects_invalid_max_uses() {
+        let signing_key = SigningKey::from_bytes(&[40u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let mut claims =
+            signed_ticket(&signing_key, "2026-03-13T12:00:00Z", "2026-03-13T12:05:00Z").1;
+        claims.max_uses = CONTACT_DISCOVERY_TICKET_MAX_USES + 1;
+        let payload = serde_json::to_vec(&claims).expect("serialize claims");
+        let signature = signing_key.sign(&payload).to_bytes();
+        let ticket = format!("{}.{}", B64.encode(payload), B64.encode(signature));
+        let error = verify_contact_discovery_ticket(
+            &verifying_key,
+            &ticket,
+            DateTime::parse_from_rfc3339("2026-03-13T12:01:00Z")
+                .expect("parse time")
+                .with_timezone(&Utc),
+        )
+        .expect_err("max uses should be rejected");
+        assert!(error.to_string().contains("max_uses"));
+    }
+
     #[tokio::test]
     async fn manifest_is_signed_by_configured_manifest_key() {
         let ticket_signing_key = SigningKey::from_bytes(&[11u8; 32]);
@@ -780,6 +1093,10 @@ mod tests {
             ticket_issuer_verifying_key: Arc::new(ticket_signing_key.verifying_key()),
             manifest_signing_key: manifest_signing_key.clone(),
             attestation_mode: DEFAULT_ATTESTATION_MODE.to_string(),
+            attestation_verifier: None,
+            enclave_measurement_hex: None,
+            attestation_document_base64: None,
+            attestation_document_sha256: None,
             registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
             oprf_secret_scalar: Arc::new(oprf_scalar),
             oprf_public_key_ristretto255_b64: oprf_pub_b64.clone(),
@@ -817,7 +1134,15 @@ mod tests {
             CONTACT_DISCOVERY_MATCH_RESULT_FORMAT
         );
         assert_eq!(response.payload.oprf_suite, CONTACT_DISCOVERY_OPRF_SUITE);
+        assert_eq!(
+            response.payload.evaluation_proof_mode,
+            CONTACT_DISCOVERY_EVALUATION_PROOF_MODE
+        );
         assert_eq!(response.payload.oprf_public_key_ristretto255, oprf_pub_b64);
+        assert!(response.payload.attestation_verifier.is_none());
+        assert!(response.payload.enclave_measurement_hex.is_none());
+        assert!(response.payload.attestation_document_format.is_none());
+        assert!(response.payload.attestation_document_sha256.is_none());
         let signed_at = DateTime::parse_from_rfc3339(&response.payload.signed_at)
             .expect("parse signed_at")
             .with_timezone(&Utc);
@@ -839,6 +1164,10 @@ mod tests {
             ticket_issuer_verifying_key: Arc::new(ticket_signing_key.verifying_key()),
             manifest_signing_key: Arc::new(SigningKey::from_bytes(&[23u8; 32])),
             attestation_mode: DEFAULT_ATTESTATION_MODE.to_string(),
+            attestation_verifier: None,
+            enclave_measurement_hex: None,
+            attestation_document_base64: None,
+            attestation_document_sha256: None,
             registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
             oprf_secret_scalar: Arc::new(oprf_scalar),
             oprf_public_key_ristretto255_b64: B64.encode(
@@ -868,7 +1197,12 @@ mod tests {
         .0;
         assert_eq!(response.user_id, claims.user_id);
         assert_eq!(response.device_id, claims.device_id);
+        assert_eq!(
+            response.evaluation_proof_mode,
+            CONTACT_DISCOVERY_EVALUATION_PROOF_MODE
+        );
         assert_eq!(response.evaluated_elements_base64.len(), 1);
+        assert_eq!(response.dleq_proofs.len(), 1);
         let evaluated_bytes = B64
             .decode(response.evaluated_elements_base64[0].as_bytes())
             .expect("decode evaluated element");
@@ -884,6 +1218,146 @@ mod tests {
         assert_eq!(
             evaluated_point.compress().to_bytes(),
             expected.compress().to_bytes()
+        );
+        let proof = &response.dleq_proofs[0];
+        let challenge = decode_scalar_b64(
+            "contact_discovery_proof_challenge_scalar",
+            &proof.challenge_scalar_base64,
+        )
+        .expect("decode challenge");
+        let response_scalar = decode_scalar_b64(
+            "contact_discovery_proof_response_scalar",
+            &proof.response_scalar_base64,
+        )
+        .expect("decode response");
+        let commitment_base = CompressedRistretto(
+            B64.decode(proof.commitment_base_base64.as_bytes())
+                .expect("decode commitment base")
+                .as_slice()
+                .try_into()
+                .expect("commitment base size"),
+        )
+        .decompress()
+        .expect("decompress commitment base");
+        let commitment_blinded = CompressedRistretto(
+            B64.decode(proof.commitment_blinded_base64.as_bytes())
+                .expect("decode commitment blinded")
+                .as_slice()
+                .try_into()
+                .expect("commitment blinded size"),
+        )
+        .decompress()
+        .expect("decompress commitment blinded");
+        let public_key = RISTRETTO_BASEPOINT_POINT * oprf_scalar;
+        let expected_challenge = discovery_evaluation_challenge(
+            &public_key,
+            &(handle_point * blind_scalar),
+            &evaluated_point,
+            &commitment_base,
+            &commitment_blinded,
+        );
+        assert_eq!(challenge, expected_challenge);
+        assert_eq!(
+            RISTRETTO_BASEPOINT_POINT * response_scalar,
+            commitment_base + public_key * challenge
+        );
+        assert_eq!(
+            (handle_point * blind_scalar) * response_scalar,
+            commitment_blinded + evaluated_point * challenge
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_endpoint_rejects_ticket_after_max_uses() {
+        let ticket_signing_key = SigningKey::from_bytes(&[41u8; 32]);
+        let oprf_scalar = Scalar::from_bytes_mod_order([42u8; 32]);
+        let state = AppState {
+            ticket_issuer_verifying_key: Arc::new(ticket_signing_key.verifying_key()),
+            manifest_signing_key: Arc::new(SigningKey::from_bytes(&[43u8; 32])),
+            attestation_mode: DEFAULT_ATTESTATION_MODE.to_string(),
+            attestation_verifier: None,
+            enclave_measurement_hex: None,
+            attestation_document_base64: None,
+            attestation_document_sha256: None,
+            registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
+            oprf_secret_scalar: Arc::new(oprf_scalar),
+            oprf_public_key_ristretto255_b64: B64.encode(
+                (RISTRETTO_BASEPOINT_POINT * oprf_scalar)
+                    .compress()
+                    .to_bytes(),
+            ),
+        };
+        let issued_at = Utc::now() - chrono::Duration::minutes(1);
+        let expires_at = issued_at + chrono::Duration::minutes(5);
+        let (ticket, _) = signed_ticket(
+            &ticket_signing_key,
+            &issued_at.to_rfc3339(),
+            &expires_at.to_rfc3339(),
+        );
+        let (blinded_b64, _) =
+            blind_handle_hash(&"11".repeat(32), Scalar::from_bytes_mod_order([44u8; 32]));
+        for _ in 0..CONTACT_DISCOVERY_TICKET_MAX_USES {
+            let _ = evaluate_blinded_elements(
+                State(state.clone()),
+                Json(DiscoveryEvaluateRequest {
+                    ticket: ticket.clone(),
+                    blinded_elements_base64: vec![blinded_b64.clone()],
+                }),
+            )
+            .await
+            .expect("evaluate within ticket budget");
+        }
+        let error = evaluate_blinded_elements(
+            State(state),
+            Json(DiscoveryEvaluateRequest {
+                ticket,
+                blinded_elements_base64: vec![blinded_b64],
+            }),
+        )
+        .await
+        .expect_err("ticket should exceed max uses");
+        assert!(error.detail.contains("exceeded max uses"));
+    }
+
+    #[tokio::test]
+    async fn attestation_endpoint_returns_configured_document() {
+        let ticket_signing_key = SigningKey::from_bytes(&[31u8; 32]);
+        let manifest_signing_key = Arc::new(SigningKey::from_bytes(&[32u8; 32]));
+        let oprf_scalar = Scalar::from_bytes_mod_order([33u8; 32]);
+        let document_bytes = b"{\"tee\":\"sgx\",\"svn\":1}".to_vec();
+        let document_b64 = B64.encode(&document_bytes);
+        let state = AppState {
+            ticket_issuer_verifying_key: Arc::new(ticket_signing_key.verifying_key()),
+            manifest_signing_key,
+            attestation_mode: "sgx_preview".to_string(),
+            attestation_verifier: Some("sgx-dcap-preview".to_string()),
+            enclave_measurement_hex: Some("cd".repeat(32)),
+            attestation_document_base64: Some(document_b64.clone()),
+            attestation_document_sha256: Some(bytes_to_hex(&Sha256::digest(&document_bytes))),
+            registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
+            oprf_secret_scalar: Arc::new(oprf_scalar),
+            oprf_public_key_ristretto255_b64: B64.encode(
+                (RISTRETTO_BASEPOINT_POINT * oprf_scalar)
+                    .compress()
+                    .to_bytes(),
+            ),
+        };
+
+        let response = attestation(State(state))
+            .await
+            .expect("attestation response")
+            .0;
+        assert_eq!(response.attestation_mode, "sgx_preview");
+        assert_eq!(response.attestation_verifier, "sgx-dcap-preview");
+        assert_eq!(response.enclave_measurement_hex, "cd".repeat(32));
+        assert_eq!(
+            response.document_format,
+            CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_FORMAT
+        );
+        assert_eq!(response.document_base64, document_b64);
+        assert_eq!(
+            response.document_sha256,
+            bytes_to_hex(&Sha256::digest(&document_bytes))
         );
     }
 
