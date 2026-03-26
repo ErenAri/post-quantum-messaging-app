@@ -133,6 +133,41 @@ class GroupChatActivity : AppCompatActivity() {
         } else {
             "${getPrivateGroupTitle(state)}\nEpoch ${state.epoch} • ${state.members.size} members • ${if (canManage) "manage enabled" else "read/send only"}"
         }
+        if (state != null) {
+            val ownerUserId = privateGroupOwnerUserId(state)
+            val role = privateGroupRoleForUser(state, setup.userId)
+            metaText.text =
+                "${getPrivateGroupTitle(state)}\nEpoch ${state.epoch} | ${state.members.size} members | role $role | owner $ownerUserId | ${if (canManage) "manage enabled" else "read/send only"}"
+        }
+    }
+
+    private fun privateGroupOwnerUserId(state: PrivateGroupState): String {
+        return state.members.firstOrNull { it.role.equals("Owner", ignoreCase = true) }?.user_id
+            ?: state.members.firstOrNull()?.user_id
+            ?: store.loadSetup().userId
+    }
+
+    private fun privateGroupRoleForUser(state: PrivateGroupState, userId: String): String {
+        return state.members.firstOrNull { it.user_id == userId }?.role ?: "Member"
+    }
+
+    private fun describePrivateGroupMemberTrust(memberUserId: String): String {
+        val setup = store.loadSetup()
+        if (memberUserId == setup.userId) {
+            return "Local member credential"
+        }
+        val identityPin = store.readIdentityPin(setup.userId, memberUserId)
+        val transparencyCheckpoint = store.readTransparencyCheckpoint(setup.serverUrl, memberUserId)
+        return when {
+            !transparencyCheckpoint.isNullOrBlank() && identityPin != null ->
+                "Transparency checkpoint saved | identity pin present"
+            !transparencyCheckpoint.isNullOrBlank() ->
+                "Transparency checkpoint saved"
+            identityPin != null ->
+                "Identity pin present"
+            else ->
+                "No local trust checkpoint"
+        }
     }
 
     private fun syncActions() {
@@ -294,6 +329,19 @@ class GroupChatActivity : AppCompatActivity() {
             val you = if (member.user_id == store.loadSetup().userId) " (you)" else ""
             "- ${member.user_id} [${member.role}]$you"
         }
+        val ownerUserId = privateGroupOwnerUserId(state)
+        val yourRole = privateGroupRoleForUser(state, store.loadSetup().userId)
+        val detailedMemberList = state.members.joinToString("\n\n") { member ->
+            val you = if (member.user_id == store.loadSetup().userId) " (you)" else ""
+            "- ${member.user_id} [${member.role}]$you\n  Trust: ${describePrivateGroupMemberTrust(member.user_id)}"
+        }
+        val groupInfoMessage =
+            "Group: ${getPrivateGroupTitle(state, groupName)}\n" +
+                "Owner: $ownerUserId\n" +
+                "Your role: $yourRole\n" +
+                "Epoch ${state.epoch}\n\n" +
+                "Member trust uses local identity pins and transparency checkpoints from direct chats.\n\n" +
+                "Members (${state.members.size}):\n$detailedMemberList"
         AlertDialog.Builder(this@GroupChatActivity)
             .setTitle(getString(R.string.group_info_title))
             .setMessage(
@@ -301,6 +349,7 @@ class GroupChatActivity : AppCompatActivity() {
                     "Epoch ${state.epoch}\n\n" +
                     "Members (${state.members.size}):\n$memberList",
             )
+            .setMessage(groupInfoMessage)
             .setPositiveButton(android.R.string.ok, null)
             .apply {
                 if (canManage) {

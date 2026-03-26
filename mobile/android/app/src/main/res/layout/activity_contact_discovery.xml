@@ -127,6 +127,14 @@
                 android:text="@string/contacts_private_service_notice"
                 android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
+            <TextView
+                android:id="@+id/textDiscoveryManifest"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/contacts_private_manifest_unavailable"
+                android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
+
             <com.google.android.material.textfield.TextInputLayout
                 style="@style/Widget.PQMsg.TextInputLayout"
                 android:layout_width="match_parent"

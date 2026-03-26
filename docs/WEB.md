@@ -8,7 +8,7 @@ The web client requires the WASM PQ runtime for messaging:
 
 - **WASM PQ mode**: real ML-KEM-768 key encapsulation and ML-DSA-65 signatures via compiled Rust WASM bindings.
 
-The current release train does not treat the web client as a supported beta messaging client, and web calling is out of scope.
+The current release train does not treat the web client as a supported beta messaging client by default, and web calling is out of scope.
 
 Manual contact bootstrap on the hardened web path is `@username` or opaque invite only. Raw-hash contact discovery remains disabled.
 
@@ -34,7 +34,9 @@ For the current beta:
 
 - Android is the supported messaging beta client.
 - Web remains demo-only.
-- Outbound web messaging is blocked whenever the server reports `web_client_policy = demo_only`.
+- Outbound web direct messaging and private-group messaging are blocked whenever the server reports `web_client_policy = demo_only`.
+- Even when the server permits hardened web messaging, private groups additionally require `private_group_messaging_supported = true`.
+- The live capability contract also exposes `supported_beta_clients`, so the server can advertise when `web` is actually in the supported beta matrix instead of demo-only.
 - Web messaging fails closed when the browser lacks HTTPS-or-loopback origin protection, an actual secure browser context, cross-origin isolation on hosted origins, IndexedDB, SubtleCrypto, WebAssembly, or text encoding support.
 - The SPA shell ships an explicit CSP plus hardened COOP/COEP/CORP browser response headers in the Vite dev/preview surface.
 - The service worker only caches same-origin app-shell assets; cross-origin API traffic and `/v1/*` messaging traffic are never cached by the web shell.
@@ -78,7 +80,7 @@ The hardened production build now emits no JavaScript sourcemaps by default.
    - publish prekeys.
 2. Claim a shareable `@username` in Settings if you want a stable manual contact handle.
 3. Fetch peer bundle before first send.
-4. Review the server capability policy before treating web messaging as available.
+4. Review the server capability policy before treating web direct or private-group messaging as available.
 5. Poll inbox to decrypt.
 6. Review pinned identities and trust state in Security Snapshot.
 
@@ -92,7 +94,7 @@ The hardened production build now emits no JavaScript sourcemaps by default.
 
 Web messaging requires the WASM PQ runtime. Legacy fallback envelopes are rejected on the hardened path.
 
-Do not treat the web client as part of the supported beta even when WASM PQ crypto is available. The Android messaging path remains the release baseline.
+Do not treat the web client as part of the supported beta when the server remains in `demo_only` web mode. The Android messaging path remains the release baseline.
 
 ## 9. WASM PQ Crypto
 

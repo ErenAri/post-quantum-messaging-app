@@ -36,10 +36,7 @@ impl BlobStore {
             BlobStoreBackend::InMemory(map) => {
                 map.lock()
                     .map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "blob store lock poisoned",
-                        )
+                        std::io::Error::new(std::io::ErrorKind::Other, "blob store lock poisoned")
                     })?
                     .insert(object_key.to_string(), bytes.to_vec());
                 Ok(())
@@ -58,10 +55,7 @@ impl BlobStore {
         match &self.backend {
             BlobStoreBackend::InMemory(map) => {
                 let guard = map.lock().map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "blob store lock poisoned",
-                    )
+                    std::io::Error::new(std::io::ErrorKind::Other, "blob store lock poisoned")
                 })?;
                 Ok(guard.get(object_key).cloned())
             }
@@ -81,10 +75,7 @@ impl BlobStore {
             BlobStoreBackend::InMemory(map) => {
                 map.lock()
                     .map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "blob store lock poisoned",
-                        )
+                        std::io::Error::new(std::io::ErrorKind::Other, "blob store lock poisoned")
                     })?
                     .remove(object_key);
                 Ok(())

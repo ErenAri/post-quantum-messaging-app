@@ -200,6 +200,10 @@ async function bootApp(options: BootOptions = {}) {
       deployment_mode: "development",
       tls_required: false,
       tls_enabled: false,
+      supported_beta_clients:
+        (options.capabilities?.web_client_policy ?? "interop_candidate") === "demo_only"
+          ? ["android"]
+          : ["android", "web"],
       supported_suite_ids: [1],
       runtime_crypto_profile: {
         protocol_version: 1,
@@ -220,6 +224,7 @@ async function bootApp(options: BootOptions = {}) {
       contact_discovery_mode: "manual_only",
       contact_discovery_ticket_supported: false,
       contact_discovery_service_origin: null,
+      contact_discovery_manifest_issuer_ed25519_pub: null,
       presence_supported: false,
       typing_indicators_supported: false,
       read_receipts_supported: false,

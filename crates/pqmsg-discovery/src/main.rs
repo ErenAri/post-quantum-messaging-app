@@ -7,7 +7,7 @@ use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -19,11 +19,13 @@ use tracing::info;
 const DEFAULT_BIND: &str = "127.0.0.1:8082";
 const DEFAULT_ATTESTATION_MODE: &str = "unattested_development";
 const CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS: i64 = 300;
+const CONTACT_DISCOVERY_MANIFEST_MAX_TTL_SECONDS: i64 = 3600;
 const MAX_DISCOVERY_HASHES_PER_REQUEST: usize = 2048;
 
 #[derive(Clone)]
 struct AppState {
     ticket_issuer_verifying_key: Arc<VerifyingKey>,
+    manifest_signing_key: Arc<SigningKey>,
     attestation_mode: String,
     registry: Arc<RwLock<DiscoveryRegistry>>,
 }
@@ -31,6 +33,10 @@ struct AppState {
 impl AppState {
     fn ticket_issuer_public_key_b64(&self) -> String {
         B64.encode(self.ticket_issuer_verifying_key.as_bytes())
+    }
+
+    fn manifest_issuer_public_key_b64(&self) -> String {
+        B64.encode(self.manifest_signing_key.verifying_key().as_bytes())
     }
 }
 
@@ -41,8 +47,8 @@ struct HealthResponse {
     ticket_verifier_ready: bool,
 }
 
-#[derive(Debug, Serialize)]
-struct ManifestResponse {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ManifestPayload {
     service: &'static str,
     protocol_version: u8,
     attestation_mode: String,
@@ -51,6 +57,16 @@ struct ManifestResponse {
     ticket_max_ttl_seconds: i64,
     lookup_protocol: &'static str,
     privacy_mode: &'static str,
+    signed_at: String,
+    expires_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ManifestResponse {
+    #[serde(flatten)]
+    payload: ManifestPayload,
+    manifest_issuer_ed25519_pub: String,
+    manifest_signature_ed25519: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -236,7 +252,10 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 }
 
 async fn manifest(State(state): State<AppState>) -> Json<ManifestResponse> {
-    Json(ManifestResponse {
+    let signed_at = Utc::now();
+    let expires_at =
+        signed_at + chrono::Duration::seconds(CONTACT_DISCOVERY_MANIFEST_MAX_TTL_SECONDS);
+    let payload = ManifestPayload {
         service: "pqmsg-discovery",
         protocol_version: 1,
         attestation_mode: state.attestation_mode.clone(),
@@ -245,6 +264,15 @@ async fn manifest(State(state): State<AppState>) -> Json<ManifestResponse> {
         ticket_max_ttl_seconds: CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS,
         lookup_protocol: "hashed_handle_directory",
         privacy_mode: "service_boundary_only",
+        signed_at: signed_at.to_rfc3339(),
+        expires_at: expires_at.to_rfc3339(),
+    };
+    let payload_bytes = serde_json::to_vec(&payload).expect("serialize discovery manifest payload");
+    let signature = state.manifest_signing_key.sign(&payload_bytes).to_bytes();
+    Json(ManifestResponse {
+        payload,
+        manifest_issuer_ed25519_pub: state.manifest_issuer_public_key_b64(),
+        manifest_signature_ed25519: B64.encode(signature),
     })
 }
 
@@ -317,6 +345,22 @@ fn parse_ticket_issuer_verifying_key() -> Result<Arc<VerifyingKey>> {
         "invalid PQMSG_CONTACT_DISCOVERY_TICKET_ISSUER_ED25519_PUB: invalid Ed25519 public key"
     })?;
     Ok(Arc::new(verifying_key))
+}
+
+fn parse_manifest_signing_key() -> Result<Arc<SigningKey>> {
+    let raw = env::var("PQMSG_CONTACT_DISCOVERY_MANIFEST_ED25519_SECRET_B64")
+        .with_context(|| "PQMSG_CONTACT_DISCOVERY_MANIFEST_ED25519_SECRET_B64 is required")?;
+    let decoded = B64
+        .decode(raw.trim().as_bytes())
+        .with_context(|| {
+            "invalid PQMSG_CONTACT_DISCOVERY_MANIFEST_ED25519_SECRET_B64: expected base64-encoded 32-byte Ed25519 secret key"
+        })?;
+    let key_bytes: [u8; 32] = decoded.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "invalid PQMSG_CONTACT_DISCOVERY_MANIFEST_ED25519_SECRET_B64: expected 32 decoded bytes"
+        )
+    })?;
+    Ok(Arc::new(SigningKey::from_bytes(&key_bytes)))
 }
 
 pub(crate) fn verify_contact_discovery_ticket(
@@ -398,9 +442,11 @@ async fn main() -> Result<()> {
     let attestation_mode = env::var("PQMSG_CONTACT_DISCOVERY_ATTESTATION_MODE")
         .unwrap_or_else(|_| DEFAULT_ATTESTATION_MODE.to_string());
     let ticket_issuer_verifying_key = parse_ticket_issuer_verifying_key()?;
+    let manifest_signing_key = parse_manifest_signing_key()?;
 
     let state = AppState {
         ticket_issuer_verifying_key,
+        manifest_signing_key,
         attestation_mode,
         registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
     };
@@ -426,7 +472,8 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
+    use chrono::Duration;
+    use ed25519_dalek::SigningKey;
 
     fn signed_ticket(
         signing_key: &SigningKey,
@@ -501,6 +548,49 @@ mod tests {
         )
         .expect_err("signature mismatch");
         assert!(error.to_string().contains("signature"));
+    }
+
+    #[tokio::test]
+    async fn manifest_is_signed_by_configured_manifest_key() {
+        let ticket_signing_key = SigningKey::from_bytes(&[11u8; 32]);
+        let manifest_signing_key = Arc::new(SigningKey::from_bytes(&[12u8; 32]));
+        let state = AppState {
+            ticket_issuer_verifying_key: Arc::new(ticket_signing_key.verifying_key()),
+            manifest_signing_key: manifest_signing_key.clone(),
+            attestation_mode: DEFAULT_ATTESTATION_MODE.to_string(),
+            registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
+        };
+        let response = manifest(State(state)).await.0;
+        let payload_bytes =
+            serde_json::to_vec(&response.payload).expect("serialize manifest payload");
+        let signature_bytes = B64
+            .decode(response.manifest_signature_ed25519.as_bytes())
+            .expect("decode manifest signature");
+        let signature = Signature::from_bytes(
+            &signature_bytes
+                .as_slice()
+                .try_into()
+                .expect("manifest signature length"),
+        );
+        manifest_signing_key
+            .verifying_key()
+            .verify(&payload_bytes, &signature)
+            .expect("verify manifest signature");
+        assert_eq!(
+            response.manifest_issuer_ed25519_pub,
+            B64.encode(manifest_signing_key.verifying_key().as_bytes())
+        );
+        let signed_at = DateTime::parse_from_rfc3339(&response.payload.signed_at)
+            .expect("parse signed_at")
+            .with_timezone(&Utc);
+        let expires_at = DateTime::parse_from_rfc3339(&response.payload.expires_at)
+            .expect("parse expires_at")
+            .with_timezone(&Utc);
+        assert!(expires_at > signed_at);
+        assert_eq!(
+            expires_at.signed_duration_since(signed_at),
+            Duration::seconds(CONTACT_DISCOVERY_MANIFEST_MAX_TTL_SECONDS)
+        );
     }
 
     #[test]

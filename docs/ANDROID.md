@@ -75,7 +75,7 @@ The Chat screen is intentionally limited to messaging actions for the current be
 Calling is not part of the Android messaging beta:
 
 - the main Chat screen no longer exposes call entry points,
-- beta validation covers onboarding, direct chat, groups, contacts, presence, typing, inbox sync, and receipts,
+- beta validation covers onboarding, direct chat, opaque private-group flows, manual contacts, trust state, and sealed inbox sync,
 - any existing calling code should be treated as experimental signaling work, not a supported release surface.
 
 ## 4. Prerequisites

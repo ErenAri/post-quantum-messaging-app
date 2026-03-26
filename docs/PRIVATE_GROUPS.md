@@ -4,11 +4,12 @@
 
 Current product posture:
 
-- Group messaging is disabled in the hardened Android/web profile.
+- The legacy clear-roster `group_messaging_supported` API remains disabled in the hardened Android/web profile.
+- The newer opaque private-group path has a separate capability flag: `private_group_messaging_supported`.
 - The existing server-side group model is too metadata-visible for a Signal-class privacy claim.
 - `pqmsg-core` now contains the first shared opaque-state primitive: a client-managed private-group state object, an encrypted snapshot format, invite-package roundtrips, a join-package primitive, an initial opaque member-credential primitive, and a share-link invite envelope where the decryption secret stays client-side.
 - `pqmsg-server` now exposes the first opaque private-group storage contract: state publish/fetch backed by encrypted snapshots plus hashed membership handles and derived fetch/publish capabilities.
-- This document defines the next honest implementation boundary before groups are re-enabled.
+- This document defines the next honest implementation boundary before private groups are treated as fully supported product surface.
 
 ## Research Baseline
 
@@ -40,6 +41,7 @@ The legacy group implementation assumes the server can:
 - and expose group membership/device state to normal clients.
 
 That is why groups remain disabled today.
+That is why legacy clear-roster groups remain disabled today.
 
 ## Target Architecture
 
@@ -101,14 +103,17 @@ Group membership and epoch transitions need user-visible trust surfaces:
 2. Define the membership-credential model and server storage contract.
    Status: partially implemented in `pqmsg-core` as `PrivateGroupMemberCredential`, and partially implemented on the server as opaque `private-groups/state/publish` and `private-groups/state/fetch` endpoints backed by encrypted state blobs. Invite/join/remove flows still need to be built on top of that storage layer.
 3. Implement create / invite / join / remove / epoch-rotate flows using opaque state updates.
-   Status: partially implemented on the server with opaque invite issuance/resolution bound to the latest group epoch and current publish capability. The shared core now also has a share-link invite envelope (`PrivateGroupLinkInviteMaterial`) that keeps the join secret outside the server-stored ciphertext. Join, remove, and full client flows are still pending.
+   Status: mostly implemented on the server and supported Android/web client path with opaque invite issuance/resolution bound to the latest group epoch and current publish capability. The shared core now also has a share-link invite envelope (`PrivateGroupLinkInviteMaterial`) that keeps the join secret outside the server-stored ciphertext. Further trust UX and transport hardening still remain.
 4. Add encrypted group message transport on top of that state model.
+   Status: implemented as sealed DM fanout over opaque group state on the current Android/web path, but not yet a dedicated lower-metadata group transport.
 5. Add Android/web trust UX for group membership and epoch changes.
+   Status: partially implemented. The Android and web group-info surfaces now show owner/role/epoch state and local trust summaries based on identity pins, safety-number verification where available, and transparency checkpoints. Richer epoch-change history and conflict UX still remain.
 6. Only then re-enable `group_messaging_supported`.
 
 ## Suggested Server Contract Changes
 
 - Keep `group_messaging_supported = false` until the opaque-state flow exists end to end.
+- Advertise `private_group_messaging_supported = true` only when the opaque state, invite, and client transport path are available together.
 - Replace clear roster endpoints with:
   - opaque state publish/fetch,
   - invite issuance and acceptance,
@@ -153,8 +158,8 @@ Need a concrete policy for:
 
 ## Current Repo Boundary
 
-Until the opaque-state private-group protocol exists:
-
 - `group_messaging_supported = false`
+- `private_group_messaging_supported` is the dedicated capability for the opaque private-group path
 - legacy group routes remain disabled in the hardened profile
-- direct messaging, invites, usernames, and manual contacts remain the supported social graph
+- the current Android/web path uses opaque state plus sealed DM fanout, not the old clear-roster API
+- direct messaging, invites, usernames, and manual contacts remain the base social graph

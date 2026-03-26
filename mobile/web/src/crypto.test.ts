@@ -72,6 +72,7 @@ import {
   decodeWireEnvelopeBase64,
   computeSafetyNumber,
   identityFingerprint,
+  verifyContactDiscoveryManifest,
   type GeneratedKeys,
   type WireEnvelope,
 } from "./crypto";
@@ -148,6 +149,58 @@ describe("buildPublishPrekeysPayload", () => {
     const payload = buildPublishPrekeysPayload(keys);
     expect(base64ToBytes(payload.sig_over_spk).length).toBe(64);
     expect(base64ToBytes(payload.sig_over_pqspk).length).toBe(64);
+  });
+});
+
+describe("verifyContactDiscoveryManifest", () => {
+  function signedManifest() {
+    const manifestSigningSecret = new Uint8Array(32).fill(19);
+    const manifestIssuerPub = bytesToBase64(ed25519.getPublicKey(manifestSigningSecret));
+    const payload = {
+      service: "pqmsg-discovery",
+      protocol_version: 1,
+      attestation_mode: "unattested_development",
+      ticket_format: "base64(json-payload).base64(ed25519-signature)",
+      ticket_issuer_ed25519_pub: "ticket-issuer-ed25519-pub",
+      ticket_max_ttl_seconds: 300,
+      lookup_protocol: "hashed_handle_directory",
+      privacy_mode: "service_boundary_only",
+      signed_at: new Date(Date.now() - 60_000).toISOString(),
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    };
+    const signature = bytesToBase64(
+      ed25519.sign(utf8ToBytes(JSON.stringify(payload)), manifestSigningSecret),
+    );
+    return {
+      ...payload,
+      manifest_issuer_ed25519_pub: manifestIssuerPub,
+      manifest_signature_ed25519: signature,
+    };
+  }
+
+  it("accepts a valid signed manifest", () => {
+    const manifest = signedManifest();
+    expect(() => {
+      verifyContactDiscoveryManifest(
+        manifest,
+        "ticket-issuer-ed25519-pub",
+        manifest.manifest_issuer_ed25519_pub,
+      );
+    }).not.toThrow();
+  });
+
+  it("rejects a bad manifest signature", () => {
+    const manifest = {
+      ...signedManifest(),
+      manifest_signature_ed25519: bytesToBase64(new Uint8Array(64).fill(1)),
+    };
+    expect(() => {
+      verifyContactDiscoveryManifest(
+        manifest,
+        "ticket-issuer-ed25519-pub",
+        manifest.manifest_issuer_ed25519_pub,
+      );
+    }).toThrow(/signature/i);
   });
 });
 

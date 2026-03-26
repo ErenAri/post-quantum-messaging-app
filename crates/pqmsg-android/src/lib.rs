@@ -2,6 +2,7 @@
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use pqmsg_core::ad::conversation_associated_data;
 use pqmsg_core::alg::{
@@ -314,6 +315,28 @@ pub struct TransparencyVerificationResult {
     pub leaf_version: u64,
     pub tree_size: u64,
     pub epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContactDiscoveryManifestPayloadRecord {
+    service: String,
+    protocol_version: u8,
+    attestation_mode: String,
+    ticket_format: String,
+    ticket_issuer_ed25519_pub: String,
+    ticket_max_ttl_seconds: i64,
+    lookup_protocol: String,
+    privacy_mode: String,
+    signed_at: String,
+    expires_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContactDiscoveryManifestRecord {
+    #[serde(flatten)]
+    payload: ContactDiscoveryManifestPayloadRecord,
+    manifest_issuer_ed25519_pub: String,
+    manifest_signature_ed25519: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
@@ -1317,6 +1340,60 @@ pub fn verify_transparency_proof(
         tree_size: sth.tree_size,
         epoch: sth.epoch,
     })
+}
+
+#[uniffi::export]
+pub fn verify_contact_discovery_manifest(
+    manifest_json: String,
+    expected_ticket_issuer_ed25519_pub: String,
+    expected_manifest_issuer_ed25519_pub: String,
+) -> Result<bool, PqmsgAndroidError> {
+    let manifest: ContactDiscoveryManifestRecord = serde_json::from_str(&manifest_json)?;
+    if manifest.payload.ticket_issuer_ed25519_pub != expected_ticket_issuer_ed25519_pub {
+        return Err(operation_failed(
+            "contact discovery manifest ticket issuer mismatch",
+        ));
+    }
+    if manifest.manifest_issuer_ed25519_pub != expected_manifest_issuer_ed25519_pub {
+        return Err(operation_failed(
+            "contact discovery manifest issuer mismatch",
+        ));
+    }
+    let signed_at = DateTime::parse_from_rfc3339(&manifest.payload.signed_at)
+        .map_err(|_| operation_failed("invalid contact discovery manifest signed_at"))?
+        .with_timezone(&Utc);
+    let expires_at = DateTime::parse_from_rfc3339(&manifest.payload.expires_at)
+        .map_err(|_| operation_failed("invalid contact discovery manifest expires_at"))?
+        .with_timezone(&Utc);
+    if expires_at <= signed_at {
+        return Err(operation_failed(
+            "contact discovery manifest timing is invalid",
+        ));
+    }
+    if expires_at <= Utc::now() {
+        return Err(operation_failed("contact discovery manifest expired"));
+    }
+    let payload_bytes = serde_json::to_vec(&manifest.payload)
+        .map_err(|_| operation_failed("serialize contact discovery manifest payload"))?;
+    let signature_bytes = decode_b64(
+        "contact_discovery_manifest.manifest_signature_ed25519",
+        &manifest.manifest_signature_ed25519,
+    )?;
+    let signature_array: [u8; 64] = signature_bytes.try_into().map_err(|_| {
+        operation_failed("contact discovery manifest signature must decode to 64 bytes")
+    })?;
+    let signature = Signature::from_bytes(&signature_array);
+    let manifest_pub_key = VerifyingKey::from_bytes(&decode_b64_32(
+        "contact_discovery_manifest.manifest_issuer_ed25519_pub",
+        &expected_manifest_issuer_ed25519_pub,
+    )?)
+    .map_err(|_| operation_failed("invalid contact discovery manifest issuer public key"))?;
+    manifest_pub_key
+        .verify(&payload_bytes, &signature)
+        .map_err(|_| {
+            operation_failed("contact discovery manifest signature verification failed")
+        })?;
+    Ok(true)
 }
 
 #[uniffi::export]
@@ -3359,6 +3436,71 @@ mod tests {
         assert_eq!(headers.auth_user, "bob");
         assert_eq!(headers.auth_device, "bob-android-1");
         assert!(!headers.auth_signature.is_empty());
+    }
+
+    #[test]
+    fn verify_contact_discovery_manifest_accepts_valid_signature() {
+        let manifest_signing_key = SigningKey::from_bytes(&[21u8; 32]);
+        let payload = ContactDiscoveryManifestPayloadRecord {
+            service: "pqmsg-discovery".to_string(),
+            protocol_version: 1,
+            attestation_mode: "unattested_development".to_string(),
+            ticket_format: "base64(json-payload).base64(ed25519-signature)".to_string(),
+            ticket_issuer_ed25519_pub: "ticket-issuer-ed25519-pub".to_string(),
+            ticket_max_ttl_seconds: 300,
+            lookup_protocol: "hashed_handle_directory".to_string(),
+            privacy_mode: "service_boundary_only".to_string(),
+            signed_at: (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
+            expires_at: (Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
+        };
+        let signature = B64.encode(
+            manifest_signing_key
+                .sign(&serde_json::to_vec(&payload).expect("serialize manifest payload"))
+                .to_bytes(),
+        );
+        let manifest_json = serde_json::to_string(&ContactDiscoveryManifestRecord {
+            payload,
+            manifest_issuer_ed25519_pub: B64
+                .encode(manifest_signing_key.verifying_key().as_bytes()),
+            manifest_signature_ed25519: signature,
+        })
+        .expect("serialize manifest");
+        assert!(verify_contact_discovery_manifest(
+            manifest_json,
+            "ticket-issuer-ed25519-pub".to_string(),
+            B64.encode(manifest_signing_key.verifying_key().as_bytes()),
+        )
+        .expect("verify manifest"));
+    }
+
+    #[test]
+    fn verify_contact_discovery_manifest_rejects_bad_signature() {
+        let manifest_signing_key = SigningKey::from_bytes(&[22u8; 32]);
+        let manifest_json = serde_json::to_string(&ContactDiscoveryManifestRecord {
+            payload: ContactDiscoveryManifestPayloadRecord {
+                service: "pqmsg-discovery".to_string(),
+                protocol_version: 1,
+                attestation_mode: "unattested_development".to_string(),
+                ticket_format: "base64(json-payload).base64(ed25519-signature)".to_string(),
+                ticket_issuer_ed25519_pub: "ticket-issuer-ed25519-pub".to_string(),
+                ticket_max_ttl_seconds: 300,
+                lookup_protocol: "hashed_handle_directory".to_string(),
+                privacy_mode: "service_boundary_only".to_string(),
+                signed_at: (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
+                expires_at: (Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
+            },
+            manifest_issuer_ed25519_pub: B64
+                .encode(manifest_signing_key.verifying_key().as_bytes()),
+            manifest_signature_ed25519: B64.encode([7u8; 64]),
+        })
+        .expect("serialize manifest");
+        let error = verify_contact_discovery_manifest(
+            manifest_json,
+            "ticket-issuer-ed25519-pub".to_string(),
+            B64.encode(manifest_signing_key.verifying_key().as_bytes()),
+        )
+        .expect_err("manifest signature should fail");
+        assert!(error.to_string().contains("signature"));
     }
 
     #[test]

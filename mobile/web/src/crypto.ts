@@ -11,7 +11,7 @@ import {
 } from "./base64";
 import { criticalType, encodeTlv, i64ToBeBytes, u16ToBeBytes } from "./tlv";
 import * as wasmCrypto from "./crypto-wasm";
-import type { BundleResponse } from "./server";
+import type { BundleResponse, ContactDiscoveryManifestResponse } from "./server";
 
 const AUTH_TAG_ENDPOINT = criticalType(0x3201);
 const AUTH_TAG_USER_ID = criticalType(0x3202);
@@ -1159,6 +1159,44 @@ export function verifyTransparencyProof(
     treeSize: result.tree_size,
     epoch: result.epoch,
   };
+}
+
+export function verifyContactDiscoveryManifest(
+  manifest: ContactDiscoveryManifestResponse,
+  expectedTicketIssuerPubB64: string,
+  expectedManifestIssuerPubB64: string,
+): void {
+  if (manifest.ticket_issuer_ed25519_pub !== expectedTicketIssuerPubB64) {
+    throw new Error("Contact discovery manifest ticket issuer mismatch");
+  }
+  if (manifest.manifest_issuer_ed25519_pub !== expectedManifestIssuerPubB64) {
+    throw new Error("Contact discovery manifest issuer mismatch");
+  }
+  const signedAt = Date.parse(manifest.signed_at);
+  const expiresAt = Date.parse(manifest.expires_at);
+  if (!Number.isFinite(signedAt) || !Number.isFinite(expiresAt) || expiresAt <= signedAt) {
+    throw new Error("Contact discovery manifest timing is invalid");
+  }
+  if (expiresAt <= Date.now()) {
+    throw new Error("Contact discovery manifest expired");
+  }
+  const payloadBytes = utf8ToBytes(JSON.stringify({
+    service: manifest.service,
+    protocol_version: manifest.protocol_version,
+    attestation_mode: manifest.attestation_mode,
+    ticket_format: manifest.ticket_format,
+    ticket_issuer_ed25519_pub: manifest.ticket_issuer_ed25519_pub,
+    ticket_max_ttl_seconds: manifest.ticket_max_ttl_seconds,
+    lookup_protocol: manifest.lookup_protocol,
+    privacy_mode: manifest.privacy_mode,
+    signed_at: manifest.signed_at,
+    expires_at: manifest.expires_at,
+  }));
+  const signatureBytes = base64ToBytes(manifest.manifest_signature_ed25519);
+  const publicKeyBytes = base64ToBytes(expectedManifestIssuerPubB64);
+  if (!ed25519.verify(signatureBytes, payloadBytes, publicKeyBytes)) {
+    throw new Error("Contact discovery manifest signature verification failed");
+  }
 }
 
 export function identityFingerprint(identityX25519PubB64: string, identityPqSigPubB64?: string): string {

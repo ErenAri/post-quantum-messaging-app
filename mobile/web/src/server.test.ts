@@ -517,6 +517,10 @@ describe("PqmsgApi methods", () => {
         ticket_max_ttl_seconds: 300,
         lookup_protocol: "not_implemented",
         privacy_mode: "service_boundary_only",
+        signed_at: "2026-03-26T12:00:00Z",
+        expires_at: "2026-03-26T13:00:00Z",
+        manifest_issuer_ed25519_pub: "manifest-ed25519-pub",
+        manifest_signature_ed25519: "manifest-sig",
       })
     );
     const manifest = await api.getContactDiscoveryManifest("https://cdsi.example");

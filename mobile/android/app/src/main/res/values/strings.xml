@@ -141,6 +141,9 @@
     <string name="contacts_manual_status">%1$d manual contact(s)</string>
     <string name="private_discovery_title">Private Discovery</string>
     <string name="contacts_private_service_notice">This development privacy mode uploads SHA-256 handle hashes to the separate discovery service with a short-lived ticket from the app server. It is not full Signal-style private discovery.</string>
+    <string name="contacts_private_manifest_unavailable">Discovery manifest unavailable.</string>
+    <string name="contacts_private_manifest_verified">Manifest verified: %1$s / %2$s (%3$s)</string>
+    <string name="contacts_private_manifest_mismatch">Manifest issuer mismatch: %1$s / %2$s (%3$s)</string>
     <string name="contacts_private_service_status">%1$d manual contact(s); separate discovery service available</string>
     <string name="contacts_discovery_uploaded_status">Uploaded %1$d phone hash(es) and %2$d email hash(es) to the discovery service.</string>
     <string name="contacts_discovery_matches_status">Discovery search returned %1$d match(es). Review the list below and add any contact you trust.</string>

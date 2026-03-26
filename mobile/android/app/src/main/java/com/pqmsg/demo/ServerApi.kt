@@ -530,6 +530,21 @@ data class ContactDiscoveryTicketResponse(
     val expires_at: String,
 )
 
+data class ContactDiscoveryManifestResponse(
+    val service: String,
+    val protocol_version: Int,
+    val attestation_mode: String,
+    val ticket_format: String,
+    val ticket_issuer_ed25519_pub: String,
+    val ticket_max_ttl_seconds: Int,
+    val lookup_protocol: String,
+    val privacy_mode: String,
+    val signed_at: String,
+    val expires_at: String,
+    val manifest_issuer_ed25519_pub: String,
+    val manifest_signature_ed25519: String,
+)
+
 data class PrivateDiscoveryHandlesUploadRequest(
     val ticket: String,
     val phone_hashes_sha256: List<String>,
@@ -685,6 +700,7 @@ data class ServerCapabilitiesResponse(
     val deployment_mode: String,
     val tls_required: Boolean,
     val tls_enabled: Boolean,
+    val supported_beta_clients: List<String> = listOf("android"),
     val supported_suite_ids: List<Int>,
     val runtime_crypto_profile: RuntimeCryptoProfileResponse,
     val production_baseline_met: Boolean,
@@ -695,6 +711,7 @@ data class ServerCapabilitiesResponse(
     val contact_discovery_mode: String,
     val contact_discovery_ticket_supported: Boolean,
     val contact_discovery_service_origin: String?,
+    val contact_discovery_manifest_issuer_ed25519_pub: String?,
     val presence_supported: Boolean,
     val typing_indicators_supported: Boolean,
     val read_receipts_supported: Boolean,
@@ -1159,6 +1176,9 @@ interface PqmsgApi {
 }
 
 interface PqmsgDiscoveryApi {
+    @GET("/v1/manifest")
+    suspend fun getManifest(): ContactDiscoveryManifestResponse
+
     @POST("/v1/discovery/handles")
     suspend fun uploadDiscoveryHandles(
         @Body request: PrivateDiscoveryHandlesUploadRequest,
@@ -1336,6 +1356,9 @@ object ApiClientFactory {
             }
             require(!capabilities.contact_discovery_service_origin.isNullOrBlank()) {
                 "Server advertises private contact discovery without a discovery service origin"
+            }
+            require(!capabilities.contact_discovery_manifest_issuer_ed25519_pub.isNullOrBlank()) {
+                "Server advertises private contact discovery without a discovery manifest issuer key"
             }
         }
         require(!capabilities.authenticated_direct_messaging_supported) {

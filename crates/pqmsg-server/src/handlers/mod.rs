@@ -48,6 +48,7 @@ fn capabilities_response(state: &AppState) -> ServerCapabilitiesResponse {
         deployment_mode: state.deployment_mode().as_str().to_string(),
         tls_required: state.security_profile().requires_tls(),
         tls_enabled: state.tls_enabled(),
+        supported_beta_clients: state.supported_beta_clients(),
         supported_suite_ids: state.supported_suite_ids(),
         runtime_crypto_profile: state.runtime_crypto_profile(),
         production_baseline_met: state.production_baseline_met(),
@@ -58,6 +59,8 @@ fn capabilities_response(state: &AppState) -> ServerCapabilitiesResponse {
         contact_discovery_mode: state.contact_discovery_mode().to_string(),
         contact_discovery_ticket_supported: state.contact_discovery_ticket_supported(),
         contact_discovery_service_origin: state.contact_discovery_service_origin(),
+        contact_discovery_manifest_issuer_ed25519_pub: state
+            .contact_discovery_manifest_issuer_public_key_b64(),
         presence_supported: state.presence_supported(),
         typing_indicators_supported: state.typing_indicators_supported(),
         read_receipts_supported: state.read_receipts_supported(),

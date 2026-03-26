@@ -66,6 +66,8 @@ sequenceDiagram
     C->>S: GET /metrics
 ```
 
+Not every route shown in the lifecycle/reference sections below is part of the hardened supported profile. Use `GET /v1/capabilities` as the source of truth for live support. Legacy authenticated direct messaging, presence, typing, receipts, ephemeral relay, stories, channels, and clear-roster groups remain compatibility/reference-only surfaces and are disabled on hardened deployments.
+
 ## 2.1 Security Profile Configuration
 
 Server startup is controlled by environment variables:
@@ -698,9 +700,18 @@ Separate discovery-service manifest. Current development-only contract:
   "ticket_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
   "ticket_max_ttl_seconds": 300,
   "lookup_protocol": "hashed_handle_directory",
-  "privacy_mode": "service_boundary_only"
+  "privacy_mode": "service_boundary_only",
+  "signed_at": "2026-03-26T12:00:00Z",
+  "expires_at": "2026-03-26T13:00:00Z",
+  "manifest_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
+  "manifest_signature_ed25519": "base64(64-byte Ed25519 signature)"
 }
 ```
+
+The current client contract verifies both:
+
+- `ticket_issuer_ed25519_pub` against the app-server capabilities document
+- `manifest_issuer_ed25519_pub` / `manifest_signature_ed25519` against the signed manifest payload
 
 `POST {contact_discovery_service_origin}/v1/discovery/handles`
 
@@ -1513,6 +1524,7 @@ Response:
     "fips_mode": false
   },
   "production_baseline_met": false,
+  "supported_beta_clients": ["android"],
   "registration_pow_bits": 0,
   "prekey_publish_min_interval_seconds": 0,
   "prekey_bundle_reserve_count": 0,
@@ -1521,12 +1533,17 @@ Response:
   "contact_discovery_mode": "manual_only",
   "contact_discovery_ticket_supported": false,
   "contact_discovery_service_origin": null,
+  "contact_discovery_manifest_issuer_ed25519_pub": null,
   "contact_discovery_ticket_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
   "group_messaging_supported": false,
+  "private_group_state_supported": true,
+  "private_group_messaging_supported": true,
   "sealed_sender_required": true,
   "sender_certificate_supported": true,
+  "key_transparency_supported": true,
   "sealed_delivery_tokens_supported": true,
   "sender_certificate_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
+  "transparency_log_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
   "authenticated_direct_messaging_supported": false,
   "ephemeral_messaging_supported": false,
   "web_client_policy": "demo_only"
@@ -1546,6 +1563,7 @@ Response:
   "deployment_mode": "pilot",
   "tls_required": true,
   "tls_enabled": true,
+  "supported_beta_clients": ["android"],
   "supported_suite_ids": [1, 2],
   "runtime_crypto_profile": {
     "protocol_version": 1,
@@ -1563,15 +1581,20 @@ Response:
   "prekey_bundle_reserve_count": 2,
   "pq_ratchet_interval": 1,
   "contact_discovery_supported": false,
-  "contact_discovery_mode": "private_service",
-  "contact_discovery_ticket_supported": true,
-  "contact_discovery_service_origin": "https://cdsi.example",
+  "contact_discovery_mode": "manual_only",
+  "contact_discovery_ticket_supported": false,
+  "contact_discovery_service_origin": null,
+  "contact_discovery_manifest_issuer_ed25519_pub": null,
   "contact_discovery_ticket_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
   "group_messaging_supported": false,
+  "private_group_state_supported": true,
+  "private_group_messaging_supported": true,
   "sealed_sender_required": true,
   "sender_certificate_supported": true,
+  "key_transparency_supported": true,
   "sealed_delivery_tokens_supported": true,
   "sender_certificate_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
+  "transparency_log_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
   "authenticated_direct_messaging_supported": false,
   "ephemeral_messaging_supported": false,
   "web_client_policy": "demo_only"
@@ -1580,14 +1603,22 @@ Response:
 
 Important capability flags:
 
-- `contact_discovery_supported`: raw-hash discovery inside the app server. Hardened deployments report `false`.
+- `contact_discovery_supported`: whether a separate private discovery service is available on the current deployment. Hardened pilot/production deployments report `false`.
 - `contact_discovery_mode`: `manual_only` or `private_service`.
 - `contact_discovery_ticket_supported`: whether the server can mint short-lived tickets for a dedicated private discovery service.
+- `contact_discovery_manifest_issuer_ed25519_pub`: Ed25519 public key clients use to verify the separate discovery service manifest.
 - `contact_discovery_ticket_issuer_ed25519_pub`: Ed25519 public key the separate discovery service must trust for ticket verification.
+- `private_service` discovery is currently development-only. Because `pqmsg-discovery` still advertises `lookup_protocol = "hashed_handle_directory"` and `privacy_mode = "service_boundary_only"`, only development deployments advertise it; pilot/production fall back to `manual_only`.
+- Development clients now also require a signed discovery manifest whose issuer matches `contact_discovery_manifest_issuer_ed25519_pub`.
+- `group_messaging_supported`: legacy clear-roster group API. Hardened deployments report `false`.
+- `private_group_state_supported`: opaque private-group state storage is available.
+- `private_group_messaging_supported`: the newer opaque private-group create/join/send flows are available.
 - `sealed_sender_required`: supported direct messaging must use sealed transport.
 - `sender_certificate_supported`: certified sealed-sender envelopes are available.
 - `sealed_delivery_tokens_supported`: sealed-relay ingress requires recipient delivery tokens.
+- `supported_beta_clients`: machine-readable supported client list for the current server profile. Default hardened posture is `["android"]`; `web` is added only when the server opts into the hardened web path.
 - `authenticated_direct_messaging_supported`: legacy authenticated DM compatibility surface. Hardened deployments report `false`.
+- `web_client_policy`: `demo_only` blocks outbound web messaging; `interop_candidate` permits the hardened web direct/private-group path.
 
 ### 4.14 Prometheus Metrics
 

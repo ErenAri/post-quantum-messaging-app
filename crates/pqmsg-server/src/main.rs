@@ -724,11 +724,25 @@ async fn main() -> anyhow::Result<()> {
                 Some(trimmed)
             }
         });
+    let contact_discovery_manifest_issuer_ed25519_pub =
+        env::var("PQMSG_CONTACT_DISCOVERY_MANIFEST_ED25519_PUB")
+            .ok()
+            .and_then(|value| {
+                let trimmed = value.trim().to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            });
     let web_client_policy = env::var("PQMSG_WEB_CLIENT_POLICY")
-        .unwrap_or_else(|_| DEFAULT_WEB_CLIENT_POLICY.to_string())
+        .unwrap_or_else(|_| "demo_only".to_string())
         .trim()
         .to_ascii_lowercase();
-    if !matches!(web_client_policy.as_str(), "demo_only" | "interop_candidate") {
+    if !matches!(
+        web_client_policy.as_str(),
+        "demo_only" | "interop_candidate"
+    ) {
         anyhow::bail!(
             "invalid PQMSG_WEB_CLIENT_POLICY '{}': expected 'demo_only' or 'interop_candidate'",
             web_client_policy
@@ -792,6 +806,9 @@ async fn main() -> anyhow::Result<()> {
             .with_ephemeral_state(ephemeral_state)
             .with_sender_certificate_signing_key(sender_certificate_signing_key)
             .with_contact_discovery_service_origin(contact_discovery_service_origin)
+            .with_contact_discovery_manifest_issuer_public_key_b64(
+                contact_discovery_manifest_issuer_ed25519_pub,
+            )
             .with_web_client_policy(web_client_policy);
 
     // Spawn the ephemeral message expiry reaper

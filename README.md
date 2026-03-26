@@ -12,9 +12,13 @@ The implementation objective is not product completeness; it is security-measura
 As of March 9, 2026, the supported beta path is **Android private beta for messaging only**.
 
 - Web remains a demo surface and is not part of the supported beta.
-- Outbound web messaging stays blocked whenever the server advertises `web_client_policy = demo_only`.
+- Outbound web direct messaging and private-group messaging stay blocked whenever the server advertises `web_client_policy = demo_only`.
+- The server exposes `supported_beta_clients` so the beta support matrix is machine-readable instead of only documented prose.
 - Calling remains out of scope for the beta on every client.
-- Manual contact bootstrap on the hardened Android/web path is `@username` or opaque invite only; private discovery and private groups are still not implemented.
+- Manual contact bootstrap on the hardened Android/web path is `@username` or opaque invite only.
+- Private discovery is still not fully implemented.
+- The current separate discovery service now ships a signed manifest contract, but it remains development-only until it stops advertising `service_boundary_only` / `unattested_development`.
+- Legacy clear-roster groups remain disabled; the newer opaque private-group path is advertised separately through `private_group_messaging_supported`.
 
 ## Research Positioning
 
@@ -32,14 +36,14 @@ The strongest contributions are:
 - hybrid dual-signature authentication (Ed25519 + ML-DSA-65) for quantum-resistant identity and prekey verification,
 - experimental call-signaling and media-encryption prototypes that remain out of beta scope,
 - five-platform reach: CLI, Android, iOS, Web PWA, and Desktop (Tauri),
-- stories (24h ephemeral broadcasts) and channels (admin-only broadcast groups).
+- legacy stories/channels research code that remains outside the hardened supported profile.
 
 ## System Architecture
 
 ```mermaid
 flowchart LR
     C[pqmsg-cli / Android / iOS / Web / Desktop] -->|HTTP JSON + TLS| S[pqmsg-server]
-    S -->|WebSocket inbox stream| C
+    S -->|Sealed inbox sync / realtime relay| C
     S -->|Call signaling REST| C
     C -->|UniFFI bridge| A[pqmsg-android]
     C -->|UniFFI bridge| I[pqmsg-ios]
@@ -91,14 +95,13 @@ flowchart TD
 - Server registration is identity-immutable after first successful bind.
 - Server enforces CORS (configurable via `PQMSG_CORS_ALLOWED_ORIGINS`) and security response headers (X-Content-Type-Options, X-Frame-Options, CSP, Referrer-Policy, Permissions-Policy, Cache-Control).
 - Server supports OpenTelemetry OTLP trace export (set `PQMSG_OTLP_ENDPOINT` for gRPC collector).
-- Server provides delivery/read receipt endpoints (`/v1/users/{user_id}/receipts`, `/v1/users/{user_id}/receipts/poll`).
-- Server supports ephemeral (disappearing) messages with TTL (`/v1/ephemeral-relay/{recipient_user_id}`) and automatic background reaper.
+- Legacy receipt and ephemeral-relay endpoints remain in the API reference as compatibility-only surfaces and are disabled on the hardened profile.
 - Server audit log supports size-based rotation (configurable `PQMSG_AUDIT_LOG_MAX_BYTES`, `PQMSG_AUDIT_LOG_MAX_FILES`).
 - Server prekey uploads require valid Ed25519 signatures under registered identity signature keys.
 - Server provides authenticated identity rotation challenge/confirm endpoints and a versioned identity event log.
 - Server relay/inbox/identity-log endpoints require signed request-auth headers bound to user/device identity keys.
 - Server exposes authenticated prekey inventory status (`/v1/users/{user_id}/prekeys/status`) with low-inventory signaling.
-- Server WebSocket inbox stream (`/v1/ws/inbox/{user_id}`) uses the same signed request-auth model for real-time relay delivery.
+- Supported realtime delivery uses sealed inbox polling / sealed websocket paths; the old authenticated `/v1/ws/inbox/{user_id}` route is compatibility-only and disabled by default.
 - Server enforces monotonic inbox cursors per authenticated user/device session and rejects cursor regression.
 - Server performs TTL-bounded relay ciphertext deduplication to reduce replay delivery risk.
 - Session decryption enforces suite continuity and authenticates ratchet metadata, including `pq_step_ct` on PQ-step messages.
@@ -123,7 +126,7 @@ flowchart TD
 | `crates/pqmsg-ios` | UniFFI-facing Rust bridge for iOS clients |
 | `mobile/android` | Minimal Kotlin demo UI and transport layer |
 | `mobile/ios` | Minimal SwiftUI demo UI and iOS build scripts |
-| `mobile/web` | Progressive web app shell with WebCrypto fallback mode |
+| `mobile/web` | Progressive web app shell with WASM PQ crypto and hardened browser gating |
 | `desktop` | Tauri desktop app wrapping web SPA with native Rust crypto |
 | `deploy` | Container, Kubernetes, and Helm deployment assets |
 | `observability` | Prometheus, Grafana, Loki, and Promtail stack assets |
@@ -209,19 +212,16 @@ cargo run -p pqmsg-cli -- devices-link --user alice --keys ./devkeys/alice.json 
 cargo run -p pqmsg-cli -- devices-revoke --user alice --keys ./devkeys/alice.json --target-device-id alice-device-2
 ```
 
-CLI discovery, contacts, and group fan-out relay:
+CLI local contacts and sealed relay:
 
 ```powershell
-cargo run -p pqmsg-cli -- discovery-upload --user alice --keys ./devkeys/alice.json --phone-hash <sha256hex> --email-hash <sha256hex>
-cargo run -p pqmsg-cli -- discovery-match --user alice --keys ./devkeys/alice.json --hash <sha256hex>
 cargo run -p pqmsg-cli -- contacts-add --user alice --keys ./devkeys/alice.json --peer bob --alias "Bobby"
 cargo run -p pqmsg-cli -- contacts-list --user alice --keys ./devkeys/alice.json
-cargo run -p pqmsg-cli -- groups-create --user alice --keys ./devkeys/alice.json --group alpha --member bob --member carol
-cargo run -p pqmsg-cli -- groups-members --user alice --keys ./devkeys/alice.json --group alpha
-cargo run -p pqmsg-cli -- groups-send --user alice --keys ./devkeys/alice.json --group alpha --text "group-ciphertext-placeholder"
 cargo run -p pqmsg-cli -- send-sealed --from alice --to bob --text "sealed-ciphertext-placeholder"
 cargo run -p pqmsg-cli -- poll-sealed --user bob --keys ./devkeys/bob.json
 ```
+
+Raw-hash discovery commands and legacy clear-roster group commands remain out of the hardened supported profile.
 
 ### PQ Backend Build (required for high-assurance/NSS runs)
 
@@ -400,7 +400,7 @@ cd mobile/ios
 open PQMsgDemo.xcodeproj
 ```
 
-Web client fallback mode:
+Web client demo shell:
 
 ```bash
 cd mobile/web
@@ -432,8 +432,8 @@ npm run dev
 5. In Chat screen:
 
 - Alice fetches Bob bundle and sends message,
-- Bob polls inbox and decrypts (HTTP fallback),
-- real-time clients can also subscribe to `/v1/ws/inbox/{user_id}?since=<message_id>` with signed auth headers.
+- Bob syncs sealed inbox state and decrypts,
+- legacy authenticated `/v1/ws/inbox/{user_id}` remains compatibility-only and is disabled by default on the hardened profile.
 
 Optional push-token registration endpoint for Android devices:
 

@@ -70,6 +70,7 @@ class SecurityInfoActivity : AppCompatActivity() {
     private var lastTransparencyProofSnapshot: TransparencyProofResponse? = null
     private var lastTransparencyVerification: uniffi.pqmsg_android.TransparencyVerificationResult? = null
     private var lastTransparencyUsedCheckpoint: Boolean = false
+    private var lastCapabilitiesSnapshot: ServerCapabilitiesResponse? = null
     private val clipboardClearHandler = Handler(Looper.getMainLooper())
     private var pendingClipboardClear: Runnable? = null
     private val gson = Gson()
@@ -195,6 +196,32 @@ class SecurityInfoActivity : AppCompatActivity() {
             "Invalid transport policy: ${it.message ?: "unavailable"}"
         }
         transportText.text = "Transport Security\n$transportPolicy"
+        if (server.isNotBlank()) {
+            val requestedServer = server
+            lifecycleScope.launch {
+                runCatching {
+                    ApiClientFactory.create(requestedServer).getCapabilities()
+                }.onSuccess { capabilities ->
+                    if (serverInput.text.toString().trim() != requestedServer) {
+                        return@onSuccess
+                    }
+                    lastCapabilitiesSnapshot = capabilities
+                    val supportedClients = capabilities.supported_beta_clients.joinToString(", ")
+                        .ifBlank { "none" }
+                    transportText.text =
+                        "Transport Security\n$transportPolicy\nSupported beta clients: $supportedClients\nWeb policy: ${capabilities.web_client_policy}"
+                }.onFailure {
+                    if (serverInput.text.toString().trim() != requestedServer) {
+                        return@onFailure
+                    }
+                    lastCapabilitiesSnapshot = null
+                    transportText.text =
+                        "Transport Security\n$transportPolicy\nCapabilities unavailable: ${it.message ?: "unavailable"}"
+                }
+            }
+        } else {
+            lastCapabilitiesSnapshot = null
+        }
 
         val pinLines = store.listIdentityPins(user)
             .map {

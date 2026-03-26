@@ -17,6 +17,7 @@ describe("betaScope", () => {
       deployment_mode: "demo",
       tls_required: false,
       tls_enabled: false,
+      supported_beta_clients: ["android"],
       supported_suite_ids: [1],
       runtime_crypto_profile: {
         protocol_version: 1,
@@ -37,6 +38,7 @@ describe("betaScope", () => {
       contact_discovery_mode: "manual_only",
       contact_discovery_ticket_supported: false,
       contact_discovery_service_origin: null,
+      contact_discovery_manifest_issuer_ed25519_pub: null,
       presence_supported: false,
       typing_indicators_supported: false,
       read_receipts_supported: false,
@@ -70,6 +72,7 @@ describe("betaScope", () => {
       deployment_mode: "demo",
       tls_required: false,
       tls_enabled: false,
+      supported_beta_clients: ["android", "web"],
       supported_suite_ids: [1],
       runtime_crypto_profile: {
         protocol_version: 1,
@@ -90,6 +93,7 @@ describe("betaScope", () => {
       contact_discovery_mode: "manual_only",
       contact_discovery_ticket_supported: false,
       contact_discovery_service_origin: null,
+      contact_discovery_manifest_issuer_ed25519_pub: null,
       presence_supported: false,
       typing_indicators_supported: false,
       read_receipts_supported: false,
@@ -124,6 +128,7 @@ describe("betaScope", () => {
       deployment_mode: "demo",
       tls_required: false,
       tls_enabled: false,
+      supported_beta_clients: ["android", "web"],
       supported_suite_ids: [1],
       runtime_crypto_profile: {
         protocol_version: 1,
@@ -144,6 +149,7 @@ describe("betaScope", () => {
       contact_discovery_mode: "manual_only",
       contact_discovery_ticket_supported: false,
       contact_discovery_service_origin: null,
+      contact_discovery_manifest_issuer_ed25519_pub: null,
       presence_supported: false,
       typing_indicators_supported: false,
       read_receipts_supported: false,

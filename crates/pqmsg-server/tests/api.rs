@@ -20,8 +20,8 @@ use pqmsg_core::pq_sig::{MlDsa65, PqSignatureProvider, ML_DSA_65_PK_LEN, ML_DSA_
 use pqmsg_core::ratchet::pq::DEFAULT_PQ_RATCHET_INTERVAL;
 use pqmsg_core::tlv::{critical_type, encode, TlvRecord};
 use pqmsg_server::{
-    build_router, init_db, parse_db_backend, AppState, AuditLogger, DbBackend, DosHardeningPolicy,
-    RateLimiter,
+    build_router, init_db, parse_db_backend, AppState, AuditLogger, DbBackend, DeploymentMode,
+    DosHardeningPolicy, RateLimiter,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -227,7 +227,49 @@ async fn test_app_with_contact_discovery_service_origin(service_origin: &str) ->
             StdDuration::from_secs(600),
         )),
     )
-    .with_contact_discovery_service_origin(Some(service_origin.to_string()));
+    .with_contact_discovery_service_origin(Some(service_origin.to_string()))
+    .with_contact_discovery_manifest_issuer_public_key_b64(Some(
+        B64.encode(
+            SigningKey::from_bytes(&[201u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        ),
+    ));
+    build_router(state)
+}
+
+async fn test_app_with_contact_discovery_service_origin_and_deployment_mode(
+    service_origin: &str,
+    deployment_mode: DeploymentMode,
+) -> axum::Router {
+    sqlx::any::install_default_drivers();
+    let database_url = "sqlite::memory:";
+    let db_backend = parse_db_backend(database_url).expect("sqlite backend");
+    let pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .expect("connect sqlite memory");
+    init_db(&pool, db_backend).await.expect("migrate");
+    let state = AppState::new(
+        pool,
+        db_backend,
+        Arc::new(RateLimiter::new(
+            1_000.0,
+            1_000.0,
+            100_000,
+            StdDuration::from_secs(600),
+        )),
+    )
+    .with_deployment_mode(deployment_mode)
+    .with_contact_discovery_service_origin(Some(service_origin.to_string()))
+    .with_contact_discovery_manifest_issuer_public_key_b64(Some(
+        B64.encode(
+            SigningKey::from_bytes(&[201u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        ),
+    ));
     build_router(state)
 }
 
@@ -2461,6 +2503,7 @@ async fn capabilities_reports_client_contract() {
     assert_eq!(body["tls_enabled"].as_bool(), Some(false));
     assert_eq!(body["production_baseline_met"].as_bool(), Some(false));
     assert_eq!(body["web_client_policy"].as_str(), Some("demo_only"));
+    assert_eq!(body["supported_beta_clients"], json!(["android"]));
     assert_eq!(
         body["pq_ratchet_interval"].as_u64(),
         Some(DEFAULT_PQ_RATCHET_INTERVAL as u64)
@@ -2472,6 +2515,7 @@ async fn capabilities_reports_client_contract() {
         Some(false)
     );
     assert!(body["contact_discovery_service_origin"].is_null());
+    assert!(body["contact_discovery_manifest_issuer_ed25519_pub"].is_null());
     assert!(body["contact_discovery_ticket_issuer_ed25519_pub"]
         .as_str()
         .is_some_and(|value| !value.is_empty()));
@@ -2524,6 +2568,28 @@ async fn capabilities_report_private_contact_discovery_service_when_configured()
         body["contact_discovery_service_origin"].as_str(),
         Some("https://cdsi.example")
     );
+    assert!(body["contact_discovery_manifest_issuer_ed25519_pub"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+}
+
+#[tokio::test]
+async fn capabilities_do_not_advertise_development_only_private_discovery_in_pilot() {
+    let app = test_app_with_contact_discovery_service_origin_and_deployment_mode(
+        "https://cdsi.example",
+        DeploymentMode::Pilot,
+    )
+    .await;
+    let (status, body) = json_request(app, Method::GET, "/v1/capabilities", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["contact_discovery_supported"].as_bool(), Some(false));
+    assert_eq!(body["contact_discovery_mode"].as_str(), Some("manual_only"));
+    assert_eq!(
+        body["contact_discovery_ticket_supported"].as_bool(),
+        Some(false)
+    );
+    assert!(body["contact_discovery_service_origin"].is_null());
+    assert!(body["contact_discovery_manifest_issuer_ed25519_pub"].is_null());
 }
 
 #[tokio::test]
@@ -2552,6 +2618,42 @@ async fn contact_discovery_ticket_requires_configured_service() {
     assert_eq!(
         body["detail"].as_str(),
         Some("private contact discovery service is not configured; use manual contacts or invite links")
+    );
+}
+
+#[tokio::test]
+async fn contact_discovery_ticket_is_forbidden_outside_development_deployments() {
+    let app = test_app_with_contact_discovery_service_origin_and_deployment_mode(
+        "https://cdsi.example",
+        DeploymentMode::Pilot,
+    )
+    .await;
+    let alice_sig = signing_key(131);
+    let reg = register_payload(
+        "alice-discovery-pilot",
+        "alice-discovery-pilot-dev",
+        [131u8; 32],
+        &alice_sig,
+    );
+    let (status_reg, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg).await;
+    assert_eq!(status_reg, StatusCode::OK);
+    let headers = contact_discovery_ticket_auth_headers(
+        &alice_sig,
+        "alice-discovery-pilot",
+        "alice-discovery-pilot-dev",
+    );
+    let (status, body) = json_request_with_headers(
+        app,
+        Method::POST,
+        "/v1/users/alice-discovery-pilot/contact-discovery/ticket",
+        json!({}),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["detail"].as_str(),
+        Some("private contact discovery service is only available in development deployments; use manual contacts or invite links")
     );
 }
 

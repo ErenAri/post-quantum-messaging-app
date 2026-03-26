@@ -1,7 +1,7 @@
 import type { ServerCapabilitiesResponse } from "./server";
 
 export const WEB_BETA_SCOPE_SUMMARY =
-  "Web direct messages use the local post-quantum runtime only when the server permits the hardened web policy. Private-group messaging also requires the explicit private-group capability. Calling remains unavailable in the supported web beta path.";
+  "Web direct messages use the local post-quantum runtime only when the server permits the hardened web policy. Private-group messaging also requires the explicit private-group capability. calling remains unavailable in the supported web beta path.";
 
 export type WebBetaHoldback = {
   directMessagingAllowed: boolean;

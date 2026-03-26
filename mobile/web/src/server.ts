@@ -215,6 +215,10 @@ export type ContactDiscoveryManifestResponse = {
   ticket_max_ttl_seconds: number;
   lookup_protocol: string;
   privacy_mode: string;
+  signed_at: string;
+  expires_at: string;
+  manifest_issuer_ed25519_pub: string;
+  manifest_signature_ed25519: string;
 };
 
 export type ContactEntry = {
@@ -725,6 +729,7 @@ export type ServerCapabilitiesResponse = {
   deployment_mode: string;
   tls_required: boolean;
   tls_enabled: boolean;
+  supported_beta_clients: string[];
   supported_suite_ids: number[];
   runtime_crypto_profile: RuntimeCryptoProfileResponse;
   production_baseline_met: boolean;
@@ -735,6 +740,7 @@ export type ServerCapabilitiesResponse = {
   contact_discovery_mode: string;
   contact_discovery_ticket_supported: boolean;
   contact_discovery_service_origin: string | null;
+  contact_discovery_manifest_issuer_ed25519_pub: string | null;
   presence_supported: boolean;
   typing_indicators_supported: boolean;
   read_receipts_supported: boolean;

@@ -107,6 +107,7 @@ class ServerApiTest {
               "deployment_mode": "demo",
               "tls_required": false,
               "tls_enabled": false,
+              "supported_beta_clients": ["android"],
               "supported_suite_ids": [42],
               "runtime_crypto_profile": {
                 "protocol_version": 1,
@@ -127,6 +128,7 @@ class ServerApiTest {
               "contact_discovery_mode": "manual_only",
               "contact_discovery_ticket_supported": false,
               "contact_discovery_service_origin": null,
+              "contact_discovery_manifest_issuer_ed25519_pub": null,
               "presence_supported": false,
               "typing_indicators_supported": false,
               "read_receipts_supported": false,
@@ -152,9 +154,11 @@ class ServerApiTest {
         )
 
         assertEquals("demo_only", parsed.web_client_policy)
+        assertEquals(listOf("android"), parsed.supported_beta_clients)
         assertEquals("manual_only", parsed.contact_discovery_mode)
         assertEquals(false, parsed.contact_discovery_ticket_supported)
         assertNull(parsed.contact_discovery_service_origin)
+        assertNull(parsed.contact_discovery_manifest_issuer_ed25519_pub)
         assertEquals("issuer-ed25519-pub", parsed.contact_discovery_ticket_issuer_ed25519_pub)
         assertEquals("ml-kem-768", parsed.runtime_crypto_profile.kem)
         assertEquals(false, parsed.presence_supported)
@@ -186,6 +190,7 @@ class ServerApiTest {
               "deployment_mode": "development",
               "tls_required": false,
               "tls_enabled": false,
+              "supported_beta_clients": ["android"],
               "supported_suite_ids": [1],
               "runtime_crypto_profile": {
                 "protocol_version": 1,
@@ -206,6 +211,7 @@ class ServerApiTest {
               "contact_discovery_mode": "manual_only",
               "contact_discovery_ticket_supported": false,
               "contact_discovery_service_origin": null,
+              "contact_discovery_manifest_issuer_ed25519_pub": null,
               "presence_supported": false,
               "typing_indicators_supported": false,
               "read_receipts_supported": false,
@@ -245,6 +251,7 @@ class ServerApiTest {
               "deployment_mode": "development",
               "tls_required": false,
               "tls_enabled": false,
+              "supported_beta_clients": ["android"],
               "supported_suite_ids": [1],
               "runtime_crypto_profile": {
                 "protocol_version": 1,
@@ -265,6 +272,7 @@ class ServerApiTest {
               "contact_discovery_mode": "private_service",
               "contact_discovery_ticket_supported": true,
               "contact_discovery_service_origin": null,
+              "contact_discovery_manifest_issuer_ed25519_pub": null,
               "presence_supported": false,
               "typing_indicators_supported": false,
               "read_receipts_supported": false,
@@ -373,6 +381,7 @@ class ServerApiTest {
               "deployment_mode": "development",
               "tls_required": false,
               "tls_enabled": false,
+              "supported_beta_clients": ["android"],
               "supported_suite_ids": [1],
               "runtime_crypto_profile": {
                 "protocol_version": 1,
@@ -393,6 +402,7 @@ class ServerApiTest {
               "contact_discovery_mode": "private_service",
               "contact_discovery_ticket_supported": true,
               "contact_discovery_service_origin": "https://cdsi.example",
+              "contact_discovery_manifest_issuer_ed25519_pub": "manifest-ed25519-pub",
               "presence_supported": false,
               "typing_indicators_supported": false,
               "read_receipts_supported": false,

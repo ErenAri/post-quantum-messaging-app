@@ -324,6 +324,7 @@ pub struct AppState {
     sender_certificate_signing_key: Arc<SigningKey>,
     authenticated_direct_messaging_supported: bool,
     contact_discovery_service_origin: Option<String>,
+    contact_discovery_manifest_issuer_ed25519_pub: Option<String>,
     web_client_policy: String,
 }
 
@@ -357,6 +358,7 @@ impl AppState {
             sender_certificate_signing_key: Arc::new(default_sender_certificate_signing_key()),
             authenticated_direct_messaging_supported: false,
             contact_discovery_service_origin: None,
+            contact_discovery_manifest_issuer_ed25519_pub: None,
             web_client_policy: DEFAULT_WEB_CLIENT_POLICY.to_string(),
         }
     }
@@ -394,6 +396,7 @@ impl AppState {
             sender_certificate_signing_key: Arc::new(default_sender_certificate_signing_key()),
             authenticated_direct_messaging_supported: false,
             contact_discovery_service_origin: None,
+            contact_discovery_manifest_issuer_ed25519_pub: None,
             web_client_policy: DEFAULT_WEB_CLIENT_POLICY.to_string(),
         }
     }
@@ -470,11 +473,11 @@ impl AppState {
     }
 
     pub fn contact_discovery_supported(&self) -> bool {
-        self.contact_discovery_service_origin.is_some()
+        self.contact_discovery_private_service_allowed()
     }
 
     pub fn contact_discovery_mode(&self) -> &'static str {
-        if self.contact_discovery_service_origin.is_some() {
+        if self.contact_discovery_private_service_allowed() {
             "private_service"
         } else {
             "manual_only"
@@ -482,11 +485,29 @@ impl AppState {
     }
 
     pub fn contact_discovery_ticket_supported(&self) -> bool {
-        self.contact_discovery_service_origin.is_some()
+        self.contact_discovery_private_service_allowed()
     }
 
     pub fn contact_discovery_service_origin(&self) -> Option<String> {
-        self.contact_discovery_service_origin.clone()
+        if self.contact_discovery_private_service_allowed() {
+            self.contact_discovery_service_origin.clone()
+        } else {
+            None
+        }
+    }
+
+    pub fn contact_discovery_manifest_issuer_public_key_b64(&self) -> Option<String> {
+        if self.contact_discovery_private_service_allowed() {
+            self.contact_discovery_manifest_issuer_ed25519_pub.clone()
+        } else {
+            None
+        }
+    }
+
+    pub fn contact_discovery_private_service_allowed(&self) -> bool {
+        self.contact_discovery_service_origin.is_some()
+            && self.contact_discovery_manifest_issuer_ed25519_pub.is_some()
+            && matches!(self.deployment_mode, DeploymentMode::Development)
     }
 
     pub fn presence_supported(&self) -> bool {
@@ -526,6 +547,14 @@ impl AppState {
             && self.sealed_sender_required()
             && self.sender_certificate_supported()
             && self.key_transparency_supported()
+    }
+
+    pub fn supported_beta_clients(&self) -> Vec<String> {
+        let mut clients = vec!["android".to_string()];
+        if self.web_client_policy() != DEFAULT_WEB_CLIENT_POLICY {
+            clients.push("web".to_string());
+        }
+        clients
     }
 
     pub fn sealed_sender_required(&self) -> bool {
@@ -601,6 +630,14 @@ impl AppState {
         contact_discovery_service_origin: Option<String>,
     ) -> Self {
         self.contact_discovery_service_origin = contact_discovery_service_origin;
+        self
+    }
+
+    pub fn with_contact_discovery_manifest_issuer_public_key_b64(
+        mut self,
+        manifest_issuer_public_key_b64: Option<String>,
+    ) -> Self {
+        self.contact_discovery_manifest_issuer_ed25519_pub = manifest_issuer_public_key_b64;
         self
     }
 

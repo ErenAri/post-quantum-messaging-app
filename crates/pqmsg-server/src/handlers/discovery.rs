@@ -23,13 +23,21 @@ fn ensure_contact_discovery_supported(_state: &AppState) -> Result<(), AppError>
 }
 
 fn ensure_contact_discovery_ticket_supported(state: &AppState) -> Result<String, AppError> {
-    state
-        .contact_discovery_service_origin()
+    let configured_service_origin = state
+        .contact_discovery_service_origin
+        .as_ref()
+        .cloned()
         .ok_or_else(|| {
             AppError::forbidden(
                 "private contact discovery service is not configured; use manual contacts or invite links",
             )
-        })
+        })?;
+    if !matches!(state.deployment_mode, crate::DeploymentMode::Development) {
+        return Err(AppError::forbidden(
+            "private contact discovery service is only available in development deployments; use manual contacts or invite links",
+        ));
+    }
+    Ok(configured_service_origin)
 }
 
 #[derive(Serialize)]

@@ -11,14 +11,17 @@ import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.google.gson.Gson
 import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.launch
 import uniffi.pqmsg_android.buildContactDiscoveryTicketAuthHeaders
 import uniffi.pqmsg_android.buildContactsListAuthHeaders
 import uniffi.pqmsg_android.buildContactsRemoveAuthHeaders
 import uniffi.pqmsg_android.buildContactsUpsertAuthHeaders
+import uniffi.pqmsg_android.verifyContactDiscoveryManifest
 
 class ContactDiscoveryActivity : AppCompatActivity() {
+    private val gson = Gson()
     private lateinit var store: LocalStateStore
     private lateinit var statusText: TextView
     private lateinit var contactUserIdInput: EditText
@@ -28,6 +31,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
     private lateinit var discoveryPhonesInput: EditText
     private lateinit var discoveryEmailsInput: EditText
     private lateinit var discoveryQueryInput: EditText
+    private lateinit var discoveryManifestText: TextView
     private lateinit var uploadDiscoveryButton: MaterialButton
     private lateinit var searchDiscoveryButton: MaterialButton
     private lateinit var discoveryMatchesText: TextView
@@ -49,6 +53,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
         discoveryPhonesInput = findViewById(R.id.editDiscoveryPhones)
         discoveryEmailsInput = findViewById(R.id.editDiscoveryEmails)
         discoveryQueryInput = findViewById(R.id.editDiscoveryQuery)
+        discoveryManifestText = findViewById(R.id.textDiscoveryManifest)
         uploadDiscoveryButton = findViewById(R.id.buttonUploadDiscoveryHandles)
         searchDiscoveryButton = findViewById(R.id.buttonSearchDiscovery)
         discoveryMatchesText = findViewById(R.id.textDiscoveryMatches)
@@ -93,6 +98,14 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                     enabled = context.capabilities.contact_discovery_mode == "private_service" &&
                         context.capabilities.contact_discovery_supported,
                 )
+                discoveryManifestText.text = if (
+                    context.capabilities.contact_discovery_mode == "private_service" &&
+                    context.capabilities.contact_discovery_supported
+                ) {
+                    renderDiscoveryManifestSummary(context.capabilities)
+                } else {
+                    getString(R.string.contacts_private_manifest_unavailable)
+                }
                 val response = context.api.listContacts(
                     userId = context.profile.userId,
                     headers = buildContactsListAuthHeaders(
@@ -152,10 +165,72 @@ class ContactDiscoveryActivity : AppCompatActivity() {
         if (!enabled) {
             discoveryMatchesText.visibility = View.GONE
             discoveryMatchesText.text = ""
+            discoveryManifestText.text = getString(R.string.contacts_private_manifest_unavailable)
             discoveryPhonesInput.setText("")
             discoveryEmailsInput.setText("")
             discoveryQueryInput.setText("")
         }
+    }
+
+    private suspend fun renderDiscoveryManifestSummary(
+        capabilities: ServerCapabilitiesResponse,
+    ): String {
+        val manifest = loadVerifiedDiscoveryManifest(capabilities)
+        val issuerMatches =
+            manifest.ticket_issuer_ed25519_pub == capabilities.contact_discovery_ticket_issuer_ed25519_pub
+        return if (issuerMatches) {
+            getString(
+                R.string.contacts_private_manifest_verified,
+                manifest.lookup_protocol,
+                manifest.privacy_mode,
+                manifest.attestation_mode,
+            )
+        } else {
+            getString(
+                R.string.contacts_private_manifest_mismatch,
+                manifest.lookup_protocol,
+                manifest.privacy_mode,
+                manifest.attestation_mode,
+            )
+        }
+    }
+
+    private suspend fun loadVerifiedDiscoveryManifest(
+        capabilities: ServerCapabilitiesResponse,
+    ): ContactDiscoveryManifestResponse {
+        val serviceOrigin = capabilities.contact_discovery_service_origin?.trim().orEmpty()
+        require(serviceOrigin.isNotBlank()) {
+            "Private contact discovery service is not configured"
+        }
+        val manifest = ApiClientFactory.createDiscovery(serviceOrigin).getManifest()
+        require(
+            manifest.ticket_issuer_ed25519_pub == capabilities.contact_discovery_ticket_issuer_ed25519_pub,
+        ) {
+            "Contact discovery manifest ticket issuer mismatch"
+        }
+        require(
+            manifest.manifest_issuer_ed25519_pub ==
+                capabilities.contact_discovery_manifest_issuer_ed25519_pub,
+        ) {
+            "Contact discovery manifest issuer mismatch"
+        }
+        verifyContactDiscoveryManifest(
+            gson.toJson(manifest),
+            capabilities.contact_discovery_ticket_issuer_ed25519_pub,
+            capabilities.contact_discovery_manifest_issuer_ed25519_pub.orEmpty(),
+        )
+        require(
+            !capabilities.contact_discovery_manifest_issuer_ed25519_pub.isNullOrBlank(),
+        ) {
+            "Contact discovery manifest issuer key is unavailable"
+        }
+        require(
+            manifest.lookup_protocol == "hashed_handle_directory" &&
+                manifest.privacy_mode == "service_boundary_only",
+        ) {
+            "Unsupported contact discovery manifest"
+        }
+        return manifest
     }
 
     private fun normalizeDiscoveryHashes(rawValue: String): List<String> {
@@ -213,6 +288,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 ) {
                     "Private contact discovery is unavailable for this profile"
                 }
+                loadVerifiedDiscoveryManifest(context.capabilities)
                 val ticket = issueDiscoveryTicket(context)
                 val discoveryApi = ApiClientFactory.createDiscovery(ticket.service_origin)
                 val response = discoveryApi.uploadDiscoveryHandles(
@@ -251,6 +327,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 ) {
                     "Private contact discovery is unavailable for this profile"
                 }
+                loadVerifiedDiscoveryManifest(context.capabilities)
                 val ticket = issueDiscoveryTicket(context)
                 val discoveryApi = ApiClientFactory.createDiscovery(ticket.service_origin)
                 val response = discoveryApi.matchDiscoveryHashes(

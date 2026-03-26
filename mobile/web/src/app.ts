@@ -43,6 +43,7 @@ import {
   openTransportEnvelopeWithSenderCert,
   regeneratePublishedPrekeys,
   sealTransportEnvelopeWithSenderCert,
+  verifyContactDiscoveryManifest,
   verifyTransparencyProof,
   type GeneratedKeys,
 } from "./crypto";
@@ -708,7 +709,8 @@ async function ensureMandatoryPqRatchetPolicy(): Promise<ServerCapabilitiesRespo
       !capabilities.contact_discovery_supported ||
       !capabilities.contact_discovery_ticket_supported ||
       !capabilities.contact_discovery_service_origin ||
-      !capabilities.contact_discovery_ticket_issuer_ed25519_pub
+      !capabilities.contact_discovery_ticket_issuer_ed25519_pub ||
+      !capabilities.contact_discovery_manifest_issuer_ed25519_pub
     )
   ) {
     throw new Error("Server is advertising private contact discovery without a complete service contract.");
@@ -1180,6 +1182,45 @@ function resolveGroupIdentity(groupId: string, ownerUserId: string): {
     primaryLabel: title,
     secondaryLabel: ownerUserId === setup.userId ? "You created this group" : `Owner @${ownerUserId}`,
     avatarText: title.slice(0, 2).toUpperCase() || groupId.slice(0, 2).toUpperCase(),
+  };
+}
+
+function describePrivateGroupMemberTrust(memberUserId: string): {
+  summary: string;
+  detail: string;
+} {
+  if (memberUserId === setup.userId) {
+    return {
+      summary: "Local member credential",
+      detail: "This device holds the current opaque state for your membership.",
+    };
+  }
+  const contact = cachedContacts.find((item) => item.contact_user_id === memberUserId);
+  const identityPin = readIdentityPin(setup.userId, memberUserId);
+  const transparencyCheckpoint = readTransparencyCheckpoint(setup.serverUrl, memberUserId);
+  if (isContactFingerprintVerified(contact, identityPin)) {
+    return {
+      summary: "Verified via safety number",
+      detail: transparencyCheckpoint
+        ? `Transparency auto-verified in tree #${transparencyCheckpoint.tree_size}.`
+        : "This member's current fingerprint matches the saved verification.",
+    };
+  }
+  if (transparencyCheckpoint) {
+    return {
+      summary: "Transparency auto-verified",
+      detail: `Signed transparency checkpoint saved at tree #${transparencyCheckpoint.tree_size}.`,
+    };
+  }
+  if (identityPin) {
+    return {
+      summary: "Pinned on this device",
+      detail: "This member's hybrid identity is pinned locally, but not safety-number verified.",
+    };
+  }
+  return {
+    summary: "No local trust checkpoint",
+    detail: "Open a direct chat and verify this member before trusting membership changes.",
   };
 }
 
@@ -3357,7 +3398,8 @@ async function loadGroupMembersCount(groupId: string): Promise<void> {
     countEl.textContent = "private-group state unavailable";
     return;
   }
-  countEl.textContent = `${state.members.length} members · epoch ${state.epoch}`;
+  const yourRole = state.members.find((member) => member.user_id === setup.userId)?.role || "member";
+  countEl.textContent = `${state.members.length} members · epoch ${state.epoch} · your role ${yourRole}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -3396,14 +3438,19 @@ async function renderGroupInfo(groupId: string): Promise<void> {
   const credentialMaterial = privateGroupDescribeMemberCredential(credential);
   const canManage = Boolean(credentialMaterial.publish_key_base64);
   const groupTitle = state.attributes.title || groupId;
+  const ownerUserId = state.members.find((member) => member.role === "Owner")?.user_id || setup.userId;
+  const yourRole = state.members.find((member) => member.user_id === setup.userId)?.role || "Member";
   const membersHtml = state.members.map((member) => {
     const identity = resolvePeerIdentity(member.user_id);
+    const trust = describePrivateGroupMemberTrust(member.user_id);
     const canRemoveMember = canManage && member.user_id !== setup.userId && member.role !== "Owner";
     return `
       <div class="contact-manage-row">
         <div>
           <span>${escHtml(identity.primaryLabel)}</span>
           <span class="text-secondary">${escHtml(member.role)}</span>
+          <div class="text-secondary">${escHtml(trust.summary)}</div>
+          <div class="text-secondary">${escHtml(trust.detail)}</div>
         </div>
         <div class="contact-manage-actions">
           ${member.user_id === setup.userId ? '<span class="text-secondary">you</span>' : ""}
@@ -3431,10 +3478,11 @@ async function renderGroupInfo(groupId: string): Promise<void> {
       <div class="settings-body">
         <div class="settings-section">
           <h3>${escHtml(groupTitle)}</h3>
-          <p class="text-secondary">Epoch ${state.epoch} | ${state.members.length} members</p>
+          <p class="text-secondary">Epoch ${state.epoch} | ${state.members.length} members | Your role ${escHtml(yourRole)} | Owner ${escHtml(resolvePeerIdentity(ownerUserId).primaryLabel)}</p>
           <div class="beta-banner beta-banner-warning">
             <strong>Opaque private-group state</strong>
             <p>${canManage ? "This device can rotate membership and issue member invites." : "This device can read the current private-group state but cannot rotate membership."}</p>
+            <p>Member trust uses the same local safety-number, identity-pin, and transparency checkpoints as direct chats.</p>
           </div>
           <div id="gi-members">${membersHtml}</div>
         </div>
@@ -3951,11 +3999,19 @@ async function renderSettings(): Promise<void> {
       contactDiscoveryManifest = await api.getContactDiscoveryManifest(
         capabilities.contact_discovery_service_origin,
       );
-      contactDiscoveryManifestStatus =
-        contactDiscoveryManifest.ticket_issuer_ed25519_pub ===
-          capabilities.contact_discovery_ticket_issuer_ed25519_pub
-          ? `Verified (${contactDiscoveryManifest.attestation_mode})`
-          : "Issuer mismatch";
+      verifyContactDiscoveryManifest(
+        contactDiscoveryManifest,
+        capabilities.contact_discovery_ticket_issuer_ed25519_pub,
+        capabilities.contact_discovery_manifest_issuer_ed25519_pub || "",
+      );
+      if (
+        contactDiscoveryManifest.lookup_protocol === "hashed_handle_directory" &&
+        contactDiscoveryManifest.privacy_mode === "service_boundary_only"
+      ) {
+        contactDiscoveryManifestStatus = `Verified (${contactDiscoveryManifest.attestation_mode})`;
+      } else {
+        contactDiscoveryManifestStatus = "Unsupported manifest";
+      }
     } catch {
       contactDiscoveryManifestStatus = "Manifest unavailable";
     }
@@ -5645,6 +5701,18 @@ async function renderDiscovery(): Promise<void> {
     if (configuredOrigin && configuredOrigin !== ticketOrigin) {
       throw new Error("Contact discovery service origin mismatch");
     }
+    const manifest = await api.getContactDiscoveryManifest(ticketOrigin);
+    verifyContactDiscoveryManifest(
+      manifest,
+      capabilities.contact_discovery_ticket_issuer_ed25519_pub,
+      capabilities.contact_discovery_manifest_issuer_ed25519_pub || "",
+    );
+    if (
+      manifest.lookup_protocol !== "hashed_handle_directory"
+      || manifest.privacy_mode !== "service_boundary_only"
+    ) {
+      throw new Error("Unsupported contact discovery manifest");
+    }
     return {
       serviceOrigin: ticketOrigin,
       ticket: response.ticket,
@@ -5779,6 +5847,7 @@ async function renderServerInfo(): Promise<void> {
           <h3>Capabilities</h3>
           <div class="settings-row"><span>Schema</span><span>v${caps.capability_schema_version}</span></div>
           <div class="settings-row"><span>Suites</span><span class="mono">${caps.supported_suite_ids.join(", ")}</span></div>
+          <div class="settings-row"><span>Supported Beta Clients</span><span class="mono">${escHtml(caps.supported_beta_clients.join(", ") || "none")}</span></div>
           <div class="settings-row"><span>Web Policy</span><span class="mono">${escHtml(caps.web_client_policy)}</span></div>
           <div class="settings-row"><span>PQ Ratchet</span><span>${caps.pq_ratchet_interval === 1 ? "every message" : `every ${caps.pq_ratchet_interval} msgs`}</span></div>
           <div class="settings-row"><span>Presence</span><span>${caps.presence_supported ? "Enabled" : "Disabled"}</span></div>
@@ -5795,6 +5864,7 @@ async function renderServerInfo(): Promise<void> {
           <div class="settings-row"><span>Contact Discovery</span><span>${caps.contact_discovery_mode === "private_service" ? "Private service" : (caps.contact_discovery_supported ? "Enabled" : "Manual only")}</span></div>
           <div class="settings-row"><span>Discovery Tickets</span><span>${caps.contact_discovery_ticket_supported ? "Available" : "Unavailable"}</span></div>
           <div class="settings-row"><span>Discovery Ticket Issuer</span><span class="mono">${escHtml(caps.contact_discovery_ticket_issuer_ed25519_pub)}</span></div>
+          <div class="settings-row"><span>Discovery Manifest Issuer</span><span class="mono">${escHtml(caps.contact_discovery_manifest_issuer_ed25519_pub || "not advertised")}</span></div>
           <div class="settings-row"><span>Prod Baseline</span><span>${caps.production_baseline_met ? "✓ Met" : "✗ Not met"}</span></div>
         </div>
         <div class="settings-section">
