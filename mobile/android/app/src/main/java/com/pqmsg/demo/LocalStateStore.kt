@@ -233,6 +233,18 @@ class LocalStateStore(context: Context) {
         removeLegacyKeys("sealed_cursor_$userId")
     }
 
+    fun readPrivateGroupCursor(userId: String, groupId: String): Long {
+        if (userId.isBlank() || groupId.isBlank()) return 0L
+        return getLong("private_group_cursor_${userId}_$groupId", 0L)
+    }
+
+    fun writePrivateGroupCursor(userId: String, groupId: String, cursor: Long) {
+        if (userId.isBlank() || groupId.isBlank()) return
+        val key = "private_group_cursor_${userId}_$groupId"
+        prefs.edit().putLong(key, cursor).apply()
+        removeLegacyKeys(key)
+    }
+
     fun readTransparencyCheckpoint(serverUrl: String, userId: String): String? {
         return getNullableString(transparencyCheckpointKey(serverUrl, userId))
     }
@@ -674,6 +686,7 @@ class LocalStateStore(context: Context) {
         groups.remove(groupId)
         prefs.edit()
             .putStringSet(privateGroupIdsKey(userId), LinkedHashSet(groups))
+            .remove("private_group_cursor_${userId}_$groupId")
             .apply()
         deletePath(File(rootDir, "private-groups/$userId/$groupId.json"))
     }
@@ -904,6 +917,7 @@ class LocalStateStore(context: Context) {
                 "pin_${userId}_",
                 "conv_${userId}_",
                 "group_${userId}_",
+                "private_group_cursor_${userId}_",
                 "request_${userId}_",
             ),
         )
@@ -926,6 +940,7 @@ class LocalStateStore(context: Context) {
                 "pin_${userId}_",
                 "conv_${userId}_",
                 "group_${userId}_",
+                "private_group_cursor_${userId}_",
                 "request_${userId}_",
             ),
         )

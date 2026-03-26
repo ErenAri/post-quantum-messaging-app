@@ -318,6 +318,62 @@ describe("PqmsgApi methods", () => {
     expect(opts.method).toBe("POST");
   });
 
+  it("private group message methods use the opaque message routes", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        message_id: 41,
+        group_id: "pg-1",
+        epoch: 2,
+        received_at: "2026-03-26T00:00:00Z",
+      })
+    );
+    await api.publishPrivateGroupMessage({
+      group_id: "pg-1",
+      epoch: 2,
+      sender_user_id: "alice",
+      sent_at_unix_ms: 1_775_000_000_000,
+      ciphertext_nonce_base64: "bm9uY2UxMjM0NTY3",
+      ciphertext_base64: "Y2lwaGVydGV4dA==",
+      ciphertext_aad_base64: "YWFk",
+      sender_hybrid_signature_base64: "c2ln",
+      authorizing_membership_handle_sha256: "aa".repeat(32),
+      authorizing_fetch_key_base64: "ZmV0Y2gta2V5",
+    });
+    let [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("http://localhost:8080/v1/private-groups/messages/publish");
+    expect(opts.method).toBe("POST");
+
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        group_id: "pg-1",
+        epoch: 2,
+        messages: [
+          {
+            message_id: 41,
+            group_id: "pg-1",
+            epoch: 2,
+            sender_user_id: "alice",
+            sent_at_unix_ms: 1_775_000_000_000,
+            ciphertext_nonce_base64: "bm9uY2UxMjM0NTY3",
+            ciphertext_base64: "Y2lwaGVydGV4dA==",
+            ciphertext_aad_base64: "YWFk",
+            sender_hybrid_signature_base64: "c2ln",
+            received_at: "2026-03-26T00:00:00Z",
+          },
+        ],
+        fetched_at: "2026-03-26T00:00:01Z",
+      })
+    );
+    await api.fetchPrivateGroupMessages({
+      membership_handle_sha256: "aa".repeat(32),
+      fetch_key_base64: "ZmV0Y2gta2V5",
+      since_message_id: 40,
+    });
+    [url, opts] = mockFetch.mock.calls[1];
+    expect(url).toBe("http://localhost:8080/v1/private-groups/messages/fetch");
+    expect(opts.method).toBe("POST");
+  });
+
   it("getPresence sends GET", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ user_id: "alice", status: "online" }));
     await api.getPresence("alice", fakeHeaders);
@@ -517,6 +573,7 @@ describe("PqmsgApi methods", () => {
         ticket_max_ttl_seconds: 300,
         lookup_protocol: "not_implemented",
         privacy_mode: "service_boundary_only",
+        match_result_format: "contact_invite_token",
         signed_at: "2026-03-26T12:00:00Z",
         expires_at: "2026-03-26T13:00:00Z",
         manifest_issuer_ed25519_pub: "manifest-ed25519-pub",
@@ -563,7 +620,7 @@ describe("PqmsgApi methods", () => {
         matches: [
           {
             hash_sha256: "11".repeat(32),
-            matched_user_id: "bob",
+            contact_invite_token: "opaque-bootstrap-1",
             handle_kind: "phone",
           },
         ],

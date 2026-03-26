@@ -187,6 +187,7 @@ class GroupChatActivity : AppCompatActivity() {
     private suspend fun sendGroupMessage() {
         val setup = store.loadSetup()
         val state = privateGroupState ?: error("Private-group state is unavailable on this device.")
+        val credential = privateGroupCredential ?: error("Private-group credential is unavailable on this device.")
         val text = messageInput.text.toString().trim()
         require(text.isNotBlank()) { "message is empty" }
 
@@ -204,81 +205,40 @@ class GroupChatActivity : AppCompatActivity() {
             userId = context.profile.userId,
             keysJson = context.keysJson,
         )
-        val wrappedPlaintext = encodePrivateGroupMessage(groupId, text)
-        val recipients = state.members.map { it.user_id }.filter { it != context.profile.userId }
-        require(recipients.isNotEmpty()) { "Private group has no other members." }
-        val senderCertificateBase64 = context.api.getSenderCertificate(
+        val credentialMaterial = describePrivateGroupMemberCredential(credential)
+        val encryptedMessage = encryptPrivateGroupTransportMessage(
+            state = state,
+            keysJson = keysJson,
+            senderUserId = context.profile.userId,
+            body = text,
+        )
+        val publishResponse = context.api.publishPrivateGroupMessage(
+            PublishPrivateGroupMessageRequest(
+                group_id = encryptedMessage.group_id,
+                epoch = encryptedMessage.epoch,
+                sender_user_id = encryptedMessage.sender_user_id,
+                sent_at_unix_ms = encryptedMessage.sent_at_unix_ms,
+                ciphertext_nonce_base64 = encryptedMessage.ciphertext.nonce.toByteArray().toBase64(),
+                ciphertext_base64 = encryptedMessage.ciphertext.ciphertext.toByteArray().toBase64(),
+                ciphertext_aad_base64 = encryptedMessage.ciphertext.aad.toByteArray().toBase64(),
+                sender_hybrid_signature_base64 = encryptedMessage.sender_hybrid_signature.toByteArray().toBase64(),
+                authorizing_membership_handle_sha256 = credentialMaterial.membership_handle_sha256,
+                authorizing_fetch_key_base64 = credentialMaterial.fetch_key_base64,
+            ),
+        )
+        store.writePrivateGroupCursor(
             context.profile.userId,
-            buildSenderCertificateAuthHeaders(
-                keysJson = keysJson,
-                userId = context.profile.userId,
-            ).toHeaderMap(),
-        ).certificate_base64
-
-        for (peerUserId in recipients) {
-            val existingSession = MessagingCoordinator.loadCompatibleSession(
-                store = store,
-                userId = context.profile.userId,
-                peerUserId = peerUserId,
-                sessionJson = store.readSession(context.profile.userId, peerUserId),
-                requiredPqRatchetInterval = context.capabilities.pq_ratchet_interval,
-            )
-            var peerTransportIdentityX25519Pub =
-                store.readIdentityPin(context.profile.userId, peerUserId)
-                    ?.identityX25519Pub
-                    ?.takeIf { it.isNotBlank() }
-            val sendResult = if (existingSession.isNullOrBlank()) {
-                val bundle = context.api.getBundle(peerUserId)
-                enforceIdentityPin(context.profile.userId, peerUserId, bundle)
-                peerTransportIdentityX25519Pub = bundle.identity_x25519_pub
-                initiateSessionAndEncrypt(
-                    keysJson = keysJson,
-                    fromUserId = context.profile.userId,
-                    peerUserId = peerUserId,
-                    peerBundle = bundle.toRustBundle(),
-                    plaintextUtf8 = wrappedPlaintext,
-                    suiteOverride = null,
-                )
-            } else {
-                encryptWithSession(
-                    sessionJson = existingSession,
-                    senderUserId = context.profile.userId,
-                    peerUserId = peerUserId,
-                    plaintextUtf8 = wrappedPlaintext,
-                )
-            }
-            store.writeSession(context.profile.userId, peerUserId, sendResult.sessionJson)
-            val resolvedPeerIdentityX25519Pub = peerTransportIdentityX25519Pub
-                ?: resolvePeerTransportIdentityX25519(context, context.profile.userId, peerUserId)
-            MessagingCoordinator.ensurePeerTransparencyVerified(
-                store = store,
-                context = context,
-                peerUserId = peerUserId,
-            )
-            val deliveryToken = resolvePeerSealedDeliveryToken(context, peerUserId)
-            val sealedMessageBytesBase64 = sealMessageWithSenderCert(
-                keysJson = keysJson,
-                recipientUserId = peerUserId,
-                recipientIdentityX25519Pub = resolvedPeerIdentityX25519Pub,
-                payloadMessageBytesBase64 = sendResult.messageBytesBase64,
-                senderCertificateBase64 = senderCertificateBase64,
-            )
-            context.api.sealedRelay(
-                recipientUserId = peerUserId,
-                headers = emptyMap(),
-                request = SealedRelayRequest(
-                    delivery_token = deliveryToken,
-                    message_bytes_base64 = sealedMessageBytesBase64,
-                ),
-            )
-        }
+            groupId,
+            publishResponse.message_id,
+        )
 
         store.appendGroupThreadMessage(
             userId = context.profile.userId,
             groupId = groupId,
             senderUserId = context.profile.userId,
             body = text,
-            transportMessageId = null,
+            sentAtMillis = encryptedMessage.sent_at_unix_ms,
+            transportMessageId = publishResponse.message_id,
         )
         store.upsertGroupConversation(
             userId = context.profile.userId,

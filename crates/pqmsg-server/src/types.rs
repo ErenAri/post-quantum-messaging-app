@@ -336,6 +336,57 @@ pub(crate) struct ConsumePrivateGroupInviteResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct PublishPrivateGroupMessageRequest {
+    pub(crate) group_id: String,
+    pub(crate) epoch: u64,
+    pub(crate) sender_user_id: String,
+    pub(crate) sent_at_unix_ms: u64,
+    pub(crate) ciphertext_nonce_base64: String,
+    pub(crate) ciphertext_base64: String,
+    pub(crate) ciphertext_aad_base64: String,
+    pub(crate) sender_hybrid_signature_base64: String,
+    pub(crate) authorizing_membership_handle_sha256: String,
+    pub(crate) authorizing_fetch_key_base64: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PublishPrivateGroupMessageResponse {
+    pub(crate) message_id: i64,
+    pub(crate) group_id: String,
+    pub(crate) epoch: u64,
+    pub(crate) received_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FetchPrivateGroupMessagesRequest {
+    pub(crate) membership_handle_sha256: String,
+    pub(crate) fetch_key_base64: String,
+    pub(crate) since_message_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PrivateGroupMessageItem {
+    pub(crate) message_id: i64,
+    pub(crate) group_id: String,
+    pub(crate) epoch: u64,
+    pub(crate) sender_user_id: String,
+    pub(crate) sent_at_unix_ms: u64,
+    pub(crate) ciphertext_nonce_base64: String,
+    pub(crate) ciphertext_base64: String,
+    pub(crate) ciphertext_aad_base64: String,
+    pub(crate) sender_hybrid_signature_base64: String,
+    pub(crate) received_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FetchPrivateGroupMessagesResponse {
+    pub(crate) group_id: String,
+    pub(crate) epoch: u64,
+    pub(crate) messages: Vec<PrivateGroupMessageItem>,
+    pub(crate) fetched_at: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct SealedRelayRequest {
     pub(crate) delivery_token: String,
     pub(crate) message_bytes_base64: String,

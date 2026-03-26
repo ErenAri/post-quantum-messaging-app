@@ -673,7 +673,7 @@ Response:
 
 `POST /v1/users/{user_id}/contact-discovery/ticket`
 
-Authenticated request with no body. This does not enable raw-hash discovery on the app server. Instead, when `contact_discovery_mode` is `private_service`, it mints a short-lived opaque ticket for a separate private discovery service.
+Authenticated request with no body. This does not enable raw-hash discovery on the app server. Instead, when `contact_discovery_mode` is `private_service`, it mints a short-lived opaque ticket for a separate private discovery service. The signed ticket now also carries a dedicated opaque bootstrap invite token for discovery matches, so the discovery service does not need to return a stable `user_id` directly.
 
 Response:
 
@@ -701,6 +701,7 @@ Separate discovery-service manifest. Current development-only contract:
   "ticket_max_ttl_seconds": 300,
   "lookup_protocol": "hashed_handle_directory",
   "privacy_mode": "service_boundary_only",
+  "match_result_format": "contact_invite_token",
   "signed_at": "2026-03-26T12:00:00Z",
   "expires_at": "2026-03-26T13:00:00Z",
   "manifest_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
@@ -712,6 +713,7 @@ The current client contract verifies both:
 
 - `ticket_issuer_ed25519_pub` against the app-server capabilities document
 - `manifest_issuer_ed25519_pub` / `manifest_signature_ed25519` against the signed manifest payload
+- `match_result_format = contact_invite_token` before allowing the development-only discovery flow
 
 `POST {contact_discovery_service_origin}/v1/discovery/handles`
 
@@ -756,7 +758,7 @@ Response:
   "matches": [
     {
       "hash_sha256": "hex...",
-      "matched_user_id": "bob",
+      "contact_invite_token": "opaque-bootstrap-token",
       "handle_kind": "phone"
     }
   ],
@@ -764,7 +766,7 @@ Response:
 }
 ```
 
-This current separate-service lookup mode is intentionally limited to `privacy_mode = "service_boundary_only"` and is not a production claim of full private contact discovery.
+This current separate-service lookup mode is intentionally limited to `privacy_mode = "service_boundary_only"` and is not a production claim of full private contact discovery. The service no longer returns stable account IDs directly; clients resolve the returned opaque bootstrap invite through `/v1/contact-invites/{invite_token}` or `/v1/contact-invites/{invite_token}/bundle` only when the user chooses to continue.
 
 `GET /v1/contact-invites/{invite_token}`
 
@@ -1013,7 +1015,7 @@ Response:
 }
 ```
 
-The server stores only opaque encrypted group-state blobs plus hashed membership handles and hashed fetch/publish capabilities. This is a storage/authorization layer, not full private-group messaging support.
+The server stores only opaque encrypted group-state blobs plus hashed membership handles and hashed fetch/publish capabilities. This is the state/authorization layer for the newer private-group flow; dedicated group-message transport is described below.
 
 ### 4.8D Opaque Private Group Invites
 
@@ -1087,7 +1089,84 @@ Rules:
 - The server stores only opaque invite ciphertext plus epoch metadata; it does not interpret the join package. In `pqmsg-core`, that opaque payload is now represented by `PrivateGroupJoinPackage`.
 - For shareable group links, the intended client contract is `invite_token` in the server-visible URL path and `invite_secret` in the client-held link fragment / QR payload. The server sees the token and commitment, but not the decryption secret.
 
-### 4.8E Sealed Sender Transport
+### 4.8E Opaque Private Group Messages
+
+These endpoints carry encrypted/authenticated private-group messages without restoring the legacy clear-roster `/groups` relay surface.
+
+`POST /v1/private-groups/messages/publish`
+
+Request:
+
+```json
+{
+  "group_id": "alpha-private",
+  "epoch": 2,
+  "sender_user_id": "alice",
+  "sent_at_unix_ms": 1775000000000,
+  "ciphertext_nonce_base64": "base64(12 bytes)",
+  "ciphertext_base64": "base64(encrypted_group_message)",
+  "ciphertext_aad_base64": "base64(group_message_aad)",
+  "sender_hybrid_signature_base64": "base64(hybrid_sender_signature)",
+  "authorizing_membership_handle_sha256": "hex(sha256(member_handle))",
+  "authorizing_fetch_key_base64": "base64(32 bytes)"
+}
+```
+
+Response:
+
+```json
+{
+  "message_id": 41,
+  "group_id": "alpha-private",
+  "epoch": 2,
+  "received_at": "2026-03-26T12:00:00Z"
+}
+```
+
+`POST /v1/private-groups/messages/fetch`
+
+Request:
+
+```json
+{
+  "membership_handle_sha256": "hex(sha256(member_handle))",
+  "fetch_key_base64": "base64(32 bytes)",
+  "since_message_id": 40
+}
+```
+
+Response:
+
+```json
+{
+  "group_id": "alpha-private",
+  "epoch": 2,
+  "messages": [
+    {
+      "message_id": 41,
+      "group_id": "alpha-private",
+      "epoch": 2,
+      "sender_user_id": "alice",
+      "sent_at_unix_ms": 1775000000000,
+      "ciphertext_nonce_base64": "base64(12 bytes)",
+      "ciphertext_base64": "base64(encrypted_group_message)",
+      "ciphertext_aad_base64": "base64(group_message_aad)",
+      "sender_hybrid_signature_base64": "base64(hybrid_sender_signature)",
+      "received_at": "2026-03-26T12:00:00Z"
+    }
+  ],
+  "fetched_at": "2026-03-26T12:00:01Z"
+}
+```
+
+Rules:
+
+- Publish is authorized by the current epoch's active membership handle plus fetch capability.
+- Publish rejects stale epochs; clients must refresh opaque state before sending after a membership/epoch change.
+- Fetch is authorized by the current epoch's active membership handle plus fetch capability.
+- Message ciphertext remains opaque to the server, but the current interim transport still stores `sender_user_id` and per-group message rows. This is better than legacy clear-roster fanout, but not yet the final lowest-metadata design.
+
+### 4.8F Sealed Sender Transport
 
 This is the supported direct-message transport on the hardened profile.
 

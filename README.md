@@ -17,7 +17,7 @@ As of March 9, 2026, the supported beta path is **Android private beta for messa
 - Calling remains out of scope for the beta on every client.
 - Manual contact bootstrap on the hardened Android/web path is `@username` or opaque invite only.
 - Private discovery is still not fully implemented.
-- The current separate discovery service now ships a signed manifest contract, but it remains development-only until it stops advertising `service_boundary_only` / `unattested_development`.
+- The current separate discovery service now ships a signed manifest contract and returns opaque bootstrap invite tokens instead of stable account IDs, but it remains development-only until it stops advertising `service_boundary_only` / `unattested_development`.
 - Legacy clear-roster groups remain disabled; the newer opaque private-group path is advertised separately through `private_group_messaging_supported`.
 
 ## Research Positioning

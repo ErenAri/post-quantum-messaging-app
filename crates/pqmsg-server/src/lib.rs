@@ -2099,6 +2099,14 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/private-groups/invites/:invite_token",
             get(resolve_private_group_invite).post(consume_private_group_invite),
         )
+        .route(
+            "/v1/private-groups/messages/publish",
+            post(publish_private_group_message),
+        )
+        .route(
+            "/v1/private-groups/messages/fetch",
+            post(fetch_private_group_messages),
+        )
         .route("/v1/users/:user_id/groups", get(list_user_groups))
         .route("/v1/groups", post(create_group))
         .route("/v1/groups/:group_id/members", get(list_group_members))

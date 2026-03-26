@@ -77,6 +77,7 @@ import {
   readProfileDisplayName,
   readIdentityPin,
   readPrivateGroup,
+  readPrivateGroupCursor,
   loadKeys,
   loadSetup,
   markConversationRead,
@@ -97,6 +98,7 @@ import {
   writeCursor,
   writeSealedCursor,
   writeIdentityPin,
+  writePrivateGroupCursor,
   writeTransparencyCheckpoint,
   type IdentityPin,
   type ConversationKind,
@@ -150,7 +152,9 @@ import {
   privateGroupDescribeMemberCredential,
   privateGroupEncryptSnapshot,
   privateGroupEncryptJoinPackageForShareLink,
+  privateGroupEncryptMessage,
   privateGroupExportJoinPackageForMember,
+  privateGroupOpenMessage,
   privateGroupOpenShareLinkInvite,
   privateGroupPrepareAddMemberTransition,
   privateGroupPrepareBootstrapMaterial,
@@ -158,6 +162,7 @@ import {
   privateGroupRestoreJoinPackage,
   type PrivateGroupBootstrapMaterial,
   type PrivateGroupCredentialMaterial,
+  type PrivateGroupEncryptedMessage,
   type PrivateGroupEpochTransition,
   type PrivateGroupLinkInviteEnvelope,
   type PrivateGroupMember,
@@ -566,33 +571,173 @@ async function sendPrivateGroupMessage(groupId: string, body: string): Promise<v
   if (!state) {
     throw new Error("Private-group state is not available on this device.");
   }
-  const recipients = state.members
-    .map((member) => member.user_id)
-    .filter((memberUserId) => memberUserId !== setup.userId);
-  if (recipients.length === 0) {
-    throw new Error("Private group has no other members.");
+  const credential = getPrivateGroupCredential(groupId);
+  if (!credential) {
+    throw new Error("Private-group credential is not available on this device.");
   }
   const k = await ensureKeys();
+  await ensureWebPqRuntime();
   const api = new PqmsgApi(setup.serverUrl);
-  const wrappedPlaintext = encodePrivateGroupMessage(groupId, body);
-  for (const recipientUserId of recipients) {
-    const sealedPayload = await encryptDirectPayload(k, recipientUserId, wrappedPlaintext);
-    await api.sealedRelay(recipientUserId, {
-      device_id: k.deviceId,
-      message_bytes_base64: sealedPayload,
-    });
-  }
+  const credentialMaterial = privateGroupDescribeMemberCredential(credential);
+  const encrypted = privateGroupEncryptMessage(
+    state,
+    setup.userId,
+    k.identitySigSecret,
+    k.identityPqSigSecret,
+    body,
+    Date.now()
+  );
+  const response = await api.publishPrivateGroupMessage({
+    group_id: encrypted.group_id,
+    epoch: encrypted.epoch,
+    sender_user_id: encrypted.sender_user_id,
+    sent_at_unix_ms: encrypted.sent_at_unix_ms,
+    ciphertext_nonce_base64: bytesToBase64(Uint8Array.from(encrypted.ciphertext.nonce)),
+    ciphertext_base64: bytesToBase64(Uint8Array.from(encrypted.ciphertext.ciphertext)),
+    ciphertext_aad_base64: bytesToBase64(Uint8Array.from(encrypted.ciphertext.aad)),
+    sender_hybrid_signature_base64: bytesToBase64(Uint8Array.from(encrypted.sender_hybrid_signature)),
+    authorizing_membership_handle_sha256: credentialMaterial.membership_handle_sha256,
+    authorizing_fetch_key_base64: credentialMaterial.fetch_key_base64,
+  });
+  writePrivateGroupCursor(setup.userId, groupId, response.message_id);
   const ownerUserId = getPrivateGroupOwnerUserId(state);
   upsertGroupConversation(setup.userId, groupId, ownerUserId, `You: ${body}`, false);
   await saveMessage({
-    id: `local-group-${groupId}-${Date.now()}`,
+    id: `srv-group-${response.message_id}`,
     conversationId: `group:${groupId}`,
     sender: setup.userId,
     recipient: groupId,
     text: `You: ${body}`,
-    timestamp: Date.now(),
+    timestamp: encrypted.sent_at_unix_ms,
     status: "sent",
+    serverMessageId: response.message_id,
   });
+}
+
+async function ensurePrivateGroupSenderPin(
+  senderUserId: string,
+  api: PqmsgApi,
+  localKeys?: GeneratedKeys
+): Promise<IdentityPin> {
+  if (senderUserId === setup.userId) {
+    const keysForSelf = localKeys ?? await ensureKeys();
+    return {
+      fingerprintSha256: identityFingerprint(
+        keysForSelf.identityX25519Pub,
+        keysForSelf.identityPqSigPub
+      ),
+      identityKeyVersion: 1,
+      identityX25519Pub: keysForSelf.identityX25519Pub,
+      identitySigPub: keysForSelf.identitySigPub,
+      identityPqSigPub: keysForSelf.identityPqSigPub,
+      observedAt: new Date().toISOString(),
+    };
+  }
+  const pin = await ensurePeerIdentityPinForTrust(senderUserId, api);
+  await ensurePeerTransparencyVerified(senderUserId, api, pin);
+  return pin;
+}
+
+function privateGroupTransportMessageFromServer(
+  item: import("./server").PrivateGroupMessageItem
+): PrivateGroupEncryptedMessage {
+  return {
+    group_id: item.group_id,
+    epoch: item.epoch,
+    sender_user_id: item.sender_user_id,
+    sent_at_unix_ms: item.sent_at_unix_ms,
+    ciphertext: {
+      nonce: Array.from(base64ToBytes(item.ciphertext_nonce_base64)),
+      ciphertext: Array.from(base64ToBytes(item.ciphertext_base64)),
+      aad: Array.from(base64ToBytes(item.ciphertext_aad_base64)),
+    },
+    sender_hybrid_signature: Array.from(base64ToBytes(item.sender_hybrid_signature_base64)),
+  };
+}
+
+async function syncPrivateGroupMessagesForGroup(groupId: string): Promise<boolean> {
+  const local = getPrivateGroupLocalState(groupId);
+  const state = local ? parsePrivateGroupStateJson(local.stateJson) : null;
+  const credential = local ? parsePrivateGroupMemberCredentialJson(local.memberCredentialJson) : null;
+  if (!state || !credential) {
+    return false;
+  }
+  const api = new PqmsgApi(setup.serverUrl);
+  const credentialMaterial = privateGroupDescribeMemberCredential(credential);
+  let cursor = readPrivateGroupCursor(setup.userId, groupId);
+  const response = await api.fetchPrivateGroupMessages({
+    membership_handle_sha256: credentialMaterial.membership_handle_sha256,
+    fetch_key_base64: credentialMaterial.fetch_key_base64,
+    since_message_id: cursor || undefined,
+  });
+  if (!response.messages.length) {
+    return false;
+  }
+
+  const localKeys = await ensureKeys();
+  let changed = false;
+  for (const item of response.messages) {
+    if (item.message_id <= cursor) {
+      continue;
+    }
+    const senderPin = await ensurePrivateGroupSenderPin(item.sender_user_id, api, localKeys);
+    const opened = privateGroupOpenMessage(
+      state,
+      privateGroupTransportMessageFromServer(item),
+      senderPin.identitySigPub,
+      senderPin.identityPqSigPub
+    );
+    const senderLabel = resolvePeerIdentity(opened.sender_user_id).primaryLabel;
+    await saveMessage({
+      id: `srv-group-${item.message_id}`,
+      conversationId: `group:${groupId}`,
+      sender: opened.sender_user_id,
+      recipient: groupId,
+      text: opened.sender_user_id === setup.userId ? `You: ${opened.body}` : `${senderLabel}: ${opened.body}`,
+      timestamp: item.sent_at_unix_ms,
+      status: "delivered",
+      serverMessageId: item.message_id,
+    });
+    noteIncomingGroupConversation(
+      groupId,
+      opened.sender_user_id,
+      opened.body,
+      activeGroupId !== groupId && opened.sender_user_id !== setup.userId
+    );
+    void loadProfileNameBackground(opened.sender_user_id);
+    cursor = Math.max(cursor, item.message_id);
+    changed = true;
+  }
+  if (cursor > 0) {
+    writePrivateGroupCursor(setup.userId, groupId, cursor);
+  }
+  if (activeGroupId === groupId) {
+    markGroupConversationRead(setup.userId, groupId);
+  }
+  return changed;
+}
+
+async function syncPrivateGroupMessagesBackground(): Promise<void> {
+  if (!setup.userId) {
+    return;
+  }
+  const capabilities = await loadServerCapabilitiesCached();
+  if (!capabilities?.private_group_messaging_supported) {
+    return;
+  }
+  let changed = false;
+  for (const group of loadPrivateGroups(setup.userId)) {
+    try {
+      if (await syncPrivateGroupMessagesForGroup(group.groupId)) {
+        changed = true;
+      }
+    } catch {
+      // best effort
+    }
+  }
+  if (changed) {
+    refreshConversationsIfVisible();
+  }
 }
 
 async function bootstrapApp(): Promise<void> {
@@ -813,7 +958,7 @@ async function encryptDirectPayload(
 }
 
 type DecryptedIncomingPayload = {
-  kind: "dm" | "group";
+  kind: "dm" | "group" | "ignored";
   senderUserId: string;
   recipient: string;
   plaintext: string;
@@ -867,8 +1012,16 @@ async function decryptIncomingPayload(
   }
   await syncUpdatedKeys(result.updatedKeys);
   await persistDirectSession(resolvedSenderUserId, result.sessionJson);
-  const privateGroupMessage = decodePrivateGroupMessage(result.plaintextUtf8, resolvedSenderUserId);
   if (result.plaintextUtf8.startsWith(PRIVATE_GROUP_MESSAGE_PREFIX)) {
+    if (capabilities.private_group_messaging_supported) {
+      return {
+        kind: "ignored",
+        senderUserId: resolvedSenderUserId,
+        recipient: activeKeys.userId,
+        plaintext: "",
+      };
+    }
+    const privateGroupMessage = decodePrivateGroupMessage(result.plaintextUtf8, resolvedSenderUserId);
     if (!privateGroupMessage) {
       throw new Error("Private-group message could not be matched to local opaque state.");
     }
@@ -1376,6 +1529,7 @@ async function bootstrapIdentityData(): Promise<void> {
   await Promise.allSettled([
     loadContactsBackground(),
     syncGroupsBackground(),
+    syncPrivateGroupMessagesBackground(),
     loadProfileNameBackground(setup.userId),
   ]);
 }
@@ -1432,6 +1586,7 @@ async function syncGroupsBackground(): Promise<void> {
   } catch {
     // Best-effort - use cached groups
   }
+  await syncPrivateGroupMessagesBackground();
 }
 
 async function ensureDirectChatPeerExists(peerId: string): Promise<void> {
@@ -3327,6 +3482,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
   q("#gc-info").addEventListener("click", () => navigateTo({ screen: "group-info", groupId }));
 
   // Load group message history
+  await syncPrivateGroupMessagesForGroup(groupId).catch(() => {});
   const history = await getMessages(`group:${groupId}`);
   renderMessageList(msgList, history);
   scrollToBottom(container);
@@ -4006,7 +4162,8 @@ async function renderSettings(): Promise<void> {
       );
       if (
         contactDiscoveryManifest.lookup_protocol === "hashed_handle_directory" &&
-        contactDiscoveryManifest.privacy_mode === "service_boundary_only"
+        contactDiscoveryManifest.privacy_mode === "service_boundary_only" &&
+        contactDiscoveryManifest.match_result_format === "contact_invite_token"
       ) {
         contactDiscoveryManifestStatus = `Verified (${contactDiscoveryManifest.attestation_mode})`;
       } else {
@@ -4794,6 +4951,13 @@ async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
       wsMsg.sender_user_id,
       wsMsg.sender_identity_x25519_pub
     );
+    if (decrypted.kind === "ignored") {
+      const cursor = readSealedCursor(k.userId, k.deviceId);
+      if (wsMsg.message_id > cursor) {
+        writeSealedCursor(k.userId, wsMsg.message_id, k.deviceId);
+      }
+      return;
+    }
     const plaintext = decrypted.plaintext;
     const senderId = decrypted.senderUserId;
     const isDirectMessage = decrypted.kind === "dm";
@@ -5524,6 +5688,10 @@ async function pollSealedInbox(): Promise<void> {
           undefined,
           item.sender_identity_x25519_pub
         );
+        if (decrypted.kind === "ignored") {
+          nextCursor = Math.max(nextCursor, item.message_id);
+          continue;
+        }
         const senderId = decrypted.senderUserId;
         const plaintext = decrypted.plaintext;
         const isDirectMessage = decrypted.kind === "dm";
@@ -5654,7 +5822,7 @@ async function renderDiscovery(): Promise<void> {
           <h3>Upload Your Handles</h3>
           <p class="text-secondary settings-desc">${
             contactDiscoveryMode === "private_service"
-              ? "Upload SHA-256 handle hashes to the separate discovery service using a short-lived ticket from the app server. This is a service-boundary-only development privacy mode, not full private contact discovery."
+              ? "Upload SHA-256 handle hashes to the separate discovery service using a short-lived ticket from the app server. This is a service-boundary-only development privacy mode, not full private contact discovery. Matches return opaque invite bootstraps, not stable account IDs."
               : "Share hashed phone/email so contacts can find you."
           }</p>
           <label class="field">
@@ -5710,6 +5878,7 @@ async function renderDiscovery(): Promise<void> {
     if (
       manifest.lookup_protocol !== "hashed_handle_directory"
       || manifest.privacy_mode !== "service_boundary_only"
+      || manifest.match_result_format !== "contact_invite_token"
     ) {
       throw new Error("Unsupported contact discovery manifest");
     }
@@ -5758,14 +5927,14 @@ async function renderDiscovery(): Promise<void> {
       }
       resultsEl.innerHTML = `
         <table class="idlog-table">
-          <thead><tr><th>Hash</th><th>User</th><th>Type</th><th></th></tr></thead>
+          <thead><tr><th>Hash</th><th>Bootstrap</th><th>Type</th><th></th></tr></thead>
           <tbody>
             ${res.matches.map((m: DiscoveryMatchItem) => `
               <tr>
                 <td class="mono fingerprint">${escHtml(m.hash_sha256)}</td>
-                <td class="mono">${escHtml(m.matched_user_id)}</td>
+                <td class="mono">invite:${escHtml(m.contact_invite_token.slice(-8))}</td>
                 <td><span class="badge-info">${escHtml(m.handle_kind)}</span></td>
-                <td><button class="btn-sm" data-add-discovered="${escHtml(m.matched_user_id)}">Add</button></td>
+                <td><button class="btn-sm" data-add-discovered="${escHtml(m.contact_invite_token)}">Add</button></td>
               </tr>
             `).join("")}
           </tbody>
@@ -5773,11 +5942,17 @@ async function renderDiscovery(): Promise<void> {
       `;
       for (const btn of document.querySelectorAll("[data-add-discovered]")) {
         btn.addEventListener("click", async () => {
-          const userId = (btn as HTMLElement).dataset.addDiscovered!;
-          await addContactSilent(userId);
-          notify(`Added ${userId} as contact`, "success");
-          (btn as HTMLButtonElement).disabled = true;
-          (btn as HTMLButtonElement).textContent = "Added";
+          const inviteToken = (btn as HTMLElement).dataset.addDiscovered!;
+          try {
+            const bundle = await api.getContactInviteBundle(inviteToken);
+            const userId = bundle.user_id.trim();
+            await addContactSilent(userId);
+            notify(`Added ${userId} as contact`, "success");
+            (btn as HTMLButtonElement).disabled = true;
+            (btn as HTMLButtonElement).textContent = "Added";
+          } catch (error) {
+            notify(`Could not resolve match bootstrap: ${errorMsg(error)}`, "error");
+          }
         });
       }
     } catch (e) {

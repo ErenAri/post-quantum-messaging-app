@@ -91,6 +91,7 @@ const CONVERSATION_META_KEY = "pqmsg.web.conversationmeta.v1";
 const PROFILE_CACHE_KEY = "pqmsg.web.profilecache.v1";
 const PINS_KEY = "pqmsg.web.pins.v1";
 const CURSORS_KEY = "pqmsg.web.cursors.v1";
+const PRIVATE_GROUP_CURSORS_KEY = "pqmsg.web.privategroupcursors.v1";
 const TRANSPARENCY_KEY = "pqmsg.web.transparency.v1";
 const METADATA_KEYS = [
   SETUP_KEY,
@@ -101,6 +102,7 @@ const METADATA_KEYS = [
   PROFILE_CACHE_KEY,
   PINS_KEY,
   CURSORS_KEY,
+  PRIVATE_GROUP_CURSORS_KEY,
   TRANSPARENCY_KEY,
 ] as const;
 const metadataCache = new Map<string, string | null>();
@@ -230,6 +232,7 @@ export async function clearAllDirectMessageSessions(userId: string): Promise<voi
 type ConversationRow = ConversationSummary & { userId: string };
 type ConversationMetaRow = ConversationMeta & { userId: string };
 type ProfileDisplayNameRow = ProfileDisplayName & { userId: string };
+type PrivateGroupCursorRow = { userId: string; groupId: string; lastMessageId: number };
 
 export function loadConversations(userId: string): ConversationSummary[] {
   const all = parseRecord<ConversationRow[]>(CONVERSATIONS_KEY, []);
@@ -604,6 +607,42 @@ export function removePrivateGroup(userId: string, groupId: string): void {
     (item) => !(item.userId === userId && item.groupId === groupId)
   );
   writeRecord(PRIVATE_GROUPS_KEY, all);
+  writeRecord(
+    PRIVATE_GROUP_CURSORS_KEY,
+    parseRecord<PrivateGroupCursorRow[]>(PRIVATE_GROUP_CURSORS_KEY, []).filter(
+      (item) => !(item.userId === userId && item.groupId === groupId)
+    )
+  );
+}
+
+export function readPrivateGroupCursor(userId: string, groupId: string): number {
+  if (!userId.trim() || !groupId.trim()) {
+    return 0;
+  }
+  return (
+    parseRecord<PrivateGroupCursorRow[]>(PRIVATE_GROUP_CURSORS_KEY, []).find(
+      (item) => item.userId === userId && item.groupId === groupId
+    )?.lastMessageId ?? 0
+  );
+}
+
+export function writePrivateGroupCursor(userId: string, groupId: string, lastMessageId: number): void {
+  if (!userId.trim() || !groupId.trim()) {
+    return;
+  }
+  const all = parseRecord<PrivateGroupCursorRow[]>(PRIVATE_GROUP_CURSORS_KEY, []);
+  const idx = all.findIndex((item) => item.userId === userId && item.groupId === groupId);
+  const next = {
+    userId,
+    groupId,
+    lastMessageId,
+  } satisfies PrivateGroupCursorRow;
+  if (idx >= 0) {
+    all[idx] = next;
+  } else {
+    all.push(next);
+  }
+  writeRecord(PRIVATE_GROUP_CURSORS_KEY, all);
 }
 
 export async function wipeLocalState(userId: string): Promise<void> {
@@ -629,6 +668,10 @@ export async function wipeLocalState(userId: string): Promise<void> {
     (item) => item.userId !== normalizedUser
   );
   writeRecord(PRIVATE_GROUPS_KEY, privateGroups);
+  const privateGroupCursors = parseRecord<PrivateGroupCursorRow[]>(PRIVATE_GROUP_CURSORS_KEY, []).filter(
+    (item) => item.userId !== normalizedUser
+  );
+  writeRecord(PRIVATE_GROUP_CURSORS_KEY, privateGroupCursors);
 
   const conversationMeta = parseRecord<ConversationMetaRow[]>(CONVERSATION_META_KEY, []).filter(
     (item) => item.userId !== normalizedUser

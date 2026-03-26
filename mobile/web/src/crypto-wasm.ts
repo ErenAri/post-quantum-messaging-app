@@ -136,6 +136,23 @@ export interface PrivateGroupLinkInviteMaterial {
   envelope: PrivateGroupLinkInviteEnvelope;
 }
 
+export interface PrivateGroupEncryptedMessage {
+  group_id: string;
+  epoch: number;
+  sender_user_id: string;
+  sent_at_unix_ms: number;
+  ciphertext: PrivateGroupCiphertextEnvelope;
+  sender_hybrid_signature: number[];
+}
+
+export interface PrivateGroupDecryptedMessage {
+  group_id: string;
+  epoch: number;
+  sender_user_id: string;
+  sent_at_unix_ms: number;
+  body: string;
+}
+
 export interface PrivateGroupMemberCredential {
   group_id: string;
   epoch: number;
@@ -668,6 +685,48 @@ export function privateGroupPrepareRemoveMemberTransition(
       JSON.stringify(state),
       memberUserId,
       updatedAtUnixSeconds
+    )
+  );
+}
+
+export function privateGroupEncryptMessage(
+  state: PrivateGroupState,
+  senderUserId: string,
+  senderIdentitySigSecretBase64: string,
+  senderIdentityPqSigSecretBase64: string,
+  body: string,
+  sentAtUnixMs: number
+): PrivateGroupEncryptedMessage {
+  if (!privateGroupBindingsAvailable()) {
+    throw new Error("WASM private group bindings are not available");
+  }
+  return parseJsonResult<PrivateGroupEncryptedMessage>(
+    wasmModule!.wasm_private_group_encrypt_message(
+      JSON.stringify(state),
+      senderUserId,
+      senderIdentitySigSecretBase64,
+      senderIdentityPqSigSecretBase64,
+      body,
+      sentAtUnixMs
+    )
+  );
+}
+
+export function privateGroupOpenMessage(
+  state: PrivateGroupState,
+  message: PrivateGroupEncryptedMessage,
+  senderIdentitySigPubBase64: string,
+  senderIdentityPqSigPubBase64: string
+): PrivateGroupDecryptedMessage {
+  if (!privateGroupBindingsAvailable()) {
+    throw new Error("WASM private group bindings are not available");
+  }
+  return parseJsonResult<PrivateGroupDecryptedMessage>(
+    wasmModule!.wasm_private_group_open_message(
+      JSON.stringify(state),
+      JSON.stringify(message),
+      senderIdentitySigPubBase64,
+      senderIdentityPqSigPubBase64
     )
   );
 }

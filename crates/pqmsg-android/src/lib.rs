@@ -12,10 +12,10 @@ use pqmsg_core::alg::{
 };
 use pqmsg_core::dh::{DhKeyPair, DhPublicKey};
 use pqmsg_core::groups::{
-    PrivateGroupAttributes, PrivateGroupEncryptedSnapshot, PrivateGroupEpochTransition,
-    PrivateGroupInvitePackage, PrivateGroupJoinPackage, PrivateGroupLinkInviteEnvelope,
-    PrivateGroupLinkInviteMaterial, PrivateGroupMember, PrivateGroupMemberCredential,
-    PrivateGroupRole, PrivateGroupState,
+    PrivateGroupAttributes, PrivateGroupDecryptedMessage, PrivateGroupEncryptedMessage,
+    PrivateGroupEncryptedSnapshot, PrivateGroupEpochTransition, PrivateGroupInvitePackage,
+    PrivateGroupJoinPackage, PrivateGroupLinkInviteEnvelope, PrivateGroupLinkInviteMaterial,
+    PrivateGroupMember, PrivateGroupMemberCredential, PrivateGroupRole, PrivateGroupState,
 };
 use pqmsg_core::handshake::{
     alice_initiate, bob_receive, pq_signed_prekey_signature_message,
@@ -327,6 +327,7 @@ struct ContactDiscoveryManifestPayloadRecord {
     ticket_max_ttl_seconds: i64,
     lookup_protocol: String,
     privacy_mode: String,
+    match_result_format: String,
     signed_at: String,
     expires_at: String,
 }
@@ -1577,6 +1578,65 @@ pub fn private_group_prepare_remove_member_transition(
     let transition: PrivateGroupEpochTransition =
         state.prepare_remove_member_transition(&member_user_id, updated_at_unix_seconds)?;
     serde_json::to_string_pretty(&transition).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn private_group_encrypt_message(
+    state_json: String,
+    keys_json: String,
+    sender_user_id: String,
+    body: String,
+    sent_at_unix_ms: u64,
+) -> Result<String, PqmsgAndroidError> {
+    let state: PrivateGroupState = serde_json::from_str(&state_json)?;
+    let keys = read_keys_file(&keys_json)?;
+    if keys.user_id != sender_user_id {
+        return Err(invalid_input(format!(
+            "sender_user_id '{}' does not match keys user '{}'",
+            sender_user_id, keys.user_id
+        )));
+    }
+    let sender_identity_sig_secret =
+        decode_b64("identity_sig_secret_b64", &keys.identity_sig_secret_b64)?;
+    let sender_identity_pq_sig_secret = decode_b64(
+        "identity_pq_sig_secret_b64",
+        &keys.identity_pq_sig_secret_b64,
+    )?;
+    let pq_provider = build_pq_signature_provider()?;
+    let message: PrivateGroupEncryptedMessage = state.encrypt_message(
+        &sender_user_id,
+        &sender_identity_sig_secret,
+        &sender_identity_pq_sig_secret,
+        &body,
+        sent_at_unix_ms,
+        &pq_provider,
+    )?;
+    serde_json::to_string_pretty(&message).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn private_group_open_message(
+    state_json: String,
+    message_json: String,
+    sender_identity_sig_pub_b64: String,
+    sender_identity_pq_sig_pub_b64: String,
+) -> Result<String, PqmsgAndroidError> {
+    let state: PrivateGroupState = serde_json::from_str(&state_json)?;
+    let message: PrivateGroupEncryptedMessage = serde_json::from_str(&message_json)?;
+    let sender_identity_sig_pub =
+        decode_b64("sender_identity_sig_pub_b64", &sender_identity_sig_pub_b64)?;
+    let sender_identity_pq_sig_pub = decode_b64(
+        "sender_identity_pq_sig_pub_b64",
+        &sender_identity_pq_sig_pub_b64,
+    )?;
+    let pq_provider = build_pq_signature_provider()?;
+    let opened: PrivateGroupDecryptedMessage = state.decrypt_message(
+        &message,
+        &sender_identity_sig_pub,
+        &sender_identity_pq_sig_pub,
+        &pq_provider,
+    )?;
+    serde_json::to_string_pretty(&opened).map_err(Into::into)
 }
 
 #[uniffi::export]
@@ -3450,6 +3510,7 @@ mod tests {
             ticket_max_ttl_seconds: 300,
             lookup_protocol: "hashed_handle_directory".to_string(),
             privacy_mode: "service_boundary_only".to_string(),
+            match_result_format: "contact_invite_token".to_string(),
             signed_at: (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
             expires_at: (Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
         };
@@ -3486,6 +3547,7 @@ mod tests {
                 ticket_max_ttl_seconds: 300,
                 lookup_protocol: "hashed_handle_directory".to_string(),
                 privacy_mode: "service_boundary_only".to_string(),
+                match_result_format: "contact_invite_token".to_string(),
                 signed_at: (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
                 expires_at: (Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
             },

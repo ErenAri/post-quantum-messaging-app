@@ -165,6 +165,7 @@ describe("verifyContactDiscoveryManifest", () => {
       ticket_max_ttl_seconds: 300,
       lookup_protocol: "hashed_handle_directory",
       privacy_mode: "service_boundary_only",
+      match_result_format: "contact_invite_token",
       signed_at: new Date(Date.now() - 60_000).toISOString(),
       expires_at: new Date(Date.now() + 60_000).toISOString(),
     };

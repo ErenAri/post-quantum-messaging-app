@@ -255,11 +255,21 @@ object MessagingCoordinator {
         if (!fromServer.isNullOrEmpty()) {
             return fromServer
         }
+        return computeIdentityFingerprint(
+            identityX25519Pub = bundle.identity_x25519_pub,
+            identityPqSigPub = bundle.identity_pq_sig_pub.orEmpty(),
+        )
+    }
+
+    internal fun computeIdentityFingerprint(
+        identityX25519Pub: String,
+        identityPqSigPub: String,
+    ): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        digest.update(Base64.getDecoder().decode(bundle.identity_x25519_pub))
-        bundle.identity_pq_sig_pub
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
+        digest.update(Base64.getDecoder().decode(identityX25519Pub))
+        identityPqSigPub
+            .trim()
+            .takeIf { it.isNotBlank() }
             ?.let { digest.update(Base64.getDecoder().decode(it)) }
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
@@ -379,8 +389,13 @@ object MessagingCoordinator {
         )
 
         if (sealedInbox.messages.isEmpty()) {
+            val privateGroupDeliveredMessages = if (context.capabilities.private_group_messaging_supported) {
+                syncPrivateGroupMessages(store, context, activeGroupId)
+            } else {
+                0
+            }
             return SyncOutcome(
-                deliveredMessages = 0,
+                deliveredMessages = privateGroupDeliveredMessages,
                 pendingRequests = 0,
                 discoveredGroups = discoveredGroups,
             )
@@ -440,13 +455,29 @@ object MessagingCoordinator {
                 existingSessionJson = existingSession,
             )
             store.writeSession(context.profile.userId, peer, result.sessionJson)
+            val isWrappedPrivateGroup = result.plaintextUtf8.startsWith(PRIVATE_GROUP_MESSAGE_PREFIX)
+            if (isWrappedPrivateGroup && context.capabilities.private_group_messaging_supported) {
+                seenCipherHashes.add(cipherHash)
+                while (seenCipherHashes.size > 512) {
+                    val first = seenCipherHashes.firstOrNull() ?: break
+                    seenCipherHashes.remove(first)
+                }
+                store.writePeerSeenCipherHashes(context.profile.userId, peer, seenCipherHashes)
+                store.writePeerLastMessageId(
+                    context.profile.userId,
+                    peer,
+                    maxOf(peerLastMessageId, item.message_id),
+                )
+                sealedCursor = maxOf(sealedCursor, item.message_id)
+                workingKeysJson = store.readKeys(context.profile.userId) ?: workingKeysJson
+                continue
+            }
             val privateGroupMessage = decodePrivateGroupMessage(
                 plaintext = result.plaintextUtf8,
                 senderUserId = peer,
                 store = store,
                 localUserId = context.profile.userId,
             )
-            val isWrappedPrivateGroup = result.plaintextUtf8.startsWith(PRIVATE_GROUP_MESSAGE_PREFIX)
             if (privateGroupMessage != null) {
                 val localGroupState = store.readPrivateGroupState(
                     context.profile.userId,
@@ -523,6 +554,9 @@ object MessagingCoordinator {
             workingKeysJson = store.readKeys(context.profile.userId) ?: workingKeysJson
         }
         store.writeSealedCursor(context.profile.userId, sealedCursor)
+        if (context.capabilities.private_group_messaging_supported) {
+            deliveredMessages += syncPrivateGroupMessages(store, context, activeGroupId)
+        }
         return SyncOutcome(
             deliveredMessages = deliveredMessages,
             pendingRequests = pendingRequests,
@@ -564,6 +598,116 @@ object MessagingCoordinator {
             discoveredGroups += 1
         }
         return discoveredGroups
+    }
+
+    private suspend fun ensurePrivateGroupSenderIdentityPin(
+        store: LocalStateStore,
+        context: ReadyMessagingContext,
+        senderUserId: String,
+        keysJson: String,
+    ): IdentityPin {
+        if (senderUserId == context.profile.userId) {
+            val keys = JSONObject(keysJson)
+            val identityX25519Pub = keys.optString("identity_x25519_pub_b64")
+            val identitySigPub = keys.optString("identity_sig_pub_b64")
+            val identityPqSigPub = keys.optString("identity_pq_sig_pub_b64")
+            check(identityX25519Pub.isNotBlank() && identitySigPub.isNotBlank() && identityPqSigPub.isNotBlank()) {
+                "local identity keys are incomplete for private-group sender verification"
+            }
+            return IdentityPin(
+                fingerprintSha256 = computeIdentityFingerprint(
+                    identityX25519Pub = identityX25519Pub,
+                    identityPqSigPub = identityPqSigPub,
+                ),
+                identityKeyVersion = 1,
+                identityX25519Pub = identityX25519Pub,
+                identitySigPub = identitySigPub,
+                identityPqSigPub = identityPqSigPub,
+                observedAt = "",
+            )
+        }
+        ensurePeerTransparencyVerified(
+            store = store,
+            context = context,
+            peerUserId = senderUserId,
+        )
+        return store.readIdentityPin(context.profile.userId, senderUserId)
+            ?: error("identity pin missing for private-group sender $senderUserId")
+    }
+
+    private suspend fun syncPrivateGroupMessages(
+        store: LocalStateStore,
+        context: ReadyMessagingContext,
+        activeGroupId: String,
+    ): Int {
+        var delivered = 0
+        val keysJson = store.readKeys(context.profile.userId) ?: context.keysJson
+        for (group in store.listPrivateGroups(context.profile.userId)) {
+            val state = parsePrivateGroupStateJson(group.stateJson)
+            val credential = parsePrivateGroupCredentialJson(group.memberCredentialJson)
+            val credentialMaterial = describePrivateGroupMemberCredential(credential)
+            var cursor = store.readPrivateGroupCursor(context.profile.userId, group.groupId)
+            val response = context.api.fetchPrivateGroupMessages(
+                FetchPrivateGroupMessagesRequest(
+                    membership_handle_sha256 = credentialMaterial.membership_handle_sha256,
+                    fetch_key_base64 = credentialMaterial.fetch_key_base64,
+                    since_message_id = cursor.takeIf { it > 0 },
+                ),
+            )
+            for (item in response.messages) {
+                if (item.message_id <= cursor) {
+                    continue
+                }
+                val senderPin = ensurePrivateGroupSenderIdentityPin(
+                    store = store,
+                    context = context,
+                    senderUserId = item.sender_user_id,
+                    keysJson = keysJson,
+                )
+                val opened = openPrivateGroupTransportMessage(
+                    state = state,
+                    message = PrivateGroupEncryptedMessage(
+                        group_id = item.group_id,
+                        epoch = item.epoch,
+                        sender_user_id = item.sender_user_id,
+                        sent_at_unix_ms = item.sent_at_unix_ms,
+                        ciphertext = PrivateGroupCiphertextEnvelope(
+                            nonce = Base64.getDecoder().decode(item.ciphertext_nonce_base64).map { it.toInt() and 0xff },
+                            ciphertext = Base64.getDecoder().decode(item.ciphertext_base64).map { it.toInt() and 0xff },
+                            aad = Base64.getDecoder().decode(item.ciphertext_aad_base64).map { it.toInt() and 0xff },
+                        ),
+                        sender_hybrid_signature = Base64.getDecoder().decode(item.sender_hybrid_signature_base64).map { it.toInt() and 0xff },
+                    ),
+                    senderIdentitySigPubB64 = senderPin.identitySigPub,
+                    senderIdentityPqSigPubB64 = senderPin.identityPqSigPub,
+                )
+                store.appendGroupThreadMessage(
+                    userId = context.profile.userId,
+                    groupId = item.group_id,
+                    senderUserId = opened.sender_user_id,
+                    body = opened.body,
+                    sentAtMillis = item.sent_at_unix_ms,
+                    transportMessageId = item.message_id,
+                )
+                store.upsertGroupConversation(
+                    userId = context.profile.userId,
+                    groupId = item.group_id,
+                    displayName = getPrivateGroupTitle(state),
+                    memberCount = state.members.size,
+                    lastPreview = "${opened.sender_user_id}: ${opened.body}",
+                    incrementUnread = item.group_id != activeGroupId && opened.sender_user_id != context.profile.userId,
+                )
+                if (item.group_id == activeGroupId) {
+                    store.markGroupRead(context.profile.userId, item.group_id)
+                }
+                cursor = maxOf(cursor, item.message_id)
+                delivered += 1
+            }
+            if (cursor > 0L) {
+                store.writePrivateGroupCursor(context.profile.userId, group.groupId, cursor)
+            }
+        }
+        return delivered
     }
 
     suspend fun ensurePrekeysReplenished(

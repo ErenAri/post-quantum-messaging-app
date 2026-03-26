@@ -15,6 +15,7 @@ const PRIVATE_GROUP_CIPHERTEXT_NONCE_LEN: usize = 12;
 const PRIVATE_GROUP_AUTH_KEY_LEN: usize = 32;
 const PRIVATE_GROUP_MAX_CIPHERTEXT_BYTES: usize = 512 * 1024;
 const PRIVATE_GROUP_MAX_AAD_BYTES: usize = 4096;
+const PRIVATE_GROUP_HYBRID_SIGNATURE_MAX_BYTES: usize = 4096;
 const PRIVATE_GROUP_INVITE_DEFAULT_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 const PRIVATE_GROUP_INVITE_MAX_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 
@@ -249,39 +250,31 @@ pub(crate) async fn fetch_private_group_state(
         PRIVATE_GROUP_AUTH_KEY_LEN,
     )?;
     let fetch_key_sha256 = hex::encode(Sha256::digest(&fetch_key));
+    let (group_id, epoch) = resolve_private_group_fetch_credential(
+        &state,
+        &membership_handle_sha256,
+        &fetch_key_sha256,
+    )
+    .await?;
 
     let row = sqlx::query(
         "SELECT
-            c.group_id,
-            c.epoch,
-            c.fetch_key_sha256,
-            s.state_commitment_sha256,
-            s.ciphertext_nonce_base64,
-            s.ciphertext_base64,
-            s.ciphertext_aad_base64,
-            s.published_at
-         FROM private_group_member_credentials c
-         INNER JOIN private_group_states s
-           ON s.group_id = c.group_id AND s.epoch = c.epoch
-         WHERE c.membership_handle_sha256 = $1
-           AND c.revoked_at IS NULL",
+            state_commitment_sha256,
+            ciphertext_nonce_base64,
+            ciphertext_base64,
+            ciphertext_aad_base64,
+            published_at
+         FROM private_group_states
+         WHERE group_id = $1 AND epoch = $2",
     )
-    .bind(&membership_handle_sha256)
+    .bind(&group_id)
+    .bind(epoch)
     .fetch_optional(state.pool())
-    .await?;
-    let Some(row) = row else {
-        return Err(AppError::not_found("private group state not found"));
-    };
-    let stored_fetch_key_sha256: String = row.try_get("fetch_key_sha256")?;
-    if stored_fetch_key_sha256 != fetch_key_sha256 {
-        return Err(AppError::forbidden(
-            "private group fetch credential is invalid",
-        ));
-    }
+    .await?
+    .ok_or_else(|| AppError::not_found("private group state not found"))?;
 
-    let epoch: i64 = row.try_get("epoch")?;
     Ok(Json(FetchPrivateGroupStateResponse {
-        group_id: row.try_get("group_id")?,
+        group_id,
         epoch: epoch as u64,
         state_commitment_sha256: row.try_get("state_commitment_sha256")?,
         ciphertext_nonce_base64: row.try_get("ciphertext_nonce_base64")?,
@@ -444,6 +437,181 @@ pub(crate) async fn consume_private_group_invite(
         invite_token,
         consumed: true,
         revoked_at,
+    }))
+}
+
+pub(crate) async fn publish_private_group_message(
+    State(state): State<AppState>,
+    Json(request): Json<PublishPrivateGroupMessageRequest>,
+) -> Result<Json<PublishPrivateGroupMessageResponse>, AppError> {
+    check_rate_limit(
+        &state,
+        &format!("private-groups-message-publish:{}", request.group_id.trim()),
+    )?;
+
+    validate_id("group_id", &request.group_id)?;
+    let epoch = validate_private_group_epoch(request.epoch)?;
+    validate_id("sender_user_id", &request.sender_user_id)?;
+    let sender_user_id = request.sender_user_id.trim().to_string();
+    let authorizing_membership_handle_sha256 = validate_sha256_hex(
+        "authorizing_membership_handle_sha256",
+        &request.authorizing_membership_handle_sha256,
+    )?;
+    decode_base64_exact(
+        "ciphertext_nonce_base64",
+        &request.ciphertext_nonce_base64,
+        PRIVATE_GROUP_CIPHERTEXT_NONCE_LEN,
+    )?;
+    decode_base64_max(
+        "ciphertext_base64",
+        &request.ciphertext_base64,
+        PRIVATE_GROUP_MAX_CIPHERTEXT_BYTES,
+    )?;
+    decode_base64_max(
+        "ciphertext_aad_base64",
+        &request.ciphertext_aad_base64,
+        PRIVATE_GROUP_MAX_AAD_BYTES,
+    )?;
+    decode_base64_range(
+        "sender_hybrid_signature_base64",
+        &request.sender_hybrid_signature_base64,
+        65,
+        PRIVATE_GROUP_HYBRID_SIGNATURE_MAX_BYTES,
+    )?;
+    let authorizing_fetch_key = decode_base64_exact(
+        "authorizing_fetch_key_base64",
+        &request.authorizing_fetch_key_base64,
+        PRIVATE_GROUP_AUTH_KEY_LEN,
+    )?;
+    let authorizing_fetch_key_sha256 = hex::encode(Sha256::digest(&authorizing_fetch_key));
+
+    authorize_private_group_fetch_capability_for_group(
+        &state,
+        request.group_id.trim(),
+        epoch,
+        &authorizing_membership_handle_sha256,
+        &authorizing_fetch_key_sha256,
+    )
+    .await?;
+
+    let received_at = Utc::now().to_rfc3339();
+    let row = sqlx::query(
+        "INSERT INTO private_group_messages (
+            group_id,
+            epoch,
+            sender_membership_handle_sha256,
+            sender_user_id,
+            sent_at_unix_ms,
+            ciphertext_nonce_base64,
+            ciphertext_base64,
+            ciphertext_aad_base64,
+            sender_hybrid_signature_base64,
+            received_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING message_id",
+    )
+    .bind(request.group_id.trim())
+    .bind(epoch)
+    .bind(&authorizing_membership_handle_sha256)
+    .bind(&sender_user_id)
+    .bind(
+        i64::try_from(request.sent_at_unix_ms)
+            .map_err(|_| AppError::bad_request("sent_at_unix_ms is too large"))?,
+    )
+    .bind(request.ciphertext_nonce_base64.trim())
+    .bind(request.ciphertext_base64.trim())
+    .bind(request.ciphertext_aad_base64.trim())
+    .bind(request.sender_hybrid_signature_base64.trim())
+    .bind(&received_at)
+    .fetch_one(state.pool())
+    .await?;
+    let message_id: i64 = row.try_get("message_id")?;
+
+    Ok(Json(PublishPrivateGroupMessageResponse {
+        message_id,
+        group_id: request.group_id.trim().to_string(),
+        epoch: epoch as u64,
+        received_at,
+    }))
+}
+
+pub(crate) async fn fetch_private_group_messages(
+    State(state): State<AppState>,
+    Json(request): Json<FetchPrivateGroupMessagesRequest>,
+) -> Result<Json<FetchPrivateGroupMessagesResponse>, AppError> {
+    let membership_handle_sha256 = validate_sha256_hex(
+        "membership_handle_sha256",
+        &request.membership_handle_sha256,
+    )?;
+    check_rate_limit(
+        &state,
+        &format!("private-groups-message-fetch:{membership_handle_sha256}"),
+    )?;
+    let fetch_key = decode_base64_exact(
+        "fetch_key_base64",
+        &request.fetch_key_base64,
+        PRIVATE_GROUP_AUTH_KEY_LEN,
+    )?;
+    let fetch_key_sha256 = hex::encode(Sha256::digest(&fetch_key));
+    let since_message_id = request.since_message_id.unwrap_or(0);
+    if since_message_id < 0 {
+        return Err(AppError::bad_request("since_message_id must be >= 0"));
+    }
+
+    let (group_id, epoch) = resolve_private_group_fetch_credential(
+        &state,
+        &membership_handle_sha256,
+        &fetch_key_sha256,
+    )
+    .await?;
+    let rows = sqlx::query(
+        "SELECT
+            message_id,
+            sender_user_id,
+            sent_at_unix_ms,
+            ciphertext_nonce_base64,
+            ciphertext_base64,
+            ciphertext_aad_base64,
+            sender_hybrid_signature_base64,
+            received_at
+         FROM private_group_messages
+         WHERE group_id = $1
+           AND epoch = $2
+           AND message_id > $3
+         ORDER BY message_id ASC",
+    )
+    .bind(&group_id)
+    .bind(epoch)
+    .bind(since_message_id)
+    .fetch_all(state.pool())
+    .await?;
+    let fetched_at = Utc::now().to_rfc3339();
+    let messages = rows
+        .into_iter()
+        .map(|row| -> Result<PrivateGroupMessageItem, AppError> {
+            let sent_at_unix_ms: i64 = row.try_get("sent_at_unix_ms")?;
+            Ok(PrivateGroupMessageItem {
+                message_id: row.try_get("message_id")?,
+                group_id: group_id.clone(),
+                epoch: epoch as u64,
+                sender_user_id: row.try_get("sender_user_id")?,
+                sent_at_unix_ms: u64::try_from(sent_at_unix_ms).map_err(|_| {
+                    AppError::bad_request("stored private group message timestamp is invalid")
+                })?,
+                ciphertext_nonce_base64: row.try_get("ciphertext_nonce_base64")?,
+                ciphertext_base64: row.try_get("ciphertext_base64")?,
+                ciphertext_aad_base64: row.try_get("ciphertext_aad_base64")?,
+                sender_hybrid_signature_base64: row.try_get("sender_hybrid_signature_base64")?,
+                received_at: row.try_get("received_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Json(FetchPrivateGroupMessagesResponse {
+        group_id,
+        epoch: epoch as u64,
+        messages,
+        fetched_at,
     }))
 }
 
@@ -627,6 +795,70 @@ async fn authorize_current_private_group_publish_capability(
         ));
     }
     Ok(())
+}
+
+async fn authorize_private_group_fetch_capability_for_group(
+    state: &AppState,
+    group_id: &str,
+    epoch: i64,
+    membership_handle_sha256: &str,
+    fetch_key_sha256: &str,
+) -> Result<(), AppError> {
+    let latest_epoch = load_latest_private_group_epoch(state.pool(), group_id).await?;
+    if epoch != latest_epoch {
+        return Err(AppError::conflict(
+            "private group epoch is stale; refresh state first",
+        ));
+    }
+    let row = sqlx::query(
+        "SELECT fetch_key_sha256
+         FROM private_group_member_credentials
+         WHERE membership_handle_sha256 = $1
+           AND group_id = $2
+           AND epoch = $3
+           AND revoked_at IS NULL",
+    )
+    .bind(membership_handle_sha256)
+    .bind(group_id)
+    .bind(latest_epoch)
+    .fetch_optional(state.pool())
+    .await?;
+    let Some(row) = row else {
+        return Err(AppError::forbidden(
+            "authorizing private group membership handle is not active for the latest epoch",
+        ));
+    };
+    let stored_fetch_key_sha256: String = row.try_get("fetch_key_sha256")?;
+    if stored_fetch_key_sha256 != fetch_key_sha256 {
+        return Err(AppError::forbidden(
+            "private group fetch credential is invalid",
+        ));
+    }
+    Ok(())
+}
+
+async fn resolve_private_group_fetch_credential(
+    state: &AppState,
+    membership_handle_sha256: &str,
+    fetch_key_sha256: &str,
+) -> Result<(String, i64), AppError> {
+    let row = sqlx::query(
+        "SELECT group_id, epoch, fetch_key_sha256
+         FROM private_group_member_credentials
+         WHERE membership_handle_sha256 = $1
+           AND revoked_at IS NULL",
+    )
+    .bind(membership_handle_sha256)
+    .fetch_optional(state.pool())
+    .await?
+    .ok_or_else(|| AppError::not_found("private group state not found"))?;
+    let stored_fetch_key_sha256: String = row.try_get("fetch_key_sha256")?;
+    if stored_fetch_key_sha256 != fetch_key_sha256 {
+        return Err(AppError::forbidden(
+            "private group fetch credential is invalid",
+        ));
+    }
+    Ok((row.try_get("group_id")?, row.try_get("epoch")?))
 }
 
 fn map_private_group_conflict(error: sqlx::Error, detail: &'static str) -> AppError {

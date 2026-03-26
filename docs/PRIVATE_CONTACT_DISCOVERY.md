@@ -68,7 +68,9 @@ Current implementation boundary:
 
 - `pqmsg-discovery` verifies short-lived tickets, publishes a manifest contract, and exposes a development-only `hashed_handle_directory` lookup mode.
 - That manifest is now signed by a dedicated Ed25519 manifest issuer key so clients can bind the service contract to the app-server capabilities document.
+- The signed manifest now also locks the current result contract to `match_result_format = contact_invite_token`, so supported clients refuse any silent switch back to stable account identifiers.
 - In that mode, clients upload SHA-256 handle hashes and submit SHA-256 query hashes directly to the discovery service.
+- The current ticket now embeds a dedicated opaque contact-bootstrap invite token, and the discovery service returns that token on match instead of a stable account ID.
 - This is intentionally marked `privacy_mode = "service_boundary_only"` and is not a production claim of Signal-style private discovery.
 - `pqmsg-server` now only advertises that separate discovery path in `development` deployments. `pilot` and `production` stay on `manual_only` until a real private-discovery protocol and attestation story exist.
 
@@ -87,7 +89,7 @@ Responsibilities:
 2. If `contact_discovery_mode == "private_service"`, client fetches `/v1/manifest` from `contact_discovery_service_origin` and verifies the signed manifest against `contact_discovery_manifest_issuer_ed25519_pub`.
 3. Client requests `/v1/users/{user_id}/contact-discovery/ticket`.
 4. Client performs the current service-boundary-only discovery flow directly against `contact_discovery_service_origin`.
-5. Discovery service returns matched account references.
+5. Discovery service returns matched opaque bootstrap invite references.
 6. Client converts selected results into local/manual contacts.
 
 ## Required Security Properties
@@ -110,7 +112,7 @@ The repo should not invent a new private-discovery cryptosystem ad hoc. The next
 
 ### Account identifier returned from discovery
 
-The discovery service should return the minimum handle needed to bootstrap contact creation:
+The discovery service should return the minimum handle needed to bootstrap contact creation. The current development-only flow now uses opaque contact-invite bootstrap tokens instead of returning stable account IDs directly:
 
 - stable `user_id`
 - or opaque invite/bootstrap token

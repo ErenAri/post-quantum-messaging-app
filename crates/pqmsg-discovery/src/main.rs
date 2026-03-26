@@ -57,6 +57,7 @@ struct ManifestPayload {
     ticket_max_ttl_seconds: i64,
     lookup_protocol: &'static str,
     privacy_mode: &'static str,
+    match_result_format: &'static str,
     signed_at: String,
     expires_at: String,
 }
@@ -115,6 +116,8 @@ pub(crate) struct ContactDiscoveryTicketClaims {
     v: u8,
     user_id: String,
     device_id: String,
+    contact_invite_token: String,
+    contact_invite_expires_at: String,
     issued_at: String,
     expires_at: String,
     nonce: String,
@@ -126,13 +129,27 @@ struct StoredHandle {
     handle_kind: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct StoredUserHandles {
+    contact_invite_token: String,
+    contact_invite_expires_at: String,
+    handles: Vec<StoredHandle>,
+}
+
 #[derive(Debug, Default)]
 struct DiscoveryRegistry {
-    user_handles: HashMap<String, Vec<StoredHandle>>,
+    user_handles: HashMap<String, StoredUserHandles>,
 }
 
 impl DiscoveryRegistry {
-    fn replace_handles(&mut self, user_id: &str, phone_hashes: &[String], email_hashes: &[String]) {
+    fn replace_handles(
+        &mut self,
+        user_id: &str,
+        contact_invite_token: &str,
+        contact_invite_expires_at: &str,
+        phone_hashes: &[String],
+        email_hashes: &[String],
+    ) {
         let mut handles = Vec::with_capacity(phone_hashes.len() + email_hashes.len());
         handles.extend(
             phone_hashes
@@ -152,25 +169,41 @@ impl DiscoveryRegistry {
                     handle_kind: "email".to_string(),
                 }),
         );
-        self.user_handles.insert(user_id.to_string(), handles);
+        self.user_handles.insert(
+            user_id.to_string(),
+            StoredUserHandles {
+                contact_invite_token: contact_invite_token.to_string(),
+                contact_invite_expires_at: contact_invite_expires_at.to_string(),
+                handles,
+            },
+        );
     }
 
     fn match_hashes(
         &self,
         requester_user_id: &str,
         query_hashes: &[String],
+        now: DateTime<Utc>,
     ) -> Vec<DiscoveryMatchItem> {
         let query_set: HashSet<&str> = query_hashes.iter().map(String::as_str).collect();
         let mut matches = Vec::new();
-        for (user_id, handles) in &self.user_handles {
+        for (user_id, stored_handles) in &self.user_handles {
             if user_id == requester_user_id {
                 continue;
             }
-            for handle in handles {
+            let invite_expires_at =
+                match DateTime::parse_from_rfc3339(&stored_handles.contact_invite_expires_at) {
+                    Ok(value) => value.with_timezone(&Utc),
+                    Err(_) => continue,
+                };
+            if invite_expires_at <= now {
+                continue;
+            }
+            for handle in &stored_handles.handles {
                 if query_set.contains(handle.hash_sha256.as_str()) {
                     matches.push(DiscoveryMatchItem {
                         hash_sha256: handle.hash_sha256.clone(),
-                        matched_user_id: user_id.clone(),
+                        contact_invite_token: stored_handles.contact_invite_token.clone(),
                         handle_kind: handle.handle_kind.clone(),
                     });
                 }
@@ -179,7 +212,7 @@ impl DiscoveryRegistry {
         matches.sort_by(|left, right| {
             left.hash_sha256
                 .cmp(&right.hash_sha256)
-                .then_with(|| left.matched_user_id.cmp(&right.matched_user_id))
+                .then_with(|| left.contact_invite_token.cmp(&right.contact_invite_token))
                 .then_with(|| left.handle_kind.cmp(&right.handle_kind))
         });
         matches
@@ -211,7 +244,7 @@ struct DiscoveryMatchRequest {
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 struct DiscoveryMatchItem {
     hash_sha256: String,
-    matched_user_id: String,
+    contact_invite_token: String,
     handle_kind: String,
 }
 
@@ -264,6 +297,7 @@ async fn manifest(State(state): State<AppState>) -> Json<ManifestResponse> {
         ticket_max_ttl_seconds: CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS,
         lookup_protocol: "hashed_handle_directory",
         privacy_mode: "service_boundary_only",
+        match_result_format: "contact_invite_token",
         signed_at: signed_at.to_rfc3339(),
         expires_at: expires_at.to_rfc3339(),
     };
@@ -291,11 +325,13 @@ async fn upload_handles(
     let email_hashes =
         normalize_sha256_hashes("email_hashes_sha256", &request.email_hashes_sha256)?;
     let now = Utc::now().to_rfc3339();
-    state
-        .registry
-        .write()
-        .await
-        .replace_handles(&claims.user_id, &phone_hashes, &email_hashes);
+    state.registry.write().await.replace_handles(
+        &claims.user_id,
+        &claims.contact_invite_token,
+        &claims.contact_invite_expires_at,
+        &phone_hashes,
+        &email_hashes,
+    );
     Ok(Json(DiscoveryHandlesUploadResponse {
         user_id: claims.user_id,
         device_id: claims.device_id,
@@ -316,11 +352,12 @@ async fn match_handles(
     )
     .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
     let query_hashes = normalize_sha256_hashes("hashes_sha256", &request.hashes_sha256)?;
-    let matches = state
-        .registry
-        .read()
-        .await
-        .match_hashes(&claims.user_id, &query_hashes);
+    let matches =
+        state
+            .registry
+            .read()
+            .await
+            .match_hashes(&claims.user_id, &query_hashes, Utc::now());
     Ok(Json(DiscoveryMatchResponse {
         user_id: claims.user_id,
         matches,
@@ -401,6 +438,15 @@ pub(crate) fn verify_contact_discovery_ticket(
     if claims.user_id.trim().is_empty() || claims.device_id.trim().is_empty() {
         anyhow::bail!("contact discovery ticket is missing user or device identity");
     }
+    if claims.contact_invite_token.trim().is_empty()
+        || claims.contact_invite_token.len() > 128
+        || !claims
+            .contact_invite_token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        anyhow::bail!("contact discovery ticket is missing a valid bootstrap invite token");
+    }
     if claims.nonce.trim().is_empty() || claims.nonce.len() > 128 {
         anyhow::bail!("contact discovery ticket nonce is invalid");
     }
@@ -410,8 +456,16 @@ pub(crate) fn verify_contact_discovery_ticket(
     let expires_at = DateTime::parse_from_rfc3339(&claims.expires_at)
         .context("parse contact discovery ticket expires_at")?
         .with_timezone(&Utc);
+    let contact_invite_expires_at = DateTime::parse_from_rfc3339(&claims.contact_invite_expires_at)
+        .context("parse contact discovery ticket bootstrap invite expires_at")?
+        .with_timezone(&Utc);
     if expires_at <= issued_at {
         anyhow::bail!("contact discovery ticket expires_at must be after issued_at");
+    }
+    if contact_invite_expires_at <= issued_at {
+        anyhow::bail!(
+            "contact discovery ticket bootstrap invite expires_at must be after issued_at"
+        );
     }
     if expires_at.signed_duration_since(issued_at).num_seconds()
         > CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS
@@ -484,6 +538,8 @@ mod tests {
             v: 1,
             user_id: "alice".to_string(),
             device_id: "alice-dev-1".to_string(),
+            contact_invite_token: "invite-bootstrap-1".to_string(),
+            contact_invite_expires_at: "2026-03-27T12:00:00Z".to_string(),
             issued_at: issued_at.to_string(),
             expires_at: expires_at.to_string(),
             nonce: "nonce-1".to_string(),
@@ -596,15 +652,49 @@ mod tests {
     #[test]
     fn registry_replaces_handles_and_matches_other_users() {
         let mut registry = DiscoveryRegistry::default();
-        registry.replace_handles("alice", &["11".repeat(32)], &["22".repeat(32)]);
+        registry.replace_handles(
+            "alice",
+            "invite-alice",
+            "2026-03-27T12:00:00Z",
+            &["11".repeat(32)],
+            &["22".repeat(32)],
+        );
         registry.replace_handles(
             "bob",
+            "invite-bob",
+            "2026-03-27T12:00:00Z",
             &["33".repeat(32)],
             &["44".repeat(32), "11".repeat(32)],
         );
-        let matches = registry.match_hashes("alice", &["11".repeat(32), "44".repeat(32)]);
+        let matches = registry.match_hashes(
+            "alice",
+            &["11".repeat(32), "44".repeat(32)],
+            DateTime::parse_from_rfc3339("2026-03-13T12:01:00Z")
+                .expect("parse time")
+                .with_timezone(&Utc),
+        );
         assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].matched_user_id, "bob");
-        assert_eq!(matches[1].matched_user_id, "bob");
+        assert_eq!(matches[0].contact_invite_token, "invite-bob");
+        assert_eq!(matches[1].contact_invite_token, "invite-bob");
+    }
+
+    #[test]
+    fn registry_filters_expired_bootstrap_invites() {
+        let mut registry = DiscoveryRegistry::default();
+        registry.replace_handles(
+            "bob",
+            "invite-bob",
+            "2026-03-13T11:59:00Z",
+            &["11".repeat(32)],
+            &[],
+        );
+        let matches = registry.match_hashes(
+            "alice",
+            &["11".repeat(32)],
+            DateTime::parse_from_rfc3339("2026-03-13T12:01:00Z")
+                .expect("parse time")
+                .with_timezone(&Utc),
+        );
+        assert!(matches.is_empty());
     }
 }

@@ -16,9 +16,31 @@ use crate::AppState;
 
 const CONTACT_INVITE_TTL_DAYS: i64 = 14;
 
-struct ContactInviteRecord {
-    user_id: String,
-    expires_at: String,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContactInvitePurpose {
+    Manual,
+    DiscoveryBootstrap,
+}
+
+impl ContactInvitePurpose {
+    fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::DiscoveryBootstrap => "discovery_bootstrap",
+        }
+    }
+
+    fn ttl(self) -> Duration {
+        match self {
+            Self::Manual | Self::DiscoveryBootstrap => Duration::days(CONTACT_INVITE_TTL_DAYS),
+        }
+    }
+}
+
+pub(crate) struct ContactInviteRecord {
+    pub(crate) invite_token: String,
+    pub(crate) user_id: String,
+    pub(crate) expires_at: String,
 }
 
 fn validate_contact_invite_token(invite_token: &str) -> Result<String, AppError> {
@@ -54,10 +76,10 @@ async fn load_contact_invite_record(
 ) -> Result<ContactInviteRecord, AppError> {
     let now = Utc::now().to_rfc3339();
     let row = sqlx::query(
-        "SELECT user_id, expires_at
+        "SELECT invite_token, user_id, expires_at
          FROM contact_invites
          WHERE invite_token = $1
-           AND expires_at > $2",
+            AND expires_at > $2",
     )
     .bind(invite_token)
     .bind(&now)
@@ -65,11 +87,90 @@ async fn load_contact_invite_record(
     .await?
     .ok_or_else(|| AppError::not_found("contact invite not found or expired"))?;
 
+    let invite_token: String = row.try_get("invite_token")?;
     let user_id: String = row.try_get("user_id")?;
     let expires_at: String = row.try_get("expires_at")?;
     ensure_user_exists(state.pool(), &user_id).await?;
     Ok(ContactInviteRecord {
+        invite_token,
         user_id,
+        expires_at,
+    })
+}
+
+async fn load_active_contact_invite_for_purpose(
+    state: &AppState,
+    user_id: &str,
+    purpose: ContactInvitePurpose,
+) -> Result<Option<ContactInviteRecord>, AppError> {
+    let now = Utc::now().to_rfc3339();
+    let row = sqlx::query(
+        "SELECT invite_token, user_id, expires_at
+         FROM contact_invites
+         WHERE user_id = $1
+           AND purpose = $2
+           AND expires_at > $3
+         ORDER BY created_at DESC
+         LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(purpose.as_db_str())
+    .bind(&now)
+    .fetch_optional(state.pool())
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    Ok(Some(ContactInviteRecord {
+        invite_token: row.try_get("invite_token")?,
+        user_id: row.try_get("user_id")?,
+        expires_at: row.try_get("expires_at")?,
+    }))
+}
+
+pub(crate) async fn ensure_contact_invite_for_purpose(
+    state: &AppState,
+    user_id: &str,
+    purpose: ContactInvitePurpose,
+    rotate_existing: bool,
+) -> Result<ContactInviteRecord, AppError> {
+    purge_expired_contact_invites(state).await?;
+    if !rotate_existing {
+        if let Some(existing) =
+            load_active_contact_invite_for_purpose(state, user_id, purpose).await?
+        {
+            return Ok(existing);
+        }
+    }
+
+    let now = Utc::now();
+    let created_at = now.to_rfc3339();
+    let expires_at = (now + purpose.ttl()).to_rfc3339();
+    let invite_token = Uuid::new_v4().simple().to_string();
+
+    sqlx::query("DELETE FROM contact_invites WHERE user_id = $1 AND purpose = $2")
+        .bind(user_id)
+        .bind(purpose.as_db_str())
+        .execute(state.pool())
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO contact_invites (invite_token, user_id, purpose, created_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(&invite_token)
+    .bind(user_id)
+    .bind(purpose.as_db_str())
+    .bind(&created_at)
+    .bind(&expires_at)
+    .execute(state.pool())
+    .await?;
+
+    Ok(ContactInviteRecord {
+        invite_token,
+        user_id: user_id.to_string(),
         expires_at,
     })
 }
@@ -90,34 +191,14 @@ pub(crate) async fn create_contact_invite(
     verify_request_auth(&state, &auth, &auth_message).await?;
     ensure_user_exists(state.pool(), &user_id).await?;
 
-    purge_expired_contact_invites(&state).await?;
-
-    let now = Utc::now();
-    let expires_at = (now + Duration::days(CONTACT_INVITE_TTL_DAYS)).to_rfc3339();
-    let issued_at = now.to_rfc3339();
-    let invite_token = Uuid::new_v4().simple().to_string();
-
-    // Keep only the newest active invite token per user to reduce stale-link exposure.
-    sqlx::query("DELETE FROM contact_invites WHERE user_id = $1")
-        .bind(&user_id)
-        .execute(state.pool())
-        .await?;
-
-    sqlx::query(
-        "INSERT INTO contact_invites (invite_token, user_id, created_at, expires_at)
-         VALUES ($1, $2, $3, $4)",
-    )
-    .bind(&invite_token)
-    .bind(&user_id)
-    .bind(&issued_at)
-    .bind(&expires_at)
-    .execute(state.pool())
-    .await?;
+    let invite =
+        ensure_contact_invite_for_purpose(&state, &user_id, ContactInvitePurpose::Manual, true)
+            .await?;
 
     Ok(Json(ContactInviteCreateResponse {
         user_id,
-        invite_token,
-        expires_at,
+        invite_token: invite.invite_token,
+        expires_at: invite.expires_at,
     }))
 }
 

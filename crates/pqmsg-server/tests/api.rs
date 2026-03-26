@@ -2682,10 +2682,134 @@ async fn contact_discovery_ticket_is_issued_for_configured_service() {
     );
     let ticket = body["ticket"].as_str().expect("ticket string");
     let mut parts = ticket.split('.');
-    assert!(parts.next().is_some_and(|value| !value.is_empty()));
+    let payload_b64 = parts.next().expect("ticket payload");
     assert!(parts.next().is_some_and(|value| !value.is_empty()));
     assert!(parts.next().is_none());
+    let payload_bytes = B64
+        .decode(payload_b64.as_bytes())
+        .expect("decode ticket payload");
+    let payload: Value = serde_json::from_slice(&payload_bytes).expect("parse ticket payload");
+    assert_eq!(payload["user_id"].as_str(), Some("alice-cdsi"));
+    assert!(payload["contact_invite_token"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    assert!(payload["contact_invite_expires_at"].as_str().is_some());
     assert!(body["expires_at"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn contact_discovery_ticket_reuses_bootstrap_invite_without_rotating_manual_invite() {
+    let app = test_app_with_contact_discovery_service_origin("https://cdsi.example").await;
+    let alice_sig = signing_key(232);
+    let reg = register_payload(
+        "alice-bootstrap",
+        "alice-bootstrap-dev",
+        [232u8; 32],
+        &alice_sig,
+    );
+    let (status_reg, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg).await;
+    assert_eq!(status_reg, StatusCode::OK);
+
+    let manual_headers =
+        contact_invite_create_auth_headers(&alice_sig, "alice-bootstrap", "alice-bootstrap-dev");
+    let (status_manual, manual_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice-bootstrap/contact-invites",
+        json!({}),
+        &manual_headers,
+    )
+    .await;
+    assert_eq!(status_manual, StatusCode::OK);
+    let manual_token = manual_payload["invite_token"]
+        .as_str()
+        .expect("manual invite token")
+        .to_string();
+
+    let discovery_headers =
+        contact_discovery_ticket_auth_headers(&alice_sig, "alice-bootstrap", "alice-bootstrap-dev");
+    let (status_ticket_first, ticket_first_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice-bootstrap/contact-discovery/ticket",
+        json!({}),
+        &discovery_headers,
+    )
+    .await;
+    assert_eq!(status_ticket_first, StatusCode::OK);
+    let first_ticket_payload_bytes = B64
+        .decode(
+            ticket_first_payload["ticket"]
+                .as_str()
+                .expect("first ticket")
+                .split('.')
+                .next()
+                .expect("first ticket payload")
+                .as_bytes(),
+        )
+        .expect("decode first ticket payload");
+    let first_ticket_payload: Value =
+        serde_json::from_slice(&first_ticket_payload_bytes).expect("parse first ticket payload");
+    let bootstrap_token = first_ticket_payload["contact_invite_token"]
+        .as_str()
+        .expect("bootstrap invite token")
+        .to_string();
+    assert_ne!(bootstrap_token, manual_token);
+
+    let discovery_headers_second =
+        contact_discovery_ticket_auth_headers(&alice_sig, "alice-bootstrap", "alice-bootstrap-dev");
+    let (status_ticket_second, ticket_second_payload) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice-bootstrap/contact-discovery/ticket",
+        json!({}),
+        &discovery_headers_second,
+    )
+    .await;
+    assert_eq!(status_ticket_second, StatusCode::OK);
+    let second_ticket_payload_bytes = B64
+        .decode(
+            ticket_second_payload["ticket"]
+                .as_str()
+                .expect("second ticket")
+                .split('.')
+                .next()
+                .expect("second ticket payload")
+                .as_bytes(),
+        )
+        .expect("decode second ticket payload");
+    let second_ticket_payload: Value =
+        serde_json::from_slice(&second_ticket_payload_bytes).expect("parse second ticket payload");
+    assert_eq!(
+        second_ticket_payload["contact_invite_token"].as_str(),
+        Some(bootstrap_token.as_str())
+    );
+
+    let (status_manual_resolve, manual_resolve_payload) = json_request(
+        app.clone(),
+        Method::GET,
+        &format!("/v1/contact-invites/{manual_token}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_manual_resolve, StatusCode::OK);
+    assert_eq!(
+        manual_resolve_payload["user_id"].as_str(),
+        Some("alice-bootstrap")
+    );
+
+    let (status_bootstrap_resolve, bootstrap_resolve_payload) = json_request(
+        app,
+        Method::GET,
+        &format!("/v1/contact-invites/{bootstrap_token}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_bootstrap_resolve, StatusCode::OK);
+    assert_eq!(
+        bootstrap_resolve_payload["user_id"].as_str(),
+        Some("alice-bootstrap")
+    );
 }
 
 #[tokio::test]
@@ -6880,6 +7004,176 @@ async fn private_group_invite_rejects_invalid_publish_capability() {
     assert_eq!(
         create_payload["detail"].as_str(),
         Some("authorizing private group publish key is invalid")
+    );
+}
+
+#[tokio::test]
+async fn private_group_message_publish_and_fetch_work() {
+    let app = test_app().await;
+    let admin = private_group_member_fixture(90, true);
+    let member = private_group_member_fixture(91, false);
+
+    let (publish_state_status, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/publish",
+        json!({
+            "group_id": "private-group-message-alpha",
+            "epoch": 1,
+            "state_commitment_sha256": sha256_hex(b"private-group-message-alpha-state-v1"),
+            "ciphertext_nonce_base64": B64.encode([21u8; 12]),
+            "ciphertext_base64": B64.encode(b"encrypted-private-group-message-alpha-state-v1"),
+            "ciphertext_aad_base64": B64.encode(b"private-group-message-alpha-aad-v1"),
+            "authorizing_membership_handle_sha256": admin.membership_handle_sha256,
+            "authorizing_publish_key_base64": admin.publish_key_base64.clone().expect("admin publish key"),
+            "members": [admin.record.clone(), member.record.clone()],
+        }),
+    )
+    .await;
+    assert_eq!(publish_state_status, StatusCode::OK);
+
+    let (publish_message_status, publish_message_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/messages/publish",
+        json!({
+            "group_id": "private-group-message-alpha",
+            "epoch": 1,
+            "sender_user_id": "member-user",
+            "sent_at_unix_ms": 1_775_000_000_000u64,
+            "ciphertext_nonce_base64": B64.encode([22u8; 12]),
+            "ciphertext_base64": B64.encode(b"opaque-private-group-message-v1"),
+            "ciphertext_aad_base64": B64.encode(b"opaque-private-group-message-aad-v1"),
+            "sender_hybrid_signature_base64": B64.encode(vec![0x55u8; 128]),
+            "authorizing_membership_handle_sha256": member.membership_handle_sha256,
+            "authorizing_fetch_key_base64": member.fetch_key_base64,
+        }),
+    )
+    .await;
+    assert_eq!(publish_message_status, StatusCode::OK);
+    let message_id = publish_message_payload["message_id"]
+        .as_i64()
+        .expect("message id");
+    assert_eq!(
+        publish_message_payload["group_id"].as_str(),
+        Some("private-group-message-alpha")
+    );
+    assert_eq!(publish_message_payload["epoch"].as_u64(), Some(1));
+
+    let (fetch_status, fetch_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/messages/fetch",
+        json!({
+            "membership_handle_sha256": admin.membership_handle_sha256,
+            "fetch_key_base64": admin.fetch_key_base64,
+            "since_message_id": 0,
+        }),
+    )
+    .await;
+    assert_eq!(fetch_status, StatusCode::OK);
+    assert_eq!(
+        fetch_payload["group_id"].as_str(),
+        Some("private-group-message-alpha")
+    );
+    assert_eq!(fetch_payload["epoch"].as_u64(), Some(1));
+    let messages = fetch_payload["messages"]
+        .as_array()
+        .expect("messages array");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["message_id"].as_i64(), Some(message_id));
+    assert_eq!(messages[0]["sender_user_id"].as_str(), Some("member-user"));
+    assert_eq!(
+        messages[0]["ciphertext_base64"].as_str(),
+        Some(B64.encode(b"opaque-private-group-message-v1").as_str())
+    );
+}
+
+#[tokio::test]
+async fn private_group_message_rejects_stale_epoch_and_revoked_fetch_capability() {
+    let app = test_app().await;
+    let admin_v1 = private_group_member_fixture(92, true);
+    let member_v1 = private_group_member_fixture(93, false);
+    let admin_v2 = private_group_member_fixture(94, true);
+    let member_v2 = private_group_member_fixture(95, false);
+
+    let (publish_v1_status, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/publish",
+        json!({
+            "group_id": "private-group-message-rotation",
+            "epoch": 1,
+            "state_commitment_sha256": sha256_hex(b"private-group-message-rotation-v1"),
+            "ciphertext_nonce_base64": B64.encode([23u8; 12]),
+            "ciphertext_base64": B64.encode(b"encrypted-private-group-message-rotation-v1"),
+            "ciphertext_aad_base64": B64.encode(b"private-group-message-rotation-aad-v1"),
+            "authorizing_membership_handle_sha256": admin_v1.membership_handle_sha256,
+            "authorizing_publish_key_base64": admin_v1.publish_key_base64.clone().expect("admin publish key"),
+            "members": [admin_v1.record.clone(), member_v1.record.clone()],
+        }),
+    )
+    .await;
+    assert_eq!(publish_v1_status, StatusCode::OK);
+
+    let (publish_v2_status, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/state/publish",
+        json!({
+            "group_id": "private-group-message-rotation",
+            "epoch": 2,
+            "state_commitment_sha256": sha256_hex(b"private-group-message-rotation-v2"),
+            "ciphertext_nonce_base64": B64.encode([24u8; 12]),
+            "ciphertext_base64": B64.encode(b"encrypted-private-group-message-rotation-v2"),
+            "ciphertext_aad_base64": B64.encode(b"private-group-message-rotation-aad-v2"),
+            "authorizing_membership_handle_sha256": admin_v1.membership_handle_sha256,
+            "authorizing_publish_key_base64": admin_v1.publish_key_base64.clone().expect("admin publish key"),
+            "members": [admin_v2.record.clone(), member_v2.record.clone()],
+        }),
+    )
+    .await;
+    assert_eq!(publish_v2_status, StatusCode::OK);
+
+    let (stale_publish_status, stale_publish_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/messages/publish",
+        json!({
+            "group_id": "private-group-message-rotation",
+            "epoch": 1,
+            "sender_user_id": "member-user",
+            "sent_at_unix_ms": 1_775_000_000_001u64,
+            "ciphertext_nonce_base64": B64.encode([25u8; 12]),
+            "ciphertext_base64": B64.encode(b"opaque-private-group-message-stale"),
+            "ciphertext_aad_base64": B64.encode(b"opaque-private-group-message-stale-aad"),
+            "sender_hybrid_signature_base64": B64.encode(vec![0x44u8; 128]),
+            "authorizing_membership_handle_sha256": member_v1.membership_handle_sha256,
+            "authorizing_fetch_key_base64": member_v1.fetch_key_base64,
+        }),
+    )
+    .await;
+    assert_eq!(stale_publish_status, StatusCode::CONFLICT);
+    assert_eq!(
+        stale_publish_payload["detail"].as_str(),
+        Some("private group epoch is stale; refresh state first")
+    );
+
+    let (revoked_fetch_status, revoked_fetch_payload) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/private-groups/messages/fetch",
+        json!({
+            "membership_handle_sha256": member_v1.membership_handle_sha256,
+            "fetch_key_base64": member_v1.fetch_key_base64,
+            "since_message_id": 0,
+        }),
+    )
+    .await;
+    assert_eq!(revoked_fetch_status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        revoked_fetch_payload["detail"].as_str(),
+        Some("private group state not found")
     );
 }
 

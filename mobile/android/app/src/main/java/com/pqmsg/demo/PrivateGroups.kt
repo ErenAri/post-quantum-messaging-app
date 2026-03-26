@@ -3,6 +3,8 @@ package com.pqmsg.demo
 import android.net.Uri
 import com.google.gson.Gson
 import uniffi.pqmsg_android.privateGroupDescribeMemberCredential
+import uniffi.pqmsg_android.privateGroupEncryptMessage
+import uniffi.pqmsg_android.privateGroupOpenMessage
 import java.util.Base64
 
 data class PrivateGroupAttributes(
@@ -38,6 +40,23 @@ data class PrivateGroupEncryptedSnapshot(
     val epoch: Long,
     val state_commitment_sha256: List<Int>,
     val ciphertext: PrivateGroupCiphertextEnvelope,
+)
+
+data class PrivateGroupEncryptedMessage(
+    val group_id: String,
+    val epoch: Long,
+    val sender_user_id: String,
+    val sent_at_unix_ms: Long,
+    val ciphertext: PrivateGroupCiphertextEnvelope,
+    val sender_hybrid_signature: List<Int>,
+)
+
+data class PrivateGroupDecryptedMessage(
+    val group_id: String,
+    val epoch: Long,
+    val sender_user_id: String,
+    val sent_at_unix_ms: Long,
+    val body: String,
 )
 
 data class PrivateGroupMemberCredential(
@@ -146,6 +165,12 @@ fun parsePrivateGroupLinkInviteMaterial(materialJson: String): PrivateGroupLinkI
 
 fun parsePrivateGroupJoinPackage(joinPackageJson: String): PrivateGroupJoinPackage =
     privateGroupGson.fromJson(joinPackageJson, PrivateGroupJoinPackage::class.java)
+
+fun parsePrivateGroupEncryptedMessage(messageJson: String): PrivateGroupEncryptedMessage =
+    privateGroupGson.fromJson(messageJson, PrivateGroupEncryptedMessage::class.java)
+
+fun parsePrivateGroupDecryptedMessage(messageJson: String): PrivateGroupDecryptedMessage =
+    privateGroupGson.fromJson(messageJson, PrivateGroupDecryptedMessage::class.java)
 
 fun findPrivateGroupCredentialForUser(
     memberCredentials: List<PrivateGroupMemberCredential>,
@@ -346,6 +371,40 @@ fun describePrivateGroupMemberCredential(credential: PrivateGroupMemberCredentia
     )
 }
 
+fun encryptPrivateGroupTransportMessage(
+    state: PrivateGroupState,
+    keysJson: String,
+    senderUserId: String,
+    body: String,
+    sentAtUnixMs: Long = System.currentTimeMillis(),
+): PrivateGroupEncryptedMessage {
+    return parsePrivateGroupEncryptedMessage(
+        privateGroupEncryptMessage(
+            privateGroupGson.toJson(state),
+            keysJson,
+            senderUserId,
+            body,
+            sentAtUnixMs.toULong(),
+        ),
+    )
+}
+
+fun openPrivateGroupTransportMessage(
+    state: PrivateGroupState,
+    message: PrivateGroupEncryptedMessage,
+    senderIdentitySigPubB64: String,
+    senderIdentityPqSigPubB64: String,
+): PrivateGroupDecryptedMessage {
+    return parsePrivateGroupDecryptedMessage(
+        privateGroupOpenMessage(
+            privateGroupGson.toJson(state),
+            privateGroupGson.toJson(message),
+            senderIdentitySigPubB64,
+            senderIdentityPqSigPubB64,
+        ),
+    )
+}
+
 fun updateLocalPrivateGroupState(
     store: LocalStateStore,
     userId: String,
@@ -390,13 +449,13 @@ private fun parseFragmentParam(fragment: String?, key: String): String {
         .orEmpty()
 }
 
-private fun List<Int>.toByteArray(): ByteArray =
+fun List<Int>.toByteArray(): ByteArray =
     ByteArray(size) { idx -> this[idx].toByte() }
 
-private fun ByteArray.toBase64(): String =
+fun ByteArray.toBase64(): String =
     Base64.getEncoder().encodeToString(this)
 
-private fun ByteArray.toHex(): String =
+fun ByteArray.toHex(): String =
     joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
 fun privateGroupBytesToHex(value: List<Int>): String =

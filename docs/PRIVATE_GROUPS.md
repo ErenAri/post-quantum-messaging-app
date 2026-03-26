@@ -9,6 +9,7 @@ Current product posture:
 - The existing server-side group model is too metadata-visible for a Signal-class privacy claim.
 - `pqmsg-core` now contains the first shared opaque-state primitive: a client-managed private-group state object, an encrypted snapshot format, invite-package roundtrips, a join-package primitive, an initial opaque member-credential primitive, and a share-link invite envelope where the decryption secret stays client-side.
 - `pqmsg-server` now exposes the first opaque private-group storage contract: state publish/fetch backed by encrypted snapshots plus hashed membership handles and derived fetch/publish capabilities.
+- Dedicated opaque private-group message publish/fetch is now live on the Android/web supported path. The server no longer needs the old clear-roster recipient fanout for private-group transport.
 - This document defines the next honest implementation boundary before private groups are treated as fully supported product surface.
 
 ## Research Baseline
@@ -22,7 +23,7 @@ This design direction follows Signal's published private-group posture:
 
 - Re-enable groups without restoring clear server-side membership graphs.
 - Keep membership changes, invites, and removals authenticated without leaking more metadata than necessary.
-- Preserve the current sealed direct-message posture for group payload transport where possible.
+- Preserve the current hybrid identity, sender-authentication, and transparency posture across group updates and group messages.
 - Keep the design compatible with the existing hybrid PQ identity and transparency model.
 
 ## Non-Goals
@@ -105,7 +106,7 @@ Group membership and epoch transitions need user-visible trust surfaces:
 3. Implement create / invite / join / remove / epoch-rotate flows using opaque state updates.
    Status: mostly implemented on the server and supported Android/web client path with opaque invite issuance/resolution bound to the latest group epoch and current publish capability. The shared core now also has a share-link invite envelope (`PrivateGroupLinkInviteMaterial`) that keeps the join secret outside the server-stored ciphertext. Further trust UX and transport hardening still remain.
 4. Add encrypted group message transport on top of that state model.
-   Status: implemented as sealed DM fanout over opaque group state on the current Android/web path, but not yet a dedicated lower-metadata group transport.
+   Status: implemented as a dedicated opaque `private-groups/messages/publish` + `private-groups/messages/fetch` transport on the current Android/web path. Messages are encrypted/authenticated in `pqmsg-core` and the server no longer computes clear recipient fanout. This is still not the final low-metadata design, because the server stores per-group message rows and still sees `sender_user_id`.
 5. Add Android/web trust UX for group membership and epoch changes.
    Status: partially implemented. The Android and web group-info surfaces now show owner/role/epoch state and local trust summaries based on identity pins, safety-number verification where available, and transparency checkpoints. Richer epoch-change history and conflict UX still remain.
 6. Only then re-enable `group_messaging_supported`.
@@ -118,7 +119,7 @@ Group membership and epoch transitions need user-visible trust surfaces:
   - opaque state publish/fetch,
   - invite issuance and acceptance,
   - membership-credential refresh,
-  - encrypted group message relay.
+  - encrypted group message publish/fetch.
 - Treat legacy `/groups` routes as disabled compatibility surface, not supported product API.
 
 ## Suggested Client Contract Changes
@@ -161,5 +162,6 @@ Need a concrete policy for:
 - `group_messaging_supported = false`
 - `private_group_messaging_supported` is the dedicated capability for the opaque private-group path
 - legacy group routes remain disabled in the hardened profile
-- the current Android/web path uses opaque state plus sealed DM fanout, not the old clear-roster API
+- the current Android/web path uses opaque state, opaque invites, and dedicated opaque group-message transport, not the old clear-roster API
+- on supported clients, legacy direct-message-wrapped private-group payloads are compatibility-only and are ignored once dedicated private-group transport is enabled
 - direct messaging, invites, usernames, and manual contacts remain the base social graph

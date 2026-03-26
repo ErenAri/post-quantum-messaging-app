@@ -215,6 +215,7 @@ export type ContactDiscoveryManifestResponse = {
   ticket_max_ttl_seconds: number;
   lookup_protocol: string;
   privacy_mode: string;
+  match_result_format: string;
   signed_at: string;
   expires_at: string;
   manifest_issuer_ed25519_pub: string;
@@ -402,6 +403,52 @@ export type ConsumePrivateGroupInviteResponse = {
   invite_token: string;
   consumed: boolean;
   revoked_at: string;
+};
+
+export type PublishPrivateGroupMessageRequest = {
+  group_id: string;
+  epoch: number;
+  sender_user_id: string;
+  sent_at_unix_ms: number;
+  ciphertext_nonce_base64: string;
+  ciphertext_base64: string;
+  ciphertext_aad_base64: string;
+  sender_hybrid_signature_base64: string;
+  authorizing_membership_handle_sha256: string;
+  authorizing_fetch_key_base64: string;
+};
+
+export type PublishPrivateGroupMessageResponse = {
+  message_id: number;
+  group_id: string;
+  epoch: number;
+  received_at: string;
+};
+
+export type FetchPrivateGroupMessagesRequest = {
+  membership_handle_sha256: string;
+  fetch_key_base64: string;
+  since_message_id?: number;
+};
+
+export type PrivateGroupMessageItem = {
+  message_id: number;
+  group_id: string;
+  epoch: number;
+  sender_user_id: string;
+  sent_at_unix_ms: number;
+  ciphertext_nonce_base64: string;
+  ciphertext_base64: string;
+  ciphertext_aad_base64: string;
+  sender_hybrid_signature_base64: string;
+  received_at: string;
+};
+
+export type FetchPrivateGroupMessagesResponse = {
+  group_id: string;
+  epoch: number;
+  messages: PrivateGroupMessageItem[];
+  fetched_at: string;
 };
 
 export type FileUploadRequest = {
@@ -661,7 +708,7 @@ export type DiscoveryMatchRequest = {
 
 export type DiscoveryMatchItem = {
   hash_sha256: string;
-  matched_user_id: string;
+  contact_invite_token: string;
   handle_kind: string;
 };
 
@@ -1177,6 +1224,28 @@ export class PqmsgApi {
       "POST",
       `/v1/private-groups/invites/${encodeURIComponent(inviteToken)}`,
       undefined,
+      {}
+    );
+  }
+
+  async publishPrivateGroupMessage(
+    payload: PublishPrivateGroupMessageRequest
+  ): Promise<PublishPrivateGroupMessageResponse> {
+    return this.request<PublishPrivateGroupMessageResponse>(
+      "POST",
+      "/v1/private-groups/messages/publish",
+      payload,
+      {}
+    );
+  }
+
+  async fetchPrivateGroupMessages(
+    payload: FetchPrivateGroupMessagesRequest
+  ): Promise<FetchPrivateGroupMessagesResponse> {
+    return this.request<FetchPrivateGroupMessagesResponse>(
+      "POST",
+      "/v1/private-groups/messages/fetch",
+      payload,
       {}
     );
   }

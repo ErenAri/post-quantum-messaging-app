@@ -226,7 +226,8 @@ class ContactDiscoveryActivity : AppCompatActivity() {
         }
         require(
             manifest.lookup_protocol == "hashed_handle_directory" &&
-                manifest.privacy_mode == "service_boundary_only",
+                manifest.privacy_mode == "service_boundary_only" &&
+                manifest.match_result_format == "contact_invite_token",
         ) {
             "Unsupported contact discovery manifest"
         }
@@ -342,10 +343,15 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 } else {
                     discoveryMatchesText.visibility = View.VISIBLE
                     discoveryMatchesText.text = response.matches.joinToString(separator = "\n") {
-                        "${it.matched_user_id} [${it.handle_kind}] ${it.hash_sha256}"
+                        "invite:${it.contact_invite_token.takeLast(8)} [${it.handle_kind}] ${it.hash_sha256}"
                     }
                     if (contactUserIdInput.text.isNullOrBlank()) {
-                        contactUserIdInput.setText(response.matches.first().matched_user_id)
+                        contactUserIdInput.setText(
+                            MessagingCoordinator.buildInviteLink(
+                                setup.serverUrl,
+                                response.matches.first().contact_invite_token,
+                            ),
+                        )
                     }
                 }
                 statusText.text = getString(

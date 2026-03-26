@@ -27,10 +27,10 @@ use crate::alg::{
 use crate::dh::{DhKeyPair, DhPublicKey};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::groups::{
-    PrivateGroupAttributes, PrivateGroupEncryptedSnapshot, PrivateGroupEpochTransition,
-    PrivateGroupInvitePackage, PrivateGroupJoinPackage, PrivateGroupLinkInviteEnvelope,
-    PrivateGroupLinkInviteMaterial, PrivateGroupMember, PrivateGroupMemberCredential,
-    PrivateGroupRole, PrivateGroupState,
+    PrivateGroupAttributes, PrivateGroupDecryptedMessage, PrivateGroupEncryptedMessage,
+    PrivateGroupEncryptedSnapshot, PrivateGroupEpochTransition, PrivateGroupInvitePackage,
+    PrivateGroupJoinPackage, PrivateGroupLinkInviteEnvelope, PrivateGroupLinkInviteMaterial,
+    PrivateGroupMember, PrivateGroupMemberCredential, PrivateGroupRole, PrivateGroupState,
 };
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use crate::handshake::{
@@ -897,6 +897,69 @@ pub fn wasm_private_group_prepare_remove_member_transition(
         .prepare_remove_member_transition(member_user_id, updated_at_unix_seconds)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     to_json(&transition)
+}
+
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_private_group_encrypt_message(
+    state_json: &str,
+    sender_user_id: &str,
+    sender_identity_sig_secret_base64: &str,
+    sender_identity_pq_sig_secret_base64: &str,
+    body: &str,
+    sent_at_unix_ms: u64,
+) -> Result<String, JsValue> {
+    let state: PrivateGroupState = parse_json(state_json)?;
+    let sender_identity_sig_secret = decode_b64(
+        "private_group.sender_identity_sig_secret_base64",
+        sender_identity_sig_secret_base64,
+    )?;
+    let sender_identity_pq_sig_secret = decode_b64(
+        "private_group.sender_identity_pq_sig_secret_base64",
+        sender_identity_pq_sig_secret_base64,
+    )?;
+    let pq_provider = MlDsa65::new().map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let message: PrivateGroupEncryptedMessage = state
+        .encrypt_message(
+            sender_user_id,
+            &sender_identity_sig_secret,
+            &sender_identity_pq_sig_secret,
+            body,
+            sent_at_unix_ms,
+            &pq_provider,
+        )
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    to_json(&message)
+}
+
+#[wasm_bindgen]
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+pub fn wasm_private_group_open_message(
+    state_json: &str,
+    message_json: &str,
+    sender_identity_sig_pub_base64: &str,
+    sender_identity_pq_sig_pub_base64: &str,
+) -> Result<String, JsValue> {
+    let state: PrivateGroupState = parse_json(state_json)?;
+    let message: PrivateGroupEncryptedMessage = parse_json(message_json)?;
+    let sender_identity_sig_pub = decode_b64(
+        "private_group.sender_identity_sig_pub_base64",
+        sender_identity_sig_pub_base64,
+    )?;
+    let sender_identity_pq_sig_pub = decode_b64(
+        "private_group.sender_identity_pq_sig_pub_base64",
+        sender_identity_pq_sig_pub_base64,
+    )?;
+    let pq_provider = MlDsa65::new().map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let decrypted: PrivateGroupDecryptedMessage = state
+        .decrypt_message(
+            &message,
+            &sender_identity_sig_pub,
+            &sender_identity_pq_sig_pub,
+            &pq_provider,
+        )
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    to_json(&decrypted)
 }
 
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]

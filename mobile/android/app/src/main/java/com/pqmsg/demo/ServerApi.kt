@@ -405,6 +405,52 @@ data class ConsumePrivateGroupInviteResponse(
     val revoked_at: String,
 )
 
+data class PublishPrivateGroupMessageRequest(
+    val group_id: String,
+    val epoch: Long,
+    val sender_user_id: String,
+    val sent_at_unix_ms: Long,
+    val ciphertext_nonce_base64: String,
+    val ciphertext_base64: String,
+    val ciphertext_aad_base64: String,
+    val sender_hybrid_signature_base64: String,
+    val authorizing_membership_handle_sha256: String,
+    val authorizing_fetch_key_base64: String,
+)
+
+data class PublishPrivateGroupMessageResponse(
+    val message_id: Long,
+    val group_id: String,
+    val epoch: Long,
+    val received_at: String,
+)
+
+data class FetchPrivateGroupMessagesRequest(
+    val membership_handle_sha256: String,
+    val fetch_key_base64: String,
+    val since_message_id: Long?,
+)
+
+data class PrivateGroupMessageItem(
+    val message_id: Long,
+    val group_id: String,
+    val epoch: Long,
+    val sender_user_id: String,
+    val sent_at_unix_ms: Long,
+    val ciphertext_nonce_base64: String,
+    val ciphertext_base64: String,
+    val ciphertext_aad_base64: String,
+    val sender_hybrid_signature_base64: String,
+    val received_at: String,
+)
+
+data class FetchPrivateGroupMessagesResponse(
+    val group_id: String,
+    val epoch: Long,
+    val messages: List<PrivateGroupMessageItem>,
+    val fetched_at: String,
+)
+
 // Sealed Sender
 
 data class SealedRelayRequest(
@@ -458,7 +504,7 @@ data class DiscoveryMatchRequest(
 
 data class DiscoveryMatchItem(
     val hash_sha256: String,
-    val matched_user_id: String,
+    val contact_invite_token: String,
     val handle_kind: String,
 )
 
@@ -539,6 +585,7 @@ data class ContactDiscoveryManifestResponse(
     val ticket_max_ttl_seconds: Int,
     val lookup_protocol: String,
     val privacy_mode: String,
+    val match_result_format: String,
     val signed_at: String,
     val expires_at: String,
     val manifest_issuer_ed25519_pub: String,
@@ -964,6 +1011,16 @@ interface PqmsgApi {
     suspend fun consumePrivateGroupInvite(
         @Path("invite_token") inviteToken: String,
     ): ConsumePrivateGroupInviteResponse
+
+    @POST("/v1/private-groups/messages/publish")
+    suspend fun publishPrivateGroupMessage(
+        @Body request: PublishPrivateGroupMessageRequest,
+    ): PublishPrivateGroupMessageResponse
+
+    @POST("/v1/private-groups/messages/fetch")
+    suspend fun fetchPrivateGroupMessages(
+        @Body request: FetchPrivateGroupMessagesRequest,
+    ): FetchPrivateGroupMessagesResponse
 
     // Sealed sender
 

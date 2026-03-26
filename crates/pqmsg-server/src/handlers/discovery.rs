@@ -8,6 +8,7 @@ use ed25519_dalek::Signer;
 use serde::Serialize;
 use sqlx::Row;
 
+use super::invites::{ensure_contact_invite_for_purpose, ContactInvitePurpose};
 use super::util::*;
 use crate::auth::*;
 use crate::db::*;
@@ -45,6 +46,8 @@ struct ContactDiscoveryTicketPayload {
     v: u8,
     user_id: String,
     device_id: String,
+    contact_invite_token: String,
+    contact_invite_expires_at: String,
     issued_at: String,
     expires_at: String,
     nonce: String,
@@ -67,12 +70,21 @@ pub(crate) async fn create_contact_discovery_ticket(
     let auth_message = contact_discovery_ticket_auth_message(&auth, &user_id)?;
     verify_request_auth(&state, &auth, &auth_message).await?;
 
+    let bootstrap_invite = ensure_contact_invite_for_purpose(
+        &state,
+        &user_id,
+        ContactInvitePurpose::DiscoveryBootstrap,
+        false,
+    )
+    .await?;
     let issued_at = Utc::now();
     let expires_at = issued_at + Duration::minutes(5);
     let payload = ContactDiscoveryTicketPayload {
         v: 1,
         user_id: user_id.clone(),
         device_id: auth.device_id.clone(),
+        contact_invite_token: bootstrap_invite.invite_token,
+        contact_invite_expires_at: bootstrap_invite.expires_at,
         issued_at: issued_at.to_rfc3339(),
         expires_at: expires_at.to_rfc3339(),
         nonce: uuid::Uuid::new_v4().to_string(),

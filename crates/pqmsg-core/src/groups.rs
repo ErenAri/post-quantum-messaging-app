@@ -1,7 +1,9 @@
 use crate::aead::{self, CiphertextEnvelope};
 use crate::kdf::hkdf_sha256_32;
+use crate::pq_sig::{HybridSignature, PqSignatureProvider};
 use crate::tlv::{critical_type, decode_strict, encode, require, TlvRecord};
 use crate::CoreError;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::{CryptoRng, OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,7 +17,10 @@ const MEMBER_CREDENTIAL_HANDLE_LABEL: &str = "pqmsg-private-group-member-handle-
 const MEMBER_CREDENTIAL_COMMITMENT_LABEL: &str = "pqmsg-private-group-member-commitment-v1";
 const MEMBER_CREDENTIAL_FETCH_KEY_LABEL: &str = "pqmsg-private-group-member-fetch-key-v1";
 const MEMBER_CREDENTIAL_PUBLISH_KEY_LABEL: &str = "pqmsg-private-group-member-publish-key-v1";
+const GROUP_MESSAGE_KEY_LABEL: &str = "pqmsg-private-group-message-key-v1";
 const GROUP_INVITE_LINK_KEY_LABEL: &str = "pqmsg-private-group-link-invite-v1";
+const GROUP_MESSAGE_AAD_LABEL: &str = "pqmsg-private-group-message-aad-v1";
+const GROUP_MESSAGE_SIGNATURE_LABEL: &str = "pqmsg-private-group-message-signature-v1";
 
 const TLV_OWNER_USER_ID: u16 = critical_type(0x3001);
 const TLV_GROUP_TITLE: u16 = critical_type(0x3002);
@@ -25,6 +30,14 @@ const TLV_GROUP_TIMER_SECONDS: u16 = 0x3005;
 const TLV_GROUP_CREATED_AT: u16 = critical_type(0x3006);
 const TLV_GROUP_UPDATED_AT: u16 = critical_type(0x3007);
 const TLV_GROUP_MEMBERS: u16 = critical_type(0x3008);
+const TLV_GROUP_MESSAGE_LABEL: u16 = critical_type(0x3010);
+const TLV_GROUP_MESSAGE_GROUP_ID: u16 = critical_type(0x3011);
+const TLV_GROUP_MESSAGE_EPOCH: u16 = critical_type(0x3012);
+const TLV_GROUP_MESSAGE_SENDER_USER_ID: u16 = critical_type(0x3013);
+const TLV_GROUP_MESSAGE_SENT_AT: u16 = critical_type(0x3014);
+const TLV_GROUP_MESSAGE_NONCE: u16 = critical_type(0x3015);
+const TLV_GROUP_MESSAGE_CIPHERTEXT: u16 = critical_type(0x3016);
+const TLV_GROUP_MESSAGE_AAD: u16 = critical_type(0x3017);
 
 const KNOWN_GROUP_PAYLOAD_TYPES: &[u16] = &[
     TLV_OWNER_USER_ID,
@@ -114,6 +127,25 @@ pub struct PrivateGroupLinkInviteMaterial {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PrivateGroupEncryptedMessage {
+    pub group_id: String,
+    pub epoch: u64,
+    pub sender_user_id: String,
+    pub sent_at_unix_ms: u64,
+    pub ciphertext: CiphertextEnvelope,
+    pub sender_hybrid_signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PrivateGroupDecryptedMessage {
+    pub group_id: String,
+    pub epoch: u64,
+    pub sender_user_id: String,
+    pub sent_at_unix_ms: u64,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PrivateGroupEpochTransition {
     pub next_state: PrivateGroupState,
     pub member_credentials: Vec<PrivateGroupMemberCredential>,
@@ -188,6 +220,138 @@ impl PrivateGroupState {
 
     pub fn encrypted_snapshot(&self) -> Result<PrivateGroupEncryptedSnapshot, CoreError> {
         self.encrypted_snapshot_with_rng(&mut OsRng)
+    }
+
+    pub fn encrypt_message<P: PqSignatureProvider>(
+        &self,
+        sender_user_id: &str,
+        sender_identity_sig_secret: &[u8],
+        sender_identity_pq_sig_secret: &[u8],
+        body: &str,
+        sent_at_unix_ms: u64,
+        pq_provider: &P,
+    ) -> Result<PrivateGroupEncryptedMessage, CoreError> {
+        self.encrypt_message_with_rng(
+            sender_user_id,
+            sender_identity_sig_secret,
+            sender_identity_pq_sig_secret,
+            body,
+            sent_at_unix_ms,
+            pq_provider,
+            &mut OsRng,
+        )
+    }
+
+    pub fn encrypt_message_with_rng<P: PqSignatureProvider, R: RngCore + CryptoRng>(
+        &self,
+        sender_user_id: &str,
+        sender_identity_sig_secret: &[u8],
+        sender_identity_pq_sig_secret: &[u8],
+        body: &str,
+        sent_at_unix_ms: u64,
+        pq_provider: &P,
+        rng: &mut R,
+    ) -> Result<PrivateGroupEncryptedMessage, CoreError> {
+        validate_user_id(sender_user_id)?;
+        if body.trim().is_empty() {
+            return Err(CoreError::PolicyViolation(
+                "private group message body cannot be blank",
+            ));
+        }
+        if !self
+            .members
+            .iter()
+            .any(|member| member.user_id == sender_user_id)
+        {
+            return Err(CoreError::PolicyViolation(
+                "private group sender is not a member of the current epoch",
+            ));
+        }
+
+        let signing_key = decode_ed25519_signing_key(
+            "private_group.sender_identity_sig_secret",
+            sender_identity_sig_secret,
+        )?;
+        let message_key = derive_message_key(&self.root_secret, &self.group_id, self.epoch)?;
+        let aad = message_aad(&self.group_id, self.epoch, sender_user_id, sent_at_unix_ms);
+        let padded_body = aead::pad_plaintext(body.as_bytes(), aead::PADDING_BLOCK_SIZE);
+        let ciphertext = aead::encrypt_with_rng(&message_key, &padded_body, &aad, rng)?;
+
+        let mut message = PrivateGroupEncryptedMessage {
+            group_id: self.group_id.clone(),
+            epoch: self.epoch,
+            sender_user_id: sender_user_id.to_string(),
+            sent_at_unix_ms,
+            ciphertext,
+            sender_hybrid_signature: Vec::new(),
+        };
+        let transcript = encode_message_signature_payload(&message)?;
+        let ed25519_sig = signing_key.sign(&transcript).to_bytes().to_vec();
+        let pq_sig = pq_provider.sign(sender_identity_pq_sig_secret, &transcript)?;
+        message.sender_hybrid_signature = HybridSignature {
+            ed25519_sig,
+            pq_sig,
+        }
+        .encode();
+        Ok(message)
+    }
+
+    pub fn decrypt_message<P: PqSignatureProvider>(
+        &self,
+        message: &PrivateGroupEncryptedMessage,
+        sender_identity_sig_pub: &[u8],
+        sender_identity_pq_sig_pub: &[u8],
+        pq_provider: &P,
+    ) -> Result<PrivateGroupDecryptedMessage, CoreError> {
+        validate_private_group_message_membership(self, message)?;
+        let expected_aad = message_aad(
+            &message.group_id,
+            message.epoch,
+            &message.sender_user_id,
+            message.sent_at_unix_ms,
+        );
+        if message.ciphertext.aad != expected_aad {
+            return Err(CoreError::PolicyViolation(
+                "private group message aad mismatch",
+            ));
+        }
+        let transcript = encode_message_signature_payload(message)?;
+        let hybrid_signature = HybridSignature::decode(&message.sender_hybrid_signature)?;
+        let verifying_key = decode_ed25519_verifying_key(
+            "private_group.sender_identity_sig_pub",
+            sender_identity_sig_pub,
+        )?;
+        let ed25519_sig = Signature::from_slice(&hybrid_signature.ed25519_sig).map_err(|_| {
+            CoreError::InvalidLength {
+                field: "private_group.sender_identity_sig",
+                expected: 64,
+                actual: hybrid_signature.ed25519_sig.len(),
+            }
+        })?;
+        verifying_key
+            .verify(&transcript, &ed25519_sig)
+            .map_err(|_| CoreError::SignatureVerificationFailed)?;
+        pq_provider.verify(
+            sender_identity_pq_sig_pub,
+            &transcript,
+            &hybrid_signature.pq_sig,
+        )?;
+        let message_key = derive_message_key(&self.root_secret, &self.group_id, self.epoch)?;
+        let decrypted = aead::decrypt(&message_key, &message.ciphertext)?;
+        let body = String::from_utf8(aead::unpad_plaintext(&decrypted)?.to_vec())
+            .map_err(|_| CoreError::InvalidUtf8("private_group.message.body"))?;
+        if body.trim().is_empty() {
+            return Err(CoreError::PolicyViolation(
+                "private group message body cannot be blank",
+            ));
+        }
+        Ok(PrivateGroupDecryptedMessage {
+            group_id: message.group_id.clone(),
+            epoch: message.epoch,
+            sender_user_id: message.sender_user_id.clone(),
+            sent_at_unix_ms: message.sent_at_unix_ms,
+            body,
+        })
     }
 
     pub fn encrypted_snapshot_with_rng<R: RngCore + CryptoRng>(
@@ -720,12 +884,126 @@ fn derive_link_invite_key(
     hkdf_sha256_32(invite_secret, None, info.as_bytes())
 }
 
+fn derive_message_key(
+    root_secret: &[u8; ROOT_SECRET_BYTES],
+    group_id: &str,
+    epoch: u64,
+) -> Result<[u8; 32], CoreError> {
+    let info = format!("{GROUP_MESSAGE_KEY_LABEL}:{group_id}:{epoch}");
+    hkdf_sha256_32(root_secret, None, info.as_bytes())
+}
+
 fn link_invite_aad(group_id: &str, epoch: u64) -> Vec<u8> {
     let mut aad = Vec::with_capacity(GROUP_INVITE_LINK_KEY_LABEL.len() + group_id.len() + 16);
     aad.extend_from_slice(GROUP_INVITE_LINK_KEY_LABEL.as_bytes());
     aad.extend_from_slice(group_id.as_bytes());
     aad.extend_from_slice(&epoch.to_be_bytes());
     aad
+}
+
+fn message_aad(group_id: &str, epoch: u64, sender_user_id: &str, sent_at_unix_ms: u64) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(
+        GROUP_MESSAGE_AAD_LABEL.len() + group_id.len() + sender_user_id.len() + 24,
+    );
+    aad.extend_from_slice(GROUP_MESSAGE_AAD_LABEL.as_bytes());
+    aad.extend_from_slice(group_id.as_bytes());
+    aad.extend_from_slice(&epoch.to_be_bytes());
+    aad.extend_from_slice(sender_user_id.as_bytes());
+    aad.extend_from_slice(&sent_at_unix_ms.to_be_bytes());
+    aad
+}
+
+fn encode_message_signature_payload(
+    message: &PrivateGroupEncryptedMessage,
+) -> Result<Vec<u8>, CoreError> {
+    encode(&[
+        TlvRecord {
+            ty: TLV_GROUP_MESSAGE_LABEL,
+            value: GROUP_MESSAGE_SIGNATURE_LABEL.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: TLV_GROUP_MESSAGE_GROUP_ID,
+            value: message.group_id.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: TLV_GROUP_MESSAGE_EPOCH,
+            value: message.epoch.to_be_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: TLV_GROUP_MESSAGE_SENDER_USER_ID,
+            value: message.sender_user_id.as_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: TLV_GROUP_MESSAGE_SENT_AT,
+            value: message.sent_at_unix_ms.to_be_bytes().to_vec(),
+        },
+        TlvRecord {
+            ty: TLV_GROUP_MESSAGE_NONCE,
+            value: message.ciphertext.nonce.to_vec(),
+        },
+        TlvRecord {
+            ty: TLV_GROUP_MESSAGE_CIPHERTEXT,
+            value: message.ciphertext.ciphertext.clone(),
+        },
+        TlvRecord {
+            ty: TLV_GROUP_MESSAGE_AAD,
+            value: message.ciphertext.aad.clone(),
+        },
+    ])
+}
+
+fn validate_private_group_message_membership(
+    state: &PrivateGroupState,
+    message: &PrivateGroupEncryptedMessage,
+) -> Result<(), CoreError> {
+    if message.group_id != state.group_id {
+        return Err(CoreError::PolicyViolation(
+            "private group message group_id mismatch",
+        ));
+    }
+    if message.epoch != state.epoch {
+        return Err(CoreError::PolicyViolation(
+            "private group message epoch mismatch",
+        ));
+    }
+    if !state
+        .members
+        .iter()
+        .any(|member| member.user_id == message.sender_user_id)
+    {
+        return Err(CoreError::PolicyViolation(
+            "private group message sender is not a member of the current epoch",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_ed25519_signing_key(
+    field: &'static str,
+    secret_key: &[u8],
+) -> Result<SigningKey, CoreError> {
+    let secret_key: [u8; 32] = secret_key
+        .try_into()
+        .map_err(|_| CoreError::InvalidLength {
+            field,
+            expected: 32,
+            actual: secret_key.len(),
+        })?;
+    Ok(SigningKey::from_bytes(&secret_key))
+}
+
+fn decode_ed25519_verifying_key(
+    field: &'static str,
+    public_key: &[u8],
+) -> Result<VerifyingKey, CoreError> {
+    let public_key: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| CoreError::InvalidLength {
+            field,
+            expected: 32,
+            actual: public_key.len(),
+        })?;
+    VerifyingKey::from_bytes(&public_key).map_err(|_| CoreError::SignatureVerificationFailed)
 }
 
 fn normalize_members(
@@ -981,6 +1259,8 @@ fn hex_encode(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pq_sig::MlDsa65;
+    use ed25519_dalek::SigningKey;
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
 
@@ -1357,5 +1637,93 @@ mod tests {
             .iter()
             .all(|credential| credential.member_user_id != "bob"));
         assert!(transition.added_member_join_package.is_none());
+    }
+
+    #[test]
+    #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+    fn private_group_message_roundtrip_verifies_hybrid_sender_signature() {
+        let mut rng = ChaCha20Rng::from_seed([26u8; 32]);
+        let state = PrivateGroupState::new_with_rng(
+            "alice".to_string(),
+            sample_attributes(),
+            vec![PrivateGroupMember {
+                user_id: "bob".to_string(),
+                role: PrivateGroupRole::Member,
+            }],
+            1_700_000_090,
+            &mut rng,
+        )
+        .expect("create group");
+        let provider = MlDsa65::new().expect("pq provider");
+        let alice_identity_sig = SigningKey::from_bytes(&[7u8; 32]);
+        let alice_identity_pq_sig = provider.keypair().expect("alice pq keypair");
+
+        let encrypted = state
+            .encrypt_message_with_rng(
+                "alice",
+                &alice_identity_sig.to_bytes(),
+                alice_identity_pq_sig.secret_key.as_slice(),
+                "Launch window moved to 09:30 UTC",
+                1_700_000_090_123,
+                &provider,
+                &mut rng,
+            )
+            .expect("encrypt");
+        let opened = state
+            .decrypt_message(
+                &encrypted,
+                alice_identity_sig.verifying_key().as_bytes(),
+                &alice_identity_pq_sig.public_key,
+                &provider,
+            )
+            .expect("decrypt");
+
+        assert_eq!(opened.group_id, state.group_id);
+        assert_eq!(opened.epoch, state.epoch);
+        assert_eq!(opened.sender_user_id, "alice");
+        assert_eq!(opened.body, "Launch window moved to 09:30 UTC");
+    }
+
+    #[test]
+    #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+    fn private_group_message_rejects_sender_signature_spoof() {
+        let mut rng = ChaCha20Rng::from_seed([27u8; 32]);
+        let state = PrivateGroupState::new_with_rng(
+            "alice".to_string(),
+            sample_attributes(),
+            vec![PrivateGroupMember {
+                user_id: "bob".to_string(),
+                role: PrivateGroupRole::Member,
+            }],
+            1_700_000_100,
+            &mut rng,
+        )
+        .expect("create group");
+        let provider = MlDsa65::new().expect("pq provider");
+        let alice_identity_sig = SigningKey::from_bytes(&[8u8; 32]);
+        let alice_identity_pq_sig = provider.keypair().expect("alice pq keypair");
+        let bob_identity_sig = SigningKey::from_bytes(&[9u8; 32]);
+        let bob_identity_pq_sig = provider.keypair().expect("bob pq keypair");
+
+        let encrypted = state
+            .encrypt_message_with_rng(
+                "alice",
+                &alice_identity_sig.to_bytes(),
+                alice_identity_pq_sig.secret_key.as_slice(),
+                "Spoof check",
+                1_700_000_100_456,
+                &provider,
+                &mut rng,
+            )
+            .expect("encrypt");
+        let error = state
+            .decrypt_message(
+                &encrypted,
+                bob_identity_sig.verifying_key().as_bytes(),
+                &bob_identity_pq_sig.public_key,
+                &provider,
+            )
+            .expect_err("wrong sender keys should fail");
+        assert!(error.to_string().contains("signature"));
     }
 }

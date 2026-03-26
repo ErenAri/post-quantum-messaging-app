@@ -1189,6 +1189,7 @@ export function verifyContactDiscoveryManifest(
     ticket_max_ttl_seconds: manifest.ticket_max_ttl_seconds,
     lookup_protocol: manifest.lookup_protocol,
     privacy_mode: manifest.privacy_mode,
+    match_result_format: manifest.match_result_format,
     signed_at: manifest.signed_at,
     expires_at: manifest.expires_at,
   }));
