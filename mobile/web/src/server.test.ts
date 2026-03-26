@@ -571,9 +571,11 @@ describe("PqmsgApi methods", () => {
         ticket_format: "base64(json-payload).base64(ed25519-signature)",
         ticket_issuer_ed25519_pub: "issuer-ed25519-pub",
         ticket_max_ttl_seconds: 300,
-        lookup_protocol: "not_implemented",
-        privacy_mode: "service_boundary_only",
+        lookup_protocol: "blind_token_directory_preview",
+        privacy_mode: "blind_evaluation_preview",
         match_result_format: "contact_invite_token",
+        oprf_suite: "ristretto255-sha512-preview",
+        oprf_public_key_ristretto255: "ristretto-oprf-pub",
         signed_at: "2026-03-26T12:00:00Z",
         expires_at: "2026-03-26T13:00:00Z",
         manifest_issuer_ed25519_pub: "manifest-ed25519-pub",
@@ -587,20 +589,43 @@ describe("PqmsgApi methods", () => {
     expect(opts.method).toBe("GET");
   });
 
+  it("evaluateDiscoveryElementsAtService sends POST to the blind-evaluation endpoint", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        user_id: "alice",
+        device_id: "alice-dev-1",
+        evaluated_elements_base64: ["ZXZhbHVhdGVk"],
+        evaluated_at: "2026-03-13T00:00:00Z",
+      })
+    );
+    const result = await api.evaluateDiscoveryElementsAtService("https://cdsi.example", {
+      ticket: "ticket-eval",
+      blinded_elements_base64: ["YmxpbmRlZA=="],
+    });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(result.device_id).toBe("alice-dev-1");
+    expect(url).toBe("https://cdsi.example/v1/discovery/evaluate");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(String(opts.body))).toEqual({
+      ticket: "ticket-eval",
+      blinded_elements_base64: ["YmxpbmRlZA=="],
+    });
+  });
+
   it("uploadDiscoveryHandlesToService sends POST to the separate discovery service", async () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
         user_id: "alice",
         device_id: "alice-dev-1",
-        uploaded_phone_hashes: 1,
-        uploaded_email_hashes: 0,
+        uploaded_phone_tokens: 1,
+        uploaded_email_tokens: 0,
         updated_at: "2026-03-13T00:00:00Z",
       })
     );
     const result = await api.uploadDiscoveryHandlesToService("https://cdsi.example", {
       ticket: "ticket-1",
-      phone_hashes_sha256: ["11".repeat(32)],
-      email_hashes_sha256: [],
+      phone_tokens_sha256: ["11".repeat(32)],
+      email_tokens_sha256: [],
     });
     const [url, opts] = mockFetch.mock.calls[0];
     expect(result.user_id).toBe("alice");
@@ -608,8 +633,8 @@ describe("PqmsgApi methods", () => {
     expect(opts.method).toBe("POST");
     expect(JSON.parse(String(opts.body))).toEqual({
       ticket: "ticket-1",
-      phone_hashes_sha256: ["11".repeat(32)],
-      email_hashes_sha256: [],
+      phone_tokens_sha256: ["11".repeat(32)],
+      email_tokens_sha256: [],
     });
   });
 
@@ -619,7 +644,7 @@ describe("PqmsgApi methods", () => {
         user_id: "alice",
         matches: [
           {
-            hash_sha256: "11".repeat(32),
+            token_sha256: "11".repeat(32),
             contact_invite_token: "opaque-bootstrap-1",
             handle_kind: "phone",
           },
@@ -629,7 +654,7 @@ describe("PqmsgApi methods", () => {
     );
     const result = await api.matchDiscoveryHashesAtService("https://cdsi.example", {
       ticket: "ticket-2",
-      hashes_sha256: ["11".repeat(32)],
+      tokens_sha256: ["11".repeat(32)],
     });
     const [url, opts] = mockFetch.mock.calls[0];
     expect(result.matches).toHaveLength(1);
@@ -637,7 +662,7 @@ describe("PqmsgApi methods", () => {
     expect(opts.method).toBe("POST");
     expect(JSON.parse(String(opts.body))).toEqual({
       ticket: "ticket-2",
-      hashes_sha256: ["11".repeat(32)],
+      tokens_sha256: ["11".repeat(32)],
     });
   });
 

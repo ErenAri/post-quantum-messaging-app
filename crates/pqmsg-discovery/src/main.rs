@@ -7,8 +7,12 @@ use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::{DateTime, Utc};
+use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+use curve25519_dalek::scalar::Scalar;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha512};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::net::SocketAddr;
@@ -21,6 +25,11 @@ const DEFAULT_ATTESTATION_MODE: &str = "unattested_development";
 const CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS: i64 = 300;
 const CONTACT_DISCOVERY_MANIFEST_MAX_TTL_SECONDS: i64 = 3600;
 const MAX_DISCOVERY_HASHES_PER_REQUEST: usize = 2048;
+const CONTACT_DISCOVERY_LOOKUP_PROTOCOL: &str = "blind_token_directory_preview";
+const CONTACT_DISCOVERY_PRIVACY_MODE: &str = "blind_evaluation_preview";
+const CONTACT_DISCOVERY_MATCH_RESULT_FORMAT: &str = "contact_invite_token";
+const CONTACT_DISCOVERY_OPRF_SUITE: &str = "ristretto255-sha512-preview";
+const CONTACT_DISCOVERY_HANDLE_DOMAIN: &[u8] = b"pqmsg-discovery-handle-v1";
 
 #[derive(Clone)]
 struct AppState {
@@ -28,6 +37,8 @@ struct AppState {
     manifest_signing_key: Arc<SigningKey>,
     attestation_mode: String,
     registry: Arc<RwLock<DiscoveryRegistry>>,
+    oprf_secret_scalar: Arc<Scalar>,
+    oprf_public_key_ristretto255_b64: String,
 }
 
 impl AppState {
@@ -58,6 +69,8 @@ struct ManifestPayload {
     lookup_protocol: &'static str,
     privacy_mode: &'static str,
     match_result_format: &'static str,
+    oprf_suite: &'static str,
+    oprf_public_key_ristretto255: String,
     signed_at: String,
     expires_at: String,
 }
@@ -125,7 +138,7 @@ pub(crate) struct ContactDiscoveryTicketClaims {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct StoredHandle {
-    hash_sha256: String,
+    token_sha256: String,
     handle_kind: String,
 }
 
@@ -142,30 +155,30 @@ struct DiscoveryRegistry {
 }
 
 impl DiscoveryRegistry {
-    fn replace_handles(
+    fn replace_tokens(
         &mut self,
         user_id: &str,
         contact_invite_token: &str,
         contact_invite_expires_at: &str,
-        phone_hashes: &[String],
-        email_hashes: &[String],
+        phone_tokens: &[String],
+        email_tokens: &[String],
     ) {
-        let mut handles = Vec::with_capacity(phone_hashes.len() + email_hashes.len());
+        let mut handles = Vec::with_capacity(phone_tokens.len() + email_tokens.len());
         handles.extend(
-            phone_hashes
+            phone_tokens
                 .iter()
                 .cloned()
-                .map(|hash_sha256| StoredHandle {
-                    hash_sha256,
+                .map(|token_sha256| StoredHandle {
+                    token_sha256,
                     handle_kind: "phone".to_string(),
                 }),
         );
         handles.extend(
-            email_hashes
+            email_tokens
                 .iter()
                 .cloned()
-                .map(|hash_sha256| StoredHandle {
-                    hash_sha256,
+                .map(|token_sha256| StoredHandle {
+                    token_sha256,
                     handle_kind: "email".to_string(),
                 }),
         );
@@ -179,13 +192,13 @@ impl DiscoveryRegistry {
         );
     }
 
-    fn match_hashes(
+    fn match_tokens(
         &self,
         requester_user_id: &str,
-        query_hashes: &[String],
+        query_tokens: &[String],
         now: DateTime<Utc>,
     ) -> Vec<DiscoveryMatchItem> {
-        let query_set: HashSet<&str> = query_hashes.iter().map(String::as_str).collect();
+        let query_set: HashSet<&str> = query_tokens.iter().map(String::as_str).collect();
         let mut matches = Vec::new();
         for (user_id, stored_handles) in &self.user_handles {
             if user_id == requester_user_id {
@@ -200,9 +213,9 @@ impl DiscoveryRegistry {
                 continue;
             }
             for handle in &stored_handles.handles {
-                if query_set.contains(handle.hash_sha256.as_str()) {
+                if query_set.contains(handle.token_sha256.as_str()) {
                     matches.push(DiscoveryMatchItem {
-                        hash_sha256: handle.hash_sha256.clone(),
+                        token_sha256: handle.token_sha256.clone(),
                         contact_invite_token: stored_handles.contact_invite_token.clone(),
                         handle_kind: handle.handle_kind.clone(),
                     });
@@ -210,8 +223,8 @@ impl DiscoveryRegistry {
             }
         }
         matches.sort_by(|left, right| {
-            left.hash_sha256
-                .cmp(&right.hash_sha256)
+            left.token_sha256
+                .cmp(&right.token_sha256)
                 .then_with(|| left.contact_invite_token.cmp(&right.contact_invite_token))
                 .then_with(|| left.handle_kind.cmp(&right.handle_kind))
         });
@@ -220,30 +233,44 @@ impl DiscoveryRegistry {
 }
 
 #[derive(Debug, Deserialize)]
+struct DiscoveryEvaluateRequest {
+    ticket: String,
+    blinded_elements_base64: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DiscoveryEvaluateResponse {
+    user_id: String,
+    device_id: String,
+    evaluated_elements_base64: Vec<String>,
+    evaluated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct DiscoveryHandlesUploadRequest {
     ticket: String,
-    phone_hashes_sha256: Vec<String>,
-    email_hashes_sha256: Vec<String>,
+    phone_tokens_sha256: Vec<String>,
+    email_tokens_sha256: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct DiscoveryHandlesUploadResponse {
     user_id: String,
     device_id: String,
-    uploaded_phone_hashes: usize,
-    uploaded_email_hashes: usize,
+    uploaded_phone_tokens: usize,
+    uploaded_email_tokens: usize,
     updated_at: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct DiscoveryMatchRequest {
     ticket: String,
-    hashes_sha256: Vec<String>,
+    tokens_sha256: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 struct DiscoveryMatchItem {
-    hash_sha256: String,
+    token_sha256: String,
     contact_invite_token: String,
     handle_kind: String,
 }
@@ -255,7 +282,10 @@ struct DiscoveryMatchResponse {
     checked_at: String,
 }
 
-fn normalize_sha256_hashes(field: &str, values: &[String]) -> Result<Vec<String>, DiscoveryError> {
+fn normalize_sha256_hex_values(
+    field: &str,
+    values: &[String],
+) -> Result<Vec<String>, DiscoveryError> {
     if values.len() > MAX_DISCOVERY_HASHES_PER_REQUEST {
         return Err(DiscoveryError::bad_request(format!(
             "{field} must contain at most {MAX_DISCOVERY_HASHES_PER_REQUEST} values"
@@ -274,6 +304,66 @@ fn normalize_sha256_hashes(field: &str, values: &[String]) -> Result<Vec<String>
     normalized.sort();
     normalized.dedup();
     Ok(normalized)
+}
+
+fn normalize_blinded_elements(
+    field: &str,
+    values: &[String],
+) -> Result<Vec<CompressedRistretto>, DiscoveryError> {
+    if values.len() > MAX_DISCOVERY_HASHES_PER_REQUEST {
+        return Err(DiscoveryError::bad_request(format!(
+            "{field} must contain at most {MAX_DISCOVERY_HASHES_PER_REQUEST} values"
+        )));
+    }
+    let mut points = Vec::with_capacity(values.len());
+    for value in values {
+        let decoded = B64.decode(value.trim().as_bytes()).map_err(|_| {
+            DiscoveryError::bad_request(format!(
+                "{field} entries must be base64-encoded 32-byte compressed ristretto points"
+            ))
+        })?;
+        let bytes: [u8; 32] = decoded.as_slice().try_into().map_err(|_| {
+            DiscoveryError::bad_request(format!("{field} entries must decode to 32 bytes"))
+        })?;
+        let compressed = CompressedRistretto(bytes);
+        if compressed.decompress().is_none() {
+            return Err(DiscoveryError::bad_request(format!(
+                "{field} entries must decode to valid compressed ristretto points"
+            )));
+        }
+        points.push(compressed);
+    }
+    Ok(points)
+}
+
+fn decode_hex_32(field: &str, value: &str) -> Result<[u8; 32], DiscoveryError> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(DiscoveryError::bad_request(format!(
+            "{field} must be a 64-character SHA-256 hex string"
+        )));
+    }
+    let mut decoded = [0u8; 32];
+    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        let upper = (chunk[0] as char)
+            .to_digit(16)
+            .ok_or_else(|| DiscoveryError::bad_request(format!("{field} must be valid hex")))?;
+        let lower = (chunk[1] as char)
+            .to_digit(16)
+            .ok_or_else(|| DiscoveryError::bad_request(format!("{field} must be valid hex")))?;
+        decoded[index] = ((upper << 4) | lower) as u8;
+    }
+    Ok(decoded)
+}
+
+fn derive_handle_point(handle_hash_sha256: &str) -> Result<RistrettoPoint, DiscoveryError> {
+    let hash_bytes = decode_hex_32("handle_hash_sha256", handle_hash_sha256)?;
+    let uniform = Sha512::new()
+        .chain_update(CONTACT_DISCOVERY_HANDLE_DOMAIN)
+        .chain_update(hash_bytes)
+        .finalize();
+    let mut uniform_bytes = [0u8; 64];
+    uniform_bytes.copy_from_slice(&uniform);
+    Ok(RistrettoPoint::from_uniform_bytes(&uniform_bytes))
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -295,9 +385,11 @@ async fn manifest(State(state): State<AppState>) -> Json<ManifestResponse> {
         ticket_format: "base64(json-payload).base64(ed25519-signature)",
         ticket_issuer_ed25519_pub: state.ticket_issuer_public_key_b64(),
         ticket_max_ttl_seconds: CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS,
-        lookup_protocol: "hashed_handle_directory",
-        privacy_mode: "service_boundary_only",
-        match_result_format: "contact_invite_token",
+        lookup_protocol: CONTACT_DISCOVERY_LOOKUP_PROTOCOL,
+        privacy_mode: CONTACT_DISCOVERY_PRIVACY_MODE,
+        match_result_format: CONTACT_DISCOVERY_MATCH_RESULT_FORMAT,
+        oprf_suite: CONTACT_DISCOVERY_OPRF_SUITE,
+        oprf_public_key_ristretto255: state.oprf_public_key_ristretto255_b64.clone(),
         signed_at: signed_at.to_rfc3339(),
         expires_at: expires_at.to_rfc3339(),
     };
@@ -310,6 +402,38 @@ async fn manifest(State(state): State<AppState>) -> Json<ManifestResponse> {
     })
 }
 
+async fn evaluate_blinded_elements(
+    State(state): State<AppState>,
+    Json(request): Json<DiscoveryEvaluateRequest>,
+) -> Result<Json<DiscoveryEvaluateResponse>, DiscoveryError> {
+    let claims = verify_contact_discovery_ticket(
+        &state.ticket_issuer_verifying_key,
+        &request.ticket,
+        Utc::now(),
+    )
+    .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
+    let blinded_elements =
+        normalize_blinded_elements("blinded_elements_base64", &request.blinded_elements_base64)?;
+    let evaluated_elements_base64 = blinded_elements
+        .into_iter()
+        .map(|compressed| {
+            let point = compressed.decompress().ok_or_else(|| {
+                DiscoveryError::bad_request(
+                    "blinded_elements_base64 entries must decode to valid compressed ristretto points",
+                )
+            })?;
+            let evaluated = (point * *state.oprf_secret_scalar).compress().to_bytes();
+            Ok(B64.encode(evaluated))
+        })
+        .collect::<Result<Vec<_>, DiscoveryError>>()?;
+    Ok(Json(DiscoveryEvaluateResponse {
+        user_id: claims.user_id,
+        device_id: claims.device_id,
+        evaluated_elements_base64,
+        evaluated_at: Utc::now().to_rfc3339(),
+    }))
+}
+
 async fn upload_handles(
     State(state): State<AppState>,
     Json(request): Json<DiscoveryHandlesUploadRequest>,
@@ -320,23 +444,23 @@ async fn upload_handles(
         Utc::now(),
     )
     .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
-    let phone_hashes =
-        normalize_sha256_hashes("phone_hashes_sha256", &request.phone_hashes_sha256)?;
-    let email_hashes =
-        normalize_sha256_hashes("email_hashes_sha256", &request.email_hashes_sha256)?;
+    let phone_tokens =
+        normalize_sha256_hex_values("phone_tokens_sha256", &request.phone_tokens_sha256)?;
+    let email_tokens =
+        normalize_sha256_hex_values("email_tokens_sha256", &request.email_tokens_sha256)?;
     let now = Utc::now().to_rfc3339();
-    state.registry.write().await.replace_handles(
+    state.registry.write().await.replace_tokens(
         &claims.user_id,
         &claims.contact_invite_token,
         &claims.contact_invite_expires_at,
-        &phone_hashes,
-        &email_hashes,
+        &phone_tokens,
+        &email_tokens,
     );
     Ok(Json(DiscoveryHandlesUploadResponse {
         user_id: claims.user_id,
         device_id: claims.device_id,
-        uploaded_phone_hashes: phone_hashes.len(),
-        uploaded_email_hashes: email_hashes.len(),
+        uploaded_phone_tokens: phone_tokens.len(),
+        uploaded_email_tokens: email_tokens.len(),
         updated_at: now,
     }))
 }
@@ -351,13 +475,13 @@ async fn match_handles(
         Utc::now(),
     )
     .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
-    let query_hashes = normalize_sha256_hashes("hashes_sha256", &request.hashes_sha256)?;
+    let query_tokens = normalize_sha256_hex_values("tokens_sha256", &request.tokens_sha256)?;
     let matches =
         state
             .registry
             .read()
             .await
-            .match_hashes(&claims.user_id, &query_hashes, Utc::now());
+            .match_tokens(&claims.user_id, &query_tokens, Utc::now());
     Ok(Json(DiscoveryMatchResponse {
         user_id: claims.user_id,
         matches,
@@ -398,6 +522,29 @@ fn parse_manifest_signing_key() -> Result<Arc<SigningKey>> {
         )
     })?;
     Ok(Arc::new(SigningKey::from_bytes(&key_bytes)))
+}
+
+fn parse_oprf_secret_scalar() -> Result<(Arc<Scalar>, String)> {
+    let raw = env::var("PQMSG_CONTACT_DISCOVERY_OPRF_RISTRETTO255_SECRET_B64")
+        .with_context(|| "PQMSG_CONTACT_DISCOVERY_OPRF_RISTRETTO255_SECRET_B64 is required")?;
+    let decoded = B64
+        .decode(raw.trim().as_bytes())
+        .with_context(|| {
+            "invalid PQMSG_CONTACT_DISCOVERY_OPRF_RISTRETTO255_SECRET_B64: expected base64-encoded 32-byte scalar seed"
+        })?;
+    let secret_bytes: [u8; 32] = decoded.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "invalid PQMSG_CONTACT_DISCOVERY_OPRF_RISTRETTO255_SECRET_B64: expected 32 decoded bytes"
+        )
+    })?;
+    let scalar = Scalar::from_bytes_mod_order(secret_bytes);
+    if scalar == Scalar::ZERO {
+        anyhow::bail!(
+            "invalid PQMSG_CONTACT_DISCOVERY_OPRF_RISTRETTO255_SECRET_B64: scalar must not map to zero"
+        );
+    }
+    let public_key = (RISTRETTO_BASEPOINT_POINT * scalar).compress().to_bytes();
+    Ok((Arc::new(scalar), B64.encode(public_key)))
 }
 
 pub(crate) fn verify_contact_discovery_ticket(
@@ -497,16 +644,20 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| DEFAULT_ATTESTATION_MODE.to_string());
     let ticket_issuer_verifying_key = parse_ticket_issuer_verifying_key()?;
     let manifest_signing_key = parse_manifest_signing_key()?;
+    let (oprf_secret_scalar, oprf_public_key_ristretto255_b64) = parse_oprf_secret_scalar()?;
 
     let state = AppState {
         ticket_issuer_verifying_key,
         manifest_signing_key,
         attestation_mode,
         registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
+        oprf_secret_scalar,
+        oprf_public_key_ristretto255_b64,
     };
     let app = Router::new()
         .route("/health", get(health))
         .route("/v1/manifest", get(manifest))
+        .route("/v1/discovery/evaluate", post(evaluate_blinded_elements))
         .route("/v1/discovery/handles", post(upload_handles))
         .route("/v1/discovery/match", post(match_handles))
         .with_state(state);
@@ -550,6 +701,15 @@ mod tests {
             format!("{}.{}", B64.encode(payload), B64.encode(signature)),
             claims,
         )
+    }
+
+    fn blind_handle_hash(
+        handle_hash_sha256: &str,
+        blind_scalar: Scalar,
+    ) -> (String, RistrettoPoint) {
+        let handle_point = derive_handle_point(handle_hash_sha256).expect("derive handle point");
+        let blinded = (handle_point * blind_scalar).compress().to_bytes();
+        (B64.encode(blinded), handle_point)
     }
 
     #[test]
@@ -610,11 +770,19 @@ mod tests {
     async fn manifest_is_signed_by_configured_manifest_key() {
         let ticket_signing_key = SigningKey::from_bytes(&[11u8; 32]);
         let manifest_signing_key = Arc::new(SigningKey::from_bytes(&[12u8; 32]));
+        let oprf_scalar = Scalar::from_bytes_mod_order([13u8; 32]);
+        let oprf_pub_b64 = B64.encode(
+            (RISTRETTO_BASEPOINT_POINT * oprf_scalar)
+                .compress()
+                .to_bytes(),
+        );
         let state = AppState {
             ticket_issuer_verifying_key: Arc::new(ticket_signing_key.verifying_key()),
             manifest_signing_key: manifest_signing_key.clone(),
             attestation_mode: DEFAULT_ATTESTATION_MODE.to_string(),
             registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
+            oprf_secret_scalar: Arc::new(oprf_scalar),
+            oprf_public_key_ristretto255_b64: oprf_pub_b64.clone(),
         };
         let response = manifest(State(state)).await.0;
         let payload_bytes =
@@ -636,6 +804,20 @@ mod tests {
             response.manifest_issuer_ed25519_pub,
             B64.encode(manifest_signing_key.verifying_key().as_bytes())
         );
+        assert_eq!(
+            response.payload.lookup_protocol,
+            CONTACT_DISCOVERY_LOOKUP_PROTOCOL
+        );
+        assert_eq!(
+            response.payload.privacy_mode,
+            CONTACT_DISCOVERY_PRIVACY_MODE
+        );
+        assert_eq!(
+            response.payload.match_result_format,
+            CONTACT_DISCOVERY_MATCH_RESULT_FORMAT
+        );
+        assert_eq!(response.payload.oprf_suite, CONTACT_DISCOVERY_OPRF_SUITE);
+        assert_eq!(response.payload.oprf_public_key_ristretto255, oprf_pub_b64);
         let signed_at = DateTime::parse_from_rfc3339(&response.payload.signed_at)
             .expect("parse signed_at")
             .with_timezone(&Utc);
@@ -649,24 +831,80 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn evaluate_endpoint_returns_blind_evaluations() {
+        let ticket_signing_key = SigningKey::from_bytes(&[21u8; 32]);
+        let oprf_scalar = Scalar::from_bytes_mod_order([22u8; 32]);
+        let state = AppState {
+            ticket_issuer_verifying_key: Arc::new(ticket_signing_key.verifying_key()),
+            manifest_signing_key: Arc::new(SigningKey::from_bytes(&[23u8; 32])),
+            attestation_mode: DEFAULT_ATTESTATION_MODE.to_string(),
+            registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
+            oprf_secret_scalar: Arc::new(oprf_scalar),
+            oprf_public_key_ristretto255_b64: B64.encode(
+                (RISTRETTO_BASEPOINT_POINT * oprf_scalar)
+                    .compress()
+                    .to_bytes(),
+            ),
+        };
+        let issued_at = Utc::now() - chrono::Duration::minutes(1);
+        let expires_at = issued_at + chrono::Duration::minutes(5);
+        let (ticket, claims) = signed_ticket(
+            &ticket_signing_key,
+            &issued_at.to_rfc3339(),
+            &expires_at.to_rfc3339(),
+        );
+        let blind_scalar = Scalar::from_bytes_mod_order([24u8; 32]);
+        let (blinded_b64, handle_point) = blind_handle_hash(&"11".repeat(32), blind_scalar);
+        let response = evaluate_blinded_elements(
+            State(state),
+            Json(DiscoveryEvaluateRequest {
+                ticket,
+                blinded_elements_base64: vec![blinded_b64],
+            }),
+        )
+        .await
+        .expect("evaluate blinded elements")
+        .0;
+        assert_eq!(response.user_id, claims.user_id);
+        assert_eq!(response.device_id, claims.device_id);
+        assert_eq!(response.evaluated_elements_base64.len(), 1);
+        let evaluated_bytes = B64
+            .decode(response.evaluated_elements_base64[0].as_bytes())
+            .expect("decode evaluated element");
+        let evaluated_point = CompressedRistretto(
+            evaluated_bytes
+                .as_slice()
+                .try_into()
+                .expect("compressed point size"),
+        )
+        .decompress()
+        .expect("decompress evaluated point");
+        let expected = handle_point * blind_scalar * oprf_scalar;
+        assert_eq!(
+            evaluated_point.compress().to_bytes(),
+            expected.compress().to_bytes()
+        );
+    }
+
     #[test]
-    fn registry_replaces_handles_and_matches_other_users() {
+    fn registry_replaces_tokens_and_matches_other_users() {
         let mut registry = DiscoveryRegistry::default();
-        registry.replace_handles(
+        registry.replace_tokens(
             "alice",
             "invite-alice",
             "2026-03-27T12:00:00Z",
             &["11".repeat(32)],
             &["22".repeat(32)],
         );
-        registry.replace_handles(
+        registry.replace_tokens(
             "bob",
             "invite-bob",
             "2026-03-27T12:00:00Z",
             &["33".repeat(32)],
             &["44".repeat(32), "11".repeat(32)],
         );
-        let matches = registry.match_hashes(
+        let matches = registry.match_tokens(
             "alice",
             &["11".repeat(32), "44".repeat(32)],
             DateTime::parse_from_rfc3339("2026-03-13T12:01:00Z")
@@ -681,14 +919,14 @@ mod tests {
     #[test]
     fn registry_filters_expired_bootstrap_invites() {
         let mut registry = DiscoveryRegistry::default();
-        registry.replace_handles(
+        registry.replace_tokens(
             "bob",
             "invite-bob",
             "2026-03-13T11:59:00Z",
             &["11".repeat(32)],
             &[],
         );
-        let matches = registry.match_hashes(
+        let matches = registry.match_tokens(
             "alice",
             &["11".repeat(32)],
             DateTime::parse_from_rfc3339("2026-03-13T12:01:00Z")

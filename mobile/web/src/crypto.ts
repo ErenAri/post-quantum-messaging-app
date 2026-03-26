@@ -1,5 +1,6 @@
-import { ed25519, x25519 } from "@noble/curves/ed25519";
+import { ed25519, ristretto255, ristretto255_hasher, x25519 } from "@noble/curves/ed25519";
 import { sha256 } from "@noble/hashes/sha2";
+import { sha512 } from "@noble/hashes/sha512";
 import {
   base64ToBytes,
   bytesToBase64,
@@ -1190,6 +1191,8 @@ export function verifyContactDiscoveryManifest(
     lookup_protocol: manifest.lookup_protocol,
     privacy_mode: manifest.privacy_mode,
     match_result_format: manifest.match_result_format,
+    oprf_suite: manifest.oprf_suite,
+    oprf_public_key_ristretto255: manifest.oprf_public_key_ristretto255,
     signed_at: manifest.signed_at,
     expires_at: manifest.expires_at,
   }));
@@ -1198,6 +1201,72 @@ export function verifyContactDiscoveryManifest(
   if (!ed25519.verify(signatureBytes, payloadBytes, publicKeyBytes)) {
     throw new Error("Contact discovery manifest signature verification failed");
   }
+}
+
+export type ContactDiscoveryBlindRequest = {
+  blindedElementsBase64: string[];
+  blindingScalarsBase64: string[];
+};
+
+function decodeDiscoveryHashHex(value: string): Uint8Array {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.length !== 64 || !/^[0-9a-f]+$/.test(normalized)) {
+    throw new Error("Discovery values must be 64-character SHA-256 hex strings");
+  }
+  const bytes = new Uint8Array(32);
+  for (let index = 0; index < normalized.length; index += 2) {
+    bytes[index / 2] = Number.parseInt(normalized.slice(index, index + 2), 16);
+  }
+  return bytes;
+}
+
+function discoveryHandlePoint(handleHashSha256: string) {
+  const uniform = sha512(
+    concatBytes([utf8ToBytes("pqmsg-discovery-handle-v1"), decodeDiscoveryHashHex(handleHashSha256)]),
+  );
+  return ristretto255.Point.hashToCurve(uniform);
+}
+
+export function prepareContactDiscoveryBlindRequest(
+  handleHashesSha256: string[],
+): ContactDiscoveryBlindRequest {
+  const blindedElementsBase64: string[] = [];
+  const blindingScalarsBase64: string[] = [];
+  for (const handleHashSha256 of handleHashesSha256) {
+    const point = discoveryHandlePoint(handleHashSha256);
+    const blindScalar = ristretto255_hasher.hashToScalar(randomBytes(32), {
+      DST: "pqmsg-discovery-blind-scalar-v1",
+    });
+    const blindedPoint = point.multiply(blindScalar);
+    blindedElementsBase64.push(bytesToBase64(blindedPoint.toBytes()));
+    blindingScalarsBase64.push(bytesToBase64(ristretto255.Point.Fn.toBytes(blindScalar)));
+  }
+  return {
+    blindedElementsBase64,
+    blindingScalarsBase64,
+  };
+}
+
+export function finalizeContactDiscoveryTokens(
+  blindingScalarsBase64: string[],
+  evaluatedElementsBase64: string[],
+): string[] {
+  if (blindingScalarsBase64.length !== evaluatedElementsBase64.length) {
+    throw new Error("Discovery evaluation result count mismatch");
+  }
+  return evaluatedElementsBase64.map((evaluatedElementBase64, index) => {
+    const evaluatedPoint = ristretto255.Point.fromBytes(base64ToBytes(evaluatedElementBase64));
+    const blindScalar = ristretto255.Point.Fn.fromBytes(base64ToBytes(blindingScalarsBase64[index]));
+    const unblindedPoint = evaluatedPoint.multiply(ristretto255.Point.Fn.inv(blindScalar));
+    return bytesToHex(
+      sha256(
+        concatBytes([
+          utf8ToBytes("pqmsg-discovery-finalize-v1"),
+          unblindedPoint.toBytes(),
+        ]),
+      ),
+    );
+  });
 }
 
 export function identityFingerprint(identityX25519PubB64: string, identityPqSigPubB64?: string): string {

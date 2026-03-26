@@ -699,9 +699,11 @@ Separate discovery-service manifest. Current development-only contract:
   "ticket_format": "base64(json-payload).base64(ed25519-signature)",
   "ticket_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
   "ticket_max_ttl_seconds": 300,
-  "lookup_protocol": "hashed_handle_directory",
-  "privacy_mode": "service_boundary_only",
+  "lookup_protocol": "blind_token_directory_preview",
+  "privacy_mode": "blind_evaluation_preview",
   "match_result_format": "contact_invite_token",
+  "oprf_suite": "ristretto255-sha512-preview",
+  "oprf_public_key_ristretto255": "base64(32-byte compressed ristretto point)",
   "signed_at": "2026-03-26T12:00:00Z",
   "expires_at": "2026-03-26T13:00:00Z",
   "manifest_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
@@ -713,17 +715,18 @@ The current client contract verifies both:
 
 - `ticket_issuer_ed25519_pub` against the app-server capabilities document
 - `manifest_issuer_ed25519_pub` / `manifest_signature_ed25519` against the signed manifest payload
-- `match_result_format = contact_invite_token` before allowing the development-only discovery flow
+- `match_result_format = contact_invite_token`
+- `oprf_suite = ristretto255-sha512-preview`
+- `lookup_protocol = blind_token_directory_preview` / `privacy_mode = blind_evaluation_preview`
 
-`POST {contact_discovery_service_origin}/v1/discovery/handles`
+`POST {contact_discovery_service_origin}/v1/discovery/evaluate`
 
-Current separate-service upload flow. Request:
+Current separate-service blind-evaluation preview. Request:
 
 ```json
 {
   "ticket": "base64(json-payload).base64(ed25519-signature)",
-  "phone_hashes_sha256": ["hex(sha256(e164_phone))"],
-  "email_hashes_sha256": ["hex(sha256(lowercase_email))"]
+  "blinded_elements_base64": ["base64(32-byte compressed ristretto point)"]
 }
 ```
 
@@ -733,8 +736,31 @@ Response:
 {
   "user_id": "alice",
   "device_id": "alice-device-1",
-  "uploaded_phone_hashes": 1,
-  "uploaded_email_hashes": 1,
+  "evaluated_elements_base64": ["base64(32-byte compressed ristretto point)"],
+  "evaluated_at": "2026-03-26T12:02:30Z"
+}
+```
+
+`POST {contact_discovery_service_origin}/v1/discovery/handles`
+
+Current separate-service upload flow. Request:
+
+```json
+{
+  "ticket": "base64(json-payload).base64(ed25519-signature)",
+  "phone_tokens_sha256": ["hex(sha256(finalized_oprf_output))"],
+  "email_tokens_sha256": ["hex(sha256(finalized_oprf_output))"]
+}
+```
+
+Response:
+
+```json
+{
+  "user_id": "alice",
+  "device_id": "alice-device-1",
+  "uploaded_phone_tokens": 1,
+  "uploaded_email_tokens": 1,
   "updated_at": "2026-03-26T12:03:00Z"
 }
 ```
@@ -746,7 +772,7 @@ Current separate-service match flow. Request:
 ```json
 {
   "ticket": "base64(json-payload).base64(ed25519-signature)",
-  "hashes_sha256": ["hex(sha256(contact_handle))"]
+  "tokens_sha256": ["hex(sha256(finalized_oprf_output))"]
 }
 ```
 
@@ -757,7 +783,7 @@ Response:
   "user_id": "alice",
   "matches": [
     {
-      "hash_sha256": "hex...",
+      "token_sha256": "hex...",
       "contact_invite_token": "opaque-bootstrap-token",
       "handle_kind": "phone"
     }
@@ -766,7 +792,7 @@ Response:
 }
 ```
 
-This current separate-service lookup mode is intentionally limited to `privacy_mode = "service_boundary_only"` and is not a production claim of full private contact discovery. The service no longer returns stable account IDs directly; clients resolve the returned opaque bootstrap invite through `/v1/contact-invites/{invite_token}` or `/v1/contact-invites/{invite_token}/bundle` only when the user chooses to continue.
+This current separate-service lookup mode is intentionally limited to `privacy_mode = "blind_evaluation_preview"` and is not a production claim of full private contact discovery. The service no longer returns stable account IDs directly; clients resolve the returned opaque bootstrap invite through `/v1/contact-invites/{invite_token}` or `/v1/contact-invites/{invite_token}/bundle` only when the user chooses to continue.
 
 `GET /v1/contact-invites/{invite_token}`
 
@@ -1687,7 +1713,7 @@ Important capability flags:
 - `contact_discovery_ticket_supported`: whether the server can mint short-lived tickets for a dedicated private discovery service.
 - `contact_discovery_manifest_issuer_ed25519_pub`: Ed25519 public key clients use to verify the separate discovery service manifest.
 - `contact_discovery_ticket_issuer_ed25519_pub`: Ed25519 public key the separate discovery service must trust for ticket verification.
-- `private_service` discovery is currently development-only. Because `pqmsg-discovery` still advertises `lookup_protocol = "hashed_handle_directory"` and `privacy_mode = "service_boundary_only"`, only development deployments advertise it; pilot/production fall back to `manual_only`.
+- `private_service` discovery is currently development-only. Because `pqmsg-discovery` still advertises `lookup_protocol = "blind_token_directory_preview"` and `privacy_mode = "blind_evaluation_preview"`, only development deployments advertise it; pilot/production fall back to `manual_only`.
 - Development clients now also require a signed discovery manifest whose issuer matches `contact_discovery_manifest_issuer_ed25519_pub`.
 - `group_messaging_supported`: legacy clear-roster group API. Hardened deployments report `false`.
 - `private_group_state_supported`: opaque private-group state storage is available.

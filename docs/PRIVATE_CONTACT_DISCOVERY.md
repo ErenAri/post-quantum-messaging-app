@@ -66,12 +66,12 @@ The discovery service must be isolated from the main messaging server so the mai
 
 Current implementation boundary:
 
-- `pqmsg-discovery` verifies short-lived tickets, publishes a manifest contract, and exposes a development-only `hashed_handle_directory` lookup mode.
-- That manifest is now signed by a dedicated Ed25519 manifest issuer key so clients can bind the service contract to the app-server capabilities document.
-- The signed manifest now also locks the current result contract to `match_result_format = contact_invite_token`, so supported clients refuse any silent switch back to stable account identifiers.
-- In that mode, clients upload SHA-256 handle hashes and submit SHA-256 query hashes directly to the discovery service.
-- The current ticket now embeds a dedicated opaque contact-bootstrap invite token, and the discovery service returns that token on match instead of a stable account ID.
-- This is intentionally marked `privacy_mode = "service_boundary_only"` and is not a production claim of Signal-style private discovery.
+- `pqmsg-discovery` verifies short-lived tickets, publishes a signed manifest contract, and exposes a development-only `blind_token_directory_preview` lookup mode.
+- That manifest is signed by a dedicated Ed25519 manifest issuer key so clients can bind the service contract to the app-server capabilities document.
+- The signed manifest now locks the current result contract to `match_result_format = contact_invite_token` and the current blind-evaluation primitive to `oprf_suite = ristretto255-sha512-preview`.
+- In that mode, clients keep SHA-256 handle hashes local, request blind evaluations from the discovery service, finalize those evaluations into discovery tokens locally, and upload/search only the finalized token hashes.
+- The current ticket embeds a dedicated opaque contact-bootstrap invite token, and the discovery service returns that token on match instead of a stable account ID.
+- This is intentionally marked `privacy_mode = "blind_evaluation_preview"` and is still not a production claim of Signal-style private discovery.
 - `pqmsg-server` now only advertises that separate discovery path in `development` deployments. `pilot` and `production` stay on `manual_only` until a real private-discovery protocol and attestation story exist.
 
 ### 3. Client
@@ -88,7 +88,7 @@ Responsibilities:
 1. Client fetches `/v1/capabilities`.
 2. If `contact_discovery_mode == "private_service"`, client fetches `/v1/manifest` from `contact_discovery_service_origin` and verifies the signed manifest against `contact_discovery_manifest_issuer_ed25519_pub`.
 3. Client requests `/v1/users/{user_id}/contact-discovery/ticket`.
-4. Client performs the current service-boundary-only discovery flow directly against `contact_discovery_service_origin`.
+4. Client performs the current blind-evaluation preview directly against `contact_discovery_service_origin`.
 5. Discovery service returns matched opaque bootstrap invite references.
 6. Client converts selected results into local/manual contacts.
 
@@ -130,7 +130,7 @@ Need explicit policy for:
 
 ## Recommended Implementation Order
 
-1. Replace the current `hashed_handle_directory` flow with one concrete audited private-discovery primitive.
+1. Replace the current `blind_token_directory_preview` flow with one concrete audited private-discovery primitive.
 2. Add attestation / manifest verification strong enough for hardened deployments.
 3. Limit or eliminate service-side handle persistence once the final primitive is chosen.
 4. Subject the discovery service to separate review before enabling it in hardened deployments.
@@ -143,6 +143,7 @@ Until the separate service lookup protocol exists, the correct server/client pos
 - `contact_discovery_supported = true` only when a separate discovery service is configured and the app server is running in `development`
 - `contact_discovery_mode = "private_service"` only for that development-only separate-service ticket flow
 - `contact_discovery_manifest_issuer_ed25519_pub` must be present, and clients verify the signed discovery manifest before using the service
+- the current manifest commits to `lookup_protocol = blind_token_directory_preview`, `privacy_mode = blind_evaluation_preview`, `match_result_format = contact_invite_token`, and `oprf_suite = ristretto255-sha512-preview`
 - raw-hash upload/match routes on the main app server remain disabled
 - manual contacts, invite links, and optional `@username` lookup remain the supported bootstrap paths outside the discovery service
 

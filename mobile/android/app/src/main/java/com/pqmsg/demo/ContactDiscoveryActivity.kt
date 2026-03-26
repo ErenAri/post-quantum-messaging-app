@@ -12,13 +12,21 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.launch
 import uniffi.pqmsg_android.buildContactDiscoveryTicketAuthHeaders
 import uniffi.pqmsg_android.buildContactsListAuthHeaders
 import uniffi.pqmsg_android.buildContactsRemoveAuthHeaders
 import uniffi.pqmsg_android.buildContactsUpsertAuthHeaders
+import uniffi.pqmsg_android.contactDiscoveryFinalizeTokens
+import uniffi.pqmsg_android.contactDiscoveryPrepareBlindRequest
 import uniffi.pqmsg_android.verifyContactDiscoveryManifest
+
+data class ContactDiscoveryBlindRequestResult(
+    val blinded_elements_base64: List<String>,
+    val blinding_scalars_base64: List<String>,
+)
 
 class ContactDiscoveryActivity : AppCompatActivity() {
     private val gson = Gson()
@@ -225,9 +233,11 @@ class ContactDiscoveryActivity : AppCompatActivity() {
             "Contact discovery manifest issuer key is unavailable"
         }
         require(
-            manifest.lookup_protocol == "hashed_handle_directory" &&
-                manifest.privacy_mode == "service_boundary_only" &&
-                manifest.match_result_format == "contact_invite_token",
+            manifest.lookup_protocol == "blind_token_directory_preview" &&
+                manifest.privacy_mode == "blind_evaluation_preview" &&
+                manifest.match_result_format == "contact_invite_token" &&
+                manifest.oprf_suite == "ristretto255-sha512-preview" &&
+                manifest.oprf_public_key_ristretto255.isNotBlank(),
         ) {
             "Unsupported contact discovery manifest"
         }
@@ -245,6 +255,25 @@ class ContactDiscoveryActivity : AppCompatActivity() {
             "Discovery values must be 64-character SHA-256 hex strings"
         }
         return values.distinct().sorted()
+    }
+
+    private fun prepareDiscoveryBlindRequest(hashes: List<String>): ContactDiscoveryBlindRequestResult {
+        val json = contactDiscoveryPrepareBlindRequest(gson.toJson(hashes))
+        return gson.fromJson(json, ContactDiscoveryBlindRequestResult::class.java)
+    }
+
+    private fun finalizeDiscoveryTokens(
+        blindingScalarsBase64: List<String>,
+        evaluatedElementsBase64: List<String>,
+    ): List<String> {
+        val json = contactDiscoveryFinalizeTokens(
+            gson.toJson(blindingScalarsBase64),
+            gson.toJson(evaluatedElementsBase64),
+        )
+        return gson.fromJson(
+            json,
+            object : TypeToken<List<String>>() {}.type,
+        )
     }
 
     private suspend fun issueDiscoveryTicket(context: ReadyMessagingContext): ContactDiscoveryTicketResponse {
@@ -292,17 +321,49 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 loadVerifiedDiscoveryManifest(context.capabilities)
                 val ticket = issueDiscoveryTicket(context)
                 val discoveryApi = ApiClientFactory.createDiscovery(ticket.service_origin)
+                val phonePrepared = prepareDiscoveryBlindRequest(phoneHashes)
+                val emailPrepared = prepareDiscoveryBlindRequest(emailHashes)
+                val phoneEvaluated =
+                    if (phonePrepared.blinded_elements_base64.isEmpty()) {
+                        emptyList()
+                    } else {
+                        discoveryApi.evaluateDiscoveryElements(
+                            PrivateDiscoveryEvaluateRequest(
+                                ticket = ticket.ticket,
+                                blinded_elements_base64 = phonePrepared.blinded_elements_base64,
+                            ),
+                        ).evaluated_elements_base64
+                    }
+                val emailEvaluated =
+                    if (emailPrepared.blinded_elements_base64.isEmpty()) {
+                        emptyList()
+                    } else {
+                        discoveryApi.evaluateDiscoveryElements(
+                            PrivateDiscoveryEvaluateRequest(
+                                ticket = ticket.ticket,
+                                blinded_elements_base64 = emailPrepared.blinded_elements_base64,
+                            ),
+                        ).evaluated_elements_base64
+                    }
+                val phoneTokens = finalizeDiscoveryTokens(
+                    phonePrepared.blinding_scalars_base64,
+                    phoneEvaluated,
+                )
+                val emailTokens = finalizeDiscoveryTokens(
+                    emailPrepared.blinding_scalars_base64,
+                    emailEvaluated,
+                )
                 val response = discoveryApi.uploadDiscoveryHandles(
                     PrivateDiscoveryHandlesUploadRequest(
                         ticket = ticket.ticket,
-                        phone_hashes_sha256 = phoneHashes,
-                        email_hashes_sha256 = emailHashes,
+                        phone_tokens_sha256 = phoneTokens,
+                        email_tokens_sha256 = emailTokens,
                     ),
                 )
                 statusText.text = getString(
                     R.string.contacts_discovery_uploaded_status,
-                    response.uploaded_phone_hashes,
-                    response.uploaded_email_hashes,
+                    response.uploaded_phone_tokens,
+                    response.uploaded_email_tokens,
                 )
             }.onFailure {
                 statusText.text = UiErrorMapper.fromThrowable(it, "Upload discovery handles").headline
@@ -331,10 +392,22 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 loadVerifiedDiscoveryManifest(context.capabilities)
                 val ticket = issueDiscoveryTicket(context)
                 val discoveryApi = ApiClientFactory.createDiscovery(ticket.service_origin)
+                val prepared = prepareDiscoveryBlindRequest(hashes)
+                val evaluated = discoveryApi.evaluateDiscoveryElements(
+                    PrivateDiscoveryEvaluateRequest(
+                        ticket = ticket.ticket,
+                        blinded_elements_base64 = prepared.blinded_elements_base64,
+                    ),
+                )
+                val tokens = finalizeDiscoveryTokens(
+                    prepared.blinding_scalars_base64,
+                    evaluated.evaluated_elements_base64,
+                )
+                val hashByToken = tokens.zip(hashes).toMap()
                 val response = discoveryApi.matchDiscoveryHashes(
                     PrivateDiscoveryMatchRequest(
                         ticket = ticket.ticket,
-                        hashes_sha256 = hashes,
+                        tokens_sha256 = tokens,
                     ),
                 )
                 if (response.matches.isEmpty()) {
@@ -343,7 +416,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 } else {
                     discoveryMatchesText.visibility = View.VISIBLE
                     discoveryMatchesText.text = response.matches.joinToString(separator = "\n") {
-                        "invite:${it.contact_invite_token.takeLast(8)} [${it.handle_kind}] ${it.hash_sha256}"
+                        "invite:${it.contact_invite_token.takeLast(8)} [${it.handle_kind}] ${hashByToken[it.token_sha256] ?: it.token_sha256}"
                     }
                     if (contactUserIdInput.text.isNullOrBlank()) {
                         contactUserIdInput.setText(

@@ -35,12 +35,14 @@ import {
   decryptDirectMessage,
   computeSafetyNumber,
   encryptDirectMessageWithSession,
+  finalizeContactDiscoveryTokens,
   generateIdentityKeys,
   identityFingerprint,
   initWasmCrypto,
   initiateDirectMessageSession,
   isPqSessionMessagingAvailable,
   openTransportEnvelopeWithSenderCert,
+  prepareContactDiscoveryBlindRequest,
   regeneratePublishedPrekeys,
   sealTransportEnvelopeWithSenderCert,
   verifyContactDiscoveryManifest,
@@ -55,8 +57,8 @@ import {
   type GroupMembershipRecord,
   type GroupMemberRecord,
   type IdentityLogItem,
-  type DiscoveryMatchItem,
   type DeviceRecord,
+  type PrivateDiscoveryMatchItem,
   type ServerCapabilitiesResponse,
   type TransparencyProofResponse,
 } from "./server";
@@ -4161,9 +4163,11 @@ async function renderSettings(): Promise<void> {
         capabilities.contact_discovery_manifest_issuer_ed25519_pub || "",
       );
       if (
-        contactDiscoveryManifest.lookup_protocol === "hashed_handle_directory" &&
-        contactDiscoveryManifest.privacy_mode === "service_boundary_only" &&
-        contactDiscoveryManifest.match_result_format === "contact_invite_token"
+        contactDiscoveryManifest.lookup_protocol === "blind_token_directory_preview" &&
+        contactDiscoveryManifest.privacy_mode === "blind_evaluation_preview" &&
+        contactDiscoveryManifest.match_result_format === "contact_invite_token" &&
+        contactDiscoveryManifest.oprf_suite === "ristretto255-sha512-preview" &&
+        !!contactDiscoveryManifest.oprf_public_key_ristretto255
       ) {
         contactDiscoveryManifestStatus = `Verified (${contactDiscoveryManifest.attestation_mode})`;
       } else {
@@ -5840,7 +5844,7 @@ async function renderDiscovery(): Promise<void> {
           <h3>Find Contacts</h3>
           <p class="text-secondary settings-desc">${
             contactDiscoveryMode === "private_service"
-              ? "Submit query hashes to the separate discovery service with a short-lived ticket. Matches only return user IDs that uploaded the same handle hashes."
+              ? "Blind-evaluate local handle hashes against the separate discovery service with a short-lived ticket. Matches only return opaque bootstrap invites for the same finalized tokens."
               : "Enter hashes to check who's registered."
           }</p>
           <label class="field">
@@ -5876,9 +5880,11 @@ async function renderDiscovery(): Promise<void> {
       capabilities.contact_discovery_manifest_issuer_ed25519_pub || "",
     );
     if (
-      manifest.lookup_protocol !== "hashed_handle_directory"
-      || manifest.privacy_mode !== "service_boundary_only"
+      manifest.lookup_protocol !== "blind_token_directory_preview"
+      || manifest.privacy_mode !== "blind_evaluation_preview"
       || manifest.match_result_format !== "contact_invite_token"
+      || manifest.oprf_suite !== "ristretto255-sha512-preview"
+      || !manifest.oprf_public_key_ristretto255
     ) {
       throw new Error("Unsupported contact discovery manifest");
     }
@@ -5897,12 +5903,34 @@ async function renderDiscovery(): Promise<void> {
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
       const { serviceOrigin, ticket } = await issueDiscoveryTicket(api, k);
+      const phonePrepared = prepareContactDiscoveryBlindRequest(phones);
+      const emailPrepared = prepareContactDiscoveryBlindRequest(emails);
+      const phoneEvaluated = phonePrepared.blindedElementsBase64.length === 0
+        ? { evaluated_elements_base64: [] }
+        : await api.evaluateDiscoveryElementsAtService(serviceOrigin, {
+          ticket,
+          blinded_elements_base64: phonePrepared.blindedElementsBase64,
+        });
+      const emailEvaluated = emailPrepared.blindedElementsBase64.length === 0
+        ? { evaluated_elements_base64: [] }
+        : await api.evaluateDiscoveryElementsAtService(serviceOrigin, {
+          ticket,
+          blinded_elements_base64: emailPrepared.blindedElementsBase64,
+        });
+      const phoneTokens = finalizeContactDiscoveryTokens(
+        phonePrepared.blindingScalarsBase64,
+        phoneEvaluated.evaluated_elements_base64,
+      );
+      const emailTokens = finalizeContactDiscoveryTokens(
+        emailPrepared.blindingScalarsBase64,
+        emailEvaluated.evaluated_elements_base64,
+      );
       const res = await api.uploadDiscoveryHandlesToService(serviceOrigin, {
         ticket,
-        phone_hashes_sha256: phones,
-        email_hashes_sha256: emails,
+        phone_tokens_sha256: phoneTokens,
+        email_tokens_sha256: emailTokens,
       });
-      statusEl.innerHTML = `<span class="text-success">✓ Uploaded ${res.uploaded_phone_hashes} phone + ${res.uploaded_email_hashes} email hashes</span>`;
+      statusEl.innerHTML = `<span class="text-success">Blind-evaluated and uploaded ${res.uploaded_phone_tokens} phone + ${res.uploaded_email_tokens} email tokens</span>`;
     } catch (e) {
       statusEl.innerHTML = `<span class="text-danger">Upload failed: ${escHtml(errorMsg(e))}</span>`;
     }
@@ -5917,9 +5945,22 @@ async function renderDiscovery(): Promise<void> {
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
       const { serviceOrigin, ticket } = await issueDiscoveryTicket(api, k);
+      const prepared = prepareContactDiscoveryBlindRequest(hashes);
+      const evaluated = await api.evaluateDiscoveryElementsAtService(serviceOrigin, {
+        ticket,
+        blinded_elements_base64: prepared.blindedElementsBase64,
+      });
+      const tokens = finalizeContactDiscoveryTokens(
+        prepared.blindingScalarsBase64,
+        evaluated.evaluated_elements_base64,
+      );
+      const hashByToken = new Map<string, string>();
+      tokens.forEach((token, index) => {
+        hashByToken.set(token, hashes[index]);
+      });
       const res = await api.matchDiscoveryHashesAtService(serviceOrigin, {
         ticket,
-        hashes_sha256: hashes,
+        tokens_sha256: tokens,
       });
       if (res.matches.length === 0) {
         resultsEl.innerHTML = '<p class="text-secondary">No matches found.</p>';
@@ -5929,9 +5970,9 @@ async function renderDiscovery(): Promise<void> {
         <table class="idlog-table">
           <thead><tr><th>Hash</th><th>Bootstrap</th><th>Type</th><th></th></tr></thead>
           <tbody>
-            ${res.matches.map((m: DiscoveryMatchItem) => `
+            ${res.matches.map((m: PrivateDiscoveryMatchItem) => `
               <tr>
-                <td class="mono fingerprint">${escHtml(m.hash_sha256)}</td>
+                <td class="mono fingerprint">${escHtml(hashByToken.get(m.token_sha256) || m.token_sha256)}</td>
                 <td class="mono">invite:${escHtml(m.contact_invite_token.slice(-8))}</td>
                 <td><span class="badge-info">${escHtml(m.handle_kind)}</span></td>
                 <td><button class="btn-sm" data-add-discovered="${escHtml(m.contact_invite_token)}">Add</button></td>

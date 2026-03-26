@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { ed25519 } from "@noble/curves/ed25519";
+import { ed25519, ristretto255 } from "@noble/curves/ed25519";
 
 vi.mock("./crypto-wasm", () => ({
   initWasm: vi.fn(async () => true),
@@ -72,6 +72,8 @@ import {
   decodeWireEnvelopeBase64,
   computeSafetyNumber,
   identityFingerprint,
+  finalizeContactDiscoveryTokens,
+  prepareContactDiscoveryBlindRequest,
   verifyContactDiscoveryManifest,
   type GeneratedKeys,
   type WireEnvelope,
@@ -163,9 +165,11 @@ describe("verifyContactDiscoveryManifest", () => {
       ticket_format: "base64(json-payload).base64(ed25519-signature)",
       ticket_issuer_ed25519_pub: "ticket-issuer-ed25519-pub",
       ticket_max_ttl_seconds: 300,
-      lookup_protocol: "hashed_handle_directory",
-      privacy_mode: "service_boundary_only",
+      lookup_protocol: "blind_token_directory_preview",
+      privacy_mode: "blind_evaluation_preview",
       match_result_format: "contact_invite_token",
+      oprf_suite: "ristretto255-sha512-preview",
+      oprf_public_key_ristretto255: bytesToBase64(ristretto255.Point.BASE.toBytes()),
       signed_at: new Date(Date.now() - 60_000).toISOString(),
       expires_at: new Date(Date.now() + 60_000).toISOString(),
     };
@@ -202,6 +206,27 @@ describe("verifyContactDiscoveryManifest", () => {
         manifest.manifest_issuer_ed25519_pub,
       );
     }).toThrow(/signature/i);
+  });
+
+  it("blind-evaluates discovery hashes into finalized tokens", () => {
+    const prepared = prepareContactDiscoveryBlindRequest(["11".repeat(32), "22".repeat(32)]);
+    const serverScalar = ristretto255.Point.Fn.create(17n);
+    const evaluated = prepared.blindedElementsBase64.map((blinded) =>
+      bytesToBase64(
+        ristretto255.Point
+          .fromBytes(base64ToBytes(blinded))
+          .multiply(serverScalar)
+          .toBytes(),
+      )
+    );
+    const tokens = finalizeContactDiscoveryTokens(
+      prepared.blindingScalarsBase64,
+      evaluated,
+    );
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).toMatch(/^[0-9a-f]{64}$/);
+    expect(tokens[1]).toMatch(/^[0-9a-f]{64}$/);
+    expect(tokens[0]).not.toBe(tokens[1]);
   });
 });
 

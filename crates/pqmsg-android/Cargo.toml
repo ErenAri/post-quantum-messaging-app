@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 base64.workspace = true
 chrono.workspace = true
+curve25519-dalek.workspace = true
 ed25519-dalek.workspace = true
 pqmsg-core = { version = "0.1.0", path = "../pqmsg-core", default-features = false, features = ["pq-rust"] }
 rand.workspace = true

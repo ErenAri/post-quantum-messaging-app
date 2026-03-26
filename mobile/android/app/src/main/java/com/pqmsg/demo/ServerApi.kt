@@ -586,21 +586,55 @@ data class ContactDiscoveryManifestResponse(
     val lookup_protocol: String,
     val privacy_mode: String,
     val match_result_format: String,
+    val oprf_suite: String,
+    val oprf_public_key_ristretto255: String,
     val signed_at: String,
     val expires_at: String,
     val manifest_issuer_ed25519_pub: String,
     val manifest_signature_ed25519: String,
 )
 
+data class PrivateDiscoveryEvaluateRequest(
+    val ticket: String,
+    val blinded_elements_base64: List<String>,
+)
+
+data class PrivateDiscoveryEvaluateResponse(
+    val user_id: String,
+    val device_id: String,
+    val evaluated_elements_base64: List<String>,
+    val evaluated_at: String,
+)
+
 data class PrivateDiscoveryHandlesUploadRequest(
     val ticket: String,
-    val phone_hashes_sha256: List<String>,
-    val email_hashes_sha256: List<String>,
+    val phone_tokens_sha256: List<String>,
+    val email_tokens_sha256: List<String>,
+)
+
+data class PrivateDiscoveryHandlesUploadResponse(
+    val user_id: String,
+    val device_id: String,
+    val uploaded_phone_tokens: Int,
+    val uploaded_email_tokens: Int,
+    val updated_at: String,
 )
 
 data class PrivateDiscoveryMatchRequest(
     val ticket: String,
-    val hashes_sha256: List<String>,
+    val tokens_sha256: List<String>,
+)
+
+data class PrivateDiscoveryMatchItem(
+    val token_sha256: String,
+    val contact_invite_token: String,
+    val handle_kind: String,
+)
+
+data class PrivateDiscoveryMatchResponse(
+    val user_id: String,
+    val matches: List<PrivateDiscoveryMatchItem>,
+    val checked_at: String,
 )
 
 // Profile & Presence & Typing
@@ -1236,15 +1270,20 @@ interface PqmsgDiscoveryApi {
     @GET("/v1/manifest")
     suspend fun getManifest(): ContactDiscoveryManifestResponse
 
+    @POST("/v1/discovery/evaluate")
+    suspend fun evaluateDiscoveryElements(
+        @Body request: PrivateDiscoveryEvaluateRequest,
+    ): PrivateDiscoveryEvaluateResponse
+
     @POST("/v1/discovery/handles")
     suspend fun uploadDiscoveryHandles(
         @Body request: PrivateDiscoveryHandlesUploadRequest,
-    ): DiscoveryHandlesUploadResponse
+    ): PrivateDiscoveryHandlesUploadResponse
 
     @POST("/v1/discovery/match")
     suspend fun matchDiscoveryHashes(
         @Body request: PrivateDiscoveryMatchRequest,
-    ): DiscoveryMatchResponse
+    ): PrivateDiscoveryMatchResponse
 }
 
 object ApiClientFactory {

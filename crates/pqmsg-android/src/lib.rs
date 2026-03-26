@@ -3,6 +3,8 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::{DateTime, Utc};
+use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+use curve25519_dalek::scalar::Scalar;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use pqmsg_core::ad::conversation_associated_data;
 use pqmsg_core::alg::{
@@ -44,7 +46,7 @@ use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_ONE_TIME_PREKEYS: u32 = 256;
@@ -328,6 +330,8 @@ struct ContactDiscoveryManifestPayloadRecord {
     lookup_protocol: String,
     privacy_mode: String,
     match_result_format: String,
+    oprf_suite: String,
+    oprf_public_key_ristretto255: String,
     signed_at: String,
     expires_at: String,
 }
@@ -338,6 +342,12 @@ struct ContactDiscoveryManifestRecord {
     payload: ContactDiscoveryManifestPayloadRecord,
     manifest_issuer_ed25519_pub: String,
     manifest_signature_ed25519: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContactDiscoveryBlindRequestRecord {
+    blinded_elements_base64: Vec<String>,
+    blinding_scalars_base64: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
@@ -1395,6 +1405,129 @@ pub fn verify_contact_discovery_manifest(
             operation_failed("contact discovery manifest signature verification failed")
         })?;
     Ok(true)
+}
+
+fn decode_hex_32(field: &str, value: &str) -> Result<[u8; 32], PqmsgAndroidError> {
+    let trimmed = value.trim();
+    if trimmed.len() != 64 || !trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid_input(format!(
+            "{field} must be a 64-character SHA-256 hex string"
+        )));
+    }
+    let mut decoded = [0u8; 32];
+    for (index, chunk) in trimmed.as_bytes().chunks_exact(2).enumerate() {
+        let upper = (chunk[0] as char)
+            .to_digit(16)
+            .ok_or_else(|| invalid_input(format!("{field} must be valid hex")))?;
+        let lower = (chunk[1] as char)
+            .to_digit(16)
+            .ok_or_else(|| invalid_input(format!("{field} must be valid hex")))?;
+        decoded[index] = ((upper << 4) | lower) as u8;
+    }
+    Ok(decoded)
+}
+
+fn derive_contact_discovery_handle_point(
+    handle_hash_sha256: &str,
+) -> Result<RistrettoPoint, PqmsgAndroidError> {
+    let handle_hash_bytes = decode_hex_32("handle_hash_sha256", handle_hash_sha256)?;
+    let uniform = Sha512::new()
+        .chain_update(b"pqmsg-discovery-handle-v1")
+        .chain_update(handle_hash_bytes)
+        .finalize();
+    let mut uniform_bytes = [0u8; 64];
+    uniform_bytes.copy_from_slice(&uniform);
+    Ok(RistrettoPoint::from_uniform_bytes(&uniform_bytes))
+}
+
+fn finalize_contact_discovery_token_hex(point: &RistrettoPoint) -> String {
+    let finalized = Sha256::new()
+        .chain_update(b"pqmsg-discovery-finalize-v1")
+        .chain_update(point.compress().to_bytes())
+        .finalize();
+    let mut hex = String::with_capacity(finalized.len() * 2);
+    for byte in finalized {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
+}
+
+#[uniffi::export]
+pub fn contact_discovery_prepare_blind_request(
+    handle_hashes_json: String,
+) -> Result<String, PqmsgAndroidError> {
+    let handle_hashes: Vec<String> = serde_json::from_str(&handle_hashes_json)?;
+    if handle_hashes.len() > 2048 {
+        return Err(invalid_input(
+            "contact discovery blind request supports at most 2048 handles",
+        ));
+    }
+    let mut blinded_elements_base64 = Vec::with_capacity(handle_hashes.len());
+    let mut blinding_scalars_base64 = Vec::with_capacity(handle_hashes.len());
+    let mut rng = OsRng;
+    for handle_hash in handle_hashes {
+        let point = derive_contact_discovery_handle_point(&handle_hash)?;
+        let blind_scalar = loop {
+            let mut wide = [0u8; 64];
+            rng.fill_bytes(&mut wide);
+            let candidate = Scalar::from_bytes_mod_order_wide(&wide);
+            if candidate != Scalar::ZERO {
+                break candidate;
+            }
+        };
+        let blinded_point = point * blind_scalar;
+        blinded_elements_base64.push(B64.encode(blinded_point.compress().to_bytes()));
+        blinding_scalars_base64.push(B64.encode(blind_scalar.to_bytes()));
+    }
+    serde_json::to_string_pretty(&ContactDiscoveryBlindRequestRecord {
+        blinded_elements_base64,
+        blinding_scalars_base64,
+    })
+    .map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn contact_discovery_finalize_tokens(
+    blinding_scalars_json: String,
+    evaluated_elements_json: String,
+) -> Result<String, PqmsgAndroidError> {
+    let blinding_scalars_base64: Vec<String> = serde_json::from_str(&blinding_scalars_json)?;
+    let evaluated_elements_base64: Vec<String> = serde_json::from_str(&evaluated_elements_json)?;
+    if blinding_scalars_base64.len() != evaluated_elements_base64.len() {
+        return Err(invalid_input(
+            "contact discovery evaluation result count mismatch",
+        ));
+    }
+    let tokens = blinding_scalars_base64
+        .into_iter()
+        .zip(evaluated_elements_base64.into_iter())
+        .map(|(blind_scalar_b64, evaluated_element_b64)| {
+            let blind_scalar = Scalar::from_bytes_mod_order(decode_b64_32(
+                "contact_discovery_blind_scalar",
+                &blind_scalar_b64,
+            )?);
+            if blind_scalar == Scalar::ZERO {
+                return Err(invalid_input(
+                    "contact discovery blinding scalar must not decode to zero",
+                ));
+            }
+            let evaluated_bytes = decode_b64_32(
+                "contact_discovery_evaluated_element",
+                &evaluated_element_b64,
+            )?;
+            let evaluated_point = CompressedRistretto(evaluated_bytes)
+                .decompress()
+                .ok_or_else(|| {
+                    invalid_input(
+                        "contact discovery evaluated element must decode to a valid compressed ristretto point",
+                    )
+                })?;
+            let unblinded = evaluated_point * blind_scalar.invert();
+            Ok(finalize_contact_discovery_token_hex(&unblinded))
+        })
+        .collect::<Result<Vec<_>, PqmsgAndroidError>>()?;
+    serde_json::to_string_pretty(&tokens).map_err(Into::into)
 }
 
 #[uniffi::export]
@@ -3508,9 +3641,11 @@ mod tests {
             ticket_format: "base64(json-payload).base64(ed25519-signature)".to_string(),
             ticket_issuer_ed25519_pub: "ticket-issuer-ed25519-pub".to_string(),
             ticket_max_ttl_seconds: 300,
-            lookup_protocol: "hashed_handle_directory".to_string(),
-            privacy_mode: "service_boundary_only".to_string(),
+            lookup_protocol: "blind_token_directory_preview".to_string(),
+            privacy_mode: "blind_evaluation_preview".to_string(),
             match_result_format: "contact_invite_token".to_string(),
+            oprf_suite: "ristretto255-sha512-preview".to_string(),
+            oprf_public_key_ristretto255: B64.encode([0x33; 32]),
             signed_at: (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
             expires_at: (Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
         };
@@ -3545,9 +3680,11 @@ mod tests {
                 ticket_format: "base64(json-payload).base64(ed25519-signature)".to_string(),
                 ticket_issuer_ed25519_pub: "ticket-issuer-ed25519-pub".to_string(),
                 ticket_max_ttl_seconds: 300,
-                lookup_protocol: "hashed_handle_directory".to_string(),
-                privacy_mode: "service_boundary_only".to_string(),
+                lookup_protocol: "blind_token_directory_preview".to_string(),
+                privacy_mode: "blind_evaluation_preview".to_string(),
                 match_result_format: "contact_invite_token".to_string(),
+                oprf_suite: "ristretto255-sha512-preview".to_string(),
+                oprf_public_key_ristretto255: B64.encode([0x44; 32]),
                 signed_at: (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
                 expires_at: (Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
             },
@@ -3563,6 +3700,42 @@ mod tests {
         )
         .expect_err("manifest signature should fail");
         assert!(error.to_string().contains("signature"));
+    }
+
+    #[test]
+    fn contact_discovery_blind_request_roundtrips_into_tokens() {
+        let request_json = contact_discovery_prepare_blind_request(
+            serde_json::to_string(&vec!["11".repeat(32), "22".repeat(32)])
+                .expect("serialize handle hashes"),
+        )
+        .expect("prepare blind request");
+        let request: ContactDiscoveryBlindRequestRecord =
+            serde_json::from_str(&request_json).expect("parse blind request");
+        let server_scalar = Scalar::from_bytes_mod_order([0x55; 32]);
+        let evaluated_elements_base64 = request
+            .blinded_elements_base64
+            .iter()
+            .map(|blinded| {
+                let point = CompressedRistretto(
+                    decode_b64_32("blinded", blinded).expect("decode blinded point"),
+                )
+                .decompress()
+                .expect("decompress blinded point");
+                B64.encode((point * server_scalar).compress().to_bytes())
+            })
+            .collect::<Vec<_>>();
+        let tokens_json = contact_discovery_finalize_tokens(
+            serde_json::to_string(&request.blinding_scalars_base64)
+                .expect("serialize blinding scalars"),
+            serde_json::to_string(&evaluated_elements_base64)
+                .expect("serialize evaluated elements"),
+        )
+        .expect("finalize tokens");
+        let tokens: Vec<String> = serde_json::from_str(&tokens_json).expect("parse tokens");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].len(), 64);
+        assert_eq!(tokens[1].len(), 64);
+        assert_ne!(tokens[0], tokens[1]);
     }
 
     #[test]

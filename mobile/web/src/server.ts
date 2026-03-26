@@ -216,6 +216,8 @@ export type ContactDiscoveryManifestResponse = {
   lookup_protocol: string;
   privacy_mode: string;
   match_result_format: string;
+  oprf_suite: string;
+  oprf_public_key_ristretto255: string;
   signed_at: string;
   expires_at: string;
   manifest_issuer_ed25519_pub: string;
@@ -715,6 +717,49 @@ export type DiscoveryMatchItem = {
 export type DiscoveryMatchResponse = {
   user_id: string;
   matches: DiscoveryMatchItem[];
+  checked_at: string;
+};
+
+export type PrivateDiscoveryEvaluateRequest = {
+  ticket: string;
+  blinded_elements_base64: string[];
+};
+
+export type PrivateDiscoveryEvaluateResponse = {
+  user_id: string;
+  device_id: string;
+  evaluated_elements_base64: string[];
+  evaluated_at: string;
+};
+
+export type PrivateDiscoveryHandlesUploadRequest = {
+  ticket: string;
+  phone_tokens_sha256: string[];
+  email_tokens_sha256: string[];
+};
+
+export type PrivateDiscoveryHandlesUploadResponse = {
+  user_id: string;
+  device_id: string;
+  uploaded_phone_tokens: number;
+  uploaded_email_tokens: number;
+  updated_at: string;
+};
+
+export type PrivateDiscoveryMatchRequest = {
+  ticket: string;
+  tokens_sha256: string[];
+};
+
+export type PrivateDiscoveryMatchItem = {
+  token_sha256: string;
+  contact_invite_token: string;
+  handle_kind: string;
+};
+
+export type PrivateDiscoveryMatchResponse = {
+  user_id: string;
+  matches: PrivateDiscoveryMatchItem[];
   checked_at: string;
 };
 
@@ -1524,10 +1569,30 @@ export class PqmsgApi {
     return response.json() as Promise<ContactDiscoveryManifestResponse>;
   }
 
+  async evaluateDiscoveryElementsAtService(
+    serviceOrigin: string,
+    payload: PrivateDiscoveryEvaluateRequest,
+  ): Promise<PrivateDiscoveryEvaluateResponse> {
+    const parsed = validateWebServerUrl(serviceOrigin);
+    const normalized = `${parsed.origin}`;
+    const response = await fetch(`${normalized}/v1/discovery/evaluate`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      throw new PqmsgApiError(response.status, await response.text());
+    }
+    return response.json() as Promise<PrivateDiscoveryEvaluateResponse>;
+  }
+
   async uploadDiscoveryHandlesToService(
     serviceOrigin: string,
-    payload: DiscoveryHandlesUploadRequest & { ticket: string }
-  ): Promise<DiscoveryHandlesUploadResponse> {
+    payload: PrivateDiscoveryHandlesUploadRequest
+  ): Promise<PrivateDiscoveryHandlesUploadResponse> {
     const parsed = validateWebServerUrl(serviceOrigin);
     const normalized = `${parsed.origin}`;
     const response = await fetch(`${normalized}/v1/discovery/handles`, {
@@ -1541,13 +1606,13 @@ export class PqmsgApi {
     if (!response.ok) {
       throw new PqmsgApiError(response.status, await response.text());
     }
-    return response.json() as Promise<DiscoveryHandlesUploadResponse>;
+    return response.json() as Promise<PrivateDiscoveryHandlesUploadResponse>;
   }
 
   async matchDiscoveryHashesAtService(
     serviceOrigin: string,
-    payload: DiscoveryMatchRequest & { ticket: string }
-  ): Promise<DiscoveryMatchResponse> {
+    payload: PrivateDiscoveryMatchRequest
+  ): Promise<PrivateDiscoveryMatchResponse> {
     const parsed = validateWebServerUrl(serviceOrigin);
     const normalized = `${parsed.origin}`;
     const response = await fetch(`${normalized}/v1/discovery/match`, {
@@ -1561,7 +1626,7 @@ export class PqmsgApi {
     if (!response.ok) {
       throw new PqmsgApiError(response.status, await response.text());
     }
-    return response.json() as Promise<DiscoveryMatchResponse>;
+    return response.json() as Promise<PrivateDiscoveryMatchResponse>;
   }
 
   async registerPushToken(
