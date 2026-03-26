@@ -1172,7 +1172,6 @@ Response:
       "message_id": 41,
       "group_id": "alpha-private",
       "epoch": 2,
-      "sender_user_id": "alice",
       "sent_at_unix_ms": 1775000000000,
       "ciphertext_nonce_base64": "base64(12 bytes)",
       "ciphertext_base64": "base64(encrypted_group_message)",
@@ -1190,7 +1189,8 @@ Rules:
 - Publish is authorized by the current epoch's active membership handle plus fetch capability.
 - Publish rejects stale epochs; clients must refresh opaque state before sending after a membership/epoch change.
 - Fetch is authorized by the current epoch's active membership handle plus fetch capability.
-- Message ciphertext remains opaque to the server, but the current interim transport still stores `sender_user_id` and per-group message rows. This is better than legacy clear-roster fanout, but not yet the final lowest-metadata design.
+- Fetch no longer returns clear `sender_user_id`; supported clients recover the sender locally by verifying the signed group envelope against the current member set.
+- Message ciphertext remains opaque to the server, but the current interim transport still stores per-group message rows and still learns `sender_user_id` on publish ingress. This is better than legacy clear-roster fanout, but not yet the final lowest-metadata design.
 
 ### 4.8F Sealed Sender Transport
 
@@ -1715,6 +1715,7 @@ Important capability flags:
 - `contact_discovery_ticket_issuer_ed25519_pub`: Ed25519 public key the separate discovery service must trust for ticket verification.
 - `private_service` discovery is currently development-only. Because `pqmsg-discovery` still advertises `lookup_protocol = "blind_token_directory_preview"` and `privacy_mode = "blind_evaluation_preview"`, only development deployments advertise it; pilot/production fall back to `manual_only`.
 - Development clients now also require a signed discovery manifest whose issuer matches `contact_discovery_manifest_issuer_ed25519_pub`.
+- Supported Android/web clients keep a local continuity checkpoint for the discovery service contract and fail closed if the signed manifest changes `service_origin`, issuer keys, protocol fields, attestation mode, or the OPRF public key on the same device.
 - `group_messaging_supported`: legacy clear-roster group API. Hardened deployments report `false`.
 - `private_group_state_supported`: opaque private-group state storage is available.
 - `private_group_messaging_supported`: the newer opaque private-group create/join/send flows are available.

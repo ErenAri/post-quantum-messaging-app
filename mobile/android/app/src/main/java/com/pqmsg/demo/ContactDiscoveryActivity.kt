@@ -15,6 +15,7 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.launch
+import java.time.Instant
 import uniffi.pqmsg_android.buildContactDiscoveryTicketAuthHeaders
 import uniffi.pqmsg_android.buildContactsListAuthHeaders
 import uniffi.pqmsg_android.buildContactsRemoveAuthHeaders
@@ -26,6 +27,11 @@ import uniffi.pqmsg_android.verifyContactDiscoveryManifest
 data class ContactDiscoveryBlindRequestResult(
     val blinded_elements_base64: List<String>,
     val blinding_scalars_base64: List<String>,
+)
+
+private data class VerifiedContactDiscoveryManifest(
+    val manifest: ContactDiscoveryManifestResponse,
+    val continuityStatus: String,
 )
 
 class ContactDiscoveryActivity : AppCompatActivity() {
@@ -110,7 +116,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                     context.capabilities.contact_discovery_mode == "private_service" &&
                     context.capabilities.contact_discovery_supported
                 ) {
-                    renderDiscoveryManifestSummary(context.capabilities)
+                    renderDiscoveryManifestSummary(context)
                 } else {
                     getString(R.string.contacts_private_manifest_unavailable)
                 }
@@ -181,12 +187,13 @@ class ContactDiscoveryActivity : AppCompatActivity() {
     }
 
     private suspend fun renderDiscoveryManifestSummary(
-        capabilities: ServerCapabilitiesResponse,
+        context: ReadyMessagingContext,
     ): String {
-        val manifest = loadVerifiedDiscoveryManifest(capabilities)
+        val verified = loadVerifiedDiscoveryManifest(context)
+        val manifest = verified.manifest
         val issuerMatches =
-            manifest.ticket_issuer_ed25519_pub == capabilities.contact_discovery_ticket_issuer_ed25519_pub
-        return if (issuerMatches) {
+            manifest.ticket_issuer_ed25519_pub == context.capabilities.contact_discovery_ticket_issuer_ed25519_pub
+        val summary = if (issuerMatches) {
             getString(
                 R.string.contacts_private_manifest_verified,
                 manifest.lookup_protocol,
@@ -201,15 +208,18 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 manifest.attestation_mode,
             )
         }
+        return "$summary\n${getString(R.string.contacts_private_manifest_continuity, verified.continuityStatus)}"
     }
 
     private suspend fun loadVerifiedDiscoveryManifest(
-        capabilities: ServerCapabilitiesResponse,
-    ): ContactDiscoveryManifestResponse {
+        context: ReadyMessagingContext,
+    ): VerifiedContactDiscoveryManifest {
+        val capabilities = context.capabilities
         val serviceOrigin = capabilities.contact_discovery_service_origin?.trim().orEmpty()
         require(serviceOrigin.isNotBlank()) {
             "Private contact discovery service is not configured"
         }
+        val normalizedServiceOrigin = ApiClientFactory.normalizeBaseUrl(serviceOrigin)
         val manifest = ApiClientFactory.createDiscovery(serviceOrigin).getManifest()
         require(
             manifest.ticket_issuer_ed25519_pub == capabilities.contact_discovery_ticket_issuer_ed25519_pub,
@@ -241,7 +251,41 @@ class ContactDiscoveryActivity : AppCompatActivity() {
         ) {
             "Unsupported contact discovery manifest"
         }
-        return manifest
+        val checkpoint = buildContactDiscoveryManifestCheckpoint(
+            serviceOrigin = normalizedServiceOrigin,
+            manifest = manifest,
+            observedAt = Instant.now().toString(),
+        )
+        val previousCheckpoint = store.readContactDiscoveryCheckpoint(
+            context.serverUrl,
+            context.profile.userId,
+        )?.let { checkpointJson ->
+            runCatching {
+                gson.fromJson(checkpointJson, ContactDiscoveryManifestCheckpoint::class.java)
+            }.getOrNull()
+        }
+        val changedFields =
+            if (previousCheckpoint == null) {
+                emptyList()
+            } else {
+                diffContactDiscoveryManifestCheckpoint(previousCheckpoint, checkpoint)
+            }
+        require(changedFields.isEmpty()) {
+            "Contact discovery manifest continuity changed: ${changedFields.joinToString(", ")}"
+        }
+        store.writeContactDiscoveryCheckpoint(
+            context.serverUrl,
+            context.profile.userId,
+            gson.toJson(checkpoint),
+        )
+        return VerifiedContactDiscoveryManifest(
+            manifest = manifest,
+            continuityStatus = if (previousCheckpoint == null) {
+                getString(R.string.contacts_private_manifest_continuity_saved)
+            } else {
+                getString(R.string.contacts_private_manifest_continuity_pinned)
+            },
+        )
     }
 
     private fun normalizeDiscoveryHashes(rawValue: String): List<String> {
@@ -318,7 +362,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 ) {
                     "Private contact discovery is unavailable for this profile"
                 }
-                loadVerifiedDiscoveryManifest(context.capabilities)
+                loadVerifiedDiscoveryManifest(context)
                 val ticket = issueDiscoveryTicket(context)
                 val discoveryApi = ApiClientFactory.createDiscovery(ticket.service_origin)
                 val phonePrepared = prepareDiscoveryBlindRequest(phoneHashes)
@@ -389,7 +433,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 ) {
                     "Private contact discovery is unavailable for this profile"
                 }
-                loadVerifiedDiscoveryManifest(context.capabilities)
+                loadVerifiedDiscoveryManifest(context)
                 val ticket = issueDiscoveryTicket(context)
                 val discoveryApi = ApiClientFactory.createDiscovery(ticket.service_origin)
                 val prepared = prepareDiscoveryBlindRequest(hashes)

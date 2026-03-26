@@ -87,6 +87,7 @@ import {
   removePrivateGroup,
   updateConversationMeta,
   readCursor,
+  readContactDiscoveryCheckpoint,
   readSealedCursor,
   readTransparencyCheckpoint,
   saveKeys,
@@ -98,10 +99,12 @@ import {
   wipeLocalState,
   writeProfileDisplayName,
   writeCursor,
+  writeContactDiscoveryCheckpoint,
   writeSealedCursor,
   writeIdentityPin,
   writePrivateGroupCursor,
   writeTransparencyCheckpoint,
+  type ContactDiscoveryCheckpoint,
   type IdentityPin,
   type ConversationKind,
   type ConversationMeta,
@@ -641,12 +644,13 @@ async function ensurePrivateGroupSenderPin(
 }
 
 function privateGroupTransportMessageFromServer(
-  item: import("./server").PrivateGroupMessageItem
+  item: import("./server").PrivateGroupMessageItem,
+  senderUserId: string
 ): PrivateGroupEncryptedMessage {
   return {
     group_id: item.group_id,
     epoch: item.epoch,
-    sender_user_id: item.sender_user_id,
+    sender_user_id: senderUserId,
     sent_at_unix_ms: item.sent_at_unix_ms,
     ciphertext: {
       nonce: Array.from(base64ToBytes(item.ciphertext_nonce_base64)),
@@ -655,6 +659,41 @@ function privateGroupTransportMessageFromServer(
     },
     sender_hybrid_signature: Array.from(base64ToBytes(item.sender_hybrid_signature_base64)),
   };
+}
+
+async function openPrivateGroupTransportMessageWithCandidates(
+  state: PrivateGroupState,
+  item: import("./server").PrivateGroupMessageItem,
+  api: PqmsgApi,
+  localKeys: GeneratedKeys
+): Promise<{ opened: PrivateGroupDecryptedMessage; senderPin: IdentityPin }> {
+  const candidateUserIds = [...new Set(state.members.map((member) => member.user_id))]
+    .sort((lhs, rhs) => {
+      const lhsPriority = lhs === setup.userId || readIdentityPin(setup.userId, lhs) ? 0 : 1;
+      const rhsPriority = rhs === setup.userId || readIdentityPin(setup.userId, rhs) ? 0 : 1;
+      if (lhsPriority !== rhsPriority) {
+        return lhsPriority - rhsPriority;
+      }
+      return lhs.localeCompare(rhs);
+    });
+  let lastError: unknown = null;
+  for (const candidateUserId of candidateUserIds) {
+    try {
+      const senderPin = await ensurePrivateGroupSenderPin(candidateUserId, api, localKeys);
+      const opened = privateGroupOpenMessage(
+        state,
+        privateGroupTransportMessageFromServer(item, candidateUserId),
+        senderPin.identitySigPub,
+        senderPin.identityPqSigPub
+      );
+      return { opened, senderPin };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Private-group sender could not be identified from the current group state.");
 }
 
 async function syncPrivateGroupMessagesForGroup(groupId: string): Promise<boolean> {
@@ -682,12 +721,11 @@ async function syncPrivateGroupMessagesForGroup(groupId: string): Promise<boolea
     if (item.message_id <= cursor) {
       continue;
     }
-    const senderPin = await ensurePrivateGroupSenderPin(item.sender_user_id, api, localKeys);
-    const opened = privateGroupOpenMessage(
+    const { opened } = await openPrivateGroupTransportMessageWithCandidates(
       state,
-      privateGroupTransportMessageFromServer(item),
-      senderPin.identitySigPub,
-      senderPin.identityPqSigPub
+      item,
+      api,
+      localKeys
     );
     const senderLabel = resolvePeerIdentity(opened.sender_user_id).primaryLabel;
     await saveMessage({
@@ -4134,6 +4172,97 @@ function showDeleteConfirm(bubble: HTMLElement, serverMessageId: number): void {
   });
 }
 
+function buildContactDiscoveryCheckpoint(
+  serviceOrigin: string,
+  manifest: ContactDiscoveryManifestResponse
+): ContactDiscoveryCheckpoint {
+  return {
+    service_origin: serviceOrigin,
+    manifest_issuer_ed25519_pub: manifest.manifest_issuer_ed25519_pub,
+    ticket_issuer_ed25519_pub: manifest.ticket_issuer_ed25519_pub,
+    protocol_version: manifest.protocol_version,
+    ticket_format: manifest.ticket_format,
+    lookup_protocol: manifest.lookup_protocol,
+    privacy_mode: manifest.privacy_mode,
+    match_result_format: manifest.match_result_format,
+    oprf_suite: manifest.oprf_suite,
+    oprf_public_key_ristretto255: manifest.oprf_public_key_ristretto255,
+    attestation_mode: manifest.attestation_mode,
+    observed_at: new Date().toISOString(),
+  };
+}
+
+function diffContactDiscoveryCheckpoint(
+  previous: ContactDiscoveryCheckpoint,
+  current: ContactDiscoveryCheckpoint
+): string[] {
+  const changed: string[] = [];
+  if (previous.service_origin !== current.service_origin) changed.push("service_origin");
+  if (previous.manifest_issuer_ed25519_pub !== current.manifest_issuer_ed25519_pub) {
+    changed.push("manifest_issuer_ed25519_pub");
+  }
+  if (previous.ticket_issuer_ed25519_pub !== current.ticket_issuer_ed25519_pub) {
+    changed.push("ticket_issuer_ed25519_pub");
+  }
+  if (previous.protocol_version !== current.protocol_version) changed.push("protocol_version");
+  if (previous.ticket_format !== current.ticket_format) changed.push("ticket_format");
+  if (previous.lookup_protocol !== current.lookup_protocol) changed.push("lookup_protocol");
+  if (previous.privacy_mode !== current.privacy_mode) changed.push("privacy_mode");
+  if (previous.match_result_format !== current.match_result_format) changed.push("match_result_format");
+  if (previous.oprf_suite !== current.oprf_suite) changed.push("oprf_suite");
+  if (previous.oprf_public_key_ristretto255 !== current.oprf_public_key_ristretto255) {
+    changed.push("oprf_public_key_ristretto255");
+  }
+  if (previous.attestation_mode !== current.attestation_mode) changed.push("attestation_mode");
+  return changed;
+}
+
+async function loadVerifiedContactDiscoveryManifest(
+  capabilities: ServerCapabilitiesResponse
+): Promise<{ manifest: ContactDiscoveryManifestResponse; continuityStatus: string }> {
+  if (
+    capabilities.contact_discovery_mode !== "private_service"
+    || !capabilities.contact_discovery_service_origin
+  ) {
+    throw new Error("Private contact discovery is not configured");
+  }
+  const apiClient = new PqmsgApi(setup.serverUrl);
+  const serviceOrigin = validateWebServerUrl(capabilities.contact_discovery_service_origin).origin;
+  const manifest = await apiClient.getContactDiscoveryManifest(serviceOrigin);
+  verifyContactDiscoveryManifest(
+    manifest,
+    capabilities.contact_discovery_ticket_issuer_ed25519_pub,
+    capabilities.contact_discovery_manifest_issuer_ed25519_pub || "",
+  );
+  if (
+    manifest.lookup_protocol !== "blind_token_directory_preview"
+    || manifest.privacy_mode !== "blind_evaluation_preview"
+    || manifest.match_result_format !== "contact_invite_token"
+    || manifest.oprf_suite !== "ristretto255-sha512-preview"
+    || !manifest.oprf_public_key_ristretto255
+  ) {
+    throw new Error("Unsupported contact discovery manifest");
+  }
+  let continuityStatus = "Not pinned";
+  if (setup.userId.trim()) {
+    const checkpoint = buildContactDiscoveryCheckpoint(serviceOrigin, manifest);
+    const previousCheckpoint = readContactDiscoveryCheckpoint(setup.serverUrl, setup.userId);
+    if (previousCheckpoint) {
+      const changedFields = diffContactDiscoveryCheckpoint(previousCheckpoint, checkpoint);
+      if (changedFields.length) {
+        throw new Error(
+          `Contact discovery manifest continuity changed: ${changedFields.join(", ")}`
+        );
+      }
+      continuityStatus = "Pinned on this device";
+    } else {
+      continuityStatus = "Saved on this device";
+    }
+    writeContactDiscoveryCheckpoint(setup.serverUrl, setup.userId, checkpoint);
+  }
+  return { manifest, continuityStatus };
+}
+
 // ---------------------------------------------------------------------------
 // 5. Settings screen
 // ---------------------------------------------------------------------------
@@ -4147,6 +4276,8 @@ async function renderSettings(): Promise<void> {
   const contactDiscoverySupported = capabilities?.contact_discovery_supported ?? false;
   const contactDiscoveryMode = capabilities?.contact_discovery_mode ?? "manual_only";
   let contactDiscoveryManifest: ContactDiscoveryManifestResponse | null = null;
+  let contactDiscoveryContinuityStatus =
+    contactDiscoveryMode === "private_service" ? "Unavailable" : "N/A";
   let contactDiscoveryManifestStatus =
     contactDiscoveryMode === "private_service" ? "Manifest unavailable" : "Manual-only";
   if (
@@ -4154,27 +4285,16 @@ async function renderSettings(): Promise<void> {
     capabilities?.contact_discovery_service_origin
   ) {
     try {
-      contactDiscoveryManifest = await api.getContactDiscoveryManifest(
-        capabilities.contact_discovery_service_origin,
-      );
-      verifyContactDiscoveryManifest(
-        contactDiscoveryManifest,
-        capabilities.contact_discovery_ticket_issuer_ed25519_pub,
-        capabilities.contact_discovery_manifest_issuer_ed25519_pub || "",
-      );
-      if (
-        contactDiscoveryManifest.lookup_protocol === "blind_token_directory_preview" &&
-        contactDiscoveryManifest.privacy_mode === "blind_evaluation_preview" &&
-        contactDiscoveryManifest.match_result_format === "contact_invite_token" &&
-        contactDiscoveryManifest.oprf_suite === "ristretto255-sha512-preview" &&
-        !!contactDiscoveryManifest.oprf_public_key_ristretto255
-      ) {
-        contactDiscoveryManifestStatus = `Verified (${contactDiscoveryManifest.attestation_mode})`;
-      } else {
-        contactDiscoveryManifestStatus = "Unsupported manifest";
-      }
-    } catch {
-      contactDiscoveryManifestStatus = "Manifest unavailable";
+      const verifiedManifest = await loadVerifiedContactDiscoveryManifest(capabilities);
+      contactDiscoveryManifest = verifiedManifest.manifest;
+      contactDiscoveryManifestStatus = `Verified (${contactDiscoveryManifest.attestation_mode})`;
+      contactDiscoveryContinuityStatus = verifiedManifest.continuityStatus;
+    } catch (error) {
+      contactDiscoveryManifestStatus =
+        error instanceof Error ? error.message : "Manifest unavailable";
+      contactDiscoveryContinuityStatus = contactDiscoveryManifestStatus.includes("continuity changed")
+        ? "Changed on this device"
+        : "Unavailable";
     }
   }
   app.innerHTML = `
@@ -4290,6 +4410,7 @@ async function renderSettings(): Promise<void> {
           ${
             contactDiscoveryMode === "private_service"
               ? `<div class="settings-row"><span>Manifest</span><span>${escHtml(contactDiscoveryManifestStatus)}</span></div>
+          <div class="settings-row"><span>Manifest Continuity</span><span>${escHtml(contactDiscoveryContinuityStatus)}</span></div>
           <div class="settings-row"><span>Service Origin</span><span class="mono">${escHtml(capabilities?.contact_discovery_service_origin || "not configured")}</span></div>
           <div class="settings-row"><span>Lookup Protocol</span><span>${escHtml(contactDiscoveryManifest?.lookup_protocol || "unknown")}</span></div>`
               : ""
@@ -5873,21 +5994,7 @@ async function renderDiscovery(): Promise<void> {
     if (configuredOrigin && configuredOrigin !== ticketOrigin) {
       throw new Error("Contact discovery service origin mismatch");
     }
-    const manifest = await api.getContactDiscoveryManifest(ticketOrigin);
-    verifyContactDiscoveryManifest(
-      manifest,
-      capabilities.contact_discovery_ticket_issuer_ed25519_pub,
-      capabilities.contact_discovery_manifest_issuer_ed25519_pub || "",
-    );
-    if (
-      manifest.lookup_protocol !== "blind_token_directory_preview"
-      || manifest.privacy_mode !== "blind_evaluation_preview"
-      || manifest.match_result_format !== "contact_invite_token"
-      || manifest.oprf_suite !== "ristretto255-sha512-preview"
-      || !manifest.oprf_public_key_ristretto255
-    ) {
-      throw new Error("Unsupported contact discovery manifest");
-    }
+    await loadVerifiedContactDiscoveryManifest(capabilities);
     return {
       serviceOrigin: ticketOrigin,
       ticket: response.ticket,

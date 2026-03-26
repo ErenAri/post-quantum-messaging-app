@@ -567,7 +567,6 @@ pub(crate) async fn fetch_private_group_messages(
     let rows = sqlx::query(
         "SELECT
             message_id,
-            sender_user_id,
             sent_at_unix_ms,
             ciphertext_nonce_base64,
             ciphertext_base64,
@@ -594,7 +593,6 @@ pub(crate) async fn fetch_private_group_messages(
                 message_id: row.try_get("message_id")?,
                 group_id: group_id.clone(),
                 epoch: epoch as u64,
-                sender_user_id: row.try_get("sender_user_id")?,
                 sent_at_unix_ms: u64::try_from(sent_at_unix_ms).map_err(|_| {
                     AppError::bad_request("stored private group message timestamp is invalid")
                 })?,

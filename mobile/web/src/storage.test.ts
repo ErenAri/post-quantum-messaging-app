@@ -54,6 +54,8 @@ import {
   readIdentityPin,
   writeIdentityPin,
   listIdentityPins,
+  readContactDiscoveryCheckpoint,
+  writeContactDiscoveryCheckpoint,
   loadConversationMeta,
   loadConversationMetas,
   updateConversationMeta,
@@ -74,6 +76,7 @@ import {
   loadDirectMessageSession,
   wipeLocalState,
   type SetupConfig,
+  type ContactDiscoveryCheckpoint,
   type IdentityPin,
 } from "./storage";
 import { sealJsonWithPassphrase } from "./crypto";
@@ -267,6 +270,66 @@ describe("cursors", () => {
     expect(readCursor("alice", "d1")).toBe(10);
     expect(readCursor("alice", "d2")).toBe(20);
     expect(readCursor("alice")).toBe(0); // no device-less cursor
+  });
+});
+
+describe("contact discovery checkpoints", () => {
+  it("round-trips per-account discovery manifest checkpoints", () => {
+    const checkpoint: ContactDiscoveryCheckpoint = {
+      service_origin: "https://cdsi.example",
+      manifest_issuer_ed25519_pub: "manifest-issuer-pub",
+      ticket_issuer_ed25519_pub: "ticket-issuer-pub",
+      protocol_version: 1,
+      ticket_format: "ed25519-ticket-v1",
+      lookup_protocol: "blind_token_directory_preview",
+      privacy_mode: "blind_evaluation_preview",
+      match_result_format: "contact_invite_token",
+      oprf_suite: "ristretto255-sha512-preview",
+      oprf_public_key_ristretto255: "oprf-pub-1",
+      attestation_mode: "service_boundary_only",
+      observed_at: "2026-03-26T00:00:00Z",
+    };
+    writeContactDiscoveryCheckpoint("https://app.example", "alice", checkpoint);
+    expect(readContactDiscoveryCheckpoint("https://app.example", "alice")).toEqual(checkpoint);
+    expect(readContactDiscoveryCheckpoint("https://app.example", "bob")).toBeNull();
+  });
+
+  it("wipeLocalState clears only the current user's discovery checkpoints", async () => {
+    writeContactDiscoveryCheckpoint("https://app.example", "alice", {
+      service_origin: "https://cdsi.example",
+      manifest_issuer_ed25519_pub: "manifest-issuer-pub",
+      ticket_issuer_ed25519_pub: "ticket-issuer-pub",
+      protocol_version: 1,
+      ticket_format: "ed25519-ticket-v1",
+      lookup_protocol: "blind_token_directory_preview",
+      privacy_mode: "blind_evaluation_preview",
+      match_result_format: "contact_invite_token",
+      oprf_suite: "ristretto255-sha512-preview",
+      oprf_public_key_ristretto255: "oprf-pub-1",
+      attestation_mode: "service_boundary_only",
+      observed_at: "2026-03-26T00:00:00Z",
+    });
+    writeContactDiscoveryCheckpoint("https://app.example", "bob", {
+      service_origin: "https://cdsi.example",
+      manifest_issuer_ed25519_pub: "manifest-issuer-pub",
+      ticket_issuer_ed25519_pub: "ticket-issuer-pub",
+      protocol_version: 1,
+      ticket_format: "ed25519-ticket-v1",
+      lookup_protocol: "blind_token_directory_preview",
+      privacy_mode: "blind_evaluation_preview",
+      match_result_format: "contact_invite_token",
+      oprf_suite: "ristretto255-sha512-preview",
+      oprf_public_key_ristretto255: "oprf-pub-1",
+      attestation_mode: "service_boundary_only",
+      observed_at: "2026-03-26T00:00:00Z",
+    });
+
+    await wipeLocalState("alice");
+
+    expect(readContactDiscoveryCheckpoint("https://app.example", "alice")).toBeNull();
+    expect(readContactDiscoveryCheckpoint("https://app.example", "bob")?.service_origin).toBe(
+      "https://cdsi.example"
+    );
   });
 });
 

@@ -437,7 +437,6 @@ export type PrivateGroupMessageItem = {
   message_id: number;
   group_id: string;
   epoch: number;
-  sender_user_id: string;
   sent_at_unix_ms: number;
   ciphertext_nonce_base64: string;
   ciphertext_base64: string;

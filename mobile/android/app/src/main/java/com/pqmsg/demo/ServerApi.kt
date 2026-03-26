@@ -435,7 +435,6 @@ data class PrivateGroupMessageItem(
     val message_id: Long,
     val group_id: String,
     val epoch: Long,
-    val sender_user_id: String,
     val sent_at_unix_ms: Long,
     val ciphertext_nonce_base64: String,
     val ciphertext_base64: String,

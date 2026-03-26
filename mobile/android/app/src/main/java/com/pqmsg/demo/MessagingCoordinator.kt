@@ -635,6 +635,58 @@ object MessagingCoordinator {
             ?: error("identity pin missing for private-group sender $senderUserId")
     }
 
+    private suspend fun openPrivateGroupMessageWithCandidateSenders(
+        store: LocalStateStore,
+        context: ReadyMessagingContext,
+        state: PrivateGroupState,
+        item: PrivateGroupMessageItem,
+        keysJson: String,
+    ): PrivateGroupDecryptedMessage {
+        val candidateUserIds = state.members
+            .map { it.user_id }
+            .distinct()
+            .sortedWith(
+                compareBy<String> { candidate ->
+                    if (candidate == context.profile.userId || store.readIdentityPin(context.profile.userId, candidate) != null) {
+                        0
+                    } else {
+                        1
+                    }
+                }.thenBy { it },
+            )
+        var lastError: Throwable? = null
+        for (candidateUserId in candidateUserIds) {
+            try {
+                val senderPin = ensurePrivateGroupSenderIdentityPin(
+                    store = store,
+                    context = context,
+                    senderUserId = candidateUserId,
+                    keysJson = keysJson,
+                )
+                return openPrivateGroupTransportMessage(
+                    state = state,
+                    message = PrivateGroupEncryptedMessage(
+                        group_id = item.group_id,
+                        epoch = item.epoch,
+                        sender_user_id = candidateUserId,
+                        sent_at_unix_ms = item.sent_at_unix_ms,
+                        ciphertext = PrivateGroupCiphertextEnvelope(
+                            nonce = Base64.getDecoder().decode(item.ciphertext_nonce_base64).map { it.toInt() and 0xff },
+                            ciphertext = Base64.getDecoder().decode(item.ciphertext_base64).map { it.toInt() and 0xff },
+                            aad = Base64.getDecoder().decode(item.ciphertext_aad_base64).map { it.toInt() and 0xff },
+                        ),
+                        sender_hybrid_signature = Base64.getDecoder().decode(item.sender_hybrid_signature_base64).map { it.toInt() and 0xff },
+                    ),
+                    senderIdentitySigPubB64 = senderPin.identitySigPub,
+                    senderIdentityPqSigPubB64 = senderPin.identityPqSigPub,
+                )
+            } catch (error: Throwable) {
+                lastError = error
+            }
+        }
+        throw lastError ?: error("private-group sender could not be identified from the current group state")
+    }
+
     private suspend fun syncPrivateGroupMessages(
         store: LocalStateStore,
         context: ReadyMessagingContext,
@@ -658,28 +710,12 @@ object MessagingCoordinator {
                 if (item.message_id <= cursor) {
                     continue
                 }
-                val senderPin = ensurePrivateGroupSenderIdentityPin(
+                val opened = openPrivateGroupMessageWithCandidateSenders(
                     store = store,
                     context = context,
-                    senderUserId = item.sender_user_id,
-                    keysJson = keysJson,
-                )
-                val opened = openPrivateGroupTransportMessage(
                     state = state,
-                    message = PrivateGroupEncryptedMessage(
-                        group_id = item.group_id,
-                        epoch = item.epoch,
-                        sender_user_id = item.sender_user_id,
-                        sent_at_unix_ms = item.sent_at_unix_ms,
-                        ciphertext = PrivateGroupCiphertextEnvelope(
-                            nonce = Base64.getDecoder().decode(item.ciphertext_nonce_base64).map { it.toInt() and 0xff },
-                            ciphertext = Base64.getDecoder().decode(item.ciphertext_base64).map { it.toInt() and 0xff },
-                            aad = Base64.getDecoder().decode(item.ciphertext_aad_base64).map { it.toInt() and 0xff },
-                        ),
-                        sender_hybrid_signature = Base64.getDecoder().decode(item.sender_hybrid_signature_base64).map { it.toInt() and 0xff },
-                    ),
-                    senderIdentitySigPubB64 = senderPin.identitySigPub,
-                    senderIdentityPqSigPubB64 = senderPin.identityPqSigPub,
+                    item = item,
+                    keysJson = keysJson,
                 )
                 store.appendGroupThreadMessage(
                     userId = context.profile.userId,

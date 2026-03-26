@@ -369,7 +369,6 @@ pub(crate) struct PrivateGroupMessageItem {
     pub(crate) message_id: i64,
     pub(crate) group_id: String,
     pub(crate) epoch: u64,
-    pub(crate) sender_user_id: String,
     pub(crate) sent_at_unix_ms: u64,
     pub(crate) ciphertext_nonce_base64: String,
     pub(crate) ciphertext_base64: String,

@@ -144,6 +144,9 @@
     <string name="contacts_private_manifest_unavailable">Discovery manifest unavailable.</string>
     <string name="contacts_private_manifest_verified">Manifest verified: %1$s / %2$s (%3$s)</string>
     <string name="contacts_private_manifest_mismatch">Manifest issuer mismatch: %1$s / %2$s (%3$s)</string>
+    <string name="contacts_private_manifest_continuity">Continuity: %1$s</string>
+    <string name="contacts_private_manifest_continuity_saved">saved on this device</string>
+    <string name="contacts_private_manifest_continuity_pinned">pinned on this device</string>
     <string name="contacts_private_service_status">%1$d manual contact(s); separate discovery service available</string>
     <string name="contacts_discovery_uploaded_status">Blind-evaluated and uploaded %1$d phone token(s) and %2$d email token(s) to the discovery service.</string>
     <string name="contacts_discovery_matches_status">Discovery search returned %1$d match(es). Review the list below and add any contact you trust.</string>

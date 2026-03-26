@@ -7082,7 +7082,7 @@ async fn private_group_message_publish_and_fetch_work() {
         .expect("messages array");
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["message_id"].as_i64(), Some(message_id));
-    assert_eq!(messages[0]["sender_user_id"].as_str(), Some("member-user"));
+    assert!(messages[0].get("sender_user_id").is_none());
     assert_eq!(
         messages[0]["ciphertext_base64"].as_str(),
         Some(B64.encode(b"opaque-private-group-message-v1").as_str())

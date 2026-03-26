@@ -352,7 +352,6 @@ describe("PqmsgApi methods", () => {
             message_id: 41,
             group_id: "pg-1",
             epoch: 2,
-            sender_user_id: "alice",
             sent_at_unix_ms: 1_775_000_000_000,
             ciphertext_nonce_base64: "bm9uY2UxMjM0NTY3",
             ciphertext_base64: "Y2lwaGVydGV4dA==",

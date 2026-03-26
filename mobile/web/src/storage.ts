@@ -83,6 +83,21 @@ export type TransparencyCheckpoint = {
   signature: string;
 };
 
+export type ContactDiscoveryCheckpoint = {
+  service_origin: string;
+  manifest_issuer_ed25519_pub: string;
+  ticket_issuer_ed25519_pub: string;
+  protocol_version: number;
+  ticket_format: string;
+  lookup_protocol: string;
+  privacy_mode: string;
+  match_result_format: string;
+  oprf_suite: string;
+  oprf_public_key_ristretto255: string;
+  attestation_mode: string;
+  observed_at: string;
+};
+
 const SETUP_KEY = "pqmsg.web.setup.v1";
 const CONVERSATIONS_KEY = "pqmsg.web.conversations.v1";
 const GROUP_CONVOS_KEY = "pqmsg.web.groupconvos.v1";
@@ -93,6 +108,7 @@ const PINS_KEY = "pqmsg.web.pins.v1";
 const CURSORS_KEY = "pqmsg.web.cursors.v1";
 const PRIVATE_GROUP_CURSORS_KEY = "pqmsg.web.privategroupcursors.v1";
 const TRANSPARENCY_KEY = "pqmsg.web.transparency.v1";
+const CONTACT_DISCOVERY_KEY = "pqmsg.web.contactdiscovery.v1";
 const METADATA_KEYS = [
   SETUP_KEY,
   CONVERSATIONS_KEY,
@@ -104,6 +120,7 @@ const METADATA_KEYS = [
   CURSORS_KEY,
   PRIVATE_GROUP_CURSORS_KEY,
   TRANSPARENCY_KEY,
+  CONTACT_DISCOVERY_KEY,
 ] as const;
 const metadataCache = new Map<string, string | null>();
 const localKeyUsers = new Set<string>();
@@ -453,6 +470,24 @@ export function writeTransparencyCheckpoint(
   writeRecord(TRANSPARENCY_KEY, checkpoints);
 }
 
+export function readContactDiscoveryCheckpoint(
+  serverUrl: string,
+  userId: string,
+): ContactDiscoveryCheckpoint | null {
+  const checkpoints = parseRecord<Record<string, ContactDiscoveryCheckpoint>>(CONTACT_DISCOVERY_KEY, {});
+  return checkpoints[`${serverUrl.trim()}::${userId.trim()}`] ?? null;
+}
+
+export function writeContactDiscoveryCheckpoint(
+  serverUrl: string,
+  userId: string,
+  checkpoint: ContactDiscoveryCheckpoint,
+): void {
+  const checkpoints = parseRecord<Record<string, ContactDiscoveryCheckpoint>>(CONTACT_DISCOVERY_KEY, {});
+  checkpoints[`${serverUrl.trim()}::${userId.trim()}`] = checkpoint;
+  writeRecord(CONTACT_DISCOVERY_KEY, checkpoints);
+}
+
 type PinRow = IdentityPin & { userId: string; peerUserId: string };
 
 export function readIdentityPin(userId: string, peerUserId: string): IdentityPin | null {
@@ -701,6 +736,17 @@ export async function wipeLocalState(userId: string): Promise<void> {
     }
   }
   writeRecord(TRANSPARENCY_KEY, checkpoints);
+
+  const discoveryCheckpoints = parseRecord<Record<string, ContactDiscoveryCheckpoint>>(
+    CONTACT_DISCOVERY_KEY,
+    {},
+  );
+  for (const checkpointKey of Object.keys(discoveryCheckpoints)) {
+    if (checkpointKey.endsWith(`::${normalizedUser}`)) {
+      delete discoveryCheckpoints[checkpointKey];
+    }
+  }
+  writeRecord(CONTACT_DISCOVERY_KEY, discoveryCheckpoints);
 
   await clearAllDirectMessageSessions(normalizedUser);
 }

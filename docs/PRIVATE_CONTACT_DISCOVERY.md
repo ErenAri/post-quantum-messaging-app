@@ -86,7 +86,7 @@ Responsibilities:
 ## Proposed Flow
 
 1. Client fetches `/v1/capabilities`.
-2. If `contact_discovery_mode == "private_service"`, client fetches `/v1/manifest` from `contact_discovery_service_origin` and verifies the signed manifest against `contact_discovery_manifest_issuer_ed25519_pub`.
+2. If `contact_discovery_mode == "private_service"`, client fetches `/v1/manifest` from `contact_discovery_service_origin`, verifies the signed manifest against `contact_discovery_manifest_issuer_ed25519_pub`, and compares the service identity/protocol contract against a local continuity checkpoint for that account.
 3. Client requests `/v1/users/{user_id}/contact-discovery/ticket`.
 4. Client performs the current blind-evaluation preview directly against `contact_discovery_service_origin`.
 5. Discovery service returns matched opaque bootstrap invite references.
@@ -143,6 +143,7 @@ Until the separate service lookup protocol exists, the correct server/client pos
 - `contact_discovery_supported = true` only when a separate discovery service is configured and the app server is running in `development`
 - `contact_discovery_mode = "private_service"` only for that development-only separate-service ticket flow
 - `contact_discovery_manifest_issuer_ed25519_pub` must be present, and clients verify the signed discovery manifest before using the service
+- development clients now also pin a local continuity checkpoint for the discovery service contract and fail closed if `service_origin`, issuer keys, protocol fields, or the OPRF public key change silently on the same device
 - the current manifest commits to `lookup_protocol = blind_token_directory_preview`, `privacy_mode = blind_evaluation_preview`, `match_result_format = contact_invite_token`, and `oprf_suite = ristretto255-sha512-preview`
 - raw-hash upload/match routes on the main app server remain disabled
 - manual contacts, invite links, and optional `@username` lookup remain the supported bootstrap paths outside the discovery service

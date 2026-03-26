@@ -24,7 +24,31 @@ type MockKeys = {
 type BootOptions = {
   existingUsers?: string[];
   bundleUsers?: string[];
-  capabilities?: { web_client_policy?: string };
+  capabilities?: {
+    web_client_policy?: string;
+    contact_discovery_supported?: boolean;
+    contact_discovery_mode?: string;
+    contact_discovery_service_origin?: string | null;
+    contact_discovery_manifest_issuer_ed25519_pub?: string | null;
+    contact_discovery_ticket_issuer_ed25519_pub?: string;
+  };
+  discoveryManifest?: {
+    service?: string;
+    protocol_version?: number;
+    attestation_mode?: string;
+    ticket_format?: string;
+    ticket_issuer_ed25519_pub?: string;
+    ticket_max_ttl_seconds?: number;
+    lookup_protocol?: string;
+    privacy_mode?: string;
+    match_result_format?: string;
+    oprf_suite?: string;
+    oprf_public_key_ristretto255?: string;
+    signed_at?: string;
+    expires_at?: string;
+    manifest_issuer_ed25519_pub?: string;
+    manifest_signature_ed25519?: string;
+  };
   profileTokensRequireContact?: boolean;
   transparencyMismatchUsers?: string[];
   prepare?: (storage: typeof import("./storage")) => Promise<void> | void;
@@ -220,11 +244,7 @@ async function bootApp(options: BootOptions = {}) {
       registration_pow_bits: 0,
       prekey_bundle_reserve_count: 0,
       pq_ratchet_interval: 1,
-      contact_discovery_supported: false,
-      contact_discovery_mode: "manual_only",
       contact_discovery_ticket_supported: false,
-      contact_discovery_service_origin: null,
-      contact_discovery_manifest_issuer_ed25519_pub: null,
       presence_supported: false,
       typing_indicators_supported: false,
       read_receipts_supported: false,
@@ -238,12 +258,45 @@ async function bootApp(options: BootOptions = {}) {
       sender_certificate_supported: true,
       key_transparency_supported: true,
       sealed_delivery_tokens_supported: true,
-      contact_discovery_ticket_issuer_ed25519_pub: "issuer-ed25519-pub",
       sender_certificate_issuer_ed25519_pub: "issuer-ed25519-pub",
       transparency_log_issuer_ed25519_pub: "issuer-ed25519-pub",
       authenticated_direct_messaging_supported: false,
       ephemeral_messaging_supported: false,
       web_client_policy: options.capabilities?.web_client_policy ?? "interop_candidate",
+      contact_discovery_supported: options.capabilities?.contact_discovery_supported ?? false,
+      contact_discovery_mode: options.capabilities?.contact_discovery_mode ?? "manual_only",
+      contact_discovery_service_origin:
+        options.capabilities?.contact_discovery_service_origin ?? null,
+      contact_discovery_manifest_issuer_ed25519_pub:
+        options.capabilities?.contact_discovery_manifest_issuer_ed25519_pub ?? null,
+      contact_discovery_ticket_issuer_ed25519_pub:
+        options.capabilities?.contact_discovery_ticket_issuer_ed25519_pub ?? "issuer-ed25519-pub",
+    },
+    contactDiscoveryManifest: {
+      service: options.discoveryManifest?.service ?? "cdsi-preview",
+      protocol_version: options.discoveryManifest?.protocol_version ?? 1,
+      attestation_mode: options.discoveryManifest?.attestation_mode ?? "service_boundary_only",
+      ticket_format: options.discoveryManifest?.ticket_format ?? "ed25519-ticket-v1",
+      ticket_issuer_ed25519_pub:
+        options.discoveryManifest?.ticket_issuer_ed25519_pub
+        ?? options.capabilities?.contact_discovery_ticket_issuer_ed25519_pub
+        ?? "issuer-ed25519-pub",
+      ticket_max_ttl_seconds: options.discoveryManifest?.ticket_max_ttl_seconds ?? 300,
+      lookup_protocol:
+        options.discoveryManifest?.lookup_protocol ?? "blind_token_directory_preview",
+      privacy_mode: options.discoveryManifest?.privacy_mode ?? "blind_evaluation_preview",
+      match_result_format: options.discoveryManifest?.match_result_format ?? "contact_invite_token",
+      oprf_suite: options.discoveryManifest?.oprf_suite ?? "ristretto255-sha512-preview",
+      oprf_public_key_ristretto255:
+        options.discoveryManifest?.oprf_public_key_ristretto255 ?? "oprf-pub-1",
+      signed_at: options.discoveryManifest?.signed_at ?? "2026-03-26T00:00:00Z",
+      expires_at: options.discoveryManifest?.expires_at ?? "2026-03-26T00:05:00Z",
+      manifest_issuer_ed25519_pub:
+        options.discoveryManifest?.manifest_issuer_ed25519_pub
+        ?? options.capabilities?.contact_discovery_manifest_issuer_ed25519_pub
+        ?? "manifest-issuer-pub",
+      manifest_signature_ed25519:
+        options.discoveryManifest?.manifest_signature_ed25519 ?? "manifest-sig",
     },
   };
 
@@ -432,6 +485,15 @@ async function bootApp(options: BootOptions = {}) {
       buildEphemeralRelayAuthHeaders: emptyHeaders,
       buildDiscoveryHandlesAuthHeaders: emptyHeaders,
       buildDiscoveryMatchAuthHeaders: emptyHeaders,
+      verifyContactDiscoveryManifest: vi.fn(),
+      prepareContactDiscoveryBlindRequest: vi.fn((hashes: string[]) => ({
+        blinded_elements_base64: hashes.map((value) => `blind:${value}`),
+        blinding_scalars_base64: hashes.map((value) => `scalar:${value}`),
+      })),
+      finalizeContactDiscoveryTokens: vi.fn(
+        (scalars: string[], evaluated: string[]) =>
+          evaluated.map((value, index) => `token:${index}:${scalars[index] ?? "missing"}:${value}`)
+      ),
       buildPushTokenAuthHeaders: emptyHeaders,
       buildListDevicesAuthHeaders: emptyHeaders,
       buildLinkDeviceAuthHeaders: emptyHeaders,
@@ -716,6 +778,10 @@ async function bootApp(options: BootOptions = {}) {
 
       async listGroupMembers(groupId: string) {
         return { group_id: groupId, members: [] };
+      }
+
+      async getContactDiscoveryManifest() {
+        return apiState.contactDiscoveryManifest;
       }
 
       async createInboxWsTicket(userId: string) {
@@ -1086,6 +1152,56 @@ describe("web app flow coverage", () => {
     await eventually(() => {
       expect(document.body.textContent).toContain("Transparency");
       expect(document.body.textContent).toContain("Verified.");
+    });
+  });
+
+  it("fails closed when the discovery manifest continuity changes on this device", async () => {
+    const { router } = await bootApp({
+      capabilities: {
+        contact_discovery_supported: true,
+        contact_discovery_mode: "private_service",
+        contact_discovery_service_origin: "https://cdsi.example",
+        contact_discovery_manifest_issuer_ed25519_pub: "manifest-issuer-pub",
+        contact_discovery_ticket_issuer_ed25519_pub: "ticket-issuer-pub",
+      },
+      discoveryManifest: {
+        ticket_issuer_ed25519_pub: "ticket-issuer-pub",
+        manifest_issuer_ed25519_pub: "manifest-issuer-pub",
+        oprf_public_key_ristretto255: "oprf-pub-2",
+      },
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "",
+          displayName: "test1",
+        });
+        storage.writeContactDiscoveryCheckpoint("http://localhost:3000", "test1", {
+          service_origin: "https://cdsi.example",
+          manifest_issuer_ed25519_pub: "manifest-issuer-pub",
+          ticket_issuer_ed25519_pub: "ticket-issuer-pub",
+          protocol_version: 1,
+          ticket_format: "ed25519-ticket-v1",
+          lookup_protocol: "blind_token_directory_preview",
+          privacy_mode: "blind_evaluation_preview",
+          match_result_format: "contact_invite_token",
+          oprf_suite: "ristretto255-sha512-preview",
+          oprf_public_key_ristretto255: "oprf-pub-1",
+          attestation_mode: "service_boundary_only",
+          observed_at: "2026-03-26T00:00:00Z",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "settings" });
+    await eventually(() => {
+      expect(document.body.textContent).toContain("Manifest Continuity");
+      expect(document.body.textContent).toContain("Changed on this device");
+      expect(document.body.textContent).toContain("Contact discovery manifest continuity changed");
     });
   });
 

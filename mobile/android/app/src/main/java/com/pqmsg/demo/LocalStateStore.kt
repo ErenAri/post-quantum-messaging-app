@@ -257,6 +257,18 @@ class LocalStateStore(context: Context) {
         removeLegacyKeys(key)
     }
 
+    fun readContactDiscoveryCheckpoint(serverUrl: String, userId: String): String? {
+        return getNullableString(contactDiscoveryCheckpointKey(serverUrl, userId))
+    }
+
+    fun writeContactDiscoveryCheckpoint(serverUrl: String, userId: String, checkpointJson: String) {
+        val key = contactDiscoveryCheckpointKey(serverUrl, userId)
+        prefs.edit()
+            .putString(key, checkpointJson)
+            .apply()
+        removeLegacyKeys(key)
+    }
+
     fun readPeerLastMessageId(userId: String, peerUserId: String): Long {
         return getLong("peer_last_${userId}_$peerUserId", 0L)
     }
@@ -804,6 +816,7 @@ class LocalStateStore(context: Context) {
         messageStore.clearUser(userId)
         removePrefsForUser(userId)
         clearTransparencyCheckpoints(userId)
+        clearContactDiscoveryCheckpoints(userId)
 
         val currentSetup = loadSetup()
         if (currentSetup.userId == userId) {
@@ -864,8 +877,20 @@ class LocalStateStore(context: Context) {
         editor.apply()
     }
 
+    private fun clearContactDiscoveryCheckpoints(userId: String) {
+        val editor = prefs.edit()
+        prefs.all.keys
+            .filter { it.startsWith("contact_discovery_manifest_") && it.endsWith("_${userId}") }
+            .forEach(editor::remove)
+        editor.apply()
+    }
+
     private fun transparencyCheckpointKey(serverUrl: String, userId: String): String {
         return "transparency_${serverUrl.trim()}_${userId.trim()}"
+    }
+
+    private fun contactDiscoveryCheckpointKey(serverUrl: String, userId: String): String {
+        return "contact_discovery_manifest_${serverUrl.trim()}_${userId.trim()}"
     }
 
     private inline fun <reified T> readLegacyList(path: File): List<T> {
