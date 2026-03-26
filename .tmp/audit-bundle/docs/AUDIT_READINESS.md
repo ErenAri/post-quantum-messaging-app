@@ -16,11 +16,19 @@ python scripts/security/build_audit_readiness_bundle.py --output-dir /tmp/pqmsg-
 
 That bundle copies the core audit documents, selected governance workflows, and manifest/policy validators into a single directory and writes `audit-bundle-manifest.json` with SHA-256 digests for each included artifact.
 
+To verify a generated bundle locally, run:
+
+```bash
+python scripts/security/verify_audit_readiness_bundle.py --bundle-dir /tmp/pqmsg-audit-bundle
+```
+
 CI also validates that repository paths referenced in this document still exist via:
 
 ```bash
 python scripts/security/validate_audit_readiness_index.py
 ```
+
+The CI `audit-readiness-bundle` job now builds the full bundle, verifies it, uploads it as an artifact, and attests the bundle manifest provenance.
 
 ---
 
@@ -115,7 +123,7 @@ Defined in `crates/pqmsg-core/src/alg.rs`:
 | ML-KEM key validation | Encapsulation key length + decapsulation round-trip check | `crates/pqmsg-core/src/kem.rs` |
 | FIPS mode | Compile-time gate restricting to FIPS-approved suites | `crates/pqmsg-core/src/alg.rs`, `kem.rs` |
 | Algorithm downgrade prevention | Fail-closed suite negotiation | `crates/pqmsg-core/src/wire.rs` — `SupportedSuites::negotiate()` |
-| Bounded skipped-key cache | Hard limit prevents memory exhaustion | `crates/pqmsg-core/src/ratchet/double.rs` |
+| Bounded skipped-key cache | Hard limit prevents memory exhaustion | `crates/pqmsg-core/src/ratchet/mod.rs` |
 | KAT test vectors | Known-answer tests for PQXDH handshake | `crates/pqmsg-core/src/handshake.rs` tests |
 
 ### 4.3 Operational Security

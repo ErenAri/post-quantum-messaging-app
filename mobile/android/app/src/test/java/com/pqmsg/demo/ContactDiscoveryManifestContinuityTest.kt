@@ -26,6 +26,8 @@ class ContactDiscoveryManifestContinuityTest {
         ticket_max_ttl_seconds = 300,
         lookup_protocol = "blind_token_directory_preview",
         privacy_mode = "blind_evaluation_preview",
+        directory_backend = "simulated_enclave_preview",
+        host_enclave_protocol_version = 1,
         match_result_format = "contact_invite_token",
         oprf_suite = "ristretto255-sha512-preview",
         evaluation_proof_mode = "dleq_per_element_preview",
@@ -93,6 +95,9 @@ class ContactDiscoveryManifestContinuityTest {
             attestation_mode = "sgx_preview",
             attestation_verifier = "sgx-dcap-preview",
             enclave_measurement_hex = "aa".repeat(32),
+            directory_backend = "simulated_enclave_preview",
+            host_enclave_protocol_version = 1,
+            attested_oprf_public_key_ristretto255 = "oprf-pub-1",
             document_format = "opaque_b64_v1",
             document_base64 = Base64.getEncoder().encodeToString(documentBytes),
             document_sha256 = documentSha256,
@@ -105,8 +110,43 @@ class ContactDiscoveryManifestContinuityTest {
                 expectedAttestationMode = "sgx_preview",
                 expectedVerifier = "sgx-dcap-preview",
                 expectedMeasurementHex = "aa".repeat(32),
+                expectedOprfPublicKeyRistretto255 = "oprf-pub-1",
                 expectedDocumentSha256 = documentSha256,
                 expectedMaxAgeSeconds = 1,
+            )
+        }
+    }
+
+    @Test
+    fun verifyContactDiscoveryAttestationDocument_rejectsOprfKeyMismatch() {
+        val documentBytes = "{\"tee\":\"sgx\"}".toByteArray()
+        val documentSha256 =
+            MessageDigest
+                .getInstance("SHA-256")
+                .digest(documentBytes)
+                .joinToString("") { "%02x".format(it) }
+        val response = ContactDiscoveryAttestationResponse(
+            attestation_mode = "sgx_preview",
+            attestation_verifier = "sgx-dcap-preview",
+            enclave_measurement_hex = "aa".repeat(32),
+            directory_backend = "simulated_enclave_preview",
+            host_enclave_protocol_version = 1,
+            attested_oprf_public_key_ristretto255 = "wrong-oprf-pub",
+            document_format = "opaque_b64_v1",
+            document_base64 = Base64.getEncoder().encodeToString(documentBytes),
+            document_sha256 = documentSha256,
+            published_at = java.time.Instant.now().toString(),
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            verifyContactDiscoveryAttestationDocument(
+                response = response,
+                expectedAttestationMode = "sgx_preview",
+                expectedVerifier = "sgx-dcap-preview",
+                expectedMeasurementHex = "aa".repeat(32),
+                expectedOprfPublicKeyRistretto255 = "oprf-pub-1",
+                expectedDocumentSha256 = documentSha256,
+                expectedMaxAgeSeconds = 900,
             )
         }
     }

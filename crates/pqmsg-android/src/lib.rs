@@ -70,6 +70,7 @@ const AUTH_TAG_ROTATE_SIG_NEW_HASH: u16 = critical_type(0x320F);
 const AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH: u16 = critical_type(0x3230);
 const AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH: u16 = critical_type(0x3231);
 const AUTH_TAG_ROTATE_PQ_SIG_NEW_HASH: u16 = critical_type(0x3232);
+const AUTH_TAG_DISCOVERY_PURPOSE: u16 = critical_type(0x3233);
 const AUTH_TAG_PUSH_DEVICE_ID: u16 = critical_type(0x3210);
 const AUTH_TAG_PUSH_TOKEN_HASH: u16 = critical_type(0x3211);
 const AUTH_TAG_LINK_DEVICE_ID: u16 = critical_type(0x3212);
@@ -2108,6 +2109,7 @@ pub fn build_sender_certificate_auth_headers(
 pub fn build_contact_discovery_ticket_auth_headers(
     keys_json: String,
     user_id: String,
+    purpose: String,
 ) -> Result<RequestAuthHeaders, PqmsgAndroidError> {
     let keys = read_keys_file(&keys_json)?;
     if keys.user_id != user_id {
@@ -2116,6 +2118,15 @@ pub fn build_contact_discovery_ticket_auth_headers(
             user_id, keys.user_id
         )));
     }
+    let purpose = match purpose.trim().to_ascii_lowercase().as_str() {
+        "upload" => "upload",
+        "match" => "match",
+        _ => {
+            return Err(invalid_input(
+                "contact discovery ticket purpose must be 'upload' or 'match'",
+            ))
+        }
+    };
     let signing_key = auth_signing_key_for_user(&keys)?;
     let timestamp = auth_timestamp()?;
     let nonce = auth_nonce();
@@ -2129,6 +2140,10 @@ pub fn build_contact_discovery_ticket_auth_headers(
     records.push(TlvRecord {
         ty: AUTH_TAG_RECIPIENT_ID,
         value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_DISCOVERY_PURPOSE,
+        value: purpose.as_bytes().to_vec(),
     });
     let transcript = encode(&records).map_err(|_| {
         operation_failed("failed to encode contact-discovery-ticket auth transcript")

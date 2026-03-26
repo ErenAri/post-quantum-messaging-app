@@ -17,7 +17,37 @@ use crate::types::*;
 use crate::validation::*;
 use crate::AppState;
 
-const CONTACT_DISCOVERY_TICKET_MAX_USES: u8 = 6;
+#[derive(Clone, Copy)]
+enum ContactDiscoveryTicketPurpose {
+    Upload,
+    Match,
+}
+
+impl ContactDiscoveryTicketPurpose {
+    fn parse(raw: &str) -> Result<Self, AppError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "upload" => Ok(Self::Upload),
+            "match" => Ok(Self::Match),
+            _ => Err(AppError::bad_request(
+                "contact discovery ticket purpose must be 'upload' or 'match'",
+            )),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Upload => "upload",
+            Self::Match => "match",
+        }
+    }
+
+    const fn max_uses(self) -> u8 {
+        match self {
+            Self::Upload => 3,
+            Self::Match => 2,
+        }
+    }
+}
 
 fn ensure_contact_discovery_supported(_state: &AppState) -> Result<(), AppError> {
     Err(AppError::forbidden(
@@ -48,6 +78,7 @@ struct ContactDiscoveryTicketPayload {
     v: u8,
     user_id: String,
     device_id: String,
+    purpose: String,
     contact_invite_token: String,
     contact_invite_expires_at: String,
     issued_at: String,
@@ -60,17 +91,19 @@ pub(crate) async fn create_contact_discovery_ticket(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
     headers: HeaderMap,
+    Json(request): Json<ContactDiscoveryTicketRequest>,
 ) -> Result<Json<ContactDiscoveryTicketResponse>, AppError> {
     let service_origin = ensure_contact_discovery_ticket_supported(&state)?;
     check_rate_limit(&state, &format!("contact-discovery-ticket:{user_id}"))?;
     validate_id("user_id", &user_id)?;
     ensure_user_exists(state.pool(), &user_id).await?;
+    let purpose = ContactDiscoveryTicketPurpose::parse(&request.purpose)?;
 
     let auth = parse_request_auth(&headers)?;
     if auth.user_id != user_id {
         return Err(AppError::bad_request("auth user_id mismatch"));
     }
-    let auth_message = contact_discovery_ticket_auth_message(&auth, &user_id)?;
+    let auth_message = contact_discovery_ticket_auth_message(&auth, &user_id, purpose.as_str())?;
     verify_request_auth(&state, &auth, &auth_message).await?;
 
     let bootstrap_invite = ensure_contact_invite_for_purpose(
@@ -86,11 +119,12 @@ pub(crate) async fn create_contact_discovery_ticket(
         v: 1,
         user_id: user_id.clone(),
         device_id: auth.device_id.clone(),
+        purpose: purpose.as_str().to_string(),
         contact_invite_token: bootstrap_invite.invite_token,
         contact_invite_expires_at: bootstrap_invite.expires_at,
         issued_at: issued_at.to_rfc3339(),
         expires_at: expires_at.to_rfc3339(),
-        max_uses: CONTACT_DISCOVERY_TICKET_MAX_USES,
+        max_uses: purpose.max_uses(),
         nonce: uuid::Uuid::new_v4().to_string(),
     };
     let payload_bytes = serde_json::to_vec(&payload)

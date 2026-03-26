@@ -12,6 +12,8 @@ data class ContactDiscoveryManifestCheckpoint(
     val ticket_format: String,
     val lookup_protocol: String,
     val privacy_mode: String,
+    val directory_backend: String,
+    val host_enclave_protocol_version: Int,
     val match_result_format: String,
     val oprf_suite: String,
     val evaluation_proof_mode: String,
@@ -29,6 +31,7 @@ fun verifyContactDiscoveryAttestationDocument(
     expectedAttestationMode: String,
     expectedVerifier: String,
     expectedMeasurementHex: String,
+    expectedOprfPublicKeyRistretto255: String,
     expectedDocumentSha256: String,
     expectedMaxAgeSeconds: Int,
 ) {
@@ -40,6 +43,15 @@ fun verifyContactDiscoveryAttestationDocument(
     }
     require(response.enclave_measurement_hex == expectedMeasurementHex) {
         "Contact discovery attestation measurement mismatch"
+    }
+    require(response.directory_backend == "simulated_enclave_preview") {
+        "Unsupported contact discovery backend"
+    }
+    require(response.host_enclave_protocol_version == 1) {
+        "Unsupported contact discovery host/enclave protocol version"
+    }
+    require(response.attested_oprf_public_key_ristretto255 == expectedOprfPublicKeyRistretto255) {
+        "Contact discovery attestation OPRF public key mismatch"
     }
     require(response.document_format == "opaque_b64_v1") {
         "Unsupported contact discovery attestation document format"
@@ -79,6 +91,8 @@ fun buildContactDiscoveryManifestCheckpoint(
         ticket_format = manifest.ticket_format,
         lookup_protocol = manifest.lookup_protocol,
         privacy_mode = manifest.privacy_mode,
+        directory_backend = manifest.directory_backend,
+        host_enclave_protocol_version = manifest.host_enclave_protocol_version,
         match_result_format = manifest.match_result_format,
         oprf_suite = manifest.oprf_suite,
         evaluation_proof_mode = manifest.evaluation_proof_mode,
@@ -108,6 +122,12 @@ fun diffContactDiscoveryManifestCheckpoint(
     if (previous.ticket_format != current.ticket_format) changedFields += "ticket_format"
     if (previous.lookup_protocol != current.lookup_protocol) changedFields += "lookup_protocol"
     if (previous.privacy_mode != current.privacy_mode) changedFields += "privacy_mode"
+    if (previous.directory_backend != current.directory_backend) {
+        changedFields += "directory_backend"
+    }
+    if (previous.host_enclave_protocol_version != current.host_enclave_protocol_version) {
+        changedFields += "host_enclave_protocol_version"
+    }
     if (previous.match_result_format != current.match_result_format) {
         changedFields += "match_result_format"
     }

@@ -61,6 +61,9 @@ fn capabilities_response(state: &AppState) -> ServerCapabilitiesResponse {
         contact_discovery_service_origin: state.contact_discovery_service_origin(),
         contact_discovery_manifest_issuer_ed25519_pub: state
             .contact_discovery_manifest_issuer_public_key_b64(),
+        contact_discovery_directory_backend: state.contact_discovery_directory_backend(),
+        contact_discovery_host_enclave_protocol_version: state
+            .contact_discovery_host_enclave_protocol_version(),
         contact_discovery_attestation_verifier: state.contact_discovery_attestation_verifier(),
         contact_discovery_expected_measurement_hex: state
             .contact_discovery_expected_measurement_hex(),

@@ -91,6 +91,8 @@ export type ContactDiscoveryCheckpoint = {
   ticket_format: string;
   lookup_protocol: string;
   privacy_mode: string;
+  directory_backend: string;
+  host_enclave_protocol_version: number;
   match_result_format: string;
   oprf_suite: string;
   evaluation_proof_mode: string;

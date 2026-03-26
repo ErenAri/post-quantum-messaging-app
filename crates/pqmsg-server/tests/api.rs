@@ -28,6 +28,7 @@ use sha2::{Digest, Sha256};
 use sqlx::any::AnyPoolOptions;
 use std::fs;
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -67,6 +68,7 @@ const AUTH_TAG_ROTATE_SIG_NEW_HASH: u16 = critical_type(0x320F);
 const AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH: u16 = critical_type(0x3230);
 const AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH: u16 = critical_type(0x3231);
 const AUTH_TAG_ROTATE_PQ_SIG_NEW_HASH: u16 = critical_type(0x3232);
+const AUTH_TAG_DISCOVERY_PURPOSE: u16 = critical_type(0x3233);
 const AUTH_TAG_PUSH_DEVICE_ID: u16 = critical_type(0x3210);
 const AUTH_TAG_PUSH_TOKEN_HASH: u16 = critical_type(0x3211);
 const AUTH_TAG_LINK_DEVICE_ID: u16 = critical_type(0x3212);
@@ -134,6 +136,19 @@ async fn test_app() -> axum::Router {
         )),
     );
     build_router(state)
+}
+
+fn load_support_matrix() -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("docs")
+        .join("SUPPORT_MATRIX.json");
+    serde_json::from_str(
+        &fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read support matrix {}: {error}", path.display())),
+    )
+    .unwrap_or_else(|error| panic!("parse support matrix {}: {error}", path.display()))
 }
 
 async fn test_app_with_rate_limit_settings(capacity: f64, refill_per_second: f64) -> axum::Router {
@@ -1288,6 +1303,7 @@ fn contact_discovery_ticket_auth_headers(
     signing_key: &SigningKey,
     user_id: &str,
     device_id: &str,
+    purpose: &str,
 ) -> Vec<(&'static str, String)> {
     let timestamp = Utc::now().timestamp();
     let nonce = format!("cdt-{}", NONCE_COUNTER.fetch_add(1, Ordering::Relaxed));
@@ -1301,6 +1317,10 @@ fn contact_discovery_ticket_auth_headers(
     records.push(TlvRecord {
         ty: AUTH_TAG_RECIPIENT_ID,
         value: user_id.as_bytes().to_vec(),
+    });
+    records.push(TlvRecord {
+        ty: AUTH_TAG_DISCOVERY_PURPOSE,
+        value: purpose.as_bytes().to_vec(),
     });
     let message = encode(&records).expect("contact-discovery-ticket auth transcript");
     let signature = signing_key.sign(&message).to_bytes();
@@ -2497,6 +2517,8 @@ async fn health_reports_security_profile() {
 #[tokio::test]
 async fn capabilities_reports_client_contract() {
     let app = test_app_with_profile(SecurityProfile::HighAssurance).await;
+    let support_matrix = load_support_matrix();
+    let current_beta_scope = &support_matrix["current_beta_scope"];
     let (status, headers, body) =
         json_request_with_headers_raw(app, Method::GET, "/v1/capabilities", json!({}), &[]).await;
     assert_eq!(status, StatusCode::OK);
@@ -2510,8 +2532,26 @@ async fn capabilities_reports_client_contract() {
     assert_eq!(body["tls_required"].as_bool(), Some(true));
     assert_eq!(body["tls_enabled"].as_bool(), Some(false));
     assert_eq!(body["production_baseline_met"].as_bool(), Some(false));
-    assert_eq!(body["web_client_policy"].as_str(), Some("demo_only"));
-    assert_eq!(body["supported_beta_clients"], json!(["android"]));
+    assert_eq!(
+        body["web_client_policy"],
+        current_beta_scope["web_client_policy"]
+    );
+    assert_eq!(
+        body["supported_beta_clients"],
+        current_beta_scope["supported_beta_clients"]
+    );
+    assert_eq!(
+        body["calling_supported"],
+        current_beta_scope["calling_supported"]
+    );
+    assert_eq!(
+        body["group_messaging_supported"],
+        current_beta_scope["group_messaging_supported"]
+    );
+    assert_eq!(
+        body["private_group_messaging_supported"],
+        current_beta_scope["private_group_messaging_supported"]
+    );
     assert_eq!(
         body["pq_ratchet_interval"].as_u64(),
         Some(DEFAULT_PQ_RATCHET_INTERVAL as u64)
@@ -2524,6 +2564,8 @@ async fn capabilities_reports_client_contract() {
     );
     assert!(body["contact_discovery_service_origin"].is_null());
     assert!(body["contact_discovery_manifest_issuer_ed25519_pub"].is_null());
+    assert!(body["contact_discovery_directory_backend"].is_null());
+    assert!(body["contact_discovery_host_enclave_protocol_version"].is_null());
     assert!(body["contact_discovery_attestation_verifier"].is_null());
     assert!(body["contact_discovery_expected_measurement_hex"].is_null());
     assert!(body["contact_discovery_attestation_document_sha256"].is_null());
@@ -2584,6 +2626,14 @@ async fn capabilities_report_private_contact_discovery_service_when_configured()
         .as_str()
         .is_some_and(|value| !value.is_empty()));
     assert_eq!(
+        body["contact_discovery_directory_backend"].as_str(),
+        Some("simulated_enclave_preview")
+    );
+    assert_eq!(
+        body["contact_discovery_host_enclave_protocol_version"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
         body["contact_discovery_attestation_verifier"].as_str(),
         Some("sgx-dcap-preview")
     );
@@ -2618,6 +2668,8 @@ async fn capabilities_do_not_advertise_development_only_private_discovery_in_pil
     );
     assert!(body["contact_discovery_service_origin"].is_null());
     assert!(body["contact_discovery_manifest_issuer_ed25519_pub"].is_null());
+    assert!(body["contact_discovery_directory_backend"].is_null());
+    assert!(body["contact_discovery_host_enclave_protocol_version"].is_null());
     assert!(body["contact_discovery_attestation_verifier"].is_null());
     assert!(body["contact_discovery_expected_measurement_hex"].is_null());
     assert!(body["contact_discovery_attestation_document_sha256"].is_null());
@@ -2636,13 +2688,17 @@ async fn contact_discovery_ticket_requires_configured_service() {
     );
     let (status_reg, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg).await;
     assert_eq!(status_reg, StatusCode::OK);
-    let headers =
-        contact_discovery_ticket_auth_headers(&alice_sig, "alice-discovery", "alice-discovery-dev");
+    let headers = contact_discovery_ticket_auth_headers(
+        &alice_sig,
+        "alice-discovery",
+        "alice-discovery-dev",
+        "match",
+    );
     let (status, body) = json_request_with_headers(
         app,
         Method::POST,
         "/v1/users/alice-discovery/contact-discovery/ticket",
-        json!({}),
+        json!({ "purpose": "match" }),
         &headers,
     )
     .await;
@@ -2673,12 +2729,13 @@ async fn contact_discovery_ticket_is_forbidden_outside_development_deployments()
         &alice_sig,
         "alice-discovery-pilot",
         "alice-discovery-pilot-dev",
+        "match",
     );
     let (status, body) = json_request_with_headers(
         app,
         Method::POST,
         "/v1/users/alice-discovery-pilot/contact-discovery/ticket",
-        json!({}),
+        json!({ "purpose": "match" }),
         &headers,
     )
     .await;
@@ -2696,12 +2753,13 @@ async fn contact_discovery_ticket_is_issued_for_configured_service() {
     let reg = register_payload("alice-cdsi", "alice-cdsi-dev", [32u8; 32], &alice_sig);
     let (status_reg, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg).await;
     assert_eq!(status_reg, StatusCode::OK);
-    let headers = contact_discovery_ticket_auth_headers(&alice_sig, "alice-cdsi", "alice-cdsi-dev");
+    let headers =
+        contact_discovery_ticket_auth_headers(&alice_sig, "alice-cdsi", "alice-cdsi-dev", "match");
     let (status, body) = json_request_with_headers(
         app,
         Method::POST,
         "/v1/users/alice-cdsi/contact-discovery/ticket",
-        json!({}),
+        json!({ "purpose": "match" }),
         &headers,
     )
     .await;
@@ -2722,6 +2780,7 @@ async fn contact_discovery_ticket_is_issued_for_configured_service() {
         .expect("decode ticket payload");
     let payload: Value = serde_json::from_slice(&payload_bytes).expect("parse ticket payload");
     assert_eq!(payload["user_id"].as_str(), Some("alice-cdsi"));
+    assert_eq!(payload["purpose"].as_str(), Some("match"));
     assert!(payload["contact_invite_token"]
         .as_str()
         .is_some_and(|value| !value.is_empty()));
@@ -2758,13 +2817,17 @@ async fn contact_discovery_ticket_reuses_bootstrap_invite_without_rotating_manua
         .expect("manual invite token")
         .to_string();
 
-    let discovery_headers =
-        contact_discovery_ticket_auth_headers(&alice_sig, "alice-bootstrap", "alice-bootstrap-dev");
+    let discovery_headers = contact_discovery_ticket_auth_headers(
+        &alice_sig,
+        "alice-bootstrap",
+        "alice-bootstrap-dev",
+        "match",
+    );
     let (status_ticket_first, ticket_first_payload) = json_request_with_headers(
         app.clone(),
         Method::POST,
         "/v1/users/alice-bootstrap/contact-discovery/ticket",
-        json!({}),
+        json!({ "purpose": "match" }),
         &discovery_headers,
     )
     .await;
@@ -2788,13 +2851,17 @@ async fn contact_discovery_ticket_reuses_bootstrap_invite_without_rotating_manua
         .to_string();
     assert_ne!(bootstrap_token, manual_token);
 
-    let discovery_headers_second =
-        contact_discovery_ticket_auth_headers(&alice_sig, "alice-bootstrap", "alice-bootstrap-dev");
+    let discovery_headers_second = contact_discovery_ticket_auth_headers(
+        &alice_sig,
+        "alice-bootstrap",
+        "alice-bootstrap-dev",
+        "match",
+    );
     let (status_ticket_second, ticket_second_payload) = json_request_with_headers(
         app.clone(),
         Method::POST,
         "/v1/users/alice-bootstrap/contact-discovery/ticket",
-        json!({}),
+        json!({ "purpose": "match" }),
         &discovery_headers_second,
     )
     .await;

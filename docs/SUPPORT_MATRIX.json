@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "current_beta_scope": {
+    "summary": "Android private beta for messaging only",
+    "supported_beta_clients": ["android"],
+    "web_client_policy": "demo_only",
+    "calling_supported": false,
+    "group_messaging_supported": false,
+    "private_group_messaging_supported": true,
+    "manual_contact_bootstrap": ["@username", "opaque_invite"],
+    "contact_discovery_preview_allowed_deployments": ["development"]
+  }
+}

@@ -1,0 +1,578 @@
+name: promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to promote
+        required: true
+        type: string
+      environment_name:
+        description: GitHub Environment providing deployment secrets and vars
+        required: true
+        type: environment
+      deployment_mode:
+        description: Hardened deployment mode
+        required: true
+        type: choice
+        options:
+          - pilot
+          - production
+        default: production
+      namespace:
+        description: Kubernetes namespace
+        required: true
+        default: pqmsg
+        type: string
+      release_name:
+        description: Helm release name
+        required: true
+        default: pqmsg-server
+        type: string
+      apply:
+        description: Apply the Helm release after validation
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  issues: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PQMSG_DATABASE_URL: ${{ secrets.PQMSG_DATABASE_URL }}
+      PQMSG_RATE_LIMIT_REDIS_URL: ${{ secrets.PQMSG_RATE_LIMIT_REDIS_URL }}
+      PQMSG_SENTRY_DSN: ${{ secrets.PQMSG_SENTRY_DSN }}
+      PQMSG_FCM_SERVER_KEY: ${{ secrets.PQMSG_FCM_SERVER_KEY }}
+      PQMSG_APNS_BEARER_TOKEN: ${{ secrets.PQMSG_APNS_BEARER_TOKEN }}
+      PQMSG_APNS_TOPIC: ${{ secrets.PQMSG_APNS_TOPIC }}
+      PQMSG_POSTGRES_STORAGE_ENCRYPTION: ${{ vars.PQMSG_POSTGRES_STORAGE_ENCRYPTION }}
+      PQMSG_POSTGRES_BACKUP_ENCRYPTION: ${{ vars.PQMSG_POSTGRES_BACKUP_ENCRYPTION }}
+      PQMSG_CORS_ALLOWED_ORIGINS: ${{ vars.PQMSG_CORS_ALLOWED_ORIGINS }}
+      PQMSG_SENTRY_TRACES_SAMPLE_RATE: ${{ vars.PQMSG_SENTRY_TRACES_SAMPLE_RATE }}
+      PQMSG_AUDIT_LOG_PATH: ${{ vars.PQMSG_AUDIT_LOG_PATH }}
+      PQMSG_AUDIT_LOG_MAX_BYTES: ${{ vars.PQMSG_AUDIT_LOG_MAX_BYTES }}
+      PQMSG_AUDIT_LOG_MAX_FILES: ${{ vars.PQMSG_AUDIT_LOG_MAX_FILES }}
+      PQMSG_ALERTMANAGER_API_URL: ${{ secrets.PQMSG_ALERTMANAGER_API_URL }}
+      PQMSG_INCIDENT_ISSUE_REPO: ${{ vars.PQMSG_INCIDENT_ISSUE_REPO }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - uses: azure/setup-kubectl@v4
+      - name: download release bundle
+        run: |
+          chmod +x scripts/release/download_release_bundle.sh
+          ./scripts/release/download_release_bundle.sh "${{ inputs.release_tag }}" dist "${{ github.repository }}"
+      - name: verify release bundle
+        run: |
+          chmod +x scripts/release/verify_release_bundle.sh
+          ./scripts/release/verify_release_bundle.sh dist "${{ github.repository }}"
+      - name: render promotion values
+        run: |
+          python scripts/release/render_promotion_values.py \
+            --deployment-mode "${{ inputs.deployment_mode }}" \
+            --output /tmp/pqmsg-promotion-values.json
+      - name: render hardened chart from released image digest
+        run: |
+          helm template "${{ inputs.release_name }}" deploy/helm/pqmsg-server \
+            --namespace "${{ inputs.namespace }}" \
+            -f dist/helm-image-overrides.yaml \
+            -f /tmp/pqmsg-promotion-values.json >dist/promoted-chart.yaml
+      - name: configure kubeconfig
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          if [ -n "${KUBECONFIG_B64:-}" ]; then
+            echo "$KUBECONFIG_B64" | base64 -d >/tmp/kubeconfig
+            echo "KUBECONFIG=/tmp/kubeconfig" >> "$GITHUB_ENV"
+          fi
+      - name: capture current deployed image state
+        run: |
+          if [ -n "${KUBECONFIG:-}" ]; then
+            kubectl get namespace "${{ inputs.namespace }}" -o json > /tmp/pqmsg-namespace.json
+            kubectl get secret --namespace "${{ inputs.namespace }}" -o json > /tmp/pqmsg-secrets.json
+            kubectl get configmap --namespace "${{ inputs.namespace }}" -o json > /tmp/pqmsg-configmaps.json
+            kubectl get deployment \
+              --namespace "${{ inputs.namespace }}" \
+              -l "app.kubernetes.io/instance=${{ inputs.release_name }},app.kubernetes.io/name=pqmsg-server" \
+              -o json > /tmp/pqmsg-current-deployments.json
+          else
+            printf '{"items":[]}\n' > /tmp/pqmsg-current-deployments.json
+            printf '{"metadata":{"labels":{}}}\n' > /tmp/pqmsg-namespace.json
+            printf '{"items":[]}\n' > /tmp/pqmsg-secrets.json
+            printf '{"items":[]}\n' > /tmp/pqmsg-configmaps.json
+          fi
+      - name: validate cluster contract
+        if: ${{ inputs.apply }}
+        run: |
+          python scripts/release/validate_cluster_contract.py \
+            --namespace-json /tmp/pqmsg-namespace.json \
+            --secret-list-json /tmp/pqmsg-secrets.json \
+            --configmap-list-json /tmp/pqmsg-configmaps.json \
+            --release-name "${{ inputs.release_name }}" \
+            --tls-secret-name "pqmsg-server-tls" \
+            --output dist/cluster-contract.json
+      - name: validate rendered hardened chart
+        run: |
+          python scripts/security/validate_hardened_manifests.py dist/promoted-chart.yaml
+          python scripts/security/validate_network_policy.py dist/promoted-chart.yaml
+          python scripts/security/validate_image_pinning.py dist/promoted-chart.yaml
+      - name: write promotion record
+        run: |
+          python scripts/release/write_promotion_record.py \
+            --release-manifest dist/release-manifest.json \
+            --rendered-chart dist/promoted-chart.yaml \
+            --current-deployments-json /tmp/pqmsg-current-deployments.json \
+            --namespace "${{ inputs.namespace }}" \
+            --release-name "${{ inputs.release_name }}" \
+            --environment-name "${{ inputs.environment_name }}" \
+            --deployment-mode "${{ inputs.deployment_mode }}" \
+            --apply "${{ inputs.apply }}" \
+            --output dist/promotion-record.json \
+            --rollback-image-output dist/rollback-image.txt \
+            --rollback-overrides-output dist/rollback-helm-overrides.yaml
+      - name: write promotion summary
+        env:
+          PQMSG_PROMOTION_ENVIRONMENT: ${{ inputs.environment_name }}
+          PQMSG_PROMOTION_MODE: ${{ inputs.deployment_mode }}
+          PQMSG_PROMOTION_RELEASE_NAME: ${{ inputs.release_name }}
+          PQMSG_PROMOTION_NAMESPACE: ${{ inputs.namespace }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(Path("dist/release-manifest.json").read_text(encoding="utf-8"))
+          record = json.loads(Path("dist/promotion-record.json").read_text(encoding="utf-8"))
+          image = manifest["container_images"][0]
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          rollback_line = (
+              f"- Rollback image: `{record['rollback_image']}`"
+              if record["rollback_image"]
+              else "- Rollback image: `unavailable (no single live image observed)`"
+          )
+          summary.write_text(
+              "\n".join(
+                  [
+                      "# Promotion Summary",
+                      "",
+                      f"- Release tag: `{manifest['tag']}`",
+                      f"- Deployment mode: `{os.environ['PQMSG_PROMOTION_MODE']}`",
+                      f"- GitHub Environment: `{os.environ['PQMSG_PROMOTION_ENVIRONMENT']}`",
+                      f"- Helm release: `{os.environ['PQMSG_PROMOTION_RELEASE_NAME']}`",
+                      f"- Namespace: `{os.environ['PQMSG_PROMOTION_NAMESPACE']}`",
+                      f"- Image: `{image['immutable_ref']}`",
+                      rollback_line,
+                      "",
+                      "The rendered chart consumed `dist/helm-image-overrides.yaml` from the signed release bundle.",
+                      "Rollback artifacts were written to `dist/rollback-image.txt` and `dist/rollback-helm-overrides.yaml`.",
+                      "Cluster contract validation is required before apply and is written to `dist/cluster-contract.json`.",
+                  ]
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: apply promoted release
+        if: ${{ inputs.apply }}
+        run: |
+          test -n "${KUBECONFIG:-}"
+          helm upgrade --install "${{ inputs.release_name }}" deploy/helm/pqmsg-server \
+            --namespace "${{ inputs.namespace }}" \
+            -f dist/helm-image-overrides.yaml \
+            -f /tmp/pqmsg-promotion-values.json
+      - name: wait for promoted rollout
+        if: ${{ inputs.apply }}
+        run: |
+          kubectl rollout status "deployment/${{ inputs.release_name }}-pqmsg-server" \
+            --namespace "${{ inputs.namespace }}" \
+            --timeout=180s
+      - name: capture post-deploy state
+        if: ${{ inputs.apply }}
+        run: |
+          kubectl get namespace "${{ inputs.namespace }}" -o json > dist/post-deploy-namespace.json
+          kubectl get secret --namespace "${{ inputs.namespace }}" -o json > dist/post-deploy-secrets.json
+          kubectl get configmap --namespace "${{ inputs.namespace }}" -o json > dist/post-deploy-configmaps.json
+          kubectl get deployment \
+            --namespace "${{ inputs.namespace }}" \
+            -l "app.kubernetes.io/instance=${{ inputs.release_name }},app.kubernetes.io/name=pqmsg-server" \
+            -o json > dist/post-deploy-deployments.json
+          kubectl get pods \
+            --namespace "${{ inputs.namespace }}" \
+            -l "app.kubernetes.io/instance=${{ inputs.release_name }},app.kubernetes.io/name=pqmsg-server" \
+            -o json > dist/post-deploy-pods.json
+          kubectl get deployment "${{ inputs.release_name }}-pqmsg-server" \
+            --namespace "${{ inputs.namespace }}" \
+            -o yaml > dist/post-deploy-deployment.yaml
+          kubectl get service "${{ inputs.release_name }}-pqmsg-server" \
+            --namespace "${{ inputs.namespace }}" \
+            -o yaml > dist/post-deploy-service.yaml
+          kubectl get networkpolicy "${{ inputs.release_name }}-pqmsg-server" \
+            --namespace "${{ inputs.namespace }}" \
+            -o yaml > dist/post-deploy-networkpolicy.yaml
+          if kubectl get ingress "${{ inputs.release_name }}-pqmsg-server" \
+            --namespace "${{ inputs.namespace }}" >/dev/null 2>&1; then
+            kubectl get ingress "${{ inputs.release_name }}-pqmsg-server" \
+              --namespace "${{ inputs.namespace }}" \
+              -o yaml > dist/post-deploy-ingress.yaml
+          else
+            : > dist/post-deploy-ingress.yaml
+          fi
+      - name: probe promoted runtime contract
+        if: ${{ inputs.apply }}
+        run: |
+          kubectl port-forward \
+            --namespace "${{ inputs.namespace }}" \
+            "service/${{ inputs.release_name }}-pqmsg-server" \
+            18443:443 >/tmp/pqmsg-port-forward.log 2>&1 &
+          pf_pid=$!
+          cleanup() {
+            kill "$pf_pid" >/dev/null 2>&1 || true
+            wait "$pf_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for _ in $(seq 1 30); do
+            if curl -kfsS https://127.0.0.1:18443/health -o dist/post-deploy-health.json; then
+              break
+            fi
+            sleep 2
+          done
+          curl -kfsS https://127.0.0.1:18443/v1/capabilities -o dist/post-deploy-capabilities.json
+          cp /tmp/pqmsg-port-forward.log dist/post-deploy-port-forward.log || true
+      - name: verify promoted runtime contract
+        if: ${{ inputs.apply }}
+        run: |
+          python scripts/release/write_post_deploy_verification.py \
+            --health dist/post-deploy-health.json \
+            --capabilities dist/post-deploy-capabilities.json \
+            --deployments dist/post-deploy-deployments.json \
+            --pods dist/post-deploy-pods.json \
+            --promotion-record dist/promotion-record.json \
+            --expected-deployment-mode "${{ inputs.deployment_mode }}" \
+            --expected-security-profile "high_assurance" \
+            --output dist/post-deploy-verification.json
+      - name: write deployment drift report
+        if: ${{ inputs.apply }}
+        run: |
+          python scripts/release/write_deployment_drift.py \
+            --before-deployments /tmp/pqmsg-current-deployments.json \
+            --after-deployments dist/post-deploy-deployments.json \
+            --before-secrets /tmp/pqmsg-secrets.json \
+            --after-secrets dist/post-deploy-secrets.json \
+            --before-configmaps /tmp/pqmsg-configmaps.json \
+            --after-configmaps dist/post-deploy-configmaps.json \
+            --before-namespace /tmp/pqmsg-namespace.json \
+            --after-namespace dist/post-deploy-namespace.json \
+            --release-name "${{ inputs.release_name }}" \
+            --tls-secret-name "pqmsg-server-tls" \
+            --output dist/deployment-drift.json
+      - name: verify live applied policy
+        if: ${{ inputs.apply }}
+        run: |
+          python scripts/release/write_live_policy_verification.py \
+            --deployment-manifest dist/post-deploy-deployment.yaml \
+            --network-policy-manifest dist/post-deploy-networkpolicy.yaml \
+            --output dist/live-policy-verification.json
+      - name: verify live applied routing
+        if: ${{ inputs.apply }}
+        run: |
+          python scripts/release/write_live_routing_verification.py \
+            --rendered-chart dist/promoted-chart.yaml \
+            --service-manifest dist/post-deploy-service.yaml \
+            --ingress-manifest dist/post-deploy-ingress.yaml \
+            --output dist/live-routing-verification.json
+      - name: append post-deploy summary
+        if: ${{ inputs.apply }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          verification = json.loads(Path("dist/post-deploy-verification.json").read_text(encoding="utf-8"))
+          drift = json.loads(Path("dist/deployment-drift.json").read_text(encoding="utf-8"))
+          live_policy = json.loads(Path("dist/live-policy-verification.json").read_text(encoding="utf-8"))
+          live_routing = json.loads(Path("dist/live-routing-verification.json").read_text(encoding="utf-8"))
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          failed = [check["name"] for check in verification["checks"] if not check["passed"]]
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write("\n## Post-Deploy Verification\n\n")
+              handle.write(f"- Passed: `{verification['passed']}`\n")
+              handle.write(f"- Deployment drift report: `dist/deployment-drift.json`\n")
+              handle.write(f"- Deployment image changed: `{drift['deployment_image_changed']}`\n")
+              handle.write(f"- Suspicious drift count: `{drift['suspicious_change_count']}`\n")
+              handle.write(f"- Namespace policy healthy after apply: `{drift['namespace_policy_healthy_after']}`\n")
+              handle.write(f"- Live policy verification: `{live_policy['passed']}`\n")
+              handle.write(f"- Live routing verification: `{live_routing['passed']}`\n")
+              handle.write(f"- Ingress expected: `{live_routing['ingress_expected']}`\n")
+              handle.write(f"- Ingress present: `{live_routing['ingress_present']}`\n")
+              if failed:
+                  handle.write(f"- Failed checks: `{', '.join(failed)}`\n")
+              else:
+                  handle.write("- Failed checks: `none`\n")
+          PY
+      - name: write promotion failure handoff
+        if: ${{ always() && inputs.apply }}
+        env:
+          PQMSG_JOB_STATUS: ${{ job.status }}
+        run: |
+          python scripts/release/write_failure_handoff_record.py \
+            --operation promote \
+            --job-status "$PQMSG_JOB_STATUS" \
+            --record dist/promotion-record.json \
+            --cluster-contract dist/cluster-contract.json \
+            --runtime-verification dist/post-deploy-verification.json \
+            --policy-verification dist/live-policy-verification.json \
+            --routing-verification dist/live-routing-verification.json \
+            --drift-report dist/deployment-drift.json \
+            --deployments dist/post-deploy-deployments.json \
+            --pods dist/post-deploy-pods.json \
+            --port-forward-log dist/post-deploy-port-forward.log \
+            --output dist/promotion-failure-handoff.json
+      - name: append promotion failure summary
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("dist/promotion-failure-handoff.json")
+          if not path.is_file():
+              raise SystemExit(0)
+          record = json.loads(path.read_text(encoding="utf-8"))
+          if not record.get("incident_required"):
+              raise SystemExit(0)
+
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          failed = ", ".join(item["name"] for item in record.get("failed_checks", [])[:6]) or "none"
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write("\n## Promotion Failure Handoff\n\n")
+              handle.write(f"- Job status: `{record['job_status']}`\n")
+              handle.write(f"- Incident required: `{record['incident_required']}`\n")
+              handle.write(f"- Failed check count: `{record['failed_check_count']}`\n")
+              handle.write(f"- Suspicious drift count: `{record['suspicious_drift_count']}`\n")
+              handle.write(f"- Failure record: `dist/promotion-failure-handoff.json`\n")
+              handle.write(f"- Top failed checks: `{failed}`\n")
+          PY
+      - name: render promotion incident alert payload
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python scripts/release/write_incident_alert_payload.py \
+            --failure-handoff dist/promotion-failure-handoff.json \
+            --output-json dist/promotion-incident-alert.json \
+            --output-md dist/promotion-incident-alert.md
+      - name: submit promotion incident alert
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python scripts/release/submit_incident_alert.py \
+            --operation promote \
+            --failure-handoff dist/promotion-failure-handoff.json \
+            --payload-json dist/promotion-incident-alert.json \
+            --alertmanager-api-url "${PQMSG_ALERTMANAGER_API_URL}" \
+            --output dist/promotion-incident-submission.json
+      - name: append promotion incident alert summary
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("dist/promotion-failure-handoff.json")
+          if not path.is_file():
+              raise SystemExit(0)
+          record = json.loads(path.read_text(encoding="utf-8"))
+          if not record.get("incident_required"):
+              raise SystemExit(0)
+
+          submission_path = Path("dist/promotion-incident-submission.json")
+          submission = (
+              json.loads(submission_path.read_text(encoding="utf-8"))
+              if submission_path.is_file()
+              else None
+          )
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write(f"- Incident alert payload: `dist/promotion-incident-alert.json`\n")
+              handle.write(f"- Incident note: `dist/promotion-incident-alert.md`\n")
+              handle.write(f"- Incident submission record: `dist/promotion-incident-submission.json`\n")
+              handle.write(f"- Alertmanager configured: `{bool(os.environ.get('PQMSG_ALERTMANAGER_API_URL'))}`\n")
+              if submission is not None:
+                  handle.write(f"- Submission outcome: `{submission['outcome']}`\n")
+                  handle.write(f"- Submission attempted: `{submission['attempted']}`\n")
+                  handle.write(f"- Submission delivered: `{submission['submitted']}`\n")
+                  handle.write(f"- Submission status code: `{submission['status_code']}`\n")
+          PY
+      - name: publish promotion incident issue
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python scripts/release/publish_incident_issue.py \
+            --failure-handoff dist/promotion-failure-handoff.json \
+            --submission-record dist/promotion-incident-submission.json \
+            --repo "${PQMSG_INCIDENT_ISSUE_REPO}" \
+            --github-api-url "${{ github.api_url }}" \
+            --github-repository "${{ github.repository }}" \
+            --github-run-id "${{ github.run_id }}" \
+            --github-workflow "${{ github.workflow }}" \
+            --output dist/promotion-incident-issue-publication.json
+      - name: append promotion incident issue summary
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          handoff_path = Path("dist/promotion-failure-handoff.json")
+          if not handoff_path.is_file():
+              raise SystemExit(0)
+          handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+          if not handoff.get("incident_required"):
+              raise SystemExit(0)
+
+          issue_path = Path("dist/promotion-incident-issue-publication.json")
+          issue_record = (
+              json.loads(issue_path.read_text(encoding="utf-8"))
+              if issue_path.is_file()
+              else None
+          )
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write(f"- Incident issue publication record: `dist/promotion-incident-issue-publication.json`\n")
+              handle.write(f"- Incident issue repo configured: `{bool(os.environ.get('PQMSG_INCIDENT_ISSUE_REPO'))}`\n")
+              if issue_record is not None:
+                  handle.write(f"- Issue publication outcome: `{issue_record['outcome']}`\n")
+                  handle.write(f"- Issue publication attempted: `{issue_record['attempted']}`\n")
+                  handle.write(f"- Issue published: `{issue_record['published']}`\n")
+                  handle.write(f"- Issue URL: `{issue_record['issue_url']}`\n")
+                  handle.write(f"- Issue labels: `{', '.join(issue_record.get('labels', []))}`\n")
+          PY
+      - name: resolve prior promotion incident issues
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python scripts/release/resolve_incident_issue.py \
+            --failure-handoff dist/promotion-failure-handoff.json \
+            --repo "${PQMSG_INCIDENT_ISSUE_REPO}" \
+            --github-api-url "${{ github.api_url }}" \
+            --github-repository "${{ github.repository }}" \
+            --github-run-id "${{ github.run_id }}" \
+            --github-workflow "${{ github.workflow }}" \
+            --output dist/promotion-incident-issue-resolution.json
+      - name: append promotion incident issue resolution summary
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("dist/promotion-incident-issue-resolution.json")
+          if not path.is_file():
+              raise SystemExit(0)
+          record = json.loads(path.read_text(encoding="utf-8"))
+          if record.get("incident_required"):
+              raise SystemExit(0)
+
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write(f"- Incident issue resolution record: `dist/promotion-incident-issue-resolution.json`\n")
+              handle.write(f"- Issue resolution outcome: `{record['outcome']}`\n")
+              handle.write(f"- Issue resolution attempted: `{record['attempted']}`\n")
+              handle.write(f"- Incident issues resolved: `{record['resolved']}`\n")
+              handle.write(f"- Resolution labels applied: `{', '.join(record.get('resolved_labels', []))}`\n")
+          PY
+      - name: enforce promotion incident gate
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("dist/promotion-failure-handoff.json")
+          if not path.is_file():
+              raise SystemExit("promotion failure handoff record missing")
+          record = json.loads(path.read_text(encoding="utf-8"))
+          raise SystemExit(1 if record.get("incident_required") else 0)
+          PY
+      - name: write promotion bundle manifest
+        if: ${{ always() }}
+        run: |
+          python scripts/release/write_bundle_manifest.py \
+            --bundle-kind promotion \
+            --release-tag "${{ inputs.release_tag }}" \
+            --deployment-mode "${{ inputs.deployment_mode }}" \
+            --dist-dir dist \
+            --output dist/promotion-bundle-manifest.json
+      - name: attest promotion bundle manifest provenance
+        if: ${{ always() }}
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/promotion-bundle-manifest.json
+      - name: comment promotion incident issue evidence
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python scripts/release/comment_incident_issue_evidence.py \
+            --issue-record dist/promotion-incident-issue-publication.json \
+            --bundle-manifest dist/promotion-bundle-manifest.json \
+            --repo "${PQMSG_INCIDENT_ISSUE_REPO}" \
+            --github-api-url "${{ github.api_url }}" \
+            --github-repository "${{ github.repository }}" \
+            --github-run-id "${{ github.run_id }}" \
+            --github-workflow "${{ github.workflow }}" \
+            --output /tmp/promotion-incident-issue-evidence.json
+      - name: comment promotion resolution issue evidence
+        if: ${{ always() && inputs.apply }}
+        run: |
+          python scripts/release/comment_incident_issue_evidence.py \
+            --issue-record dist/promotion-incident-issue-resolution.json \
+            --bundle-manifest dist/promotion-bundle-manifest.json \
+            --repo "${PQMSG_INCIDENT_ISSUE_REPO}" \
+            --github-api-url "${{ github.api_url }}" \
+            --github-repository "${{ github.repository }}" \
+            --github-run-id "${{ github.run_id }}" \
+            --github-workflow "${{ github.workflow }}" \
+            --output /tmp/promotion-incident-resolution-evidence.json
+      - name: append promotion bundle evidence summary
+        if: ${{ always() }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          manifest_path = Path("dist/promotion-bundle-manifest.json")
+          if manifest_path.is_file():
+              manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+              with summary.open("a", encoding="utf-8") as handle:
+                  handle.write(f"- Promotion bundle manifest: `dist/promotion-bundle-manifest.json`\n")
+                  handle.write(f"- Promotion bundle file count: `{manifest.get('file_count', 0)}`\n")
+
+          for path_str in [
+              "/tmp/promotion-incident-issue-evidence.json",
+              "/tmp/promotion-incident-resolution-evidence.json",
+          ]:
+              path = Path(path_str)
+              if not path.is_file():
+                  continue
+              record = json.loads(path.read_text(encoding="utf-8"))
+              with summary.open("a", encoding="utf-8") as handle:
+                  handle.write(f"- Incident evidence comment record: `{path_str}`\n")
+                  handle.write(f"- Incident evidence comment outcome: `{record.get('outcome')}`\n")
+          PY
+      - name: upload promotion bundle
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: promotion-bundle-${{ inputs.release_tag }}-${{ inputs.deployment_mode }}
+          path: |
+            dist/*

@@ -27,6 +27,7 @@ INCLUDED_PATHS = [
     "docs/PRIVATE_GROUPS.md",
     "docs/RELEASE_GOVERNANCE.md",
     "docs/SPEC.md",
+    "docs/SUPPORT_MATRIX.json",
     "docs/THREAT_MODEL.md",
     "docs/WEB.md",
     ".github/workflows/ci.yml",
@@ -39,8 +40,11 @@ INCLUDED_PATHS = [
     "scripts/security/validate_image_pinning.py",
     "scripts/security/validate_namespace_policy.py",
     "scripts/security/validate_network_policy.py",
+    "scripts/security/validate_audit_readiness_index.py",
     "scripts/security/validate_no_preview_contact_discovery.py",
     "scripts/security/validate_release_governance_workflows.py",
+    "scripts/security/validate_support_matrix.py",
+    "scripts/security/verify_audit_readiness_bundle.py",
 ]
 
 

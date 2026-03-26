@@ -280,6 +280,8 @@ class ContactDiscoveryActivity : AppCompatActivity() {
         require(
             manifest.lookup_protocol == "blind_token_directory_preview" &&
                 manifest.privacy_mode == "blind_evaluation_preview" &&
+                manifest.directory_backend == "simulated_enclave_preview" &&
+                manifest.host_enclave_protocol_version == 1 &&
                 manifest.match_result_format == "contact_invite_token" &&
                 manifest.oprf_suite == "ristretto255-sha512-preview" &&
                 manifest.evaluation_proof_mode == "dleq_per_element_preview" &&
@@ -292,6 +294,13 @@ class ContactDiscoveryActivity : AppCompatActivity() {
         ) {
             "Unsupported contact discovery manifest"
         }
+        require(
+            manifest.directory_backend == capabilities.contact_discovery_directory_backend &&
+                manifest.host_enclave_protocol_version ==
+                capabilities.contact_discovery_host_enclave_protocol_version,
+        ) {
+            "Contact discovery backend contract mismatch"
+        }
         if (!manifest.attestation_document_sha256.isNullOrBlank()) {
             val attestation = ApiClientFactory.createDiscovery(serviceOrigin).getAttestation()
             verifyContactDiscoveryAttestationDocument(
@@ -299,6 +308,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 expectedAttestationMode = manifest.attestation_mode,
                 expectedVerifier = manifest.attestation_verifier.orEmpty(),
                 expectedMeasurementHex = manifest.enclave_measurement_hex.orEmpty(),
+                expectedOprfPublicKeyRistretto255 = manifest.oprf_public_key_ristretto255,
                 expectedDocumentSha256 = manifest.attestation_document_sha256.orEmpty(),
                 expectedMaxAgeSeconds = capabilities.contact_discovery_attestation_max_age_seconds ?: 0,
             )
@@ -376,7 +386,10 @@ class ContactDiscoveryActivity : AppCompatActivity() {
         )
     }
 
-    private suspend fun issueDiscoveryTicket(context: ReadyMessagingContext): ContactDiscoveryTicketResponse {
+    private suspend fun issueDiscoveryTicket(
+        context: ReadyMessagingContext,
+        purpose: String,
+    ): ContactDiscoveryTicketResponse {
         val configuredOrigin = context.capabilities.contact_discovery_service_origin?.trim().orEmpty()
         require(configuredOrigin.isNotBlank()) {
             "Private contact discovery service is not configured"
@@ -386,7 +399,9 @@ class ContactDiscoveryActivity : AppCompatActivity() {
             headers = buildContactDiscoveryTicketAuthHeaders(
                 keysJson = context.keysJson,
                 userId = context.profile.userId,
+                purpose = purpose,
             ).toHeaderMap(),
+            request = ContactDiscoveryTicketRequest(purpose = purpose),
         )
         require(
             ApiClientFactory.normalizeBaseUrl(response.service_origin) ==
@@ -419,7 +434,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                     "Private contact discovery is unavailable for this profile"
                 }
                 val manifest = loadVerifiedDiscoveryManifest(context).manifest
-                val ticket = issueDiscoveryTicket(context)
+                val ticket = issueDiscoveryTicket(context, "upload")
                 val discoveryApi = ApiClientFactory.createDiscovery(ticket.service_origin)
                 val phonePrepared = prepareDiscoveryBlindRequest(phoneHashes)
                 val emailPrepared = prepareDiscoveryBlindRequest(emailHashes)
@@ -508,7 +523,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                     "Private contact discovery is unavailable for this profile"
                 }
                 val manifest = loadVerifiedDiscoveryManifest(context).manifest
-                val ticket = issueDiscoveryTicket(context)
+                val ticket = issueDiscoveryTicket(context, "match")
                 val discoveryApi = ApiClientFactory.createDiscovery(ticket.service_origin)
                 val prepared = prepareDiscoveryBlindRequest(hashes)
                 val evaluated = discoveryApi.evaluateDiscoveryElements(

@@ -66,6 +66,7 @@ const AUTH_TAG_ROTATE_SIG_NEW_HASH = criticalType(0x320f);
 const AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH = criticalType(0x3230);
 const AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH = criticalType(0x3231);
 const AUTH_TAG_ROTATE_PQ_SIG_NEW_HASH = criticalType(0x3232);
+const AUTH_TAG_DISCOVERY_PURPOSE = criticalType(0x3233);
 
 const SIG_TAG_PROTOCOL_VERSION = criticalType(0x0201);
 const SIG_TAG_LABEL = criticalType(0x0202);
@@ -781,12 +782,14 @@ export function buildSenderCertificateAuthHeaders(keys: GeneratedKeys): RequestA
 }
 
 export function buildContactDiscoveryTicketAuthHeaders(
-  keys: GeneratedKeys
+  keys: GeneratedKeys,
+  purpose: "upload" | "match"
 ): RequestAuthHeaders {
   const timestamp = unixTimestampSeconds();
   const nonce = bytesToBase64(randomBytes(16));
   const records = authCommonRecords("contact-discovery-ticket", keys.userId, keys.deviceId, timestamp, nonce);
   records.push({ ty: AUTH_TAG_RECIPIENT_ID, value: utf8ToBytes(keys.userId) });
+  records.push({ ty: AUTH_TAG_DISCOVERY_PURPOSE, value: utf8ToBytes(purpose) });
   return signAuthHeaders(keys, timestamp, nonce, records);
 }
 
@@ -1226,6 +1229,8 @@ export function verifyContactDiscoveryManifest(
     ticket_max_ttl_seconds: manifest.ticket_max_ttl_seconds,
     lookup_protocol: manifest.lookup_protocol,
     privacy_mode: manifest.privacy_mode,
+    directory_backend: manifest.directory_backend,
+    host_enclave_protocol_version: manifest.host_enclave_protocol_version,
     match_result_format: manifest.match_result_format,
     oprf_suite: manifest.oprf_suite,
     evaluation_proof_mode: manifest.evaluation_proof_mode,
@@ -1245,6 +1250,7 @@ export function verifyContactDiscoveryAttestationDocument(
   expectedAttestationMode: string,
   expectedVerifier: string,
   expectedMeasurementHex: string,
+  expectedOprfPublicKeyRistretto255B64: string,
   expectedDocumentSha256: string,
   expectedMaxAgeSeconds: number,
 ): void {
@@ -1256,6 +1262,9 @@ export function verifyContactDiscoveryAttestationDocument(
   }
   if (response.enclave_measurement_hex !== expectedMeasurementHex) {
     throw new Error("Contact discovery attestation measurement mismatch");
+  }
+  if (response.attested_oprf_public_key_ristretto255 !== expectedOprfPublicKeyRistretto255B64) {
+    throw new Error("Contact discovery attestation OPRF public key mismatch");
   }
   if (response.document_format !== "opaque_b64_v1") {
     throw new Error("Unsupported contact discovery attestation document format");

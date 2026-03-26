@@ -194,6 +194,10 @@ jobs:
 
   audit-readiness-bundle:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -205,11 +209,18 @@ jobs:
       - name: build audit-readiness bundle
         run: |
           python scripts/security/build_audit_readiness_bundle.py --output-dir /tmp/pqmsg-audit-bundle
-      - name: upload audit-readiness bundle manifest
+      - name: verify audit-readiness bundle
+        run: |
+          python scripts/security/verify_audit_readiness_bundle.py --bundle-dir /tmp/pqmsg-audit-bundle
+      - name: attest audit-readiness bundle manifest provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: /tmp/pqmsg-audit-bundle/audit-bundle-manifest.json
+      - name: upload audit-readiness bundle
         uses: actions/upload-artifact@v4
         with:
-          name: audit-readiness-bundle-manifest
-          path: /tmp/pqmsg-audit-bundle/audit-bundle-manifest.json
+          name: audit-readiness-bundle
+          path: /tmp/pqmsg-audit-bundle/**
 
   benchmarks:
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}

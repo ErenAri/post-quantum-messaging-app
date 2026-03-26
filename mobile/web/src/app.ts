@@ -4185,6 +4185,8 @@ function buildContactDiscoveryCheckpoint(
     ticket_format: manifest.ticket_format,
     lookup_protocol: manifest.lookup_protocol,
     privacy_mode: manifest.privacy_mode,
+    directory_backend: manifest.directory_backend,
+    host_enclave_protocol_version: manifest.host_enclave_protocol_version,
     match_result_format: manifest.match_result_format,
     oprf_suite: manifest.oprf_suite,
     evaluation_proof_mode: manifest.evaluation_proof_mode,
@@ -4214,6 +4216,10 @@ function diffContactDiscoveryCheckpoint(
   if (previous.ticket_format !== current.ticket_format) changed.push("ticket_format");
   if (previous.lookup_protocol !== current.lookup_protocol) changed.push("lookup_protocol");
   if (previous.privacy_mode !== current.privacy_mode) changed.push("privacy_mode");
+  if (previous.directory_backend !== current.directory_backend) changed.push("directory_backend");
+  if (previous.host_enclave_protocol_version !== current.host_enclave_protocol_version) {
+    changed.push("host_enclave_protocol_version");
+  }
   if (previous.match_result_format !== current.match_result_format) changed.push("match_result_format");
   if (previous.oprf_suite !== current.oprf_suite) changed.push("oprf_suite");
   if (previous.evaluation_proof_mode !== current.evaluation_proof_mode) {
@@ -4268,8 +4274,16 @@ async function loadVerifiedContactDiscoveryManifest(
     capabilities.contact_discovery_attestation_document_sha256,
   );
   if (
+    !capabilities.contact_discovery_directory_backend
+    || !capabilities.contact_discovery_host_enclave_protocol_version
+  ) {
+    throw new Error("Private contact discovery backend contract is incomplete");
+  }
+  if (
     manifest.lookup_protocol !== "blind_token_directory_preview"
     || manifest.privacy_mode !== "blind_evaluation_preview"
+    || manifest.directory_backend !== "simulated_enclave_preview"
+    || manifest.host_enclave_protocol_version !== 1
     || manifest.match_result_format !== "contact_invite_token"
     || manifest.oprf_suite !== "ristretto255-sha512-preview"
     || manifest.evaluation_proof_mode !== "dleq_per_element_preview"
@@ -4282,6 +4296,13 @@ async function loadVerifiedContactDiscoveryManifest(
   ) {
     throw new Error("Unsupported contact discovery manifest");
   }
+  if (
+    manifest.directory_backend !== capabilities.contact_discovery_directory_backend
+    || manifest.host_enclave_protocol_version
+      !== capabilities.contact_discovery_host_enclave_protocol_version
+  ) {
+    throw new Error("Contact discovery backend contract mismatch");
+  }
   if (manifest.attestation_document_sha256) {
     const attestation = await apiClient.getContactDiscoveryAttestation(serviceOrigin);
     verifyContactDiscoveryAttestationDocument(
@@ -4289,6 +4310,7 @@ async function loadVerifiedContactDiscoveryManifest(
       manifest.attestation_mode,
       manifest.attestation_verifier || "",
       manifest.enclave_measurement_hex || "",
+      manifest.oprf_public_key_ristretto255,
       manifest.attestation_document_sha256,
       capabilities.contact_discovery_attestation_max_age_seconds || 0,
     );
@@ -6035,13 +6057,17 @@ async function renderDiscovery(): Promise<void> {
 
   q("#disc-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
 
-  async function issueDiscoveryTicket(api: PqmsgApi, keys: GeneratedKeys): Promise<{
+  async function issueDiscoveryTicket(
+    api: PqmsgApi,
+    keys: GeneratedKeys,
+    purpose: "upload" | "match"
+  ): Promise<{
     serviceOrigin: string;
     ticket: string;
     manifest: ContactDiscoveryManifestResponse;
   }> {
-    const headers = buildContactDiscoveryTicketAuthHeaders(keys);
-    const response = await api.issueContactDiscoveryTicket(keys.userId, headers);
+    const headers = buildContactDiscoveryTicketAuthHeaders(keys, purpose);
+    const response = await api.issueContactDiscoveryTicket(keys.userId, headers, { purpose });
     const configuredOrigin = contactDiscoveryServiceOrigin
       ? validateWebServerUrl(contactDiscoveryServiceOrigin).origin
       : null;
@@ -6065,7 +6091,7 @@ async function renderDiscovery(): Promise<void> {
     try {
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
-      const { serviceOrigin, ticket, manifest } = await issueDiscoveryTicket(api, k);
+      const { serviceOrigin, ticket, manifest } = await issueDiscoveryTicket(api, k, "upload");
       const phonePrepared = prepareContactDiscoveryBlindRequest(phones);
       const emailPrepared = prepareContactDiscoveryBlindRequest(emails);
       const phoneEvaluated = phonePrepared.blindedElementsBase64.length === 0
@@ -6117,7 +6143,7 @@ async function renderDiscovery(): Promise<void> {
     try {
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
-      const { serviceOrigin, ticket, manifest } = await issueDiscoveryTicket(api, k);
+      const { serviceOrigin, ticket, manifest } = await issueDiscoveryTicket(api, k, "match");
       const prepared = prepareContactDiscoveryBlindRequest(hashes);
       const evaluated = await api.evaluateDiscoveryElementsAtService(serviceOrigin, {
         ticket,
@@ -6259,6 +6285,8 @@ async function renderServerInfo(): Promise<void> {
           <div class="settings-row"><span>Discovery Tickets</span><span>${caps.contact_discovery_ticket_supported ? "Available" : "Unavailable"}</span></div>
           <div class="settings-row"><span>Discovery Ticket Issuer</span><span class="mono">${escHtml(caps.contact_discovery_ticket_issuer_ed25519_pub)}</span></div>
           <div class="settings-row"><span>Discovery Manifest Issuer</span><span class="mono">${escHtml(caps.contact_discovery_manifest_issuer_ed25519_pub || "not advertised")}</span></div>
+          <div class="settings-row"><span>Discovery Backend</span><span>${escHtml(caps.contact_discovery_directory_backend || "not advertised")}</span></div>
+          <div class="settings-row"><span>Host/Enclave Protocol</span><span>${escHtml(caps.contact_discovery_host_enclave_protocol_version ? `${caps.contact_discovery_host_enclave_protocol_version}` : "not advertised")}</span></div>
           <div class="settings-row"><span>Discovery Attestation Verifier</span><span class="mono">${escHtml(caps.contact_discovery_attestation_verifier || "not advertised")}</span></div>
           <div class="settings-row"><span>Discovery Enclave Measurement</span><span class="mono">${escHtml(caps.contact_discovery_expected_measurement_hex || "not advertised")}</span></div>
           <div class="settings-row"><span>Discovery Attestation Max Age</span><span>${escHtml(caps.contact_discovery_attestation_max_age_seconds ? `${caps.contact_discovery_attestation_max_age_seconds}s` : "not advertised")}</span></div>

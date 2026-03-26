@@ -157,6 +157,7 @@ const DEVELOPMENT_SENDER_CERT_SIGNING_KEY_BYTES: [u8; 32] = [0x53; 32];
 pub(crate) const AUTH_TAG_ROTATE_NEW_PQ_SIG_HASH: u16 = critical_type(0x3230);
 pub(crate) const AUTH_TAG_ROTATE_PQ_SIG_CURRENT_HASH: u16 = critical_type(0x3231);
 pub(crate) const AUTH_TAG_ROTATE_PQ_SIG_NEW_HASH: u16 = critical_type(0x3232);
+pub(crate) const AUTH_TAG_DISCOVERY_PURPOSE: u16 = critical_type(0x3233);
 pub(crate) const MAX_DELETE_MESSAGE_IDS: usize = 512;
 pub(crate) const MAX_POW_NONCE_LEN: usize = 128;
 pub(crate) const DEFAULT_REGISTRATION_POW_BITS_HARDENED: u8 = 18;
@@ -325,6 +326,8 @@ pub struct AppState {
     authenticated_direct_messaging_supported: bool,
     contact_discovery_service_origin: Option<String>,
     contact_discovery_manifest_issuer_ed25519_pub: Option<String>,
+    contact_discovery_directory_backend: Option<String>,
+    contact_discovery_host_enclave_protocol_version: Option<u32>,
     contact_discovery_attestation_verifier: Option<String>,
     contact_discovery_expected_measurement_hex: Option<String>,
     contact_discovery_attestation_document_sha256: Option<String>,
@@ -363,6 +366,8 @@ impl AppState {
             authenticated_direct_messaging_supported: false,
             contact_discovery_service_origin: None,
             contact_discovery_manifest_issuer_ed25519_pub: None,
+            contact_discovery_directory_backend: None,
+            contact_discovery_host_enclave_protocol_version: None,
             contact_discovery_attestation_verifier: None,
             contact_discovery_expected_measurement_hex: None,
             contact_discovery_attestation_document_sha256: None,
@@ -405,6 +410,8 @@ impl AppState {
             authenticated_direct_messaging_supported: false,
             contact_discovery_service_origin: None,
             contact_discovery_manifest_issuer_ed25519_pub: None,
+            contact_discovery_directory_backend: None,
+            contact_discovery_host_enclave_protocol_version: None,
             contact_discovery_attestation_verifier: None,
             contact_discovery_expected_measurement_hex: None,
             contact_discovery_attestation_document_sha256: None,
@@ -511,6 +518,25 @@ impl AppState {
     pub fn contact_discovery_manifest_issuer_public_key_b64(&self) -> Option<String> {
         if self.contact_discovery_private_service_allowed() {
             self.contact_discovery_manifest_issuer_ed25519_pub.clone()
+        } else {
+            None
+        }
+    }
+
+    pub fn contact_discovery_directory_backend(&self) -> Option<String> {
+        if self.contact_discovery_private_service_allowed() {
+            self.contact_discovery_directory_backend
+                .clone()
+                .or_else(|| Some("simulated_enclave_preview".to_string()))
+        } else {
+            None
+        }
+    }
+
+    pub fn contact_discovery_host_enclave_protocol_version(&self) -> Option<u32> {
+        if self.contact_discovery_private_service_allowed() {
+            self.contact_discovery_host_enclave_protocol_version
+                .or(Some(1))
         } else {
             None
         }
@@ -682,6 +708,22 @@ impl AppState {
         manifest_issuer_public_key_b64: Option<String>,
     ) -> Self {
         self.contact_discovery_manifest_issuer_ed25519_pub = manifest_issuer_public_key_b64;
+        self
+    }
+
+    pub fn with_contact_discovery_directory_backend(
+        mut self,
+        directory_backend: Option<String>,
+    ) -> Self {
+        self.contact_discovery_directory_backend = directory_backend;
+        self
+    }
+
+    pub fn with_contact_discovery_host_enclave_protocol_version(
+        mut self,
+        host_enclave_protocol_version: Option<u32>,
+    ) -> Self {
+        self.contact_discovery_host_enclave_protocol_version = host_enclave_protocol_version;
         self
     }
 

@@ -26,6 +26,8 @@ const DEFAULT_BIND: &str = "127.0.0.1:8082";
 const DEFAULT_ATTESTATION_MODE: &str = "unattested_development";
 const CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS: i64 = 300;
 const CONTACT_DISCOVERY_TICKET_MAX_USES: u8 = 6;
+const CONTACT_DISCOVERY_TICKET_UPLOAD_MAX_USES: u8 = 3;
+const CONTACT_DISCOVERY_TICKET_MATCH_MAX_USES: u8 = 2;
 const CONTACT_DISCOVERY_MANIFEST_MAX_TTL_SECONDS: i64 = 3600;
 const MAX_DISCOVERY_HASHES_PER_REQUEST: usize = 2048;
 const CONTACT_DISCOVERY_LOOKUP_PROTOCOL: &str = "blind_token_directory_preview";
@@ -34,6 +36,8 @@ const CONTACT_DISCOVERY_MATCH_RESULT_FORMAT: &str = "contact_invite_token";
 const CONTACT_DISCOVERY_OPRF_SUITE: &str = "ristretto255-sha512-preview";
 const CONTACT_DISCOVERY_EVALUATION_PROOF_MODE: &str = "dleq_per_element_preview";
 const CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_FORMAT: &str = "opaque_b64_v1";
+const CONTACT_DISCOVERY_DIRECTORY_BACKEND: &str = "simulated_enclave_preview";
+const CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION: u8 = 1;
 const CONTACT_DISCOVERY_HANDLE_DOMAIN: &[u8] = b"pqmsg-discovery-handle-v1";
 
 #[derive(Clone)]
@@ -65,6 +69,8 @@ struct HealthResponse {
     status: &'static str,
     attestation_mode: String,
     ticket_verifier_ready: bool,
+    directory_backend: &'static str,
+    host_enclave_protocol_version: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -81,6 +87,8 @@ struct ManifestPayload {
     ticket_max_ttl_seconds: i64,
     lookup_protocol: &'static str,
     privacy_mode: &'static str,
+    directory_backend: &'static str,
+    host_enclave_protocol_version: u8,
     match_result_format: &'static str,
     oprf_suite: &'static str,
     evaluation_proof_mode: &'static str,
@@ -110,6 +118,9 @@ struct AttestationResponse {
     attestation_mode: String,
     attestation_verifier: String,
     enclave_measurement_hex: String,
+    directory_backend: &'static str,
+    host_enclave_protocol_version: u8,
+    attested_oprf_public_key_ristretto255: String,
     document_format: &'static str,
     document_base64: String,
     document_sha256: String,
@@ -162,6 +173,7 @@ pub(crate) struct ContactDiscoveryTicketClaims {
     v: u8,
     user_id: String,
     device_id: String,
+    purpose: String,
     contact_invite_token: String,
     contact_invite_expires_at: String,
     issued_at: String,
@@ -197,6 +209,14 @@ struct DiscoveryRegistry {
 }
 
 impl DiscoveryRegistry {
+    fn purge_expired_handles(&mut self, now: DateTime<Utc>) {
+        self.user_handles.retain(|_, stored_handles| {
+            DateTime::parse_from_rfc3339(&stored_handles.contact_invite_expires_at)
+                .map(|value| value.with_timezone(&Utc) > now)
+                .unwrap_or(false)
+        });
+    }
+
     fn consume_ticket_use(
         &mut self,
         claims: &ContactDiscoveryTicketClaims,
@@ -526,6 +546,8 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         status: "ok",
         attestation_mode: state.attestation_mode.clone(),
         ticket_verifier_ready: true,
+        directory_backend: CONTACT_DISCOVERY_DIRECTORY_BACKEND,
+        host_enclave_protocol_version: CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION,
     })
 }
 
@@ -549,6 +571,8 @@ async fn manifest(State(state): State<AppState>) -> Json<ManifestResponse> {
         ticket_max_ttl_seconds: CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS,
         lookup_protocol: CONTACT_DISCOVERY_LOOKUP_PROTOCOL,
         privacy_mode: CONTACT_DISCOVERY_PRIVACY_MODE,
+        directory_backend: CONTACT_DISCOVERY_DIRECTORY_BACKEND,
+        host_enclave_protocol_version: CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION,
         match_result_format: CONTACT_DISCOVERY_MATCH_RESULT_FORMAT,
         oprf_suite: CONTACT_DISCOVERY_OPRF_SUITE,
         evaluation_proof_mode: CONTACT_DISCOVERY_EVALUATION_PROOF_MODE,
@@ -588,6 +612,9 @@ async fn attestation(
         attestation_mode: state.attestation_mode.clone(),
         attestation_verifier: verifier,
         enclave_measurement_hex: measurement,
+        directory_backend: CONTACT_DISCOVERY_DIRECTORY_BACKEND,
+        host_enclave_protocol_version: CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION,
+        attested_oprf_public_key_ristretto255: state.oprf_public_key_ristretto255_b64.clone(),
         document_format: CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_FORMAT,
         document_base64,
         document_sha256,
@@ -603,6 +630,7 @@ async fn evaluate_blinded_elements(
     let claims =
         verify_contact_discovery_ticket(&state.ticket_issuer_verifying_key, &request.ticket, now)
             .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
+    ensure_ticket_purpose_allowed(&claims, &["upload", "match"])?;
     state
         .registry
         .write()
@@ -647,6 +675,7 @@ async fn upload_handles(
     let claims =
         verify_contact_discovery_ticket(&state.ticket_issuer_verifying_key, &request.ticket, now)
             .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
+    ensure_ticket_purpose_allowed(&claims, &["upload"])?;
     let mut registry = state.registry.write().await;
     registry.consume_ticket_use(&claims, now)?;
     let phone_tokens =
@@ -654,6 +683,7 @@ async fn upload_handles(
     let email_tokens =
         normalize_sha256_hex_values("email_tokens_sha256", &request.email_tokens_sha256)?;
     let now = Utc::now().to_rfc3339();
+    registry.purge_expired_handles(Utc::now());
     registry.replace_tokens(
         &claims.user_id,
         &claims.contact_invite_token,
@@ -678,18 +708,12 @@ async fn match_handles(
     let claims =
         verify_contact_discovery_ticket(&state.ticket_issuer_verifying_key, &request.ticket, now)
             .map_err(|error| DiscoveryError::bad_request(error.to_string()))?;
-    state
-        .registry
-        .write()
-        .await
-        .consume_ticket_use(&claims, now)?;
+    ensure_ticket_purpose_allowed(&claims, &["match"])?;
+    let mut registry = state.registry.write().await;
+    registry.consume_ticket_use(&claims, now)?;
+    registry.purge_expired_handles(now);
     let query_tokens = normalize_sha256_hex_values("tokens_sha256", &request.tokens_sha256)?;
-    let matches =
-        state
-            .registry
-            .read()
-            .await
-            .match_tokens(&claims.user_id, &query_tokens, Utc::now());
+    let matches = registry.match_tokens(&claims.user_id, &query_tokens, Utc::now());
     Ok(Json(DiscoveryMatchResponse {
         user_id: claims.user_id,
         matches,
@@ -830,6 +854,19 @@ pub(crate) fn verify_contact_discovery_ticket(
     if claims.user_id.trim().is_empty() || claims.device_id.trim().is_empty() {
         anyhow::bail!("contact discovery ticket is missing user or device identity");
     }
+    match claims.purpose.as_str() {
+        "upload" => {
+            if claims.max_uses != CONTACT_DISCOVERY_TICKET_UPLOAD_MAX_USES {
+                anyhow::bail!("contact discovery ticket max_uses is invalid for upload purpose");
+            }
+        }
+        "match" => {
+            if claims.max_uses != CONTACT_DISCOVERY_TICKET_MATCH_MAX_USES {
+                anyhow::bail!("contact discovery ticket max_uses is invalid for match purpose");
+            }
+        }
+        _ => anyhow::bail!("contact discovery ticket purpose is invalid"),
+    }
     if claims.contact_invite_token.trim().is_empty()
         || claims.contact_invite_token.len() > 128
         || !claims
@@ -871,6 +908,23 @@ pub(crate) fn verify_contact_discovery_ticket(
         anyhow::bail!("contact discovery ticket expired");
     }
     Ok(claims)
+}
+
+fn ensure_ticket_purpose_allowed(
+    claims: &ContactDiscoveryTicketClaims,
+    allowed_purposes: &[&str],
+) -> Result<(), DiscoveryError> {
+    if allowed_purposes
+        .iter()
+        .any(|purpose| *purpose == claims.purpose.as_str())
+    {
+        Ok(())
+    } else {
+        Err(DiscoveryError::bad_request(format!(
+            "contact discovery ticket purpose '{}' is not valid for this operation",
+            claims.purpose
+        )))
+    }
 }
 
 #[tokio::main]
@@ -975,16 +1029,23 @@ mod tests {
         signing_key: &SigningKey,
         issued_at: &str,
         expires_at: &str,
+        purpose: &str,
     ) -> (String, ContactDiscoveryTicketClaims) {
+        let max_uses = match purpose {
+            "upload" => CONTACT_DISCOVERY_TICKET_UPLOAD_MAX_USES,
+            "match" => CONTACT_DISCOVERY_TICKET_MATCH_MAX_USES,
+            _ => panic!("unsupported ticket purpose"),
+        };
         let claims = ContactDiscoveryTicketClaims {
             v: 1,
             user_id: "alice".to_string(),
             device_id: "alice-dev-1".to_string(),
+            purpose: purpose.to_string(),
             contact_invite_token: "invite-bootstrap-1".to_string(),
             contact_invite_expires_at: "2026-03-27T12:00:00Z".to_string(),
             issued_at: issued_at.to_string(),
             expires_at: expires_at.to_string(),
-            max_uses: CONTACT_DISCOVERY_TICKET_MAX_USES,
+            max_uses,
             nonce: "nonce-1".to_string(),
         };
         let payload = serde_json::to_vec(&claims).expect("serialize claims");
@@ -1008,8 +1069,12 @@ mod tests {
     fn verify_contact_discovery_ticket_accepts_valid_ticket() {
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
         let verifying_key = signing_key.verifying_key();
-        let (ticket, claims) =
-            signed_ticket(&signing_key, "2026-03-13T12:00:00Z", "2026-03-13T12:05:00Z");
+        let (ticket, claims) = signed_ticket(
+            &signing_key,
+            "2026-03-13T12:00:00Z",
+            "2026-03-13T12:05:00Z",
+            "match",
+        );
         let verified = verify_contact_discovery_ticket(
             &verifying_key,
             &ticket,
@@ -1025,8 +1090,12 @@ mod tests {
     fn verify_contact_discovery_ticket_rejects_expired_ticket() {
         let signing_key = SigningKey::from_bytes(&[8u8; 32]);
         let verifying_key = signing_key.verifying_key();
-        let (ticket, _) =
-            signed_ticket(&signing_key, "2026-03-13T12:00:00Z", "2026-03-13T12:05:00Z");
+        let (ticket, _) = signed_ticket(
+            &signing_key,
+            "2026-03-13T12:00:00Z",
+            "2026-03-13T12:05:00Z",
+            "match",
+        );
         let error = verify_contact_discovery_ticket(
             &verifying_key,
             &ticket,
@@ -1046,6 +1115,7 @@ mod tests {
             &SigningKey::from_bytes(&[10u8; 32]),
             "2026-03-13T12:00:00Z",
             "2026-03-13T12:05:00Z",
+            "match",
         );
         let error = verify_contact_discovery_ticket(
             &verifying_key,
@@ -1062,8 +1132,13 @@ mod tests {
     fn verify_contact_discovery_ticket_rejects_invalid_max_uses() {
         let signing_key = SigningKey::from_bytes(&[40u8; 32]);
         let verifying_key = signing_key.verifying_key();
-        let mut claims =
-            signed_ticket(&signing_key, "2026-03-13T12:00:00Z", "2026-03-13T12:05:00Z").1;
+        let mut claims = signed_ticket(
+            &signing_key,
+            "2026-03-13T12:00:00Z",
+            "2026-03-13T12:05:00Z",
+            "match",
+        )
+        .1;
         claims.max_uses = CONTACT_DISCOVERY_TICKET_MAX_USES + 1;
         let payload = serde_json::to_vec(&claims).expect("serialize claims");
         let signature = signing_key.sign(&payload).to_bytes();
@@ -1130,6 +1205,14 @@ mod tests {
             CONTACT_DISCOVERY_PRIVACY_MODE
         );
         assert_eq!(
+            response.payload.directory_backend,
+            CONTACT_DISCOVERY_DIRECTORY_BACKEND
+        );
+        assert_eq!(
+            response.payload.host_enclave_protocol_version,
+            CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION
+        );
+        assert_eq!(
             response.payload.match_result_format,
             CONTACT_DISCOVERY_MATCH_RESULT_FORMAT
         );
@@ -1182,6 +1265,7 @@ mod tests {
             &ticket_signing_key,
             &issued_at.to_rfc3339(),
             &expires_at.to_rfc3339(),
+            "match",
         );
         let blind_scalar = Scalar::from_bytes_mod_order([24u8; 32]);
         let (blinded_b64, handle_point) = blind_handle_hash(&"11".repeat(32), blind_scalar);
@@ -1293,10 +1377,11 @@ mod tests {
             &ticket_signing_key,
             &issued_at.to_rfc3339(),
             &expires_at.to_rfc3339(),
+            "match",
         );
         let (blinded_b64, _) =
             blind_handle_hash(&"11".repeat(32), Scalar::from_bytes_mod_order([44u8; 32]));
-        for _ in 0..CONTACT_DISCOVERY_TICKET_MAX_USES {
+        for _ in 0..CONTACT_DISCOVERY_TICKET_MATCH_MAX_USES {
             let _ = evaluate_blinded_elements(
                 State(state.clone()),
                 Json(DiscoveryEvaluateRequest {
@@ -1320,10 +1405,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upload_endpoint_rejects_match_purpose_ticket() {
+        let ticket_signing_key = SigningKey::from_bytes(&[46u8; 32]);
+        let oprf_scalar = Scalar::from_bytes_mod_order([47u8; 32]);
+        let state = AppState {
+            ticket_issuer_verifying_key: Arc::new(ticket_signing_key.verifying_key()),
+            manifest_signing_key: Arc::new(SigningKey::from_bytes(&[48u8; 32])),
+            attestation_mode: DEFAULT_ATTESTATION_MODE.to_string(),
+            attestation_verifier: None,
+            enclave_measurement_hex: None,
+            attestation_document_base64: None,
+            attestation_document_sha256: None,
+            registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
+            oprf_secret_scalar: Arc::new(oprf_scalar),
+            oprf_public_key_ristretto255_b64: B64.encode(
+                (RISTRETTO_BASEPOINT_POINT * oprf_scalar)
+                    .compress()
+                    .to_bytes(),
+            ),
+        };
+        let issued_at = Utc::now() - chrono::Duration::minutes(1);
+        let expires_at = issued_at + chrono::Duration::minutes(5);
+        let (ticket, _) = signed_ticket(
+            &ticket_signing_key,
+            &issued_at.to_rfc3339(),
+            &expires_at.to_rfc3339(),
+            "match",
+        );
+        let error = upload_handles(
+            State(state),
+            Json(DiscoveryHandlesUploadRequest {
+                ticket,
+                phone_tokens_sha256: vec!["11".repeat(32)],
+                email_tokens_sha256: vec![],
+            }),
+        )
+        .await
+        .expect_err("match-purpose ticket should not upload");
+        assert!(error.detail.contains("purpose"));
+    }
+
+    #[tokio::test]
+    async fn match_endpoint_rejects_upload_purpose_ticket() {
+        let ticket_signing_key = SigningKey::from_bytes(&[49u8; 32]);
+        let oprf_scalar = Scalar::from_bytes_mod_order([50u8; 32]);
+        let state = AppState {
+            ticket_issuer_verifying_key: Arc::new(ticket_signing_key.verifying_key()),
+            manifest_signing_key: Arc::new(SigningKey::from_bytes(&[51u8; 32])),
+            attestation_mode: DEFAULT_ATTESTATION_MODE.to_string(),
+            attestation_verifier: None,
+            enclave_measurement_hex: None,
+            attestation_document_base64: None,
+            attestation_document_sha256: None,
+            registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
+            oprf_secret_scalar: Arc::new(oprf_scalar),
+            oprf_public_key_ristretto255_b64: B64.encode(
+                (RISTRETTO_BASEPOINT_POINT * oprf_scalar)
+                    .compress()
+                    .to_bytes(),
+            ),
+        };
+        let issued_at = Utc::now() - chrono::Duration::minutes(1);
+        let expires_at = issued_at + chrono::Duration::minutes(5);
+        let (ticket, _) = signed_ticket(
+            &ticket_signing_key,
+            &issued_at.to_rfc3339(),
+            &expires_at.to_rfc3339(),
+            "upload",
+        );
+        let error = match_handles(
+            State(state),
+            Json(DiscoveryMatchRequest {
+                ticket,
+                tokens_sha256: vec!["22".repeat(32)],
+            }),
+        )
+        .await
+        .expect_err("upload-purpose ticket should not match");
+        assert!(error.detail.contains("purpose"));
+    }
+
+    #[tokio::test]
     async fn attestation_endpoint_returns_configured_document() {
         let ticket_signing_key = SigningKey::from_bytes(&[31u8; 32]);
         let manifest_signing_key = Arc::new(SigningKey::from_bytes(&[32u8; 32]));
         let oprf_scalar = Scalar::from_bytes_mod_order([33u8; 32]);
+        let oprf_public_key_ristretto255_b64 = B64.encode(
+            (RISTRETTO_BASEPOINT_POINT * oprf_scalar)
+                .compress()
+                .to_bytes(),
+        );
         let document_bytes = b"{\"tee\":\"sgx\",\"svn\":1}".to_vec();
         let document_b64 = B64.encode(&document_bytes);
         let state = AppState {
@@ -1336,11 +1507,7 @@ mod tests {
             attestation_document_sha256: Some(bytes_to_hex(&Sha256::digest(&document_bytes))),
             registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
             oprf_secret_scalar: Arc::new(oprf_scalar),
-            oprf_public_key_ristretto255_b64: B64.encode(
-                (RISTRETTO_BASEPOINT_POINT * oprf_scalar)
-                    .compress()
-                    .to_bytes(),
-            ),
+            oprf_public_key_ristretto255_b64: oprf_public_key_ristretto255_b64.clone(),
         };
 
         let response = attestation(State(state))
@@ -1350,6 +1517,18 @@ mod tests {
         assert_eq!(response.attestation_mode, "sgx_preview");
         assert_eq!(response.attestation_verifier, "sgx-dcap-preview");
         assert_eq!(response.enclave_measurement_hex, "cd".repeat(32));
+        assert_eq!(
+            response.directory_backend,
+            CONTACT_DISCOVERY_DIRECTORY_BACKEND
+        );
+        assert_eq!(
+            response.host_enclave_protocol_version,
+            CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            response.attested_oprf_public_key_ristretto255,
+            oprf_public_key_ristretto255_b64
+        );
         assert_eq!(
             response.document_format,
             CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_FORMAT
@@ -1408,5 +1587,50 @@ mod tests {
                 .with_timezone(&Utc),
         );
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn registry_purges_expired_bootstrap_invites() {
+        let mut registry = DiscoveryRegistry::default();
+        registry.replace_tokens(
+            "bob",
+            "invite-bob",
+            "2026-03-13T11:59:00Z",
+            &["11".repeat(32)],
+            &[],
+        );
+        assert_eq!(registry.user_handles.len(), 1);
+        registry.purge_expired_handles(
+            DateTime::parse_from_rfc3339("2026-03-13T12:01:00Z")
+                .expect("parse time")
+                .with_timezone(&Utc),
+        );
+        assert!(registry.user_handles.is_empty());
+    }
+
+    #[test]
+    fn verify_contact_discovery_ticket_rejects_invalid_purpose() {
+        let signing_key = SigningKey::from_bytes(&[45u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let mut claims = signed_ticket(
+            &signing_key,
+            "2026-03-13T12:00:00Z",
+            "2026-03-13T12:05:00Z",
+            "match",
+        )
+        .1;
+        claims.purpose = "weird".to_string();
+        let payload = serde_json::to_vec(&claims).expect("serialize claims");
+        let signature = signing_key.sign(&payload).to_bytes();
+        let ticket = format!("{}.{}", B64.encode(payload), B64.encode(signature));
+        let error = verify_contact_discovery_ticket(
+            &verifying_key,
+            &ticket,
+            DateTime::parse_from_rfc3339("2026-03-13T12:01:00Z")
+                .expect("parse time")
+                .with_timezone(&Utc),
+        )
+        .expect_err("purpose should be rejected");
+        assert!(error.to_string().contains("purpose"));
     }
 }

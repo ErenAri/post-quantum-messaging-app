@@ -3,13 +3,13 @@
   "entries": [
     {
       "path": "README.md",
-      "sha256": "19db56b6b593444352fb34ee8f28d15d921b29c199aac16b1d5d2aec8c16ffdd",
-      "size_bytes": 29260
+      "sha256": "1e9ca870ee8662ae5af87451fc7c412286b82615c0b90c42e2ec5b6bcb4cac2a",
+      "size_bytes": 29442
     },
     {
       "path": "docs/AUDIT_READINESS.md",
-      "sha256": "78a0179f726146a0e2754969222ea88ee4df3642a8c109d27bec4d88bb3e4668",
-      "size_bytes": 17414
+      "sha256": "36676a8e3e36346893d1105f2b118f55add09a975488d7a91d54f25942f7348f",
+      "size_bytes": 17710
     },
     {
       "path": "docs/API.md",
@@ -73,8 +73,8 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "e687e108825686b5f2d4a5e5403cea74a8bac3019febf1fbe32df68c295c6cc3",
-      "size_bytes": 16648
+      "sha256": "12170a11dcd1609a86638f3f55bdb23df5cf19c5526822c441ab43ac41ecff83",
+      "size_bytes": 17040
     },
     {
       "path": ".github/workflows/release.yml",
@@ -122,6 +122,11 @@
       "size_bytes": 1917
     },
     {
+      "path": "scripts/security/validate_audit_readiness_index.py",
+      "sha256": "ef7064329979db9cf8e94a4fdf028ef071df69979409bdd8f8bb296cc2bb90f7",
+      "size_bytes": 990
+    },
+    {
       "path": "scripts/security/validate_no_preview_contact_discovery.py",
       "sha256": "db42f7eac85967911441fe2d17a7d785dc9f0273e55632b90aef1ce0f875129a",
       "size_bytes": 1631
@@ -130,9 +135,14 @@
       "path": "scripts/security/validate_release_governance_workflows.py",
       "sha256": "862e46ded68dac220967833179d886a6c8fed74f5c2118154a6de49aaf2512c3",
       "size_bytes": 2789
+    },
+    {
+      "path": "scripts/security/verify_audit_readiness_bundle.py",
+      "sha256": "53beb66d6f7363a7d7935ecc9969069990fca650175a44ff6eed4d8faac56e86",
+      "size_bytes": 2692
     }
   ],
-  "generated_at_utc": "2026-03-26T20:03:39.024680+00:00",
+  "generated_at_utc": "2026-03-26T20:07:52.774065+00:00",
   "git_branch": "main",
-  "git_commit": "1927aae599ec4ed21d6089004780daf15086b2ee"
+  "git_commit": "90d1c656a7c09e5926275704637bf15be8ab778f"
 }

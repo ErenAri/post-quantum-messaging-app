@@ -206,6 +206,10 @@ export type ContactDiscoveryTicketResponse = {
   expires_at: string;
 };
 
+export type ContactDiscoveryTicketRequest = {
+  purpose: "upload" | "match";
+};
+
 export type ContactDiscoveryManifestResponse = {
   service: string;
   protocol_version: number;
@@ -219,6 +223,8 @@ export type ContactDiscoveryManifestResponse = {
   ticket_max_ttl_seconds: number;
   lookup_protocol: string;
   privacy_mode: string;
+  directory_backend: string;
+  host_enclave_protocol_version: number;
   match_result_format: string;
   oprf_suite: string;
   evaluation_proof_mode: string;
@@ -233,6 +239,9 @@ export type ContactDiscoveryAttestationResponse = {
   attestation_mode: string;
   attestation_verifier: string;
   enclave_measurement_hex: string;
+  directory_backend: string;
+  host_enclave_protocol_version: number;
+  attested_oprf_public_key_ristretto255: string;
   document_format: string;
   document_base64: string;
   document_sha256: string;
@@ -853,6 +862,8 @@ export type ServerCapabilitiesResponse = {
   contact_discovery_ticket_supported: boolean;
   contact_discovery_service_origin: string | null;
   contact_discovery_manifest_issuer_ed25519_pub: string | null;
+  contact_discovery_directory_backend: string | null;
+  contact_discovery_host_enclave_protocol_version: number | null;
   contact_discovery_attestation_verifier: string | null;
   contact_discovery_expected_measurement_hex: string | null;
   contact_discovery_attestation_document_sha256: string | null;
@@ -1570,12 +1581,13 @@ export class PqmsgApi {
 
   async issueContactDiscoveryTicket(
     userId: string,
-    headers: RequestAuthHeaders
+    headers: RequestAuthHeaders,
+    request: ContactDiscoveryTicketRequest,
   ): Promise<ContactDiscoveryTicketResponse> {
     return this.request<ContactDiscoveryTicketResponse>(
       "POST",
       `/v1/users/${encodeURIComponent(userId)}/contact-discovery/ticket`,
-      {},
+      request,
       headers
     );
   }

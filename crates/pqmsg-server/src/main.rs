@@ -58,6 +58,9 @@ struct PostgresEncryptionConfig {
     backups_encrypted: bool,
 }
 
+const CONTACT_DISCOVERY_DIRECTORY_BACKEND: &str = "simulated_enclave_preview";
+const CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION: u32 = 1;
+
 fn parse_env_u32(name: &str, default: u32) -> anyhow::Result<u32> {
     match env::var(name) {
         Ok(value) => value
@@ -884,9 +887,19 @@ async fn main() -> anyhow::Result<()> {
             .with_blob_store(blob_store)
             .with_ephemeral_state(ephemeral_state)
             .with_sender_certificate_signing_key(sender_certificate_signing_key)
-            .with_contact_discovery_service_origin(contact_discovery_service_origin)
+            .with_contact_discovery_service_origin(contact_discovery_service_origin.clone())
             .with_contact_discovery_manifest_issuer_public_key_b64(
                 contact_discovery_manifest_issuer_ed25519_pub,
+            )
+            .with_contact_discovery_directory_backend(
+                contact_discovery_service_origin
+                    .as_ref()
+                    .map(|_| CONTACT_DISCOVERY_DIRECTORY_BACKEND.to_string()),
+            )
+            .with_contact_discovery_host_enclave_protocol_version(
+                contact_discovery_service_origin
+                    .as_ref()
+                    .map(|_| CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION),
             )
             .with_contact_discovery_attestation_verifier(contact_discovery_attestation_verifier)
             .with_contact_discovery_expected_measurement_hex(

@@ -153,6 +153,11 @@ pub(crate) struct ContactDiscoveryTicketResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ContactDiscoveryTicketRequest {
+    pub(crate) purpose: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct RemoveContactRequest {
     pub(crate) contact_user_id: String,
 }
@@ -849,6 +854,8 @@ pub(crate) struct ServerCapabilitiesResponse {
     pub(crate) contact_discovery_ticket_supported: bool,
     pub(crate) contact_discovery_service_origin: Option<String>,
     pub(crate) contact_discovery_manifest_issuer_ed25519_pub: Option<String>,
+    pub(crate) contact_discovery_directory_backend: Option<String>,
+    pub(crate) contact_discovery_host_enclave_protocol_version: Option<u32>,
     pub(crate) contact_discovery_attestation_verifier: Option<String>,
     pub(crate) contact_discovery_expected_measurement_hex: Option<String>,
     pub(crate) contact_discovery_attestation_document_sha256: Option<String>,

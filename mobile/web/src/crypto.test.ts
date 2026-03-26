@@ -174,6 +174,8 @@ describe("verifyContactDiscoveryManifest", () => {
       ticket_max_ttl_seconds: 300,
       lookup_protocol: "blind_token_directory_preview",
       privacy_mode: "blind_evaluation_preview",
+      directory_backend: "simulated_enclave_preview",
+      host_enclave_protocol_version: 1,
       match_result_format: "contact_invite_token",
       oprf_suite: "ristretto255-sha512-preview",
       evaluation_proof_mode: "dleq_per_element_preview",
@@ -231,6 +233,9 @@ describe("verifyContactDiscoveryManifest", () => {
           attestation_mode: "sgx_preview",
           attestation_verifier: "sgx-dcap-preview",
           enclave_measurement_hex: "aa".repeat(32),
+          directory_backend: "simulated_enclave_preview",
+          host_enclave_protocol_version: 1,
+          attested_oprf_public_key_ristretto255: bytesToBase64(ristretto255.Point.BASE.toBytes()),
           document_format: "opaque_b64_v1",
           document_base64: bytesToBase64(documentBytes),
           document_sha256: documentSha256,
@@ -239,6 +244,7 @@ describe("verifyContactDiscoveryManifest", () => {
         "sgx_preview",
         "sgx-dcap-preview",
         "aa".repeat(32),
+        bytesToBase64(ristretto255.Point.BASE.toBytes()),
         documentSha256,
         900,
       );
@@ -256,6 +262,9 @@ describe("verifyContactDiscoveryManifest", () => {
           attestation_mode: "sgx_preview",
           attestation_verifier: "sgx-dcap-preview",
           enclave_measurement_hex: "aa".repeat(32),
+          directory_backend: "simulated_enclave_preview",
+          host_enclave_protocol_version: 1,
+          attested_oprf_public_key_ristretto255: bytesToBase64(ristretto255.Point.BASE.toBytes()),
           document_format: "opaque_b64_v1",
           document_base64: bytesToBase64(documentBytes),
           document_sha256: documentSha256,
@@ -264,10 +273,40 @@ describe("verifyContactDiscoveryManifest", () => {
         "sgx_preview",
         "sgx-dcap-preview",
         "aa".repeat(32),
+        bytesToBase64(ristretto255.Point.BASE.toBytes()),
         documentSha256,
         1,
       );
     }).toThrow(/stale/i);
+  });
+
+  it("rejects a contact discovery attestation OPRF public key mismatch", () => {
+    const documentBytes = utf8ToBytes("{\"tee\":\"sgx\",\"svn\":1}");
+    const documentSha256 = Array.from(sha256(documentBytes))
+      .map((value) => value.toString(16).padStart(2, "0"))
+      .join("");
+    expect(() => {
+      verifyContactDiscoveryAttestationDocument(
+        {
+          attestation_mode: "sgx_preview",
+          attestation_verifier: "sgx-dcap-preview",
+          enclave_measurement_hex: "aa".repeat(32),
+          directory_backend: "simulated_enclave_preview",
+          host_enclave_protocol_version: 1,
+          attested_oprf_public_key_ristretto255: bytesToBase64(new Uint8Array(32).fill(7)),
+          document_format: "opaque_b64_v1",
+          document_base64: bytesToBase64(documentBytes),
+          document_sha256: documentSha256,
+          published_at: new Date().toISOString(),
+        },
+        "sgx_preview",
+        "sgx-dcap-preview",
+        "aa".repeat(32),
+        bytesToBase64(ristretto255.Point.BASE.toBytes()),
+        documentSha256,
+        900,
+      );
+    }).toThrow(/OPRF public key mismatch/i);
   });
 
   it("blind-evaluates discovery hashes into finalized tokens", () => {

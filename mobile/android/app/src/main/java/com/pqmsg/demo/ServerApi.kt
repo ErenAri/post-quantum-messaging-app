@@ -574,6 +574,10 @@ data class ContactDiscoveryTicketResponse(
     val expires_at: String,
 )
 
+data class ContactDiscoveryTicketRequest(
+    val purpose: String,
+)
+
 data class ContactDiscoveryManifestResponse(
     val service: String,
     val protocol_version: Int,
@@ -587,6 +591,8 @@ data class ContactDiscoveryManifestResponse(
     val ticket_max_ttl_seconds: Int,
     val lookup_protocol: String,
     val privacy_mode: String,
+    val directory_backend: String,
+    val host_enclave_protocol_version: Int,
     val match_result_format: String,
     val oprf_suite: String,
     val evaluation_proof_mode: String,
@@ -601,6 +607,9 @@ data class ContactDiscoveryAttestationResponse(
     val attestation_mode: String,
     val attestation_verifier: String,
     val enclave_measurement_hex: String,
+    val directory_backend: String,
+    val host_enclave_protocol_version: Int,
+    val attested_oprf_public_key_ristretto255: String,
     val document_format: String,
     val document_base64: String,
     val document_sha256: String,
@@ -815,6 +824,8 @@ data class ServerCapabilitiesResponse(
     val contact_discovery_ticket_supported: Boolean,
     val contact_discovery_service_origin: String?,
     val contact_discovery_manifest_issuer_ed25519_pub: String?,
+    val contact_discovery_directory_backend: String?,
+    val contact_discovery_host_enclave_protocol_version: Int?,
     val contact_discovery_attestation_verifier: String?,
     val contact_discovery_expected_measurement_hex: String?,
     val contact_discovery_attestation_document_sha256: String?,
@@ -1124,6 +1135,7 @@ interface PqmsgApi {
     suspend fun issueContactDiscoveryTicket(
         @Path("user_id") userId: String,
         @HeaderMap headers: Map<String, String>,
+        @Body request: ContactDiscoveryTicketRequest,
     ): ContactDiscoveryTicketResponse
 
     @GET("/v1/users/{user_id}/contacts")
@@ -1484,6 +1496,15 @@ object ApiClientFactory {
             }
             require(!capabilities.contact_discovery_manifest_issuer_ed25519_pub.isNullOrBlank()) {
                 "Server advertises private contact discovery without a discovery manifest issuer key"
+            }
+            require(!capabilities.contact_discovery_directory_backend.isNullOrBlank()) {
+                "Server advertises private contact discovery without a discovery backend"
+            }
+            require(capabilities.contact_discovery_host_enclave_protocol_version != null) {
+                "Server advertises private contact discovery without a host/enclave protocol version"
+            }
+            require(capabilities.contact_discovery_host_enclave_protocol_version > 0) {
+                "Server advertises an invalid private discovery host/enclave protocol version"
             }
             val attestationFieldsPresent =
                 listOf(
