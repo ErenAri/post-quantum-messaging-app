@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -36,8 +36,10 @@ const CONTACT_DISCOVERY_MATCH_RESULT_FORMAT: &str = "contact_invite_token";
 const CONTACT_DISCOVERY_OPRF_SUITE: &str = "ristretto255-sha512-preview";
 const CONTACT_DISCOVERY_EVALUATION_PROOF_MODE: &str = "dleq_per_element_preview";
 const CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_FORMAT: &str = "opaque_b64_v1";
+const CONTACT_DISCOVERY_ATTESTATION_CHALLENGE_MODE: &str = "nonce_b64_required_preview";
 const CONTACT_DISCOVERY_DIRECTORY_BACKEND: &str = "simulated_enclave_preview";
 const CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION: u8 = 1;
+const DEFAULT_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID: &str = "simulated-preview";
 const CONTACT_DISCOVERY_HANDLE_DOMAIN: &[u8] = b"pqmsg-discovery-handle-v1";
 
 #[derive(Clone)]
@@ -52,6 +54,7 @@ struct AppState {
     registry: Arc<RwLock<DiscoveryRegistry>>,
     oprf_secret_scalar: Arc<Scalar>,
     oprf_public_key_ristretto255_b64: String,
+    enclave_release_id: String,
 }
 
 impl AppState {
@@ -82,6 +85,7 @@ struct ManifestPayload {
     enclave_measurement_hex: Option<String>,
     attestation_document_format: Option<String>,
     attestation_document_sha256: Option<String>,
+    attestation_challenge_mode: Option<String>,
     ticket_format: &'static str,
     ticket_issuer_ed25519_pub: String,
     ticket_max_ttl_seconds: i64,
@@ -89,6 +93,7 @@ struct ManifestPayload {
     privacy_mode: &'static str,
     directory_backend: &'static str,
     host_enclave_protocol_version: u8,
+    enclave_release_id: String,
     match_result_format: &'static str,
     oprf_suite: &'static str,
     evaluation_proof_mode: &'static str,
@@ -114,17 +119,31 @@ struct ManifestResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct AttestationResponse {
+struct AttestationPayload {
     attestation_mode: String,
     attestation_verifier: String,
     enclave_measurement_hex: String,
     directory_backend: &'static str,
     host_enclave_protocol_version: u8,
+    enclave_release_id: String,
     attested_oprf_public_key_ristretto255: String,
     document_format: &'static str,
     document_base64: String,
     document_sha256: String,
     published_at: String,
+    challenge_nonce_base64: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AttestationResponse {
+    #[serde(flatten)]
+    payload: AttestationPayload,
+    attestation_signature_ed25519: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttestationQuery {
+    nonce_b64: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -566,6 +585,10 @@ async fn manifest(State(state): State<AppState>) -> Json<ManifestResponse> {
             .as_ref()
             .map(|_| CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_FORMAT.to_string()),
         attestation_document_sha256: state.attestation_document_sha256.clone(),
+        attestation_challenge_mode: state
+            .attestation_document_sha256
+            .as_ref()
+            .map(|_| CONTACT_DISCOVERY_ATTESTATION_CHALLENGE_MODE.to_string()),
         ticket_format: "base64(json-payload).base64(ed25519-signature)",
         ticket_issuer_ed25519_pub: state.ticket_issuer_public_key_b64(),
         ticket_max_ttl_seconds: CONTACT_DISCOVERY_TICKET_MAX_TTL_SECONDS,
@@ -573,6 +596,7 @@ async fn manifest(State(state): State<AppState>) -> Json<ManifestResponse> {
         privacy_mode: CONTACT_DISCOVERY_PRIVACY_MODE,
         directory_backend: CONTACT_DISCOVERY_DIRECTORY_BACKEND,
         host_enclave_protocol_version: CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION,
+        enclave_release_id: state.enclave_release_id.clone(),
         match_result_format: CONTACT_DISCOVERY_MATCH_RESULT_FORMAT,
         oprf_suite: CONTACT_DISCOVERY_OPRF_SUITE,
         evaluation_proof_mode: CONTACT_DISCOVERY_EVALUATION_PROOF_MODE,
@@ -589,8 +613,27 @@ async fn manifest(State(state): State<AppState>) -> Json<ManifestResponse> {
     })
 }
 
+fn normalize_attestation_nonce(name: &str, value: &str) -> Result<String, DiscoveryError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 256 {
+        return Err(DiscoveryError::bad_request(format!(
+            "{name} must be 1..=256 base64 characters"
+        )));
+    }
+    let decoded = B64.decode(trimmed.as_bytes()).map_err(|_| {
+        DiscoveryError::bad_request(format!("{name} must be valid base64-encoded bytes"))
+    })?;
+    if !(16..=64).contains(&decoded.len()) {
+        return Err(DiscoveryError::bad_request(format!(
+            "{name} must decode to 16..=64 bytes"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
 async fn attestation(
     State(state): State<AppState>,
+    Query(query): Query<AttestationQuery>,
 ) -> Result<Json<AttestationResponse>, DiscoveryError> {
     let verifier = state
         .attestation_verifier
@@ -608,17 +651,27 @@ async fn attestation(
         .attestation_document_sha256
         .clone()
         .ok_or_else(|| DiscoveryError::bad_request("discovery attestation is not configured"))?;
-    Ok(Json(AttestationResponse {
+    let challenge_nonce_base64 = normalize_attestation_nonce("nonce_b64", &query.nonce_b64)?;
+    let payload = AttestationPayload {
         attestation_mode: state.attestation_mode.clone(),
         attestation_verifier: verifier,
         enclave_measurement_hex: measurement,
         directory_backend: CONTACT_DISCOVERY_DIRECTORY_BACKEND,
         host_enclave_protocol_version: CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION,
+        enclave_release_id: state.enclave_release_id.clone(),
         attested_oprf_public_key_ristretto255: state.oprf_public_key_ristretto255_b64.clone(),
         document_format: CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_FORMAT,
         document_base64,
         document_sha256,
         published_at: Utc::now().to_rfc3339(),
+        challenge_nonce_base64,
+    };
+    let payload_bytes =
+        serde_json::to_vec(&payload).expect("serialize discovery attestation payload");
+    let signature = state.manifest_signing_key.sign(&payload_bytes).to_bytes();
+    Ok(Json(AttestationResponse {
+        payload,
+        attestation_signature_ed25519: B64.encode(signature),
     }))
 }
 
@@ -984,6 +1037,9 @@ async fn main() -> Result<()> {
     let ticket_issuer_verifying_key = parse_ticket_issuer_verifying_key()?;
     let manifest_signing_key = parse_manifest_signing_key()?;
     let (oprf_secret_scalar, oprf_public_key_ristretto255_b64) = parse_oprf_secret_scalar()?;
+    let enclave_release_id =
+        parse_optional_env_nonempty("PQMSG_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID")
+            .unwrap_or_else(|| DEFAULT_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID.to_string());
 
     let state = AppState {
         ticket_issuer_verifying_key,
@@ -996,6 +1052,7 @@ async fn main() -> Result<()> {
         registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
         oprf_secret_scalar,
         oprf_public_key_ristretto255_b64,
+        enclave_release_id,
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -1175,6 +1232,7 @@ mod tests {
             registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
             oprf_secret_scalar: Arc::new(oprf_scalar),
             oprf_public_key_ristretto255_b64: oprf_pub_b64.clone(),
+            enclave_release_id: DEFAULT_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID.to_string(),
         };
         let response = manifest(State(state)).await.0;
         let payload_bytes =
@@ -1211,6 +1269,10 @@ mod tests {
         assert_eq!(
             response.payload.host_enclave_protocol_version,
             CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            response.payload.enclave_release_id,
+            DEFAULT_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID
         );
         assert_eq!(
             response.payload.match_result_format,
@@ -1258,6 +1320,7 @@ mod tests {
                     .compress()
                     .to_bytes(),
             ),
+            enclave_release_id: DEFAULT_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID.to_string(),
         };
         let issued_at = Utc::now() - chrono::Duration::minutes(1);
         let expires_at = issued_at + chrono::Duration::minutes(5);
@@ -1370,6 +1433,7 @@ mod tests {
                     .compress()
                     .to_bytes(),
             ),
+            enclave_release_id: DEFAULT_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID.to_string(),
         };
         let issued_at = Utc::now() - chrono::Duration::minutes(1);
         let expires_at = issued_at + chrono::Duration::minutes(5);
@@ -1423,6 +1487,7 @@ mod tests {
                     .compress()
                     .to_bytes(),
             ),
+            enclave_release_id: DEFAULT_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID.to_string(),
         };
         let issued_at = Utc::now() - chrono::Duration::minutes(1);
         let expires_at = issued_at + chrono::Duration::minutes(5);
@@ -1464,6 +1529,7 @@ mod tests {
                     .compress()
                     .to_bytes(),
             ),
+            enclave_release_id: DEFAULT_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID.to_string(),
         };
         let issued_at = Utc::now() - chrono::Duration::minutes(1);
         let expires_at = issued_at + chrono::Duration::minutes(5);
@@ -1499,7 +1565,7 @@ mod tests {
         let document_b64 = B64.encode(&document_bytes);
         let state = AppState {
             ticket_issuer_verifying_key: Arc::new(ticket_signing_key.verifying_key()),
-            manifest_signing_key,
+            manifest_signing_key: manifest_signing_key.clone(),
             attestation_mode: "sgx_preview".to_string(),
             attestation_verifier: Some("sgx-dcap-preview".to_string()),
             enclave_measurement_hex: Some("cd".repeat(32)),
@@ -1508,36 +1574,63 @@ mod tests {
             registry: Arc::new(RwLock::new(DiscoveryRegistry::default())),
             oprf_secret_scalar: Arc::new(oprf_scalar),
             oprf_public_key_ristretto255_b64: oprf_public_key_ristretto255_b64.clone(),
+            enclave_release_id: DEFAULT_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID.to_string(),
         };
+        let nonce_b64 = B64.encode([7u8; 16]);
 
-        let response = attestation(State(state))
-            .await
-            .expect("attestation response")
-            .0;
-        assert_eq!(response.attestation_mode, "sgx_preview");
-        assert_eq!(response.attestation_verifier, "sgx-dcap-preview");
-        assert_eq!(response.enclave_measurement_hex, "cd".repeat(32));
+        let response = attestation(
+            State(state),
+            Query(AttestationQuery {
+                nonce_b64: nonce_b64.clone(),
+            }),
+        )
+        .await
+        .expect("attestation response")
+        .0;
+        assert_eq!(response.payload.attestation_mode, "sgx_preview");
+        assert_eq!(response.payload.attestation_verifier, "sgx-dcap-preview");
+        assert_eq!(response.payload.enclave_measurement_hex, "cd".repeat(32));
         assert_eq!(
-            response.directory_backend,
+            response.payload.directory_backend,
             CONTACT_DISCOVERY_DIRECTORY_BACKEND
         );
         assert_eq!(
-            response.host_enclave_protocol_version,
+            response.payload.host_enclave_protocol_version,
             CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION
         );
         assert_eq!(
-            response.attested_oprf_public_key_ristretto255,
+            response.payload.enclave_release_id,
+            DEFAULT_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID
+        );
+        assert_eq!(
+            response.payload.attested_oprf_public_key_ristretto255,
             oprf_public_key_ristretto255_b64
         );
         assert_eq!(
-            response.document_format,
+            response.payload.document_format,
             CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_FORMAT
         );
-        assert_eq!(response.document_base64, document_b64);
+        assert_eq!(response.payload.document_base64, document_b64);
         assert_eq!(
-            response.document_sha256,
+            response.payload.document_sha256,
             bytes_to_hex(&Sha256::digest(&document_bytes))
         );
+        assert_eq!(response.payload.challenge_nonce_base64, nonce_b64);
+
+        let payload_bytes =
+            serde_json::to_vec(&response.payload).expect("serialize attestation payload");
+        let signature_bytes = B64
+            .decode(response.attestation_signature_ed25519.as_bytes())
+            .expect("decode attestation signature");
+        let signature_array: [u8; 64] = signature_bytes
+            .as_slice()
+            .try_into()
+            .expect("signature is 64 bytes");
+        let signature = Signature::from_bytes(&signature_array);
+        manifest_signing_key
+            .verifying_key()
+            .verify(&payload_bytes, &signature)
+            .expect("verify attestation signature");
     }
 
     #[test]

@@ -28,6 +28,7 @@ import {
   buildSealedInboxAuthHeaders,
   buildSenderCertificateAuthHeaders,
   buildContactDiscoveryTicketAuthHeaders,
+  buildContactDiscoveryAttestationChallengeNonce,
   buildPushTokenAuthHeaders,
   buildListDevicesAuthHeaders,
   buildLinkDeviceAuthHeaders,
@@ -4187,6 +4188,7 @@ function buildContactDiscoveryCheckpoint(
     privacy_mode: manifest.privacy_mode,
     directory_backend: manifest.directory_backend,
     host_enclave_protocol_version: manifest.host_enclave_protocol_version,
+    enclave_release_id: manifest.enclave_release_id,
     match_result_format: manifest.match_result_format,
     oprf_suite: manifest.oprf_suite,
     evaluation_proof_mode: manifest.evaluation_proof_mode,
@@ -4196,6 +4198,7 @@ function buildContactDiscoveryCheckpoint(
     enclave_measurement_hex: manifest.enclave_measurement_hex ?? null,
     attestation_document_format: manifest.attestation_document_format ?? null,
     attestation_document_sha256: manifest.attestation_document_sha256 ?? null,
+    attestation_challenge_mode: manifest.attestation_challenge_mode ?? null,
     observed_at: new Date().toISOString(),
   };
 }
@@ -4220,6 +4223,9 @@ function diffContactDiscoveryCheckpoint(
   if (previous.host_enclave_protocol_version !== current.host_enclave_protocol_version) {
     changed.push("host_enclave_protocol_version");
   }
+  if (previous.enclave_release_id !== current.enclave_release_id) {
+    changed.push("enclave_release_id");
+  }
   if (previous.match_result_format !== current.match_result_format) changed.push("match_result_format");
   if (previous.oprf_suite !== current.oprf_suite) changed.push("oprf_suite");
   if (previous.evaluation_proof_mode !== current.evaluation_proof_mode) {
@@ -4240,6 +4246,9 @@ function diffContactDiscoveryCheckpoint(
   }
   if (previous.attestation_document_sha256 !== current.attestation_document_sha256) {
     changed.push("attestation_document_sha256");
+  }
+  if (previous.attestation_challenge_mode !== current.attestation_challenge_mode) {
+    changed.push("attestation_challenge_mode");
   }
   return changed;
 }
@@ -4276,6 +4285,7 @@ async function loadVerifiedContactDiscoveryManifest(
   if (
     !capabilities.contact_discovery_directory_backend
     || !capabilities.contact_discovery_host_enclave_protocol_version
+    || !capabilities.contact_discovery_enclave_release_id
   ) {
     throw new Error("Private contact discovery backend contract is incomplete");
   }
@@ -4284,6 +4294,7 @@ async function loadVerifiedContactDiscoveryManifest(
     || manifest.privacy_mode !== "blind_evaluation_preview"
     || manifest.directory_backend !== "simulated_enclave_preview"
     || manifest.host_enclave_protocol_version !== 1
+    || !manifest.enclave_release_id
     || manifest.match_result_format !== "contact_invite_token"
     || manifest.oprf_suite !== "ristretto255-sha512-preview"
     || manifest.evaluation_proof_mode !== "dleq_per_element_preview"
@@ -4292,24 +4303,39 @@ async function loadVerifiedContactDiscoveryManifest(
       && (!manifest.attestation_verifier
         || !manifest.enclave_measurement_hex
         || !manifest.attestation_document_format
-        || !manifest.attestation_document_sha256))
+        || !manifest.attestation_document_sha256
+        || !manifest.attestation_challenge_mode))
   ) {
     throw new Error("Unsupported contact discovery manifest");
+  }
+  if (
+    manifest.attestation_document_sha256
+    && manifest.attestation_challenge_mode !== "nonce_b64_required_preview"
+  ) {
+    throw new Error("Unsupported contact discovery attestation challenge mode");
   }
   if (
     manifest.directory_backend !== capabilities.contact_discovery_directory_backend
     || manifest.host_enclave_protocol_version
       !== capabilities.contact_discovery_host_enclave_protocol_version
+    || manifest.enclave_release_id !== capabilities.contact_discovery_enclave_release_id
   ) {
     throw new Error("Contact discovery backend contract mismatch");
   }
   if (manifest.attestation_document_sha256) {
-    const attestation = await apiClient.getContactDiscoveryAttestation(serviceOrigin);
+    const attestationChallengeNonce = buildContactDiscoveryAttestationChallengeNonce();
+    const attestation = await apiClient.getContactDiscoveryAttestation(
+      serviceOrigin,
+      attestationChallengeNonce,
+    );
     verifyContactDiscoveryAttestationDocument(
       attestation,
       manifest.attestation_mode,
       manifest.attestation_verifier || "",
       manifest.enclave_measurement_hex || "",
+      manifest.manifest_issuer_ed25519_pub,
+      attestationChallengeNonce,
+      manifest.enclave_release_id,
       manifest.oprf_public_key_ristretto255,
       manifest.attestation_document_sha256,
       capabilities.contact_discovery_attestation_max_age_seconds || 0,
@@ -6287,6 +6313,7 @@ async function renderServerInfo(): Promise<void> {
           <div class="settings-row"><span>Discovery Manifest Issuer</span><span class="mono">${escHtml(caps.contact_discovery_manifest_issuer_ed25519_pub || "not advertised")}</span></div>
           <div class="settings-row"><span>Discovery Backend</span><span>${escHtml(caps.contact_discovery_directory_backend || "not advertised")}</span></div>
           <div class="settings-row"><span>Host/Enclave Protocol</span><span>${escHtml(caps.contact_discovery_host_enclave_protocol_version ? `${caps.contact_discovery_host_enclave_protocol_version}` : "not advertised")}</span></div>
+          <div class="settings-row"><span>Enclave Release</span><span class="mono">${escHtml(caps.contact_discovery_enclave_release_id || "not advertised")}</span></div>
           <div class="settings-row"><span>Discovery Attestation Verifier</span><span class="mono">${escHtml(caps.contact_discovery_attestation_verifier || "not advertised")}</span></div>
           <div class="settings-row"><span>Discovery Enclave Measurement</span><span class="mono">${escHtml(caps.contact_discovery_expected_measurement_hex || "not advertised")}</span></div>
           <div class="settings-row"><span>Discovery Attestation Max Age</span><span>${escHtml(caps.contact_discovery_attestation_max_age_seconds ? `${caps.contact_discovery_attestation_max_age_seconds}s` : "not advertised")}</span></div>

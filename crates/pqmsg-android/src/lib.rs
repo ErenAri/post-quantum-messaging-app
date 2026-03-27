@@ -330,11 +330,15 @@ struct ContactDiscoveryManifestPayloadRecord {
     enclave_measurement_hex: Option<String>,
     attestation_document_format: Option<String>,
     attestation_document_sha256: Option<String>,
+    attestation_challenge_mode: Option<String>,
     ticket_format: String,
     ticket_issuer_ed25519_pub: String,
     ticket_max_ttl_seconds: i64,
     lookup_protocol: String,
     privacy_mode: String,
+    directory_backend: String,
+    host_enclave_protocol_version: u8,
+    enclave_release_id: String,
     match_result_format: String,
     oprf_suite: String,
     evaluation_proof_mode: String,
@@ -349,6 +353,29 @@ struct ContactDiscoveryManifestRecord {
     payload: ContactDiscoveryManifestPayloadRecord,
     manifest_issuer_ed25519_pub: String,
     manifest_signature_ed25519: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContactDiscoveryAttestationPayloadRecord {
+    attestation_mode: String,
+    attestation_verifier: String,
+    enclave_measurement_hex: String,
+    directory_backend: String,
+    host_enclave_protocol_version: u8,
+    enclave_release_id: String,
+    attested_oprf_public_key_ristretto255: String,
+    document_format: String,
+    document_base64: String,
+    document_sha256: String,
+    published_at: String,
+    challenge_nonce_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContactDiscoveryAttestationResponseRecord {
+    #[serde(flatten)]
+    payload: ContactDiscoveryAttestationPayloadRecord,
+    attestation_signature_ed25519: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1439,7 +1466,8 @@ pub fn verify_contact_discovery_manifest(
         && (manifest.payload.attestation_verifier.is_none()
             || manifest.payload.enclave_measurement_hex.is_none()
             || manifest.payload.attestation_document_format.is_none()
-            || manifest.payload.attestation_document_sha256.is_none())
+            || manifest.payload.attestation_document_sha256.is_none()
+            || manifest.payload.attestation_challenge_mode.is_none())
     {
         return Err(operation_failed(
             "contact discovery manifest attestation contract is incomplete",
@@ -1464,6 +1492,48 @@ pub fn verify_contact_discovery_manifest(
         .verify(&payload_bytes, &signature)
         .map_err(|_| {
             operation_failed("contact discovery manifest signature verification failed")
+        })?;
+    Ok(true)
+}
+
+#[uniffi::export]
+pub fn verify_contact_discovery_attestation_response_signature(
+    attestation_json: String,
+    expected_manifest_issuer_ed25519_pub: String,
+    expected_challenge_nonce_base64: String,
+) -> Result<bool, PqmsgAndroidError> {
+    let response: ContactDiscoveryAttestationResponseRecord =
+        serde_json::from_str(&attestation_json)?;
+    let expected_challenge_nonce_base64 = expected_challenge_nonce_base64.trim();
+    if expected_challenge_nonce_base64.is_empty() {
+        return Err(invalid_input(
+            "expected_challenge_nonce_base64 must not be empty",
+        ));
+    }
+    if response.payload.challenge_nonce_base64 != expected_challenge_nonce_base64 {
+        return Err(operation_failed(
+            "contact discovery attestation challenge nonce mismatch",
+        ));
+    }
+    let payload_bytes = serde_json::to_vec(&response.payload)
+        .map_err(|_| operation_failed("serialize contact discovery attestation payload"))?;
+    let signature_bytes = decode_b64(
+        "contact_discovery_attestation.attestation_signature_ed25519",
+        &response.attestation_signature_ed25519,
+    )?;
+    let signature_array: [u8; 64] = signature_bytes.try_into().map_err(|_| {
+        operation_failed("contact discovery attestation signature must decode to 64 bytes")
+    })?;
+    let signature = Signature::from_bytes(&signature_array);
+    let manifest_pub_key = VerifyingKey::from_bytes(&decode_b64_32(
+        "contact_discovery_attestation.manifest_issuer_ed25519_pub",
+        &expected_manifest_issuer_ed25519_pub,
+    )?)
+    .map_err(|_| operation_failed("invalid contact discovery manifest issuer public key"))?;
+    manifest_pub_key
+        .verify(&payload_bytes, &signature)
+        .map_err(|_| {
+            operation_failed("contact discovery attestation signature verification failed")
         })?;
     Ok(true)
 }
@@ -3836,11 +3906,15 @@ mod tests {
             enclave_measurement_hex: None,
             attestation_document_format: None,
             attestation_document_sha256: None,
+            attestation_challenge_mode: None,
             ticket_format: "base64(json-payload).base64(ed25519-signature)".to_string(),
             ticket_issuer_ed25519_pub: "ticket-issuer-ed25519-pub".to_string(),
             ticket_max_ttl_seconds: 300,
             lookup_protocol: "blind_token_directory_preview".to_string(),
             privacy_mode: "blind_evaluation_preview".to_string(),
+            directory_backend: "simulated_enclave_preview".to_string(),
+            host_enclave_protocol_version: 1,
+            enclave_release_id: "simulated-preview".to_string(),
             match_result_format: "contact_invite_token".to_string(),
             oprf_suite: "ristretto255-sha512-preview".to_string(),
             evaluation_proof_mode: "dleq_per_element_preview".to_string(),
@@ -3883,11 +3957,15 @@ mod tests {
                 enclave_measurement_hex: None,
                 attestation_document_format: None,
                 attestation_document_sha256: None,
+                attestation_challenge_mode: None,
                 ticket_format: "base64(json-payload).base64(ed25519-signature)".to_string(),
                 ticket_issuer_ed25519_pub: "ticket-issuer-ed25519-pub".to_string(),
                 ticket_max_ttl_seconds: 300,
                 lookup_protocol: "blind_token_directory_preview".to_string(),
                 privacy_mode: "blind_evaluation_preview".to_string(),
+                directory_backend: "simulated_enclave_preview".to_string(),
+                host_enclave_protocol_version: 1,
+                enclave_release_id: "simulated-preview".to_string(),
                 match_result_format: "contact_invite_token".to_string(),
                 oprf_suite: "ristretto255-sha512-preview".to_string(),
                 evaluation_proof_mode: "dleq_per_element_preview".to_string(),
@@ -3910,6 +3988,77 @@ mod tests {
         )
         .expect_err("manifest signature should fail");
         assert!(error.to_string().contains("signature"));
+    }
+
+    #[test]
+    fn verify_contact_discovery_attestation_response_signature_accepts_valid_signature() {
+        let manifest_signing_key = SigningKey::from_bytes(&[23u8; 32]);
+        let payload = ContactDiscoveryAttestationPayloadRecord {
+            attestation_mode: "sgx_preview".to_string(),
+            attestation_verifier: "sgx-dcap-preview".to_string(),
+            enclave_measurement_hex: "aa".repeat(32),
+            directory_backend: "simulated_enclave_preview".to_string(),
+            host_enclave_protocol_version: 1,
+            enclave_release_id: "simulated-preview".to_string(),
+            attested_oprf_public_key_ristretto255: B64.encode([0x55; 32]),
+            document_format: "opaque_b64_v1".to_string(),
+            document_base64: B64.encode(br#"{"tee":"sgx","svn":1}"#),
+            document_sha256: "bb".repeat(32),
+            published_at: Utc::now().to_rfc3339(),
+            challenge_nonce_base64: B64.encode([7u8; 16]),
+        };
+        let signature = B64.encode(
+            manifest_signing_key
+                .sign(&serde_json::to_vec(&payload).expect("serialize attestation payload"))
+                .to_bytes(),
+        );
+        let attestation_json = serde_json::to_string(&ContactDiscoveryAttestationResponseRecord {
+            payload,
+            attestation_signature_ed25519: signature,
+        })
+        .expect("serialize attestation");
+        assert!(verify_contact_discovery_attestation_response_signature(
+            attestation_json,
+            B64.encode(manifest_signing_key.verifying_key().as_bytes()),
+            B64.encode([7u8; 16]),
+        )
+        .expect("verify attestation signature"));
+    }
+
+    #[test]
+    fn verify_contact_discovery_attestation_response_signature_rejects_nonce_mismatch() {
+        let manifest_signing_key = SigningKey::from_bytes(&[24u8; 32]);
+        let payload = ContactDiscoveryAttestationPayloadRecord {
+            attestation_mode: "sgx_preview".to_string(),
+            attestation_verifier: "sgx-dcap-preview".to_string(),
+            enclave_measurement_hex: "aa".repeat(32),
+            directory_backend: "simulated_enclave_preview".to_string(),
+            host_enclave_protocol_version: 1,
+            enclave_release_id: "simulated-preview".to_string(),
+            attested_oprf_public_key_ristretto255: B64.encode([0x66; 32]),
+            document_format: "opaque_b64_v1".to_string(),
+            document_base64: B64.encode(br#"{"tee":"sgx","svn":1}"#),
+            document_sha256: "cc".repeat(32),
+            published_at: Utc::now().to_rfc3339(),
+            challenge_nonce_base64: B64.encode([7u8; 16]),
+        };
+        let signature = B64.encode(
+            manifest_signing_key
+                .sign(&serde_json::to_vec(&payload).expect("serialize attestation payload"))
+                .to_bytes(),
+        );
+        let attestation_json = serde_json::to_string(&ContactDiscoveryAttestationResponseRecord {
+            payload,
+            attestation_signature_ed25519: signature,
+        })
+        .expect("serialize attestation");
+        let error = verify_contact_discovery_attestation_response_signature(
+            attestation_json,
+            B64.encode(manifest_signing_key.verifying_key().as_bytes()),
+            B64.encode([8u8; 16]),
+        )
+        .expect_err("attestation nonce should fail");
+        assert!(error.to_string().contains("nonce"));
     }
 
     #[test]

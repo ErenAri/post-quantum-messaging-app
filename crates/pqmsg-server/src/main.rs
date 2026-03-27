@@ -60,6 +60,7 @@ struct PostgresEncryptionConfig {
 
 const CONTACT_DISCOVERY_DIRECTORY_BACKEND: &str = "simulated_enclave_preview";
 const CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION: u32 = 1;
+const CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID: &str = "simulated-preview";
 
 fn parse_env_u32(name: &str, default: u32) -> anyhow::Result<u32> {
     match env::var(name) {
@@ -771,6 +772,8 @@ async fn main() -> anyhow::Result<()> {
         });
     let contact_discovery_manifest_issuer_ed25519_pub =
         parse_env_optional_nonempty("PQMSG_CONTACT_DISCOVERY_MANIFEST_ED25519_PUB");
+    let contact_discovery_enclave_release_id =
+        parse_env_optional_nonempty("PQMSG_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID");
     let contact_discovery_attestation_verifier =
         parse_env_optional_nonempty("PQMSG_CONTACT_DISCOVERY_ATTESTATION_VERIFIER");
     let contact_discovery_expected_measurement_hex =
@@ -900,6 +903,13 @@ async fn main() -> anyhow::Result<()> {
                 contact_discovery_service_origin
                     .as_ref()
                     .map(|_| CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION),
+            )
+            .with_contact_discovery_enclave_release_id(
+                contact_discovery_service_origin.as_ref().map(|_| {
+                    contact_discovery_enclave_release_id
+                        .clone()
+                        .unwrap_or_else(|| CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID.to_string())
+                }),
             )
             .with_contact_discovery_attestation_verifier(contact_discovery_attestation_verifier)
             .with_contact_discovery_expected_measurement_hex(

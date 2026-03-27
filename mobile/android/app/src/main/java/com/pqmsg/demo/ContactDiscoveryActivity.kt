@@ -15,7 +15,9 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.launch
+import java.security.SecureRandom
 import java.time.Instant
+import java.util.Base64
 import uniffi.pqmsg_android.buildContactDiscoveryTicketAuthHeaders
 import uniffi.pqmsg_android.buildContactsListAuthHeaders
 import uniffi.pqmsg_android.buildContactsRemoveAuthHeaders
@@ -36,6 +38,7 @@ private data class VerifiedContactDiscoveryManifest(
 
 class ContactDiscoveryActivity : AppCompatActivity() {
     private val gson = Gson()
+    private val secureRandom = SecureRandom()
     private lateinit var store: LocalStateStore
     private lateinit var statusText: TextView
     private lateinit var contactUserIdInput: EditText
@@ -227,6 +230,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                         ),
                     )
                 }
+                add("Enclave release: ${manifest.enclave_release_id}")
             }
         return "$summary\n${manifestDetails.joinToString("\n")}"
     }
@@ -282,6 +286,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 manifest.privacy_mode == "blind_evaluation_preview" &&
                 manifest.directory_backend == "simulated_enclave_preview" &&
                 manifest.host_enclave_protocol_version == 1 &&
+                manifest.enclave_release_id.isNotBlank() &&
                 manifest.match_result_format == "contact_invite_token" &&
                 manifest.oprf_suite == "ristretto255-sha512-preview" &&
                 manifest.evaluation_proof_mode == "dleq_per_element_preview" &&
@@ -290,24 +295,40 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                     (!manifest.attestation_verifier.isNullOrBlank() &&
                         !manifest.enclave_measurement_hex.isNullOrBlank() &&
                         !manifest.attestation_document_format.isNullOrBlank() &&
-                        !manifest.attestation_document_sha256.isNullOrBlank())),
+                        !manifest.attestation_document_sha256.isNullOrBlank() &&
+                        !manifest.attestation_challenge_mode.isNullOrBlank())),
         ) {
             "Unsupported contact discovery manifest"
         }
         require(
+            manifest.attestation_document_sha256.isNullOrBlank() ||
+                manifest.attestation_challenge_mode == "nonce_b64_required_preview",
+        ) {
+            "Unsupported contact discovery attestation challenge mode"
+        }
+        require(
             manifest.directory_backend == capabilities.contact_discovery_directory_backend &&
                 manifest.host_enclave_protocol_version ==
-                capabilities.contact_discovery_host_enclave_protocol_version,
+                capabilities.contact_discovery_host_enclave_protocol_version &&
+                manifest.enclave_release_id == capabilities.contact_discovery_enclave_release_id,
         ) {
             "Contact discovery backend contract mismatch"
         }
         if (!manifest.attestation_document_sha256.isNullOrBlank()) {
-            val attestation = ApiClientFactory.createDiscovery(serviceOrigin).getAttestation()
+            val challengeNonce = ByteArray(16).also(secureRandom::nextBytes)
+            val challengeNonceBase64 = Base64.getEncoder().encodeToString(challengeNonce)
+            val attestation =
+                ApiClientFactory
+                    .createDiscovery(serviceOrigin)
+                    .getAttestation(challengeNonceBase64)
             verifyContactDiscoveryAttestationDocument(
                 response = attestation,
                 expectedAttestationMode = manifest.attestation_mode,
                 expectedVerifier = manifest.attestation_verifier.orEmpty(),
                 expectedMeasurementHex = manifest.enclave_measurement_hex.orEmpty(),
+                expectedManifestIssuerEd25519Pub = manifest.manifest_issuer_ed25519_pub,
+                expectedChallengeNonceBase64 = challengeNonceBase64,
+                expectedEnclaveReleaseId = manifest.enclave_release_id,
                 expectedOprfPublicKeyRistretto255 = manifest.oprf_public_key_ristretto255,
                 expectedDocumentSha256 = manifest.attestation_document_sha256.orEmpty(),
                 expectedMaxAgeSeconds = capabilities.contact_discovery_attestation_max_age_seconds ?: 0,

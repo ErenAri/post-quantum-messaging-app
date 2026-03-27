@@ -2566,6 +2566,7 @@ async fn capabilities_reports_client_contract() {
     assert!(body["contact_discovery_manifest_issuer_ed25519_pub"].is_null());
     assert!(body["contact_discovery_directory_backend"].is_null());
     assert!(body["contact_discovery_host_enclave_protocol_version"].is_null());
+    assert!(body["contact_discovery_enclave_release_id"].is_null());
     assert!(body["contact_discovery_attestation_verifier"].is_null());
     assert!(body["contact_discovery_expected_measurement_hex"].is_null());
     assert!(body["contact_discovery_attestation_document_sha256"].is_null());
@@ -2634,6 +2635,10 @@ async fn capabilities_report_private_contact_discovery_service_when_configured()
         Some(1)
     );
     assert_eq!(
+        body["contact_discovery_enclave_release_id"].as_str(),
+        Some("simulated-preview")
+    );
+    assert_eq!(
         body["contact_discovery_attestation_verifier"].as_str(),
         Some("sgx-dcap-preview")
     );
@@ -2670,6 +2675,7 @@ async fn capabilities_do_not_advertise_development_only_private_discovery_in_pil
     assert!(body["contact_discovery_manifest_issuer_ed25519_pub"].is_null());
     assert!(body["contact_discovery_directory_backend"].is_null());
     assert!(body["contact_discovery_host_enclave_protocol_version"].is_null());
+    assert!(body["contact_discovery_enclave_release_id"].is_null());
     assert!(body["contact_discovery_attestation_verifier"].is_null());
     assert!(body["contact_discovery_expected_measurement_hex"].is_null());
     assert!(body["contact_discovery_attestation_document_sha256"].is_null());

@@ -1,8 +1,12 @@
 package com.pqmsg.demo
 
+import com.google.gson.Gson
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.Base64
+import uniffi.pqmsg_android.verifyContactDiscoveryAttestationResponseSignature
+
+private val contactDiscoveryManifestGson = Gson()
 
 data class ContactDiscoveryManifestCheckpoint(
     val service_origin: String,
@@ -14,6 +18,7 @@ data class ContactDiscoveryManifestCheckpoint(
     val privacy_mode: String,
     val directory_backend: String,
     val host_enclave_protocol_version: Int,
+    val enclave_release_id: String,
     val match_result_format: String,
     val oprf_suite: String,
     val evaluation_proof_mode: String,
@@ -23,6 +28,7 @@ data class ContactDiscoveryManifestCheckpoint(
     val enclave_measurement_hex: String?,
     val attestation_document_format: String?,
     val attestation_document_sha256: String?,
+    val attestation_challenge_mode: String?,
     val observed_at: String,
 )
 
@@ -31,6 +37,9 @@ fun verifyContactDiscoveryAttestationDocument(
     expectedAttestationMode: String,
     expectedVerifier: String,
     expectedMeasurementHex: String,
+    expectedManifestIssuerEd25519Pub: String,
+    expectedChallengeNonceBase64: String,
+    expectedEnclaveReleaseId: String,
     expectedOprfPublicKeyRistretto255: String,
     expectedDocumentSha256: String,
     expectedMaxAgeSeconds: Int,
@@ -49,6 +58,9 @@ fun verifyContactDiscoveryAttestationDocument(
     }
     require(response.host_enclave_protocol_version == 1) {
         "Unsupported contact discovery host/enclave protocol version"
+    }
+    require(response.enclave_release_id == expectedEnclaveReleaseId) {
+        "Contact discovery attestation enclave release mismatch"
     }
     require(response.attested_oprf_public_key_ristretto255 == expectedOprfPublicKeyRistretto255) {
         "Contact discovery attestation OPRF public key mismatch"
@@ -76,6 +88,11 @@ fun verifyContactDiscoveryAttestationDocument(
     require(!publishedAt.isBefore(now.minusSeconds(expectedMaxAgeSeconds.toLong()))) {
         "Contact discovery attestation document is stale"
     }
+    verifyContactDiscoveryAttestationResponseSignature(
+        contactDiscoveryManifestGson.toJson(response),
+        expectedManifestIssuerEd25519Pub,
+        expectedChallengeNonceBase64,
+    )
 }
 
 fun buildContactDiscoveryManifestCheckpoint(
@@ -93,6 +110,7 @@ fun buildContactDiscoveryManifestCheckpoint(
         privacy_mode = manifest.privacy_mode,
         directory_backend = manifest.directory_backend,
         host_enclave_protocol_version = manifest.host_enclave_protocol_version,
+        enclave_release_id = manifest.enclave_release_id,
         match_result_format = manifest.match_result_format,
         oprf_suite = manifest.oprf_suite,
         evaluation_proof_mode = manifest.evaluation_proof_mode,
@@ -102,6 +120,7 @@ fun buildContactDiscoveryManifestCheckpoint(
         enclave_measurement_hex = manifest.enclave_measurement_hex,
         attestation_document_format = manifest.attestation_document_format,
         attestation_document_sha256 = manifest.attestation_document_sha256,
+        attestation_challenge_mode = manifest.attestation_challenge_mode,
         observed_at = observedAt,
     )
 }
@@ -128,6 +147,9 @@ fun diffContactDiscoveryManifestCheckpoint(
     if (previous.host_enclave_protocol_version != current.host_enclave_protocol_version) {
         changedFields += "host_enclave_protocol_version"
     }
+    if (previous.enclave_release_id != current.enclave_release_id) {
+        changedFields += "enclave_release_id"
+    }
     if (previous.match_result_format != current.match_result_format) {
         changedFields += "match_result_format"
     }
@@ -150,6 +172,9 @@ fun diffContactDiscoveryManifestCheckpoint(
     }
     if (previous.attestation_document_sha256 != current.attestation_document_sha256) {
         changedFields += "attestation_document_sha256"
+    }
+    if (previous.attestation_challenge_mode != current.attestation_challenge_mode) {
+        changedFields += "attestation_challenge_mode"
     }
     return changedFields
 }

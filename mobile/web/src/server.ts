@@ -218,6 +218,7 @@ export type ContactDiscoveryManifestResponse = {
   enclave_measurement_hex?: string | null;
   attestation_document_format?: string | null;
   attestation_document_sha256?: string | null;
+  attestation_challenge_mode?: string | null;
   ticket_format: string;
   ticket_issuer_ed25519_pub: string;
   ticket_max_ttl_seconds: number;
@@ -225,6 +226,7 @@ export type ContactDiscoveryManifestResponse = {
   privacy_mode: string;
   directory_backend: string;
   host_enclave_protocol_version: number;
+  enclave_release_id: string;
   match_result_format: string;
   oprf_suite: string;
   evaluation_proof_mode: string;
@@ -241,11 +243,14 @@ export type ContactDiscoveryAttestationResponse = {
   enclave_measurement_hex: string;
   directory_backend: string;
   host_enclave_protocol_version: number;
+  enclave_release_id: string;
   attested_oprf_public_key_ristretto255: string;
   document_format: string;
   document_base64: string;
   document_sha256: string;
   published_at: string;
+  challenge_nonce_base64: string;
+  attestation_signature_ed25519: string;
 };
 
 export type ContactEntry = {
@@ -864,6 +869,7 @@ export type ServerCapabilitiesResponse = {
   contact_discovery_manifest_issuer_ed25519_pub: string | null;
   contact_discovery_directory_backend: string | null;
   contact_discovery_host_enclave_protocol_version: number | null;
+  contact_discovery_enclave_release_id: string | null;
   contact_discovery_attestation_verifier: string | null;
   contact_discovery_expected_measurement_hex: string | null;
   contact_discovery_attestation_document_sha256: string | null;
@@ -1606,11 +1612,14 @@ export class PqmsgApi {
   }
 
   async getContactDiscoveryAttestation(
-    serviceOrigin: string
+    serviceOrigin: string,
+    challengeNonceB64: string,
   ): Promise<ContactDiscoveryAttestationResponse> {
     const parsed = validateWebServerUrl(serviceOrigin);
     const normalized = `${parsed.origin}`;
-    const response = await fetch(`${normalized}/v1/attestation`, {
+    const url = new URL(`${normalized}/v1/attestation`);
+    url.searchParams.set("nonce_b64", challengeNonceB64);
+    const response = await fetch(url.toString(), {
       method: "GET",
       headers: { Accept: "application/json" },
     });

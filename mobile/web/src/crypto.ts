@@ -1212,6 +1212,7 @@ export function verifyContactDiscoveryManifest(
       || !manifest.enclave_measurement_hex
       || !manifest.attestation_document_format
       || !manifest.attestation_document_sha256
+      || !manifest.attestation_challenge_mode
     ) {
       throw new Error("Contact discovery manifest attestation contract is incomplete");
     }
@@ -1224,6 +1225,7 @@ export function verifyContactDiscoveryManifest(
     enclave_measurement_hex: manifest.enclave_measurement_hex ?? null,
     attestation_document_format: manifest.attestation_document_format ?? null,
     attestation_document_sha256: manifest.attestation_document_sha256 ?? null,
+    attestation_challenge_mode: manifest.attestation_challenge_mode ?? null,
     ticket_format: manifest.ticket_format,
     ticket_issuer_ed25519_pub: manifest.ticket_issuer_ed25519_pub,
     ticket_max_ttl_seconds: manifest.ticket_max_ttl_seconds,
@@ -1231,6 +1233,7 @@ export function verifyContactDiscoveryManifest(
     privacy_mode: manifest.privacy_mode,
     directory_backend: manifest.directory_backend,
     host_enclave_protocol_version: manifest.host_enclave_protocol_version,
+    enclave_release_id: manifest.enclave_release_id,
     match_result_format: manifest.match_result_format,
     oprf_suite: manifest.oprf_suite,
     evaluation_proof_mode: manifest.evaluation_proof_mode,
@@ -1250,10 +1253,35 @@ export function verifyContactDiscoveryAttestationDocument(
   expectedAttestationMode: string,
   expectedVerifier: string,
   expectedMeasurementHex: string,
+  expectedManifestIssuerEd25519PubB64: string,
+  expectedChallengeNonceBase64: string,
+  expectedEnclaveReleaseId: string,
   expectedOprfPublicKeyRistretto255B64: string,
   expectedDocumentSha256: string,
   expectedMaxAgeSeconds: number,
 ): void {
+  if (response.challenge_nonce_base64 !== expectedChallengeNonceBase64) {
+    throw new Error("Contact discovery attestation challenge nonce mismatch");
+  }
+  const payloadBytes = utf8ToBytes(JSON.stringify({
+    attestation_mode: response.attestation_mode,
+    attestation_verifier: response.attestation_verifier,
+    enclave_measurement_hex: response.enclave_measurement_hex,
+    directory_backend: response.directory_backend,
+    host_enclave_protocol_version: response.host_enclave_protocol_version,
+    enclave_release_id: response.enclave_release_id,
+    attested_oprf_public_key_ristretto255: response.attested_oprf_public_key_ristretto255,
+    document_format: response.document_format,
+    document_base64: response.document_base64,
+    document_sha256: response.document_sha256,
+    published_at: response.published_at,
+    challenge_nonce_base64: response.challenge_nonce_base64,
+  }));
+  const signatureBytes = base64ToBytes(response.attestation_signature_ed25519);
+  const publicKeyBytes = base64ToBytes(expectedManifestIssuerEd25519PubB64);
+  if (!ed25519.verify(signatureBytes, payloadBytes, publicKeyBytes)) {
+    throw new Error("Contact discovery attestation signature verification failed");
+  }
   if (response.attestation_mode !== expectedAttestationMode) {
     throw new Error("Contact discovery attestation mode mismatch");
   }
@@ -1262,6 +1290,9 @@ export function verifyContactDiscoveryAttestationDocument(
   }
   if (response.enclave_measurement_hex !== expectedMeasurementHex) {
     throw new Error("Contact discovery attestation measurement mismatch");
+  }
+  if (response.enclave_release_id !== expectedEnclaveReleaseId) {
+    throw new Error("Contact discovery attestation enclave release mismatch");
   }
   if (response.attested_oprf_public_key_ristretto255 !== expectedOprfPublicKeyRistretto255B64) {
     throw new Error("Contact discovery attestation OPRF public key mismatch");
@@ -1291,6 +1322,10 @@ export function verifyContactDiscoveryAttestationDocument(
   if (now - publishedAtMs > expectedMaxAgeSeconds * 1000) {
     throw new Error("Contact discovery attestation document is stale");
   }
+}
+
+export function buildContactDiscoveryAttestationChallengeNonce(): string {
+  return bytesToBase64(randomBytes(16));
 }
 
 export type ContactDiscoveryBlindRequest = {

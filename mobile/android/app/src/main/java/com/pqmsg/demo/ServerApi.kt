@@ -586,6 +586,7 @@ data class ContactDiscoveryManifestResponse(
     val enclave_measurement_hex: String?,
     val attestation_document_format: String?,
     val attestation_document_sha256: String?,
+    val attestation_challenge_mode: String?,
     val ticket_format: String,
     val ticket_issuer_ed25519_pub: String,
     val ticket_max_ttl_seconds: Int,
@@ -593,6 +594,7 @@ data class ContactDiscoveryManifestResponse(
     val privacy_mode: String,
     val directory_backend: String,
     val host_enclave_protocol_version: Int,
+    val enclave_release_id: String,
     val match_result_format: String,
     val oprf_suite: String,
     val evaluation_proof_mode: String,
@@ -609,11 +611,14 @@ data class ContactDiscoveryAttestationResponse(
     val enclave_measurement_hex: String,
     val directory_backend: String,
     val host_enclave_protocol_version: Int,
+    val enclave_release_id: String,
     val attested_oprf_public_key_ristretto255: String,
     val document_format: String,
     val document_base64: String,
     val document_sha256: String,
     val published_at: String,
+    val challenge_nonce_base64: String,
+    val attestation_signature_ed25519: String,
 )
 
 data class PrivateDiscoveryEvaluateRequest(
@@ -826,6 +831,7 @@ data class ServerCapabilitiesResponse(
     val contact_discovery_manifest_issuer_ed25519_pub: String?,
     val contact_discovery_directory_backend: String?,
     val contact_discovery_host_enclave_protocol_version: Int?,
+    val contact_discovery_enclave_release_id: String?,
     val contact_discovery_attestation_verifier: String?,
     val contact_discovery_expected_measurement_hex: String?,
     val contact_discovery_attestation_document_sha256: String?,
@@ -1309,7 +1315,9 @@ interface PqmsgDiscoveryApi {
     suspend fun getManifest(): ContactDiscoveryManifestResponse
 
     @GET("/v1/attestation")
-    suspend fun getAttestation(): ContactDiscoveryAttestationResponse
+    suspend fun getAttestation(
+        @Query("nonce_b64") nonceB64: String,
+    ): ContactDiscoveryAttestationResponse
 
     @POST("/v1/discovery/evaluate")
     suspend fun evaluateDiscoveryElements(
@@ -1505,6 +1513,9 @@ object ApiClientFactory {
             }
             require(capabilities.contact_discovery_host_enclave_protocol_version > 0) {
                 "Server advertises an invalid private discovery host/enclave protocol version"
+            }
+            require(!capabilities.contact_discovery_enclave_release_id.isNullOrBlank()) {
+                "Server advertises private contact discovery without an enclave release id"
             }
             val attestationFieldsPresent =
                 listOf(

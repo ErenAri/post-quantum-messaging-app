@@ -21,6 +21,8 @@ class ContactDiscoveryManifestContinuityTest {
         enclave_measurement_hex = enclaveMeasurementHex,
         attestation_document_format = if (attestationMode == "unattested_development") null else "opaque_b64_v1",
         attestation_document_sha256 = if (attestationMode == "unattested_development") null else "bb".repeat(32),
+        attestation_challenge_mode =
+            if (attestationMode == "unattested_development") null else "nonce_b64_required_preview",
         ticket_format = "ed25519-ticket-v1",
         ticket_issuer_ed25519_pub = "ticket-issuer-pub",
         ticket_max_ttl_seconds = 300,
@@ -28,6 +30,7 @@ class ContactDiscoveryManifestContinuityTest {
         privacy_mode = "blind_evaluation_preview",
         directory_backend = "simulated_enclave_preview",
         host_enclave_protocol_version = 1,
+        enclave_release_id = "simulated-preview",
         match_result_format = "contact_invite_token",
         oprf_suite = "ristretto255-sha512-preview",
         evaluation_proof_mode = "dleq_per_element_preview",
@@ -97,11 +100,14 @@ class ContactDiscoveryManifestContinuityTest {
             enclave_measurement_hex = "aa".repeat(32),
             directory_backend = "simulated_enclave_preview",
             host_enclave_protocol_version = 1,
+            enclave_release_id = "simulated-preview",
             attested_oprf_public_key_ristretto255 = "oprf-pub-1",
             document_format = "opaque_b64_v1",
             document_base64 = Base64.getEncoder().encodeToString(documentBytes),
             document_sha256 = documentSha256,
             published_at = "2026-03-26T00:00:00Z",
+            challenge_nonce_base64 = "bm9uY2UxMjM0NTY3ODkwMTIzNA==",
+            attestation_signature_ed25519 = "sig",
         )
 
         assertThrows(IllegalArgumentException::class.java) {
@@ -110,6 +116,9 @@ class ContactDiscoveryManifestContinuityTest {
                 expectedAttestationMode = "sgx_preview",
                 expectedVerifier = "sgx-dcap-preview",
                 expectedMeasurementHex = "aa".repeat(32),
+                expectedManifestIssuerEd25519Pub = "manifest-issuer-pub",
+                expectedChallengeNonceBase64 = "bm9uY2UxMjM0NTY3ODkwMTIzNA==",
+                expectedEnclaveReleaseId = "simulated-preview",
                 expectedOprfPublicKeyRistretto255 = "oprf-pub-1",
                 expectedDocumentSha256 = documentSha256,
                 expectedMaxAgeSeconds = 1,
@@ -131,11 +140,14 @@ class ContactDiscoveryManifestContinuityTest {
             enclave_measurement_hex = "aa".repeat(32),
             directory_backend = "simulated_enclave_preview",
             host_enclave_protocol_version = 1,
+            enclave_release_id = "simulated-preview",
             attested_oprf_public_key_ristretto255 = "wrong-oprf-pub",
             document_format = "opaque_b64_v1",
             document_base64 = Base64.getEncoder().encodeToString(documentBytes),
             document_sha256 = documentSha256,
             published_at = java.time.Instant.now().toString(),
+            challenge_nonce_base64 = "bm9uY2UxMjM0NTY3ODkwMTIzNA==",
+            attestation_signature_ed25519 = "sig",
         )
 
         assertThrows(IllegalArgumentException::class.java) {
@@ -144,6 +156,9 @@ class ContactDiscoveryManifestContinuityTest {
                 expectedAttestationMode = "sgx_preview",
                 expectedVerifier = "sgx-dcap-preview",
                 expectedMeasurementHex = "aa".repeat(32),
+                expectedManifestIssuerEd25519Pub = "manifest-issuer-pub",
+                expectedChallengeNonceBase64 = "bm9uY2UxMjM0NTY3ODkwMTIzNA==",
+                expectedEnclaveReleaseId = "simulated-preview",
                 expectedOprfPublicKeyRistretto255 = "oprf-pub-1",
                 expectedDocumentSha256 = documentSha256,
                 expectedMaxAgeSeconds = 900,

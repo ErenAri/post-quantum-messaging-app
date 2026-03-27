@@ -33,6 +33,7 @@ type BootOptions = {
     contact_discovery_ticket_issuer_ed25519_pub?: string;
     contact_discovery_directory_backend?: string | null;
     contact_discovery_host_enclave_protocol_version?: number | null;
+    contact_discovery_enclave_release_id?: string | null;
     contact_discovery_attestation_verifier?: string | null;
     contact_discovery_expected_measurement_hex?: string | null;
     contact_discovery_attestation_document_sha256?: string | null;
@@ -46,6 +47,7 @@ type BootOptions = {
     enclave_measurement_hex?: string | null;
     attestation_document_format?: string | null;
     attestation_document_sha256?: string | null;
+    attestation_challenge_mode?: string | null;
     ticket_format?: string;
     ticket_issuer_ed25519_pub?: string;
     ticket_max_ttl_seconds?: number;
@@ -53,6 +55,7 @@ type BootOptions = {
     privacy_mode?: string;
     directory_backend?: string;
     host_enclave_protocol_version?: number;
+    enclave_release_id?: string;
     match_result_format?: string;
     oprf_suite?: string;
     evaluation_proof_mode?: string;
@@ -290,6 +293,11 @@ async function bootApp(options: BootOptions = {}) {
       contact_discovery_host_enclave_protocol_version:
         options.capabilities?.contact_discovery_host_enclave_protocol_version
         ?? (options.capabilities?.contact_discovery_mode === "private_service" ? 1 : null),
+      contact_discovery_enclave_release_id:
+        options.capabilities?.contact_discovery_enclave_release_id
+        ?? (options.capabilities?.contact_discovery_mode === "private_service"
+          ? "simulated-preview"
+          : null),
       contact_discovery_ticket_issuer_ed25519_pub:
         options.capabilities?.contact_discovery_ticket_issuer_ed25519_pub ?? "issuer-ed25519-pub",
       contact_discovery_attestation_verifier:
@@ -310,6 +318,8 @@ async function bootApp(options: BootOptions = {}) {
       enclave_measurement_hex: options.discoveryManifest?.enclave_measurement_hex ?? null,
       attestation_document_format: options.discoveryManifest?.attestation_document_format ?? null,
       attestation_document_sha256: options.discoveryManifest?.attestation_document_sha256 ?? null,
+      attestation_challenge_mode:
+        options.discoveryManifest?.attestation_challenge_mode ?? null,
       ticket_format: options.discoveryManifest?.ticket_format ?? "ed25519-ticket-v1",
       ticket_issuer_ed25519_pub:
         options.discoveryManifest?.ticket_issuer_ed25519_pub
@@ -323,6 +333,8 @@ async function bootApp(options: BootOptions = {}) {
         options.discoveryManifest?.directory_backend ?? "simulated_enclave_preview",
       host_enclave_protocol_version:
         options.discoveryManifest?.host_enclave_protocol_version ?? 1,
+      enclave_release_id:
+        options.discoveryManifest?.enclave_release_id ?? "simulated-preview",
       match_result_format: options.discoveryManifest?.match_result_format ?? "contact_invite_token",
       oprf_suite: options.discoveryManifest?.oprf_suite ?? "ristretto255-sha512-preview",
       evaluation_proof_mode:
@@ -347,6 +359,8 @@ async function bootApp(options: BootOptions = {}) {
         options.discoveryManifest?.directory_backend ?? "simulated_enclave_preview",
       host_enclave_protocol_version:
         options.discoveryManifest?.host_enclave_protocol_version ?? 1,
+      enclave_release_id:
+        options.discoveryManifest?.enclave_release_id ?? "simulated-preview",
       attested_oprf_public_key_ristretto255:
         options.discoveryManifest?.oprf_public_key_ristretto255 ?? "oprf-pub",
       document_format: options.discoveryManifest?.attestation_document_format ?? "opaque_b64_v1",
@@ -554,10 +568,12 @@ async function bootApp(options: BootOptions = {}) {
       buildDiscoveryHandlesAuthHeaders: emptyHeaders,
       buildDiscoveryMatchAuthHeaders: emptyHeaders,
       verifyContactDiscoveryManifest: vi.fn(),
+      buildContactDiscoveryAttestationChallengeNonce: vi.fn(() => "flow-attestation-nonce"),
       prepareContactDiscoveryBlindRequest: vi.fn((hashes: string[]) => ({
         blinded_elements_base64: hashes.map((value) => `blind:${value}`),
         blinding_scalars_base64: hashes.map((value) => `scalar:${value}`),
       })),
+      verifyContactDiscoveryAttestationDocument: vi.fn(),
       finalizeContactDiscoveryTokens: vi.fn(
         (scalars: string[], evaluated: string[]) =>
           evaluated.map((value, index) => `token:${index}:${scalars[index] ?? "missing"}:${value}`)
@@ -1237,6 +1253,7 @@ describe("web app flow coverage", () => {
         contact_discovery_ticket_issuer_ed25519_pub: "ticket-issuer-pub",
         contact_discovery_directory_backend: "simulated_enclave_preview",
         contact_discovery_host_enclave_protocol_version: 1,
+        contact_discovery_enclave_release_id: "simulated-preview",
       },
       discoveryManifest: {
         ticket_issuer_ed25519_pub: "ticket-issuer-pub",
@@ -1263,6 +1280,7 @@ describe("web app flow coverage", () => {
           privacy_mode: "blind_evaluation_preview",
           directory_backend: "simulated_enclave_preview",
           host_enclave_protocol_version: 1,
+          enclave_release_id: "simulated-preview",
           match_result_format: "contact_invite_token",
           oprf_suite: "ristretto255-sha512-preview",
           evaluation_proof_mode: "dleq_per_element_preview",
@@ -1272,6 +1290,7 @@ describe("web app flow coverage", () => {
           enclave_measurement_hex: null,
           attestation_document_format: null,
           attestation_document_sha256: null,
+          attestation_challenge_mode: null,
           observed_at: "2026-03-26T00:00:00Z",
         });
         sessionStorage.setItem("pqmsg.passphrase", "pass-1");

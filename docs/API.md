@@ -720,6 +720,7 @@ Separate discovery-service manifest. Current development-only contract:
   "enclave_measurement_hex": null,
   "attestation_document_format": null,
   "attestation_document_sha256": null,
+  "attestation_challenge_mode": null,
   "ticket_format": "base64(json-payload).base64(ed25519-signature)",
   "ticket_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
   "ticket_max_ttl_seconds": 300,
@@ -727,6 +728,7 @@ Separate discovery-service manifest. Current development-only contract:
   "privacy_mode": "blind_evaluation_preview",
   "directory_backend": "simulated_enclave_preview",
   "host_enclave_protocol_version": 1,
+  "enclave_release_id": "simulated-preview",
   "match_result_format": "contact_invite_token",
   "oprf_suite": "ristretto255-sha512-preview",
   "evaluation_proof_mode": "dleq_per_element_preview",
@@ -743,16 +745,18 @@ The current client contract verifies both:
 - `ticket_issuer_ed25519_pub` against the app-server capabilities document
 - `manifest_issuer_ed25519_pub` / `manifest_signature_ed25519` against the signed manifest payload
 - if the app server advertises them, `attestation_verifier`, `enclave_measurement_hex`, `attestation_document_sha256`, and `contact_discovery_attestation_max_age_seconds` must also match the expected discovery-service contract
+- if the manifest advertises attestation evidence, it must also advertise `attestation_challenge_mode = nonce_b64_required_preview`
 - `match_result_format = contact_invite_token`
 - `directory_backend = simulated_enclave_preview`
 - `host_enclave_protocol_version = 1`
+- `enclave_release_id = simulated-preview`
 - `oprf_suite = ristretto255-sha512-preview`
 - `evaluation_proof_mode = dleq_per_element_preview`
 - `lookup_protocol = blind_token_directory_preview` / `privacy_mode = blind_evaluation_preview`
 
 If the signed manifest carries `attestation_document_sha256`, supported clients also fetch:
 
-`GET {contact_discovery_service_origin}/v1/attestation`
+`GET {contact_discovery_service_origin}/v1/attestation?nonce_b64={base64(16..=64 random bytes)}`
 
 ```json
 {
@@ -761,15 +765,18 @@ If the signed manifest carries `attestation_document_sha256`, supported clients 
   "enclave_measurement_hex": "64-hex measurement",
   "directory_backend": "simulated_enclave_preview",
   "host_enclave_protocol_version": 1,
+  "enclave_release_id": "simulated-preview",
   "attested_oprf_public_key_ristretto255": "base64(32-byte ristretto point)",
   "document_format": "opaque_b64_v1",
   "document_base64": "base64(enclave attestation document bytes)",
   "document_sha256": "64-hex sha256",
-  "published_at": "2026-03-26T12:00:00Z"
+  "published_at": "2026-03-26T12:00:00Z",
+  "challenge_nonce_base64": "base64(16..=64 random bytes)",
+  "attestation_signature_ed25519": "base64(64-byte Ed25519 signature over the attestation payload)"
 }
 ```
 
-Clients verify that the returned attestation document hash matches the signed manifest and the app-server capabilities contract, that `attested_oprf_public_key_ristretto255` matches the manifest-pinned blind-evaluation key, and reject documents older than `contact_discovery_attestation_max_age_seconds`.
+Clients verify that the returned attestation document hash matches the signed manifest and the app-server capabilities contract, that `attested_oprf_public_key_ristretto255` matches the manifest-pinned blind-evaluation key, that `challenge_nonce_base64` matches the per-request client nonce, that `attestation_signature_ed25519` verifies under `manifest_issuer_ed25519_pub`, and reject documents older than `contact_discovery_attestation_max_age_seconds`.
 
 `POST {contact_discovery_service_origin}/v1/discovery/evaluate`
 

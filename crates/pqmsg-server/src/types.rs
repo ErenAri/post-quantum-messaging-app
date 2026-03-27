@@ -856,6 +856,7 @@ pub(crate) struct ServerCapabilitiesResponse {
     pub(crate) contact_discovery_manifest_issuer_ed25519_pub: Option<String>,
     pub(crate) contact_discovery_directory_backend: Option<String>,
     pub(crate) contact_discovery_host_enclave_protocol_version: Option<u32>,
+    pub(crate) contact_discovery_enclave_release_id: Option<String>,
     pub(crate) contact_discovery_attestation_verifier: Option<String>,
     pub(crate) contact_discovery_expected_measurement_hex: Option<String>,
     pub(crate) contact_discovery_attestation_document_sha256: Option<String>,

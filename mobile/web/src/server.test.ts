@@ -575,6 +575,7 @@ describe("PqmsgApi methods", () => {
         privacy_mode: "blind_evaluation_preview",
         directory_backend: "simulated_enclave_preview",
         host_enclave_protocol_version: 1,
+        enclave_release_id: "simulated-preview",
         match_result_format: "contact_invite_token",
         oprf_suite: "ristretto255-sha512-preview",
         oprf_public_key_ristretto255: "ristretto-oprf-pub",
@@ -599,17 +600,25 @@ describe("PqmsgApi methods", () => {
         enclave_measurement_hex: "ab".repeat(32),
         directory_backend: "simulated_enclave_preview",
         host_enclave_protocol_version: 1,
+        enclave_release_id: "simulated-preview",
         attested_oprf_public_key_ristretto255: "oprf-pub",
         document_format: "opaque_b64_v1",
         document_base64: "eyJ0ZWUiOiJzZ3gifQ==",
         document_sha256: "cd".repeat(32),
         published_at: "2026-03-26T12:00:00Z",
+        challenge_nonce_base64: "bm9uY2UxMjM0NTY3ODkwMTIzNA==",
+        attestation_signature_ed25519: "attestation-sig",
       })
     );
-    const attestation = await api.getContactDiscoveryAttestation("https://cdsi.example");
+    const attestation = await api.getContactDiscoveryAttestation(
+      "https://cdsi.example",
+      "bm9uY2UxMjM0NTY3ODkwMTIzNA==",
+    );
     const [url, opts] = mockFetch.mock.calls[0];
     expect(attestation.attestation_verifier).toBe("sgx-dcap-preview");
-    expect(url).toBe("https://cdsi.example/v1/attestation");
+    expect(url).toBe(
+      "https://cdsi.example/v1/attestation?nonce_b64=bm9uY2UxMjM0NTY3ODkwMTIzNA%3D%3D"
+    );
     expect(opts.method).toBe("GET");
   });
 

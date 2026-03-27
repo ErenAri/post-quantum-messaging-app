@@ -285,6 +285,7 @@ describe("contact discovery checkpoints", () => {
       privacy_mode: "blind_evaluation_preview",
       directory_backend: "simulated_enclave_preview",
       host_enclave_protocol_version: 1,
+      enclave_release_id: "simulated-preview",
       match_result_format: "contact_invite_token",
       oprf_suite: "ristretto255-sha512-preview",
       evaluation_proof_mode: "dleq_per_element_preview",
@@ -294,6 +295,7 @@ describe("contact discovery checkpoints", () => {
       enclave_measurement_hex: null,
       attestation_document_format: null,
       attestation_document_sha256: null,
+      attestation_challenge_mode: null,
       observed_at: "2026-03-26T00:00:00Z",
     };
     writeContactDiscoveryCheckpoint("https://app.example", "alice", checkpoint);
@@ -312,6 +314,7 @@ describe("contact discovery checkpoints", () => {
       privacy_mode: "blind_evaluation_preview",
       directory_backend: "simulated_enclave_preview",
       host_enclave_protocol_version: 1,
+      enclave_release_id: "simulated-preview",
       match_result_format: "contact_invite_token",
       oprf_suite: "ristretto255-sha512-preview",
       evaluation_proof_mode: "dleq_per_element_preview",
@@ -321,6 +324,7 @@ describe("contact discovery checkpoints", () => {
       enclave_measurement_hex: null,
       attestation_document_format: null,
       attestation_document_sha256: null,
+      attestation_challenge_mode: null,
       observed_at: "2026-03-26T00:00:00Z",
     });
     writeContactDiscoveryCheckpoint("https://app.example", "bob", {
@@ -333,6 +337,7 @@ describe("contact discovery checkpoints", () => {
       privacy_mode: "blind_evaluation_preview",
       directory_backend: "simulated_enclave_preview",
       host_enclave_protocol_version: 1,
+      enclave_release_id: "simulated-preview",
       match_result_format: "contact_invite_token",
       oprf_suite: "ristretto255-sha512-preview",
       evaluation_proof_mode: "dleq_per_element_preview",
@@ -342,6 +347,7 @@ describe("contact discovery checkpoints", () => {
       enclave_measurement_hex: null,
       attestation_document_format: null,
       attestation_document_sha256: null,
+      attestation_challenge_mode: null,
       observed_at: "2026-03-26T00:00:00Z",
     });
 

@@ -328,6 +328,7 @@ pub struct AppState {
     contact_discovery_manifest_issuer_ed25519_pub: Option<String>,
     contact_discovery_directory_backend: Option<String>,
     contact_discovery_host_enclave_protocol_version: Option<u32>,
+    contact_discovery_enclave_release_id: Option<String>,
     contact_discovery_attestation_verifier: Option<String>,
     contact_discovery_expected_measurement_hex: Option<String>,
     contact_discovery_attestation_document_sha256: Option<String>,
@@ -368,6 +369,7 @@ impl AppState {
             contact_discovery_manifest_issuer_ed25519_pub: None,
             contact_discovery_directory_backend: None,
             contact_discovery_host_enclave_protocol_version: None,
+            contact_discovery_enclave_release_id: None,
             contact_discovery_attestation_verifier: None,
             contact_discovery_expected_measurement_hex: None,
             contact_discovery_attestation_document_sha256: None,
@@ -412,6 +414,7 @@ impl AppState {
             contact_discovery_manifest_issuer_ed25519_pub: None,
             contact_discovery_directory_backend: None,
             contact_discovery_host_enclave_protocol_version: None,
+            contact_discovery_enclave_release_id: None,
             contact_discovery_attestation_verifier: None,
             contact_discovery_expected_measurement_hex: None,
             contact_discovery_attestation_document_sha256: None,
@@ -537,6 +540,16 @@ impl AppState {
         if self.contact_discovery_private_service_allowed() {
             self.contact_discovery_host_enclave_protocol_version
                 .or(Some(1))
+        } else {
+            None
+        }
+    }
+
+    pub fn contact_discovery_enclave_release_id(&self) -> Option<String> {
+        if self.contact_discovery_private_service_allowed() {
+            self.contact_discovery_enclave_release_id
+                .clone()
+                .or(Some("simulated-preview".to_string()))
         } else {
             None
         }
@@ -724,6 +737,14 @@ impl AppState {
         host_enclave_protocol_version: Option<u32>,
     ) -> Self {
         self.contact_discovery_host_enclave_protocol_version = host_enclave_protocol_version;
+        self
+    }
+
+    pub fn with_contact_discovery_enclave_release_id(
+        mut self,
+        enclave_release_id: Option<String>,
+    ) -> Self {
+        self.contact_discovery_enclave_release_id = enclave_release_id;
         self
     }
 
