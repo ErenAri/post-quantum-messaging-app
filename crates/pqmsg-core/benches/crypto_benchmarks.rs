@@ -15,7 +15,8 @@ use pqmsg_core::storage::{unwrap_bytes, wrap_bytes_with_params, Argon2idParams};
 use pqmsg_core::tlv::{self, critical_type, TlvRecord};
 use pqmsg_core::wire::WireMessage;
 use pqmsg_core::CoreError;
-use rand::SeedableRng;
+use rand::rngs::OsRng;
+use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
@@ -40,6 +41,16 @@ impl SignatureVerifier for BenchSignatureVerifier {
 }
 
 impl KemProvider for BenchMockKem {
+    fn keypair(&self) -> Result<pqmsg_core::kem::KemKeyPair, CoreError> {
+        let mut seed = [0u8; 32];
+        OsRng.fill_bytes(&mut seed);
+        let seed = seed.to_vec();
+        Ok(pqmsg_core::kem::KemKeyPair {
+            public_key: seed.clone(),
+            secret_key: SecretBytes::from(seed),
+        })
+    }
+
     fn encapsulate(&self, recipient_public_key: &[u8]) -> Result<KemEncapsulation, CoreError> {
         if recipient_public_key.len() != 32 {
             return Err(CoreError::InvalidLength {

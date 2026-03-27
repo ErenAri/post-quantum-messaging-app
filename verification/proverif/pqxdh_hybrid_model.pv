@@ -33,7 +33,6 @@ reduc forall m:bitstring, sk:pqsigkey; pqsig_verify(pqsig_sign(m, sk), m, pqsig_
 
 (* ── KEM (ML-KEM-768) ─────────────────────────────────────────── *)
 fun kem_enc(pkey, bitstring): bitstring.
-fun kem_ss(key, bitstring): bitstring.
 reduc forall sk:key, ss:bitstring; kem_ss(sk, kem_enc(pk(sk), ss)) = ss.
 
 (* ── Key schedule helpers ──────────────────────────────────────── *)
