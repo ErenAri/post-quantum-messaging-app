@@ -56,11 +56,11 @@ function Write-CheckResult {
     Write-Host ("[{0}] {1}: {2}" -f $status, $Label, $Detail)
 }
 
-$isWindows = $env:OS -eq "Windows_NT"
-$isMacOS = $IsMacOS
-$isLinux = $IsLinux
+$windowsOs = $env:OS -eq "Windows_NT"
+$macOs = $IsMacOS
+$linuxOs = $IsLinux
 
-if ($isWindows) {
+if ($windowsOs) {
     Write-Host "Checking Windows SQLCipher server prerequisites (vendored OpenSSL path)..."
 
     $perlPath = Resolve-PerlPath
@@ -92,7 +92,7 @@ Install or ensure availability of:
 - nasm is optional but recommended for faster OpenSSL builds
 "@
     }
-} elseif ($isLinux) {
+} elseif ($linuxOs) {
     Write-Host "Checking Linux SQLCipher server prerequisites..."
 
     $pkgConfigOk = Test-CommandAvailable "pkg-config"
@@ -112,7 +112,7 @@ Install or ensure availability of:
     if (-not $pkgConfigOk -or -not $makeOk -or -not $opensslPkgOk) {
         throw "Missing Linux SQLCipher prerequisites. Install pkg-config, perl, make, and OpenSSL development headers/libs."
     }
-} elseif ($isMacOS) {
+} elseif ($macOs) {
     Write-Host "Checking macOS SQLCipher server prerequisites..."
 
     $brewOk = Test-CommandAvailable "brew"
@@ -137,7 +137,7 @@ Install or ensure availability of:
 }
 
 if ($RunTests) {
-    if ($isWindows) {
+    if ($windowsOs) {
         $perlDir = Split-Path -Parent (Resolve-PerlPath)
         $vcvarsPath = Resolve-VcVarsPath
         if (-not $vcvarsPath) {

@@ -10,10 +10,12 @@ use base64::Engine;
 use chrono::Utc;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use ed25519_dalek::{Signer, SigningKey};
+use pqmsg_core::pq_sig::{MlDsa65, PqSignatureProvider};
 use pqmsg_core::tlv::{critical_type, encode, TlvRecord};
 use pqmsg_server::{build_router, init_db, parse_db_backend, AppState, RateLimiter};
 use serde_json::{json, Value};
 use sqlx::any::AnyPoolOptions;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,10 +40,28 @@ const AUTH_TAG_MESSAGE_BLOB: u16 = critical_type(0x3208);
 
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(1_000_000);
 
+struct TestIdentityKeyPair {
+    classical: SigningKey,
+    pq_public: Vec<u8>,
+}
+
+impl Deref for TestIdentityKeyPair {
+    type Target = SigningKey;
+
+    fn deref(&self) -> &Self::Target {
+        &self.classical
+    }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────
 
-fn signing_key(seed: u8) -> SigningKey {
-    SigningKey::from_bytes(&[seed; 32])
+fn signing_key(seed: u8) -> TestIdentityKeyPair {
+    let provider = MlDsa65::new().expect("ml-dsa init");
+    let pq_keypair = provider.keypair().expect("ml-dsa keypair");
+    TestIdentityKeyPair {
+        classical: SigningKey::from_bytes(&[seed; 32]),
+        pq_public: pq_keypair.public_key,
+    }
 }
 
 fn auth_common_records(
@@ -184,11 +204,17 @@ async fn setup_app() -> axum::Router {
     build_router(state)
 }
 
-async fn register_user(app: &axum::Router, user_id: &str, device_id: &str, key: &SigningKey) {
+async fn register_user(
+    app: &axum::Router,
+    user_id: &str,
+    device_id: &str,
+    key: &TestIdentityKeyPair,
+) {
     let payload = json!({
         "user_id": user_id,
         "identity_x25519_pub": B64.encode([0x42u8; 32]),
         "identity_sig_pub": B64.encode(key.verifying_key().to_bytes()),
+        "identity_pq_sig_pub": B64.encode(&key.pq_public),
         "device_id": device_id,
     });
     let status = json_request(
@@ -334,6 +360,7 @@ fn bench_registration(c: &mut Criterion) {
                     "user_id": user_id,
                     "identity_x25519_pub": B64.encode([0x42u8; 32]),
                     "identity_sig_pub": B64.encode(key.verifying_key().to_bytes()),
+                    "identity_pq_sig_pub": B64.encode(&key.pq_public),
                     "device_id": "dev1",
                 });
                 let status =

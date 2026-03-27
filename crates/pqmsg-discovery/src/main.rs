@@ -14,7 +14,9 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256, Sha512};
+#[cfg(test)]
+use sha2::Sha512;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::net::SocketAddr;
@@ -39,8 +41,11 @@ const CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_FORMAT: &str = "opaque_b64_v1";
 const CONTACT_DISCOVERY_ATTESTATION_CHALLENGE_MODE: &str = "nonce_b64_required_v1";
 const CONTACT_DISCOVERY_DIRECTORY_BACKEND: &str = "attested_enclave_directory_v1";
 const CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION: u8 = 1;
+#[cfg(test)]
 const DEFAULT_CONTACT_DISCOVERY_HOST_RELEASE_ID: &str = "attested-host-v1";
+#[cfg(test)]
 const DEFAULT_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID: &str = "attested-enclave-v1";
+#[cfg(test)]
 const CONTACT_DISCOVERY_HANDLE_DOMAIN: &[u8] = b"pqmsg-discovery-handle-v1";
 
 #[derive(Clone)]
@@ -497,6 +502,7 @@ fn encode_scalar_b64(scalar: &Scalar) -> String {
     B64.encode(scalar.to_bytes())
 }
 
+#[cfg(test)]
 fn decode_scalar_b64(field: &str, value: &str) -> Result<Scalar, DiscoveryError> {
     let decoded = B64.decode(value.trim().as_bytes()).map_err(|_| {
         DiscoveryError::bad_request(format!(
@@ -571,6 +577,7 @@ fn generate_discovery_evaluate_proof(
     }
 }
 
+#[cfg(test)]
 fn decode_hex_32(field: &str, value: &str) -> Result<[u8; 32], DiscoveryError> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(DiscoveryError::bad_request(format!(
@@ -590,6 +597,7 @@ fn decode_hex_32(field: &str, value: &str) -> Result<[u8; 32], DiscoveryError> {
     Ok(decoded)
 }
 
+#[cfg(test)]
 fn derive_handle_point(handle_hash_sha256: &str) -> Result<RistrettoPoint, DiscoveryError> {
     let hash_bytes = decode_hex_32("handle_hash_sha256", handle_hash_sha256)?;
     let uniform = Sha512::new()

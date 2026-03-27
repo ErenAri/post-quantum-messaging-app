@@ -23,9 +23,9 @@ fun shared_dh(key, pkey): bitstring.
 equation forall x : key, y : key; shared_dh(x, pk(y)) = shared_dh(y, pk(x)).
 
 (* ── Classical Ed25519 signatures ──────────────────────────────── *)
-fun sig_sign(bitstring, key): bitstring.
-fun sig_verify(bitstring, bitstring, pkey): bool.
-reduc forall m:bitstring, sk:key; sig_verify(sig_sign(m, sk), m, pk(sk)) = true.
+fun ed_sig_sign(bitstring, key): bitstring.
+fun ed_sig_verify(bitstring, bitstring, pkey): bool.
+reduc forall m:bitstring, sk:key; ed_sig_verify(ed_sig_sign(m, sk), m, pk(sk)) = true.
 
 (* ── PQ ML-DSA-65 signatures ──────────────────────────────────── *)
 fun pqsig_pk(pqsigkey): pqsigpkey.
@@ -75,8 +75,8 @@ let Bob =
   let otpk_b_pub = pk(otpk_b) in
   let pqsig_b_pub = pqsig_pk(pqsig_b) in
   (* Classical Ed25519 signatures over prekeys *)
-  let sig_spk = sig_sign(spk_b_pub, ik_b) in
-  let sig_pqspk = sig_sign(pqspk_b_pub, ik_b) in
+  let sig_spk = ed_sig_sign(spk_b_pub, ik_b) in
+  let sig_pqspk = ed_sig_sign(pqspk_b_pub, ik_b) in
   (* PQ ML-DSA-65 dual signatures over prekeys *)
   let pqsig_spk = pqsig_sign(spk_b_pub, pqsig_b) in
   let pqsig_pqspk = pqsig_sign(pqspk_b_pub, pqsig_b) in
@@ -106,8 +106,8 @@ let Alice =
            pqsig_b_pub:pqsigpkey, pqsig_spk:bitstring, pqsig_pqspk:bitstring));
   if target_id = bob_id then
     (* Verify classical Ed25519 signatures *)
-    if sig_verify(sig_spk, spk_b_pub, ik_b_pub) = true then
-      if sig_verify(sig_pqspk, pqspk_b_pub, ik_b_pub) = true then
+    if ed_sig_verify(sig_spk, spk_b_pub, ik_b_pub) = true then
+      if ed_sig_verify(sig_pqspk, pqspk_b_pub, ik_b_pub) = true then
         (* Verify PQ ML-DSA-65 dual signatures — hybrid: secure if EITHER holds *)
         if pqsig_verify(pqsig_spk, spk_b_pub, pqsig_b_pub) = true then
           if pqsig_verify(pqsig_pqspk, pqspk_b_pub, pqsig_b_pub) = true then
@@ -135,8 +135,8 @@ let AliceFS =
            sig_spk:bitstring, sig_pqspk:bitstring,
            pqsig_b_pub:pqsigpkey, pqsig_spk:bitstring, pqsig_pqspk:bitstring));
   if target_id = bob_id then
-    if sig_verify(sig_spk, spk_b_pub, ik_b_pub) = true then
-      if sig_verify(sig_pqspk, pqspk_b_pub, ik_b_pub) = true then
+    if ed_sig_verify(sig_spk, spk_b_pub, ik_b_pub) = true then
+      if ed_sig_verify(sig_pqspk, pqspk_b_pub, ik_b_pub) = true then
         if pqsig_verify(pqsig_spk, spk_b_pub, pqsig_b_pub) = true then
           if pqsig_verify(pqsig_pqspk, pqspk_b_pub, pqsig_b_pub) = true then
             new ek_a:key;
