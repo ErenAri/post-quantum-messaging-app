@@ -118,7 +118,7 @@ fn iterated_fingerprint(user_id: &str, x25519_pub: &[u8; 32], ml_dsa_pub: &[u8])
     // Iterate 5199 more times (total 5200).
     for _ in 1..HASH_ITERATIONS {
         let mut h = Sha256::new();
-        h.update(&hash);
+        h.update(hash);
         // Re-include the key material in each iteration to bind the hash chain.
         h.update(x25519_pub);
         h.update(ml_dsa_pub);

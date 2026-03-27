@@ -242,6 +242,7 @@ impl PrivateGroupState {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn encrypt_message_with_rng<P: PqSignatureProvider, R: RngCore + CryptoRng>(
         &self,
         sender_user_id: &str,

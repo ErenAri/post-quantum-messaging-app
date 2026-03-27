@@ -728,6 +728,7 @@ impl SessionState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn session_associated_data(
     version: u16,
     suite_id: u16,

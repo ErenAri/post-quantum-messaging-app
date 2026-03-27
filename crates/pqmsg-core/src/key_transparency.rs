@@ -305,7 +305,7 @@ pub fn build_tree_root(leaf_hashes: &[[u8; 32]]) -> Option<[u8; 32]> {
     }
     let mut level: Vec<[u8; 32]> = leaf_hashes.to_vec();
     while level.len() > 1 {
-        let mut next = Vec::with_capacity((level.len() + 1) / 2);
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for pair in level.chunks(2) {
             if pair.len() == 2 {
                 next.push(hash_node(&pair[0], &pair[1]));
@@ -341,7 +341,7 @@ pub fn build_inclusion_proof(
             path.push((level[sibling_idx], is_left));
         }
         // Build the next level
-        let mut next = Vec::with_capacity((level.len() + 1) / 2);
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for pair in level.chunks(2) {
             if pair.len() == 2 {
                 next.push(hash_node(&pair[0], &pair[1]));

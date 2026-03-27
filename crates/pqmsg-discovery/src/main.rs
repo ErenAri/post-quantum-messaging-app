@@ -1181,10 +1181,7 @@ fn ensure_ticket_purpose_allowed(
     claims: &ContactDiscoveryTicketClaims,
     allowed_purposes: &[&str],
 ) -> Result<(), DiscoveryError> {
-    if allowed_purposes
-        .iter()
-        .any(|purpose| *purpose == claims.purpose.as_str())
-    {
+    if allowed_purposes.contains(&claims.purpose.as_str()) {
         Ok(())
     } else {
         Err(DiscoveryError::bad_request(format!(

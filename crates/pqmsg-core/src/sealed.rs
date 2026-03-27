@@ -534,6 +534,7 @@ fn seal_message_with_cert_v1(
 /// included as an additional TLV record inside the encrypted inner payload.
 /// Certified envelopes also carry an encrypted sender-identity hint so the
 /// recipient can open the transport without server-supplied sender metadata.
+#[allow(clippy::too_many_arguments)]
 pub fn seal_message_with_cert(
     sender_local_secret: &DhSecretKey,
     recipient_identity_pub: &DhPublicKey,
