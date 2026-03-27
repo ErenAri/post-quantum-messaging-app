@@ -13,6 +13,7 @@
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@color/pq_background</item>
         <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
         <item name="materialCardViewStyle">@style/Widget.PQMsg.Card</item>
         <item name="shapeAppearanceSmallComponent">@style/ShapeAppearance.PQMsg.Small</item>
         <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.PQMsg.Medium</item>

@@ -1,55 +1,58 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/bg_screen"
     android:orientation="vertical"
-    android:padding="20dp">
+    android:paddingHorizontal="16dp"
+    android:paddingTop="16dp"
+    android:paddingBottom="12dp">
 
-    <com.google.android.material.card.MaterialCardView
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        app:cardBackgroundColor="@color/pq_hero"
-        app:strokeWidth="0dp">
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonBackFromContacts"
+            style="@style/Widget.PQMsg.Button.Compact"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Back" />
 
         <LinearLayout
-            android:layout_width="match_parent"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="22dp">
+            android:layout_marginStart="10dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="People"
-                android:textAppearance="@style/TextAppearance.PQMsg.Eyebrow"
-                android:textColor="@color/pq_hero_accent" />
+                android:textAppearance="@style/TextAppearance.PQMsg.Eyebrow" />
 
             <TextView
-                android:layout_width="match_parent"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
                 android:text="@string/discovery_title"
-                android:textAppearance="@style/TextAppearance.MaterialComponents.Headline4"
-                android:textColor="@color/pq_surface"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/textDiscoveryStatus"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:text="@string/contacts_manual_only_notice"
-                android:textAppearance="@style/TextAppearance.MaterialComponents.Body1"
-                android:textColor="@color/pq_surface" />
+                android:textAppearance="@style/TextAppearance.PQMsg.ScreenTitle" />
         </LinearLayout>
-    </com.google.android.material.card.MaterialCardView>
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/textDiscoveryStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="16dp">
+        android:layout_marginTop="14dp">
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -60,7 +63,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Add contact"
+                android:text="Add by username or invite"
                 android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
 
             <com.google.android.material.textfield.TextInputLayout
@@ -121,18 +124,10 @@
                 android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
 
             <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/contacts_private_service_notice"
-                android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
-
-            <TextView
                 android:id="@+id/textDiscoveryManifest"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="@string/contacts_private_manifest_unavailable"
                 android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
             <com.google.android.material.textfield.TextInputLayout
@@ -218,38 +213,34 @@
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:orientation="vertical"
-            android:padding="18dp">
+            android:orientation="vertical">
 
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Your contacts"
+                android:paddingHorizontal="18dp"
+                android:paddingTop="18dp"
+                android:text="Contacts"
                 android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
-
-            <ListView
-                android:id="@+id/listContacts"
-                android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_marginTop="12dp"
-                android:layout_weight="1" />
 
             <TextView
                 android:id="@+id/textContactsEmpty"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="No contacts yet."
+                android:paddingHorizontal="18dp"
+                android:paddingTop="8dp"
+                android:text="@string/contacts_empty"
                 android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted"
                 android:visibility="gone" />
+
+            <ListView
+                android:id="@+id/listContacts"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="8dp"
+                android:layout_weight="1"
+                android:divider="@android:color/transparent"
+                android:dividerHeight="0dp" />
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
-
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/buttonBackFromContacts"
-        style="@style/Widget.PQMsg.Button.Secondary"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:text="@string/button_back_conversations" />
 </LinearLayout>

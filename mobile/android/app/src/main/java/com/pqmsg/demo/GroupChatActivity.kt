@@ -4,10 +4,10 @@ import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.widget.EditText
+import android.widget.ListView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.widget.NestedScrollView
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.button.MaterialButton
@@ -28,8 +28,6 @@ import uniffi.pqmsg_android.privateGroupPrepareRemoveMemberTransition
 import uniffi.pqmsg_android.sealMessageWithSenderCert
 import java.security.MessageDigest
 import java.util.Base64
-import java.text.DateFormat
-import java.util.Date
 
 class GroupChatActivity : AppCompatActivity() {
     private val gson = Gson()
@@ -39,16 +37,21 @@ class GroupChatActivity : AppCompatActivity() {
     private lateinit var messageInput: EditText
     private lateinit var sendButton: MaterialButton
     private lateinit var syncButton: MaterialButton
-    private lateinit var infoButton: MaterialButton
     private lateinit var backButton: MaterialButton
-    private lateinit var chatLogScroll: NestedScrollView
-    private lateinit var chatLog: TextView
+    private lateinit var groupHeaderContainer: View
+    private lateinit var groupMessages: ListView
+    private lateinit var groupEmptyText: TextView
+    private lateinit var replyPreviewLayout: View
+    private lateinit var replyPreviewText: TextView
+    private lateinit var clearReplyButton: MaterialButton
     private var groupId = ""
     private var groupName = ""
     private var syncInFlight = false
     private var privateGroupState: PrivateGroupState? = null
     private var privateGroupCredential: PrivateGroupMemberCredential? = null
     private var localStoreAvailable = true
+    private lateinit var threadAdapter: ThreadMessageAdapter
+    private var pendingReplyMessage: ThreadMessage? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,19 +68,35 @@ class GroupChatActivity : AppCompatActivity() {
         messageInput = findViewById(R.id.editGroupMessage)
         sendButton = findViewById(R.id.buttonSendGroup)
         syncButton = findViewById(R.id.buttonSyncGroup)
-        infoButton = findViewById(R.id.buttonGroupInfo)
         backButton = findViewById(R.id.buttonBackFromGroup)
-        chatLogScroll = findViewById(R.id.scrollGroupChatLog)
-        chatLog = findViewById(R.id.textGroupChatLog)
+        groupHeaderContainer = findViewById(R.id.groupHeaderContainer)
+        groupMessages = findViewById(R.id.listGroupMessages)
+        groupEmptyText = findViewById(R.id.textGroupChatEmpty)
+        replyPreviewLayout = findViewById(R.id.layoutGroupReplyPreview)
+        replyPreviewText = findViewById(R.id.textGroupReplyPreview)
+        clearReplyButton = findViewById(R.id.buttonClearGroupReply)
+        threadAdapter = ThreadMessageAdapter(this)
+        groupMessages.adapter = threadAdapter
+        groupMessages.emptyView = groupEmptyText
+        groupMessages.setOnItemLongClickListener { _, _, position, _ ->
+            val message = threadAdapter.getItem(position)
+            showThreadMessageActions(message)
+            true
+        }
 
         reloadPrivateGroupState()
         titleText.text = privateGroupState?.let { getPrivateGroupTitle(it, groupName) } ?: groupName
         messageInput.doAfterTextChanged { syncActions() }
+        clearReplyButton.setOnClickListener {
+            pendingReplyMessage = null
+            renderReplyPreview()
+            syncActions()
+        }
         sendButton.setOnClickListener {
             lifecycleScope.launch { runAction("Send group message") { sendGroupMessage() } }
         }
         syncButton.setOnClickListener { syncGroupMessages() }
-        infoButton.setOnClickListener { showGroupInfo() }
+        groupHeaderContainer.setOnClickListener { showGroupInfo() }
         backButton.setOnClickListener { finish() }
 
         if (privateGroupState == null || privateGroupCredential == null) {
@@ -86,6 +105,7 @@ class GroupChatActivity : AppCompatActivity() {
         }
 
         renderChatLog()
+        renderReplyPreview()
         refreshMeta()
         syncActions()
     }
@@ -108,9 +128,10 @@ class GroupChatActivity : AppCompatActivity() {
         messageInput.isEnabled = false
         sendButton.isEnabled = false
         syncButton.isEnabled = true
-        infoButton.isEnabled = false
-        chatLog.text = "This device does not have the local opaque state needed to open this private group."
+        threadAdapter.submitList(emptyList())
+        groupEmptyText.text = "This device does not have the local opaque state needed to open this private group."
         metaText.text = "Open the group from an invite link or a device that already has the current epoch state."
+        renderReplyPreview()
     }
 
     private suspend fun runAction(label: String, block: suspend () -> Unit) {
@@ -175,7 +196,63 @@ class GroupChatActivity : AppCompatActivity() {
         sendButton.isEnabled =
             hasText && !syncInFlight && localStoreAvailable && privateGroupState != null && privateGroupCredential != null
         syncButton.isEnabled = !syncInFlight && localStoreAvailable
-        infoButton.isEnabled = localStoreAvailable && privateGroupState != null && privateGroupCredential != null
+    }
+
+    private fun renderReplyPreview() {
+        val reply = pendingReplyMessage
+        if (reply == null) {
+            replyPreviewLayout.visibility = View.GONE
+            replyPreviewText.text = ""
+            return
+        }
+        replyPreviewLayout.visibility = View.VISIBLE
+        replyPreviewText.text =
+            "${getString(R.string.thread_reply_prefix)}: ${reply.body.take(72)}"
+    }
+
+    private fun showThreadMessageActions(message: ThreadMessage) {
+        val options = arrayOf(
+            getString(R.string.thread_action_reply),
+            getString(R.string.thread_action_react),
+        )
+        AlertDialog.Builder(this)
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> {
+                        pendingReplyMessage = message
+                        renderReplyPreview()
+                        messageInput.requestFocus()
+                    }
+                    1 -> showReactionPicker(message)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showReactionPicker(message: ThreadMessage) {
+        val emojiOptions = arrayOf("👍", "❤️", "😂", "😮", "😢", "👏")
+        AlertDialog.Builder(this)
+            .setItems(emojiOptions) { _, which ->
+                val setup = store.loadSetup()
+                val next = LinkedHashMap(message.reactions.orEmpty())
+                val emoji = emojiOptions[which]
+                if (next[emoji] == "You") {
+                    next.remove(emoji)
+                } else {
+                    next[emoji] = "You"
+                }
+                store.updateGroupThreadMessageReactions(
+                    userId = setup.userId,
+                    groupId = groupId,
+                    direction = message.direction,
+                    sentAtMillis = message.sentAtMillis,
+                    reactions = next.ifEmpty { null },
+                )
+                renderChatLog()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     private fun requirePrivateGroupMessagingEnabled(context: ReadyMessagingContext) {
@@ -189,6 +266,7 @@ class GroupChatActivity : AppCompatActivity() {
         val state = privateGroupState ?: error("Private-group state is unavailable on this device.")
         val credential = privateGroupCredential ?: error("Private-group credential is unavailable on this device.")
         val text = messageInput.text.toString().trim()
+        val replyToId = pendingReplyMessage?.transportMessageId ?: pendingReplyMessage?.sentAtMillis
         require(text.isNotBlank()) { "message is empty" }
 
         val context = MessagingCoordinator.ensureReady(
@@ -238,6 +316,7 @@ class GroupChatActivity : AppCompatActivity() {
             body = text,
             sentAtMillis = encryptedMessage.sent_at_unix_ms,
             transportMessageId = publishResponse.message_id,
+            replyToId = replyToId,
         )
         store.upsertGroupConversation(
             userId = context.profile.userId,
@@ -248,6 +327,8 @@ class GroupChatActivity : AppCompatActivity() {
             incrementUnread = false,
         )
         messageInput.setText("")
+        pendingReplyMessage = null
+        renderReplyPreview()
     }
 
     private fun syncGroupMessages() {
@@ -683,20 +764,18 @@ class GroupChatActivity : AppCompatActivity() {
             store.listGroupThreadMessages(setup.userId, groupId)
         }.onSuccess { messages ->
             localStoreAvailable = true
-            chatLog.text = if (messages.isEmpty()) {
-                getString(R.string.group_chat_log_empty)
-            } else {
-                messages.joinToString("\n\n") { msg ->
-                    val timeLabel = DateFormat.getTimeInstance(DateFormat.SHORT)
-                        .format(Date(msg.sentAtMillis))
-                    "$timeLabel\n${msg.body}"
+            threadAdapter.submitList(messages)
+            groupEmptyText.text = getString(R.string.group_chat_log_empty)
+            groupMessages.post {
+                if (messages.isNotEmpty()) {
+                    groupMessages.setSelection(messages.lastIndex)
                 }
             }
-            chatLog.post { chatLogScroll.fullScroll(View.FOCUS_DOWN) }
         }.onFailure {
             localStoreAvailable = false
             metaText.text = UiErrorMapper.fromThrowable(it, "Open local secure state").headline
-            chatLog.text =
+            threadAdapter.submitList(emptyList())
+            groupEmptyText.text =
                 "Local encrypted group history is unavailable on this device.\nRe-import the current group state from a linked device or fully reprovision this device."
         }
         syncActions()

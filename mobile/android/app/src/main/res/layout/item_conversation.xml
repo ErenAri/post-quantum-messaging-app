@@ -4,26 +4,51 @@
     android:layout_height="wrap_content"
     android:background="?attr/selectableItemBackground"
     android:gravity="center_vertical"
-    android:minHeight="84dp"
+    android:minHeight="76dp"
     android:orientation="horizontal"
     android:paddingHorizontal="18dp"
-    android:paddingVertical="14dp">
+    android:paddingVertical="12dp">
+
+    <TextView
+        android:id="@+id/textConversationAvatar"
+        android:layout_width="42dp"
+        android:layout_height="42dp"
+        android:background="@drawable/bg_avatar_circle"
+        android:gravity="center"
+        android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle"
+        android:textColor="@color/pq_toolbar_icon_fg" />
 
     <LinearLayout
         android:layout_width="0dp"
         android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
         android:layout_weight="1"
         android:orientation="vertical">
 
-        <TextView
-            android:id="@+id/textConversationPeer"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:textAppearance="@style/TextAppearance.MaterialComponents.Subtitle1"
-            android:textColor="@color/pq_ink"
-            android:textStyle="bold" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/textConversationPeer"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle"
+                android:textColor="@color/pq_ink"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/textConversationTime"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:textAppearance="@style/TextAppearance.PQMsg.CaptionStrong" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/textConversationPreview"
@@ -31,14 +56,14 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
             android:ellipsize="end"
-            android:maxLines="2"
+            android:maxLines="1"
             android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
         <TextView
             android:id="@+id/textConversationMeta"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
+            android:layout_marginTop="4dp"
             android:textAppearance="@style/TextAppearance.MaterialComponents.Caption"
             android:textColor="@color/pq_ink_muted" />
     </LinearLayout>
@@ -47,11 +72,12 @@
         android:id="@+id/textConversationUnread"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:layout_marginStart="10dp"
         android:background="@drawable/bg_badge"
         android:gravity="center"
-        android:minWidth="30dp"
-        android:paddingHorizontal="10dp"
-        android:paddingVertical="6dp"
+        android:minWidth="28dp"
+        android:paddingHorizontal="8dp"
+        android:paddingVertical="5dp"
         android:textColor="@color/pq_badge_fg"
         android:textStyle="bold"
         android:visibility="gone" />

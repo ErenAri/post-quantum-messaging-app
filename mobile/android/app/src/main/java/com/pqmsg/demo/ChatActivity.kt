@@ -8,11 +8,11 @@ import android.provider.OpenableColumns
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ListView
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.widget.NestedScrollView
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import com.google.gson.Gson
@@ -37,9 +37,7 @@ import uniffi.pqmsg_android.encryptWithSession
 import uniffi.pqmsg_android.initiateSessionAndEncrypt
 import uniffi.pqmsg_android.sealMessageWithSenderCert
 import java.io.ByteArrayOutputStream
-import java.text.DateFormat
 import java.util.Base64
-import java.util.Date
 import kotlin.coroutines.resume
 
 class ChatActivity : AppCompatActivity() {
@@ -51,11 +49,15 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var clearAttachmentButton: Button
     private lateinit var sendButton: Button
     private lateinit var syncButton: Button
-    private lateinit var verifySafetyButton: Button
     private lateinit var backButton: Button
-    private lateinit var chatLogScroll: NestedScrollView
-    private lateinit var chatLog: TextView
+    private lateinit var chatHeaderContainer: View
+    private lateinit var chatMessages: ListView
+    private lateinit var chatEmptyText: TextView
+    private lateinit var chatTitleText: TextView
     private lateinit var chatMeta: TextView
+    private lateinit var replyPreviewLayout: View
+    private lateinit var replyPreviewText: TextView
+    private lateinit var clearReplyButton: Button
     private lateinit var attachmentPreviewCard: View
     private lateinit var attachmentTitle: TextView
     private lateinit var attachmentInfo: TextView
@@ -75,6 +77,8 @@ class ChatActivity : AppCompatActivity() {
     private var sealedSenderEnabled = true
     private var ephemeralTtlSeconds: Long? = null
     private var localStoreAvailable = true
+    private lateinit var threadAdapter: ThreadMessageAdapter
+    private var pendingReplyMessage: ThreadMessage? = null
 
     private val pickAttachmentLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -128,22 +132,36 @@ class ChatActivity : AppCompatActivity() {
         clearAttachmentButton = findViewById(R.id.buttonClearAttachment)
         sendButton = findViewById(R.id.buttonSend)
         syncButton = findViewById(R.id.buttonSyncThread)
-        verifySafetyButton = findViewById(R.id.buttonVerifySafetyNumber)
         backButton = findViewById(R.id.buttonBackSetup)
-        chatLogScroll = findViewById(R.id.scrollChatLog)
-        chatLog = findViewById(R.id.textChatLog)
+        chatHeaderContainer = findViewById(R.id.chatHeaderContainer)
+        chatMessages = findViewById(R.id.listChatMessages)
+        chatEmptyText = findViewById(R.id.textChatEmpty)
+        chatTitleText = findViewById(R.id.textChatTitle)
         chatMeta = findViewById(R.id.textChatMeta)
+        replyPreviewLayout = findViewById(R.id.layoutReplyPreview)
+        replyPreviewText = findViewById(R.id.textReplyPreview)
+        clearReplyButton = findViewById(R.id.buttonClearReply)
         attachmentPreviewCard = findViewById(R.id.cardAttachmentPreview)
         attachmentTitle = findViewById(R.id.textAttachmentPreviewTitle)
         attachmentInfo = findViewById(R.id.textAttachmentPreviewMeta)
         errorSummaryText = findViewById(R.id.textErrorSummaryChat)
         errorDetailsText = findViewById(R.id.textErrorDetailsChat)
         errorToggleButton = findViewById(R.id.buttonToggleErrorDetailsChat)
+        threadAdapter = ThreadMessageAdapter(this)
+        chatMessages.adapter = threadAdapter
+        chatMessages.emptyView = chatEmptyText
+        chatMessages.setOnItemLongClickListener { _, _, position, _ ->
+            val message = threadAdapter.getItem(position)
+            showThreadMessageActions(message)
+            true
+        }
 
         configureInputObservers()
         configureErrorToggle()
         configureAttachmentButtons()
+        configureReplyPreview()
         renderAttachmentInfo()
+        renderReplyPreview()
         renderThreadHistory()
         refreshMeta()
         syncActionAvailability()
@@ -160,11 +178,9 @@ class ChatActivity : AppCompatActivity() {
             syncThread()
         }
 
-        verifySafetyButton.setOnClickListener {
+        chatHeaderContainer.setOnClickListener {
             lifecycleScope.launch {
-                runAction("Verify safety number") {
-                    verifySafetyNumberFlow()
-                }
+                showChatInfoDialog()
             }
         }
 
@@ -213,6 +229,14 @@ class ChatActivity : AppCompatActivity() {
         clearAttachmentButton.setOnClickListener {
             pendingAttachment = null
             renderAttachmentInfo()
+            syncActionAvailability()
+        }
+    }
+
+    private fun configureReplyPreview() {
+        clearReplyButton.setOnClickListener {
+            pendingReplyMessage = null
+            renderReplyPreview()
             syncActionAvailability()
         }
     }
@@ -282,6 +306,7 @@ class ChatActivity : AppCompatActivity() {
     private suspend fun sendMessageFlow() {
         val setup = currentSetup()
         val messageText = messageInput.text.toString()
+        val replyToId = pendingReplyMessage?.transportMessageId ?: pendingReplyMessage?.sentAtMillis
         require(messageText.isNotBlank() || pendingAttachment != null) {
             "message and attachment are both empty"
         }
@@ -394,10 +419,13 @@ class ChatActivity : AppCompatActivity() {
             direction = "outbound",
             body = outbound.preview,
             transportMessageId = null,
+            replyToId = replyToId,
         )
         messageInput.setText("")
         pendingAttachment = null
+        pendingReplyMessage = null
         renderAttachmentInfo()
+        renderReplyPreview()
     }
 
     private suspend fun resolvePeerTransportIdentityX25519(
@@ -730,36 +758,69 @@ class ChatActivity : AppCompatActivity() {
         return MessagingCoordinator.bundleIdentityFingerprint(bundle)
     }
 
-    private fun refreshMeta() {
+    private suspend fun showChatInfoDialog() {
         val setup = currentSetup()
         val cursor = store.readSealedCursor(setup.userId)
         val bundleFetched = store.readBundleFetchedAt(setup.userId, activePeerUserId)
         val transparencyCheckpoint = store.readTransparencyCheckpoint(setup.serverUrl, activePeerUserId)
-        val bundleLine = if (bundleFetched.isNullOrBlank()) {
-            "Peer bundle is fetched automatically on first send."
-        } else {
-            "Peer bundle cached at $bundleFetched"
-        }
-        val transparencyLine = if (transparencyCheckpoint.isNullOrBlank()) {
-            "Peer transparency proof is checked automatically before encrypted traffic."
-        } else {
-            "Peer transparency checkpoint saved for this chat."
-        }
-        val syncSummary = if (syncInFlight) "Refreshing..." else "Ready"
-        val protectionSummary = buildList {
-            add("Sealed sender required")
-        }.joinToString(" | ")
-        val statusSummary = buildString {
-            append("Status: ")
-            append(syncSummary)
-            append(" | Sealed cursor ")
-            append(cursor)
-            if (protectionSummary.isNotBlank()) {
-                append(" | ")
-                append(protectionSummary)
+        val pin = store.readIdentityPin(setup.userId, activePeerUserId)
+        val details = buildList {
+            add("Contact: $activePeerUserId")
+            add("Presence: ${if (peerIsTyping) getString(R.string.typing_indicator) else if (peerPresenceOnline) getString(R.string.presence_online) else getString(R.string.presence_offline)}")
+            add("Sealed sender: required")
+            add("Sealed cursor: $cursor")
+            add(
+                if (pin == null) {
+                    "Trust: no local identity pin yet"
+                } else {
+                    "Trust: pinned identity v${pin.identityKeyVersion}"
+                },
+            )
+            add(
+                if (bundleFetched.isNullOrBlank()) {
+                    "Bundle cache: fetched automatically on first send"
+                } else {
+                    "Bundle cache: $bundleFetched"
+                },
+            )
+            add(
+                if (transparencyCheckpoint.isNullOrBlank()) {
+                    "Transparency: checked automatically before encrypted traffic"
+                } else {
+                    "Transparency: checkpoint saved for this chat"
+                },
+            )
+        }.joinToString("\n")
+
+        AlertDialog.Builder(this)
+            .setTitle(activePeerUserId)
+            .setMessage(details)
+            .setNeutralButton(R.string.button_verify_safety_number) { _, _ ->
+                lifecycleScope.launch {
+                    runAction("Verify safety number") {
+                        verifySafetyNumberFlow()
+                    }
+                }
             }
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun refreshMeta() {
+        val setup = currentSetup()
+        chatTitleText.text = activePeerUserId
+        val trustSummary = if (store.readIdentityPin(setup.userId, activePeerUserId) != null) {
+            "trusted locally"
+        } else {
+            "tap for safety details"
         }
-        chatMeta.text = "$activePeerUserId | metadata minimized\n$bundleLine\n$transparencyLine\n$statusSummary"
+        val presenceSummary = when {
+            peerIsTyping -> getString(R.string.typing_indicator)
+            peerPresenceOnline -> getString(R.string.presence_online)
+            else -> getString(R.string.presence_offline)
+        }
+        val syncSummary = if (syncInFlight) "refreshing" else "ready"
+        chatMeta.text = "$presenceSummary | sealed sender | $trustSummary | $syncSummary"
     }
 
     private fun renderThreadHistory() {
@@ -768,26 +829,33 @@ class ChatActivity : AppCompatActivity() {
             store.listThreadMessages(setup.userId, activePeerUserId)
         }.onSuccess { messages ->
             localStoreAvailable = true
-            chatLog.text = if (messages.isEmpty()) {
-                getString(R.string.chat_log_empty)
-            } else {
-                messages.joinToString("\n\n") { message ->
-                    val label = if (message.direction == "outbound") "You" else activePeerUserId
-                    val timeLabel = DateFormat.getTimeInstance(DateFormat.SHORT)
-                        .format(Date(message.sentAtMillis))
-                    "$label  $timeLabel\n${message.body}"
+            threadAdapter.submitList(messages)
+            chatEmptyText.text = getString(R.string.chat_log_empty)
+            chatMessages.post {
+                if (messages.isNotEmpty()) {
+                    chatMessages.setSelection(messages.lastIndex)
                 }
-            }
-            chatLog.post {
-                chatLogScroll.fullScroll(View.FOCUS_DOWN)
             }
         }.onFailure {
             localStoreAvailable = false
             renderError(UiErrorMapper.fromThrowable(it, "Open local secure state"))
-            chatLog.text =
+            threadAdapter.submitList(emptyList())
+            chatEmptyText.text =
                 "Local encrypted message history is unavailable on this device.\nRe-import a linked-device package or fully reprovision this device."
         }
         syncActionAvailability()
+    }
+
+    private fun renderReplyPreview() {
+        val reply = pendingReplyMessage
+        if (reply == null) {
+            replyPreviewLayout.visibility = View.GONE
+            replyPreviewText.text = ""
+            return
+        }
+        replyPreviewLayout.visibility = View.VISIBLE
+        replyPreviewText.text =
+            "${getString(R.string.thread_reply_prefix)}: ${reply.body.take(72)}"
     }
 
     private fun syncActionAvailability() {
@@ -796,7 +864,51 @@ class ChatActivity : AppCompatActivity() {
         sendButton.isEnabled = hasPayload && hasIdentity && localStoreAvailable && !syncInFlight
         clearAttachmentButton.isEnabled = pendingAttachment != null
         syncButton.isEnabled = hasIdentity && localStoreAvailable && !syncInFlight
-        verifySafetyButton.isEnabled = hasIdentity && localStoreAvailable && !syncInFlight
+    }
+
+    private fun showThreadMessageActions(message: ThreadMessage) {
+        val options = arrayOf(
+            getString(R.string.thread_action_reply),
+            getString(R.string.thread_action_react),
+        )
+        AlertDialog.Builder(this)
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> {
+                        pendingReplyMessage = message
+                        renderReplyPreview()
+                        messageInput.requestFocus()
+                    }
+                    1 -> showReactionPicker(message)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showReactionPicker(message: ThreadMessage) {
+        val emojiOptions = arrayOf("👍", "❤️", "😂", "😮", "😢", "👏")
+        AlertDialog.Builder(this)
+            .setItems(emojiOptions) { _, which ->
+                val setup = currentSetup()
+                val next = LinkedHashMap(message.reactions.orEmpty())
+                val emoji = emojiOptions[which]
+                if (next[emoji] == "You") {
+                    next.remove(emoji)
+                } else {
+                    next[emoji] = "You"
+                }
+                store.updateThreadMessageReactions(
+                    userId = setup.userId,
+                    peerUserId = activePeerUserId,
+                    direction = message.direction,
+                    sentAtMillis = message.sentAtMillis,
+                    reactions = next.ifEmpty { null },
+                )
+                renderThreadHistory()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     private fun hasIdentity(): Boolean {

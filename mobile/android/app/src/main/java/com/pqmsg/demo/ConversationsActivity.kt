@@ -22,22 +22,33 @@ import uniffi.pqmsg_android.privateGroupRestoreJoinPackage
 import java.util.Base64
 
 class ConversationsActivity : AppCompatActivity() {
+    private enum class InboxFilter {
+        ALL,
+        UNREAD,
+        GROUPS,
+        REQUESTS,
+    }
+
     private val gson = Gson()
     private lateinit var store: LocalStateStore
     private lateinit var composeButton: Button
-    private lateinit var requestsButton: Button
-    private lateinit var openSecurityButton: Button
     private lateinit var refreshButton: Button
-    private lateinit var shareInviteButton: Button
-    private lateinit var groupsButton: Button
-    private lateinit var contactsButton: Button
+    private lateinit var profileMenuButton: TextView
+    private lateinit var filterAllButton: Button
+    private lateinit var filterUnreadButton: Button
+    private lateinit var filterGroupsButton: Button
+    private lateinit var filterRequestsButton: Button
     private lateinit var statusText: TextView
     private lateinit var profileText: TextView
     private lateinit var emptyText: TextView
     private lateinit var conversationsList: ListView
     private lateinit var adapter: ConversationSummaryAdapter
     private var currentConversations: List<ConversationSummary> = emptyList()
+    private var currentGroups: List<GroupSummary> = emptyList()
+    private var currentRequests: List<MessageRequestSummary> = emptyList()
+    private var currentInboxItems: List<InboxListItem> = emptyList()
     private var currentContactsByPeer: Map<String, ContactListItem> = emptyMap()
+    private var selectedFilter = InboxFilter.ALL
     private var syncInFlight = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,12 +61,12 @@ class ConversationsActivity : AppCompatActivity() {
         setContentView(R.layout.activity_conversations)
 
         composeButton = findViewById(R.id.buttonComposeConversation)
-        requestsButton = findViewById(R.id.buttonOpenMessageRequests)
-        openSecurityButton = findViewById(R.id.buttonOpenSecurityCenter)
         refreshButton = findViewById(R.id.buttonRefreshConversations)
-        shareInviteButton = findViewById(R.id.buttonShareInvite)
-        groupsButton = findViewById(R.id.buttonOpenGroups)
-        contactsButton = findViewById(R.id.buttonOpenContacts)
+        profileMenuButton = findViewById(R.id.textProfileMenu)
+        filterAllButton = findViewById(R.id.buttonFilterAll)
+        filterUnreadButton = findViewById(R.id.buttonFilterUnread)
+        filterGroupsButton = findViewById(R.id.buttonFilterGroups)
+        filterRequestsButton = findViewById(R.id.buttonFilterRequests)
         statusText = findViewById(R.id.textConversationsStatus)
         profileText = findViewById(R.id.textCurrentProfile)
         emptyText = findViewById(R.id.textConversationsEmpty)
@@ -94,31 +105,30 @@ class ConversationsActivity : AppCompatActivity() {
 
     private fun configureListEvents() {
         conversationsList.setOnItemClickListener { _, _, position, _ ->
-            val conversation = currentConversations.getOrNull(position) ?: return@setOnItemClickListener
-            openChat(conversation.peerUserId)
+            val item = currentInboxItems.getOrNull(position) ?: return@setOnItemClickListener
+            when (item.kind) {
+                InboxItemKind.DIRECT -> openChat(item.id)
+                InboxItemKind.GROUP -> openGroup(item.id)
+                InboxItemKind.REQUEST -> showMessageRequestDialog(item.id)
+            }
         }
     }
 
     private fun configureButtons() {
-        composeButton.setOnClickListener { showComposeDialog() }
+        composeButton.setOnClickListener { showComposeChooser() }
         refreshButton.setOnClickListener { syncInbox(forceStatus = true) }
-        requestsButton.setOnClickListener { showMessageRequestsDialog() }
-        shareInviteButton.setOnClickListener { shareInvite() }
-        openSecurityButton.setOnClickListener {
-            startActivity(Intent(this, SecurityInfoActivity::class.java))
-        }
-        groupsButton.setOnClickListener { showGroupsDialog() }
-        contactsButton.setOnClickListener {
-            startActivity(Intent(this, ContactDiscoveryActivity::class.java))
-        }
+        profileMenuButton.setOnClickListener { showProfileMenu() }
+        filterAllButton.setOnClickListener { selectFilter(InboxFilter.ALL) }
+        filterUnreadButton.setOnClickListener { selectFilter(InboxFilter.UNREAD) }
+        filterGroupsButton.setOnClickListener { selectFilter(InboxFilter.GROUPS) }
+        filterRequestsButton.setOnClickListener { selectFilter(InboxFilter.REQUESTS) }
     }
 
     private fun renderHome() {
         val setup = store.loadSetup()
         profileText.text = "${setup.userId}\n${setup.serverUrl}"
-        groupsButton.alpha = 1f
+        profileMenuButton.text = buildAvatarText(setup.userId)
         refreshConversations()
-        updateRequestsButton()
     }
 
     private fun showGroupMessagingUnavailable() {
@@ -134,16 +144,21 @@ class ConversationsActivity : AppCompatActivity() {
     private fun refreshConversations() {
         val user = store.loadSetup().userId
         currentConversations = store.listConversations(user)
-        adapter.submitContactLabels(currentContactsByPeer)
-        adapter.submitList(currentConversations)
-        if (currentConversations.isEmpty()) {
+        currentGroups = store.listGroups(user)
+        currentRequests = store.listMessageRequests(user)
+        currentInboxItems = buildInboxItems()
+        adapter.submitList(currentInboxItems)
+        updateFilterButtons()
+        updateRequestsFilterButton()
+        if (currentInboxItems.isEmpty()) {
             conversationsList.visibility = View.GONE
             emptyText.visibility = View.VISIBLE
-            statusText.text = "No chats yet. Use Compose to start the first conversation."
+            emptyText.text = emptyStateMessage()
+            statusText.text = emptyStateMessage()
         } else {
             conversationsList.visibility = View.VISIBLE
             emptyText.visibility = View.GONE
-            statusText.text = "${currentConversations.size} chat(s) ready."
+            statusText.text = statusSummary()
         }
     }
 
@@ -171,25 +186,147 @@ class ConversationsActivity : AppCompatActivity() {
             }.onSuccess { contacts ->
                 if (contacts != currentContactsByPeer) {
                     currentContactsByPeer = contacts
-                    adapter.submitContactLabels(currentContactsByPeer)
+                    refreshConversations()
                 }
             }
         }
     }
 
-    private fun updateRequestsButton() {
-        val requestCount = store.listMessageRequests(store.loadSetup().userId).size
-        if (requestCount == 0) {
-            requestsButton.visibility = View.GONE
-            requestsButton.text = getString(R.string.button_open_message_requests)
+    private fun selectFilter(next: InboxFilter) {
+        if (selectedFilter == next) {
             return
         }
-        requestsButton.visibility = View.VISIBLE
-        requestsButton.text = resources.getQuantityString(
-            R.plurals.message_request_count,
-            requestCount,
-            requestCount,
+        selectedFilter = next
+        refreshConversations()
+    }
+
+    private fun updateFilterButtons() {
+        updateFilterButton(filterAllButton, selectedFilter == InboxFilter.ALL)
+        updateFilterButton(filterUnreadButton, selectedFilter == InboxFilter.UNREAD)
+        updateFilterButton(filterGroupsButton, selectedFilter == InboxFilter.GROUPS)
+        updateFilterButton(filterRequestsButton, selectedFilter == InboxFilter.REQUESTS)
+    }
+
+    private fun updateFilterButton(button: Button, active: Boolean) {
+        button.isEnabled = !active
+        button.alpha = if (active) 1f else 0.72f
+    }
+
+    private fun updateRequestsFilterButton() {
+        val requestCount = currentRequests.size
+        filterRequestsButton.text = if (requestCount > 0) {
+            resources.getQuantityString(
+                R.plurals.message_request_count,
+                requestCount,
+                requestCount,
+            )
+        } else {
+            getString(R.string.conversations_filter_requests)
+        }
+    }
+
+    private fun statusSummary(): String {
+        val requestCount = currentRequests.size
+        val visibleCount = currentInboxItems.size
+        return when {
+            requestCount > 0 && selectedFilter != InboxFilter.REQUESTS ->
+                "$requestCount message request(s) waiting. $visibleCount conversation(s) visible."
+            selectedFilter == InboxFilter.REQUESTS ->
+                "$visibleCount request(s) ready for review."
+            else ->
+                "$visibleCount conversation(s) visible."
+        }
+    }
+
+    private fun emptyStateMessage(): String {
+        return when (selectedFilter) {
+            InboxFilter.ALL -> getString(R.string.conversations_empty)
+            InboxFilter.UNREAD -> getString(R.string.conversations_empty_unread)
+            InboxFilter.GROUPS -> getString(R.string.conversations_empty_groups)
+            InboxFilter.REQUESTS -> getString(R.string.conversations_empty_requests)
+        }
+    }
+
+    private fun buildInboxItems(): List<InboxListItem> {
+        val directItems = currentConversations.map { conversation ->
+            InboxListItem(
+                kind = InboxItemKind.DIRECT,
+                id = conversation.peerUserId,
+                title = resolvePeerPrimaryLabel(conversation.peerUserId),
+                secondaryLabel = resolvePeerSecondaryLabel(conversation.peerUserId)
+                    ?: getString(R.string.conversation_secondary_direct),
+                preview = conversation.lastPreview,
+                updatedAtMillis = conversation.updatedAtMillis,
+                unreadCount = conversation.unreadCount,
+            )
+        }
+        val groupItems = currentGroups.map { group ->
+            InboxListItem(
+                kind = InboxItemKind.GROUP,
+                id = group.groupId,
+                title = group.displayName,
+                secondaryLabel = getString(R.string.conversation_secondary_group, group.memberCount),
+                preview = group.lastPreview,
+                updatedAtMillis = group.updatedAtMillis,
+                unreadCount = group.unreadCount,
+            )
+        }
+        val requestItems = currentRequests.map { request ->
+            InboxListItem(
+                kind = InboxItemKind.REQUEST,
+                id = request.peerUserId,
+                title = resolvePeerPrimaryLabel(request.peerUserId),
+                secondaryLabel = resolvePeerSecondaryLabel(request.peerUserId)
+                    ?: getString(R.string.conversation_secondary_request),
+                preview = request.lastPreview,
+                updatedAtMillis = request.updatedAtMillis,
+                unreadCount = request.unreadCount.coerceAtLeast(1),
+            )
+        }
+
+        val filtered = when (selectedFilter) {
+            InboxFilter.ALL -> directItems + groupItems
+            InboxFilter.UNREAD -> (directItems + groupItems).filter { it.unreadCount > 0 } + requestItems
+            InboxFilter.GROUPS -> groupItems
+            InboxFilter.REQUESTS -> requestItems
+        }
+        return filtered.sortedByDescending { it.updatedAtMillis }
+    }
+
+    private fun buildAvatarText(label: String): String {
+        val trimmed = label.trim()
+        if (trimmed.isEmpty()) {
+            return "?"
+        }
+        val parts = trimmed.split(" ", "-", "_", "@").filter { it.isNotBlank() }
+        return when {
+            parts.size >= 2 -> (parts[0].first().toString() + parts[1].first().toString()).uppercase()
+            else -> trimmed.take(2).uppercase()
+        }
+    }
+
+    private fun showProfileMenu() {
+        val options = listOf(
+            getString(R.string.profile_menu_contacts) to {
+                startActivity(Intent(this, ContactDiscoveryActivity::class.java))
+            },
+            getString(R.string.profile_menu_share_invite) to {
+                shareInvite()
+            },
+            getString(R.string.profile_menu_security) to {
+                startActivity(Intent(this, SecurityInfoActivity::class.java))
+            },
+            getString(R.string.profile_menu_refresh) to {
+                syncInbox(forceStatus = true)
+            },
         )
+        AlertDialog.Builder(this)
+            .setTitle(R.string.profile_menu_title)
+            .setItems(options.map { it.first }.toTypedArray()) { _, which ->
+                options[which].second.invoke()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     private fun syncInbox(forceStatus: Boolean = false) {
@@ -227,6 +364,25 @@ class ConversationsActivity : AppCompatActivity() {
             }
             syncInFlight = false
         }
+    }
+
+    private fun showComposeChooser() {
+        val options = arrayOf(
+            getString(R.string.compose_option_message),
+            getString(R.string.compose_option_create_group),
+            getString(R.string.compose_option_join_group),
+        )
+        AlertDialog.Builder(this)
+            .setTitle(R.string.compose_dialog_title)
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> showComposeDialog()
+                    1 -> showCreateGroupDialog()
+                    2 -> showJoinPrivateGroupDialog()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     private fun showComposeDialog() {
@@ -288,14 +444,12 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     private fun showMessageRequestsDialog() {
-        val user = store.loadSetup().userId
-        val requests = store.listMessageRequests(user)
-        if (requests.isEmpty()) {
-            statusText.text = "No pending message requests."
-            updateRequestsButton()
+        if (currentRequests.isEmpty()) {
+            statusText.text = getString(R.string.conversations_empty_requests)
+            updateRequestsFilterButton()
             return
         }
-        val labels = requests.map { request ->
+        val labels = currentRequests.map { request ->
             buildString {
                 append(resolvePeerPrimaryLabel(request.peerUserId))
                 resolvePeerSecondaryLabel(request.peerUserId)?.let { secondary ->
@@ -309,27 +463,36 @@ class ConversationsActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle(R.string.message_requests_title)
             .setItems(labels) { _, which ->
-                val request = requests[which]
-                AlertDialog.Builder(this)
-                    .setTitle(resolvePeerPrimaryLabel(request.peerUserId))
-                    .setMessage(
-                        listOfNotNull(
-                            resolvePeerSecondaryLabel(request.peerUserId),
-                            request.lastPreview,
-                        ).joinToString("\n"),
-                    )
-                    .setNegativeButton(R.string.button_ignore_request) { _, _ ->
-                        store.dismissMessageRequest(user, request.peerUserId)
-                        renderHome()
-                    }
-                    .setPositiveButton(R.string.button_accept_request) { _, _ ->
-                        store.acceptMessageRequest(user, request.peerUserId)
-                        renderHome()
-                        openChat(request.peerUserId)
-                    }
-                    .show()
+                showMessageRequestDialog(currentRequests[which].peerUserId)
             }
             .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showMessageRequestDialog(peerUserId: String) {
+        val user = store.loadSetup().userId
+        val request = currentRequests.firstOrNull { it.peerUserId == peerUserId } ?: run {
+            statusText.text = getString(R.string.conversations_empty_requests)
+            refreshConversations()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle(resolvePeerPrimaryLabel(request.peerUserId))
+            .setMessage(
+                listOfNotNull(
+                    resolvePeerSecondaryLabel(request.peerUserId),
+                    request.lastPreview,
+                ).joinToString("\n"),
+            )
+            .setNegativeButton(R.string.button_ignore_request) { _, _ ->
+                store.dismissMessageRequest(user, request.peerUserId)
+                renderHome()
+            }
+            .setPositiveButton(R.string.button_accept_request) { _, _ ->
+                store.acceptMessageRequest(user, request.peerUserId)
+                renderHome()
+                openChat(request.peerUserId)
+            }
             .show()
     }
 
@@ -626,6 +789,18 @@ class ConversationsActivity : AppCompatActivity() {
                 statusText.text = UiErrorMapper.fromThrowable(it, "Join private group").headline
             }
         }
+    }
+
+    private fun openGroup(groupId: String) {
+        val group = currentGroups.firstOrNull { it.groupId == groupId } ?: return
+        val setup = store.loadSetup()
+        store.markGroupRead(setup.userId, groupId)
+        startActivity(
+            Intent(this, GroupChatActivity::class.java).apply {
+                putExtra("group_id", group.groupId)
+                putExtra("group_name", group.displayName)
+            },
+        )
     }
 
     private fun openChat(peerUserId: String, initialBundle: BundleResponse? = null) {

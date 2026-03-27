@@ -18,7 +18,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 private const val DATABASE_NAME = "pqmsg_local_messages.db"
-private const val DATABASE_VERSION = 1
+private const val DATABASE_VERSION = 2
 private const val DIRECT_THREAD_LIMIT = 300
 private const val GROUP_THREAD_LIMIT = 300
 private const val GCM_TAG_BITS = 128
@@ -134,6 +134,8 @@ class LocalMessageDatabase(
                 body_ciphertext TEXT NOT NULL,
                 sent_at_millis INTEGER NOT NULL,
                 transport_message_id INTEGER,
+                reply_to_id INTEGER,
+                reactions_ciphertext TEXT,
                 UNIQUE(user_id, group_id, transport_message_id) ON CONFLICT IGNORE
             )
             """.trimIndent(),
@@ -172,7 +174,12 @@ class LocalMessageDatabase(
         db.rawExecSQL(SQLCIPHER_MEMORY_SECURITY_PRAGMA)
     }
 
-    override fun onUpgrade(db: SqlCipherDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SqlCipherDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE group_messages ADD COLUMN reply_to_id INTEGER")
+            db.execSQL("ALTER TABLE group_messages ADD COLUMN reactions_ciphertext TEXT")
+        }
+    }
 
     private fun readableDb(): SqlCipherDatabase =
         runCatching { super.readableDatabase as SqlCipherDatabase }
@@ -448,7 +455,14 @@ class LocalMessageDatabase(
         val db = readableDb()
         db.query(
             "group_messages",
-            arrayOf("direction", "body_ciphertext", "sent_at_millis", "transport_message_id"),
+            arrayOf(
+                "direction",
+                "body_ciphertext",
+                "sent_at_millis",
+                "transport_message_id",
+                "reply_to_id",
+                "reactions_ciphertext",
+            ),
             "user_id = ? AND group_id = ?",
             arrayOf(userId, groupId),
             null,
@@ -463,6 +477,10 @@ class LocalMessageDatabase(
                         body = decryptString(cursor.requireString("body_ciphertext")),
                         sentAtMillis = cursor.requireLong("sent_at_millis"),
                         transportMessageId = cursor.optionalLong("transport_message_id"),
+                        replyToId = cursor.optionalLong("reply_to_id"),
+                        reactions = cursor.optionalString("reactions_ciphertext")?.let {
+                            gson.fromJson<Map<String, String>>(decryptString(it), reactionsType)
+                        },
                     ),
                 )
             }
@@ -485,6 +503,11 @@ class LocalMessageDatabase(
                     put("body_ciphertext", encryptString(message.body))
                     put("sent_at_millis", message.sentAtMillis)
                     put("transport_message_id", message.transportMessageId)
+                    put("reply_to_id", message.replyToId)
+                    put(
+                        "reactions_ciphertext",
+                        message.reactions?.let { encryptString(gson.toJson(it)) },
+                    )
                 },
                 SqlCipherDatabase.CONFLICT_IGNORE,
             )
@@ -493,6 +516,48 @@ class LocalMessageDatabase(
         } finally {
             db.endTransaction()
         }
+    }
+
+    fun updateDirectMessageReactions(
+        userId: String,
+        peerUserId: String,
+        direction: String,
+        sentAtMillis: Long,
+        reactions: Map<String, String>?,
+    ) {
+        if (userId.isBlank() || peerUserId.isBlank()) return
+        writableDb().update(
+            "direct_messages",
+            ContentValues().apply {
+                put(
+                    "reactions_ciphertext",
+                    reactions?.takeIf { it.isNotEmpty() }?.let { encryptString(gson.toJson(it)) },
+                )
+            },
+            "user_id = ? AND peer_user_id = ? AND direction = ? AND sent_at_millis = ?",
+            arrayOf(userId, peerUserId, direction, sentAtMillis.toString()),
+        )
+    }
+
+    fun updateGroupMessageReactions(
+        userId: String,
+        groupId: String,
+        direction: String,
+        sentAtMillis: Long,
+        reactions: Map<String, String>?,
+    ) {
+        if (userId.isBlank() || groupId.isBlank()) return
+        writableDb().update(
+            "group_messages",
+            ContentValues().apply {
+                put(
+                    "reactions_ciphertext",
+                    reactions?.takeIf { it.isNotEmpty() }?.let { encryptString(gson.toJson(it)) },
+                )
+            },
+            "user_id = ? AND group_id = ? AND direction = ? AND sent_at_millis = ?",
+            arrayOf(userId, groupId, direction, sentAtMillis.toString()),
+        )
     }
 
     fun importGroupMessages(userId: String, groupId: String, messages: List<ThreadMessage>) {

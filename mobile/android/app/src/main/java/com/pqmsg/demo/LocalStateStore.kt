@@ -558,6 +558,8 @@ class LocalStateStore(context: Context) {
         body: String,
         sentAtMillis: Long = System.currentTimeMillis(),
         transportMessageId: Long? = null,
+        replyToId: Long? = null,
+        reactions: Map<String, String>? = null,
     ) {
         if (userId.isBlank() || peerUserId.isBlank()) {
             return
@@ -572,8 +574,22 @@ class LocalStateStore(context: Context) {
                 body = normalizedBody,
                 sentAtMillis = sentAtMillis,
                 transportMessageId = transportMessageId,
+                replyToId = replyToId,
+                reactions = reactions,
             ),
         )
+    }
+
+    fun updateThreadMessageReactions(
+        userId: String,
+        peerUserId: String,
+        direction: String,
+        sentAtMillis: Long,
+        reactions: Map<String, String>?,
+    ) {
+        if (userId.isBlank() || peerUserId.isBlank()) return
+        migrateLegacyDirectThread(userId, peerUserId)
+        messageStore.updateDirectMessageReactions(userId, peerUserId, direction, sentAtMillis, reactions)
     }
 
     fun countSessions(userId: String): Int {
@@ -716,6 +732,8 @@ class LocalStateStore(context: Context) {
         body: String,
         sentAtMillis: Long = System.currentTimeMillis(),
         transportMessageId: Long? = null,
+        replyToId: Long? = null,
+        reactions: Map<String, String>? = null,
     ) {
         if (userId.isBlank() || groupId.isBlank()) return
         val direction = if (senderUserId == userId) "outbound" else "inbound"
@@ -729,8 +747,22 @@ class LocalStateStore(context: Context) {
                 body = "$label: ${body.trim().ifBlank { "(empty)" }}",
                 sentAtMillis = sentAtMillis,
                 transportMessageId = transportMessageId,
+                replyToId = replyToId,
+                reactions = reactions,
             ),
         )
+    }
+
+    fun updateGroupThreadMessageReactions(
+        userId: String,
+        groupId: String,
+        direction: String,
+        sentAtMillis: Long,
+        reactions: Map<String, String>?,
+    ) {
+        if (userId.isBlank() || groupId.isBlank()) return
+        migrateLegacyGroupThread(userId, groupId)
+        messageStore.updateGroupMessageReactions(userId, groupId, direction, sentAtMillis, reactions)
     }
 
     private fun readGroupIds(userId: String): LinkedHashSet<String> {
