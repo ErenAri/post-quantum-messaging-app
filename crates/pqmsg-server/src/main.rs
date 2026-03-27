@@ -336,6 +336,7 @@ struct DeploymentContract {
     postgres_encryption: PostgresEncryptionConfig,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn enforce_contact_discovery_service_contract(
     contact_discovery_service_origin: Option<&str>,
     contact_discovery_manifest_issuer_ed25519_pub: Option<&str>,

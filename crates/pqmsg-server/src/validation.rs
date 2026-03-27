@@ -472,6 +472,7 @@ pub(crate) fn identity_fingerprint_sha256(
     hex::encode(hasher.finalize())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_hybrid_prekey_signatures(
     identity_sig_pub: &[u8],
     identity_pq_sig_pub: &[u8],

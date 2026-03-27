@@ -295,7 +295,7 @@ pub(crate) async fn load_bundle_response(
              WHERE u.user_id = $1 AND ud.device_id = $2 AND ud.active = 1
              LIMIT 1",
         )
-        .bind(&user_id)
+        .bind(user_id)
         .bind(target_device_id)
         .fetch_optional(&mut *tx)
         .await?
@@ -326,7 +326,7 @@ pub(crate) async fn load_bundle_response(
              ORDER BY ud.linked_at ASC, ud.device_id ASC
              LIMIT 1",
         )
-        .bind(&user_id)
+        .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?
     };
@@ -376,29 +376,29 @@ pub(crate) async fn load_bundle_response(
     }
 
     let remaining_x_before =
-        count_available_one_time_keys(&mut tx, "one_time_prekeys_x25519", &user_id, &device_id)
+        count_available_one_time_keys(&mut tx, "one_time_prekeys_x25519", user_id, &device_id)
             .await?;
     let remaining_pq_before =
-        count_available_one_time_keys(&mut tx, "one_time_prekeys_mlkem768", &user_id, &device_id)
+        count_available_one_time_keys(&mut tx, "one_time_prekeys_mlkem768", user_id, &device_id)
             .await?;
     let reserve_count = state.dos_policy().prekey_bundle_reserve_count().max(0);
     let consume_one_time =
         remaining_x_before > reserve_count && remaining_pq_before > reserve_count;
     let x25519_otk = if consume_one_time {
-        select_one_time_key(&mut tx, "one_time_prekeys_x25519", &user_id, &device_id).await?
+        select_one_time_key(&mut tx, "one_time_prekeys_x25519", user_id, &device_id).await?
     } else {
         None
     };
     let mlkem_otk = if consume_one_time {
-        select_one_time_key(&mut tx, "one_time_prekeys_mlkem768", &user_id, &device_id).await?
+        select_one_time_key(&mut tx, "one_time_prekeys_mlkem768", user_id, &device_id).await?
     } else {
         None
     };
     let remaining_x =
-        count_available_one_time_keys(&mut tx, "one_time_prekeys_x25519", &user_id, &device_id)
+        count_available_one_time_keys(&mut tx, "one_time_prekeys_x25519", user_id, &device_id)
             .await?;
     let remaining_pq =
-        count_available_one_time_keys(&mut tx, "one_time_prekeys_mlkem768", &user_id, &device_id)
+        count_available_one_time_keys(&mut tx, "one_time_prekeys_mlkem768", user_id, &device_id)
             .await?;
     tx.commit().await?;
 

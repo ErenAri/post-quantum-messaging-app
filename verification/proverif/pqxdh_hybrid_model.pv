@@ -24,13 +24,11 @@ equation forall x : key, y : key; shared_dh(x, pk(y)) = shared_dh(y, pk(x)).
 
 (* ── Classical Ed25519 signatures ──────────────────────────────── *)
 fun ed_sig_sign(bitstring, key): bitstring.
-fun ed_sig_verify(bitstring, bitstring, pkey): bool.
 reduc forall m:bitstring, sk:key; ed_sig_verify(ed_sig_sign(m, sk), m, pk(sk)) = true.
 
 (* ── PQ ML-DSA-65 signatures ──────────────────────────────────── *)
 fun pqsig_pk(pqsigkey): pqsigpkey.
 fun pqsig_sign(bitstring, pqsigkey): bitstring.
-fun pqsig_verify(bitstring, bitstring, pqsigpkey): bool.
 reduc forall m:bitstring, sk:pqsigkey; pqsig_verify(pqsig_sign(m, sk), m, pqsig_pk(sk)) = true.
 
 (* ── KEM (ML-KEM-768) ─────────────────────────────────────────── *)

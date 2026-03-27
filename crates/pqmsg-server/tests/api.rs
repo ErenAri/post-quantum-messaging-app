@@ -1839,6 +1839,7 @@ fn files_download_auth_headers(
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn profile_upsert_auth_headers(
     signing_key: &SigningKey,
     user_id: &str,

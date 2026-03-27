@@ -1189,6 +1189,7 @@ fn call_hangup_auth_headers(
     )
 }
 
+#[allow(dead_code)]
 fn call_signals_auth_headers(
     signing_key: &SigningKey,
     user_id: &str,

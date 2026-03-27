@@ -35,9 +35,7 @@ impl BlobStore {
         match &self.backend {
             BlobStoreBackend::InMemory(map) => {
                 map.lock()
-                    .map_err(|_| {
-                        std::io::Error::new(std::io::ErrorKind::Other, "blob store lock poisoned")
-                    })?
+                    .map_err(|_| std::io::Error::other("blob store lock poisoned"))?
                     .insert(object_key.to_string(), bytes.to_vec());
                 Ok(())
             }
@@ -54,9 +52,9 @@ impl BlobStore {
     pub fn get(&self, object_key: &str) -> std::io::Result<Option<Vec<u8>>> {
         match &self.backend {
             BlobStoreBackend::InMemory(map) => {
-                let guard = map.lock().map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::Other, "blob store lock poisoned")
-                })?;
+                let guard = map
+                    .lock()
+                    .map_err(|_| std::io::Error::other("blob store lock poisoned"))?;
                 Ok(guard.get(object_key).cloned())
             }
             BlobStoreBackend::LocalFs { root } => {
@@ -74,9 +72,7 @@ impl BlobStore {
         match &self.backend {
             BlobStoreBackend::InMemory(map) => {
                 map.lock()
-                    .map_err(|_| {
-                        std::io::Error::new(std::io::ErrorKind::Other, "blob store lock poisoned")
-                    })?
+                    .map_err(|_| std::io::Error::other("blob store lock poisoned"))?
                     .remove(object_key);
                 Ok(())
             }
