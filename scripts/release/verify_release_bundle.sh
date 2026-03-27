@@ -18,6 +18,7 @@ required_files=(
   "pqmsg-server-linux-x86_64"
   "sbom.tar.gz"
   "release-manifest.json"
+  "release-security-posture.json"
   "container-image.txt"
   "helm-image-overrides.yaml"
   "checksums.txt"
@@ -62,8 +63,21 @@ if f"repository: {images[0]['name']}" not in helm_overrides:
     raise SystemExit("helm-image-overrides.yaml does not contain the manifest image repository")
 if f"digest: {images[0]['digest']}" not in helm_overrides:
     raise SystemExit("helm-image-overrides.yaml does not contain the manifest image digest")
+
+posture = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
+support_matrix = posture.get("support_matrix") or {}
+audit_findings = posture.get("audit_findings") or {}
+release_audit_gate = posture.get("release_audit_gate") or {}
+if not support_matrix.get("path") or not support_matrix.get("sha256"):
+    raise SystemExit("release-security-posture.json is missing support matrix evidence")
+if not audit_findings.get("path") or not audit_findings.get("sha256"):
+    raise SystemExit("release-security-posture.json is missing audit findings evidence")
+if "blocking_findings" not in release_audit_gate:
+    raise SystemExit("release-security-posture.json is missing release audit gate details")
+if release_audit_gate.get("blocking_findings"):
+    raise SystemExit("release-security-posture.json contains blocking release audit findings")
 PY
-"$dist_dir/container-image.txt" "$dist_dir/helm-image-overrides.yaml"
+"$dist_dir/container-image.txt" "$dist_dir/helm-image-overrides.yaml" "$dist_dir/release-security-posture.json"
 
 if [[ -n "$repo" ]]; then
   if ! command -v gh >/dev/null 2>&1; then
@@ -72,5 +86,6 @@ if [[ -n "$repo" ]]; then
   fi
   gh attestation verify "$dist_dir/pqmsg-server-linux-x86_64" -R "$repo"
   gh attestation verify "$dist_dir/release-manifest.json" -R "$repo"
+  gh attestation verify "$dist_dir/release-security-posture.json" -R "$repo"
   gh attestation verify "$dist_dir/sbom.tar.gz" -R "$repo"
 fi

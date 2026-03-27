@@ -223,15 +223,27 @@ jobs:
       - name: verify audit-readiness bundle
         run: |
           python scripts/security/verify_audit_readiness_bundle.py --bundle-dir /tmp/pqmsg-audit-bundle
+      - name: prepare external audit handoff package
+        run: |
+          python scripts/security/prepare_external_audit_handoff.py --bundle-dir /tmp/pqmsg-audit-bundle --output-dir /tmp/pqmsg-audit-handoff
       - name: attest audit-readiness bundle manifest provenance
         uses: actions/attest@v4
         with:
           subject-path: /tmp/pqmsg-audit-bundle/audit-bundle-manifest.json
+      - name: attest external audit handoff archive provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: /tmp/pqmsg-audit-handoff/audit-readiness-bundle.zip
       - name: upload audit-readiness bundle
         uses: actions/upload-artifact@v4
         with:
           name: audit-readiness-bundle
           path: /tmp/pqmsg-audit-bundle/**
+      - name: upload external audit handoff package
+        uses: actions/upload-artifact@v4
+        with:
+          name: external-audit-handoff
+          path: /tmp/pqmsg-audit-handoff/**
 
   benchmarks:
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}

@@ -42,6 +42,13 @@ jobs:
             type=sha,format=long,prefix=sha-
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: block release on unresolved audit findings
+        run: |
+          python scripts/security/validate_audit_findings.py
+          python scripts/security/validate_release_audit_gate.py
       - name: render hardened production chart
         run: |
           helm template pqmsg-server deploy/helm/pqmsg-server \
@@ -64,6 +71,9 @@ jobs:
           mkdir -p dist
           cp target/release/pqmsg-server dist/pqmsg-server-linux-x86_64
           chmod +x dist/pqmsg-server-linux-x86_64
+      - name: render release security posture
+        run: |
+          python scripts/security/render_release_security_posture.py --output dist/release-security-posture.json
       - name: install cargo-cyclonedx
         run: cargo install cargo-cyclonedx --locked
       - name: generate SBOM
@@ -100,6 +110,7 @@ jobs:
 
           binary = Path("dist/pqmsg-server-linux-x86_64")
           sbom = Path("dist/sbom.tar.gz")
+          posture = Path("dist/release-security-posture.json")
           manifest = {
               "tag": os.environ["PQMSG_RELEASE_TAG"],
               "commit_sha": os.environ["PQMSG_RELEASE_SHA"],
@@ -128,6 +139,12 @@ jobs:
                       "sha256": sha256(sbom),
                       "size_bytes": sbom.stat().st_size,
                       "kind": "sbom-archive"
+                  },
+                  {
+                      "path": posture.name,
+                      "sha256": sha256(posture),
+                      "size_bytes": posture.stat().st_size,
+                      "kind": "release-security-posture"
                   }
               ]
           }
@@ -151,6 +168,7 @@ jobs:
           sha256sum \
             dist/pqmsg-server-linux-x86_64 \
             dist/sbom.tar.gz \
+            dist/release-security-posture.json \
             dist/release-manifest.json \
             dist/container-image.txt \
             dist/helm-image-overrides.yaml > dist/checksums.txt
@@ -178,6 +196,10 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-path: dist/release-manifest.json
+      - name: attest release security posture provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/release-security-posture.json
       - name: attest SBOM archive provenance
         uses: actions/attest@v4
         with:
@@ -197,6 +219,7 @@ jobs:
             dist/checksums.txt.pem
             dist/container-image.txt
             dist/helm-image-overrides.yaml
+            dist/release-security-posture.json
             dist/release-manifest.json
             dist/sbom.tar.gz
           generate_release_notes: true

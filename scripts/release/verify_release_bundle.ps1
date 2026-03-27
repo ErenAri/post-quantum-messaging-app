@@ -14,6 +14,7 @@ $requiredFiles = @(
     "pqmsg-server-linux-x86_64",
     "sbom.tar.gz",
     "release-manifest.json",
+    "release-security-posture.json",
     "container-image.txt",
     "helm-image-overrides.yaml",
     "checksums.txt"
@@ -80,6 +81,21 @@ if ($helmOverrides -notmatch [regex]::Escape("digest: $($manifest.container_imag
     throw "helm-image-overrides.yaml does not contain the manifest image digest"
 }
 
+$posturePath = Join-Path $DistDir "release-security-posture.json"
+$posture = Get-Content $posturePath -Raw | ConvertFrom-Json
+if ([string]::IsNullOrWhiteSpace($posture.support_matrix.path) -or [string]::IsNullOrWhiteSpace($posture.support_matrix.sha256)) {
+    throw "release-security-posture.json is missing support matrix evidence"
+}
+if ([string]::IsNullOrWhiteSpace($posture.audit_findings.path) -or [string]::IsNullOrWhiteSpace($posture.audit_findings.sha256)) {
+    throw "release-security-posture.json is missing audit findings evidence"
+}
+if ($null -eq $posture.release_audit_gate -or $null -eq $posture.release_audit_gate.blocking_findings) {
+    throw "release-security-posture.json is missing release audit gate details"
+}
+if ($posture.release_audit_gate.blocking_findings.Count -ne 0) {
+    throw "release-security-posture.json contains blocking release audit findings"
+}
+
 if (-not [string]::IsNullOrWhiteSpace($Repo)) {
     $gh = Get-Command gh -ErrorAction SilentlyContinue
     if ($null -eq $gh) {
@@ -88,5 +104,6 @@ if (-not [string]::IsNullOrWhiteSpace($Repo)) {
     }
     & $gh.Source attestation verify (Join-Path $DistDir "pqmsg-server-linux-x86_64") -R $Repo
     & $gh.Source attestation verify (Join-Path $DistDir "release-manifest.json") -R $Repo
+    & $gh.Source attestation verify (Join-Path $DistDir "release-security-posture.json") -R $Repo
     & $gh.Source attestation verify (Join-Path $DistDir "sbom.tar.gz") -R $Repo
 }

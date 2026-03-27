@@ -27,9 +27,16 @@ As of March 9, 2026, the supported beta path is **Android private beta for messa
 - The blind-evaluation preview now also echoes `manifest_contract_sha256` on evaluate/upload/match responses, and supported clients reject response-side contract drift instead of trusting post-attestation service replies implicitly.
 - Discovery tickets are now also bound to the app-server-pinned manifest contract hash, so the separate discovery service can reject stale or cross-contract tickets before evaluate/upload/match runs.
 - Discovery tickets now also carry a per-ticket nonce, and the blind-evaluation preview echoes that nonce on evaluate/upload/match responses so supported clients can reject response-side ticket drift as well as contract drift.
-- The server now rejects `PQMSG_CONTACT_DISCOVERY_*` preview configuration outside `development` so this discovery preview cannot be accidentally promoted into pilot/production by config drift alone.
+- The server now advertises `private_service` discovery only when the full attested enclave-style contract is configured end to end, so config drift cannot silently downgrade clients back into old preview semantics.
 - Audit handoff is now scriptable: `scripts/security/build_audit_readiness_bundle.py` produces a hashed audit-readiness bundle from the current docs, workflows, and policy validators.
 - That audit bundle can now be verified locally with `scripts/security/verify_audit_readiness_bundle.py`, and CI publishes the full bundle artifact plus an attested bundle manifest.
+- `scripts/security/prepare_external_audit_handoff.py` now also emits `audit-findings-summary.md` so external reviewers get a quick inventory of the tracked finding/remediation state alongside the archive and checksum.
+- External findings now have a machine-readable registry in `docs/AUDIT_FINDINGS.json`, validated by `scripts/security/validate_audit_findings.py` and paired with `.github/ISSUE_TEMPLATE/security-audit-finding.yml`.
+- Real findings can now be upserted deterministically with `scripts/security/upsert_audit_finding.py`, and summarized with `scripts/security/render_audit_findings_report.py`.
+- External audit engagements now have a separate registry in `docs/AUDIT_ENGAGEMENTS.json`, maintained with `scripts/security/upsert_audit_engagement.py`, and the final post-audit human release decision can be checked with `scripts/security/validate_final_audit_closeout.py`.
+- Tagged releases now fail closed on unresolved `critical` / `high` entries in `docs/AUDIT_FINDINGS.json` through `scripts/security/validate_release_audit_gate.py`.
+- Tagged releases also emit `release-security-posture.json` so each published release carries the exact support boundary and audit-gate result it was built under.
+- Promotion and rollback verification now fail if the live `/v1/capabilities` support boundary drifts from that frozen release posture.
 - Legacy clear-roster groups remain disabled; the newer opaque private-group path is advertised separately through `private_group_messaging_supported`, and its supported Android/web transport no longer returns or persists clear sender identifiers on message fetch/publish rows.
 
 ## Research Positioning

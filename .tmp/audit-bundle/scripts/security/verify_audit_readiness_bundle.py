@@ -16,28 +16,15 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Verify an audit-readiness bundle against its manifest."
-    )
-    parser.add_argument(
-        "--bundle-dir",
-        required=True,
-        help="Directory containing audit-bundle-manifest.json and referenced files",
-    )
-    args = parser.parse_args()
-
-    bundle_dir = Path(args.bundle_dir)
+def verify_bundle(bundle_dir: Path) -> dict:
     manifest_path = bundle_dir / "audit-bundle-manifest.json"
     if not manifest_path.is_file():
-        print(f"missing bundle manifest: {manifest_path}", file=sys.stderr)
-        return 1
+        raise FileNotFoundError(f"missing bundle manifest: {manifest_path}")
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     entries = manifest.get("entries")
     if not isinstance(entries, list):
-        print("invalid audit bundle manifest: missing entries list", file=sys.stderr)
-        return 1
+        raise ValueError("invalid audit bundle manifest: missing entries list")
 
     failures: list[str] = []
     for entry in entries:
@@ -65,8 +52,26 @@ def main() -> int:
             )
 
     if failures:
-        for failure in failures:
-            print(failure, file=sys.stderr)
+        raise ValueError("; ".join(failures))
+    return manifest
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Verify an audit-readiness bundle against its manifest."
+    )
+    parser.add_argument(
+        "--bundle-dir",
+        required=True,
+        help="Directory containing audit-bundle-manifest.json and referenced files",
+    )
+    args = parser.parse_args()
+
+    bundle_dir = Path(args.bundle_dir)
+    try:
+        manifest = verify_bundle(bundle_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
         return 1
 
     print(

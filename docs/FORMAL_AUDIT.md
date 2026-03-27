@@ -20,7 +20,15 @@ The following artifacts are expected to be delivered to an external assessor at 
 6. formal verification model: `verification/proverif/pqxdh_hybrid_model.pv`,
 7. Tamarin Prover model: `verification/tamarin/pqxdh_hybrid.spthy`,
 8. audit readiness package: `docs/AUDIT_READINESS.md`,
-9. test evidence:
+9. machine-readable finding registry: `docs/AUDIT_FINDINGS.json`,
+10. machine-readable engagement registry: `docs/AUDIT_ENGAGEMENTS.json`,
+11. GitHub intake template: `.github/ISSUE_TEMPLATE/security-audit-finding.yml`,
+12. reproducible handoff archive:
+   - `python scripts/security/build_audit_readiness_bundle.py --output-dir /tmp/pqmsg-audit-bundle`,
+   - `python scripts/security/verify_audit_readiness_bundle.py --bundle-dir /tmp/pqmsg-audit-bundle`,
+   - `python scripts/security/prepare_external_audit_handoff.py --bundle-dir /tmp/pqmsg-audit-bundle --output-dir /tmp/pqmsg-audit-handoff`,
+   - review `audit-findings-summary.md` in the handoff output alongside `audit-handoff.json`,
+13. test evidence:
    - `cargo test --workspace`,
    - `cargo clippy --workspace --all-targets -- -D warnings`,
    - fuzz smoke outputs from CI.
@@ -74,3 +82,16 @@ Use the following issue schema for each external finding:
 5. `mitigation_plan`,
 6. `verification_test`,
 7. `status`.
+
+The same fields are now enforced in the machine-readable registry `docs/AUDIT_FINDINGS.json`
+via `scripts/security/validate_audit_findings.py`, and the GitHub intake surface is
+bootstrapped with `.github/ISSUE_TEMPLATE/security-audit-finding.yml`.
+Tagged releases also consume that registry through `scripts/security/validate_release_audit_gate.py`
+so unresolved `critical` / `high` findings, or expired risk acceptances for them, block publication.
+Published releases also carry `release-security-posture.json`, which captures the frozen
+support matrix and audit-gate result used at publication time.
+Registry maintenance is scriptable through `scripts/security/upsert_audit_finding.py`, and
+human-readable summaries can be rendered with `scripts/security/render_audit_findings_report.py`.
+The engagement lifecycle is also scriptable through `scripts/security/upsert_audit_engagement.py`,
+and `scripts/security/validate_final_audit_closeout.py` provides the final machine-readable
+go/no-go check once a real external audit has completed.

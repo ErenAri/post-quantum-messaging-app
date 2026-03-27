@@ -256,6 +256,7 @@ jobs:
             --deployments dist/post-deploy-deployments.json \
             --pods dist/post-deploy-pods.json \
             --promotion-record dist/promotion-record.json \
+            --release-security-posture dist/release-security-posture.json \
             --expected-deployment-mode "${{ inputs.deployment_mode }}" \
             --expected-security-profile "high_assurance" \
             --output dist/post-deploy-verification.json

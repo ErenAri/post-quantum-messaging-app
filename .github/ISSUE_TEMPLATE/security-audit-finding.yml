@@ -1,0 +1,98 @@
+name: Security Audit Finding
+description: Track a finding from an external audit, penetration test, or formal review.
+title: "[Audit] <finding_id> <short title>"
+labels:
+  - security
+body:
+  - type: input
+    id: finding_id
+    attributes:
+      label: Finding ID
+      description: Stable external or internal reference, for example `AUD-2026-001`.
+      placeholder: AUD-2026-001
+    validations:
+      required: true
+  - type: dropdown
+    id: source
+    attributes:
+      label: Source
+      options:
+        - external_audit
+        - pentest
+        - formal_verification
+        - internal_review
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - critical
+        - high
+        - medium
+        - low
+        - info
+    validations:
+      required: true
+  - type: input
+    id: affected_component
+    attributes:
+      label: Affected Component
+      placeholder: crates/pqmsg-core/src/session.rs
+    validations:
+      required: true
+  - type: textarea
+    id: exploit_path
+    attributes:
+      label: Exploit Path
+      description: Concrete attack or failure path.
+    validations:
+      required: true
+  - type: textarea
+    id: mitigation_plan
+    attributes:
+      label: Mitigation Plan
+    validations:
+      required: true
+  - type: textarea
+    id: verification_test
+    attributes:
+      label: Verification Test
+      description: Test, proof, or procedure that will close the finding.
+    validations:
+      required: true
+  - type: dropdown
+    id: status
+    attributes:
+      label: Status
+      options:
+        - open
+        - in_progress
+        - remediated_pending_verification
+        - closed
+        - risk_accepted
+    validations:
+      required: true
+  - type: input
+    id: owner
+    attributes:
+      label: Owner
+      description: Required if the finding is risk-accepted.
+      placeholder: security-review-board
+  - type: input
+    id: risk_acceptance_expires_on_utc
+    attributes:
+      label: Risk Acceptance Expires On (UTC)
+      description: Required if the finding is risk-accepted. Use ISO-8601 UTC, for example `2026-06-30T00:00:00Z`.
+      placeholder: 2026-06-30T00:00:00Z
+  - type: textarea
+    id: risk_acceptance
+    attributes:
+      label: Risk Acceptance Rationale
+      description: Required if the finding is risk-accepted.
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: One path or URL per line.

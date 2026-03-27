@@ -264,6 +264,7 @@ jobs:
             --deployments dist/post-rollback-deployments.json \
             --pods dist/post-rollback-pods.json \
             --promotion-record dist/rollback-record.json \
+            --release-security-posture dist/release-security-posture.json \
             --expected-deployment-mode "${{ inputs.deployment_mode }}" \
             --expected-security-profile "high_assurance" \
             --output dist/post-rollback-verification.json

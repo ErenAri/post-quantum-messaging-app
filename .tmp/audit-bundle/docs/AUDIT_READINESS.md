@@ -22,13 +22,19 @@ To verify a generated bundle locally, run:
 python scripts/security/verify_audit_readiness_bundle.py --bundle-dir /tmp/pqmsg-audit-bundle
 ```
 
+To turn that verified bundle into an external-review handoff archive with checksum + machine-readable descriptor, run:
+
+```bash
+python scripts/security/prepare_external_audit_handoff.py --bundle-dir /tmp/pqmsg-audit-bundle --output-dir /tmp/pqmsg-audit-handoff
+```
+
 CI also validates that repository paths referenced in this document still exist via:
 
 ```bash
 python scripts/security/validate_audit_readiness_index.py
 ```
 
-The CI `audit-readiness-bundle` job now builds the full bundle, verifies it, uploads it as an artifact, and attests the bundle manifest provenance.
+The CI `audit-readiness-bundle` job now builds the full bundle, verifies it, uploads it as an artifact, prepares a zipped external handoff package, and attests both the bundle manifest and handoff archive provenance.
 
 The current beta support boundary is also frozen as a machine-readable artifact in `docs/SUPPORT_MATRIX.json`, with CI drift checks in `scripts/security/validate_support_matrix.py`.
 

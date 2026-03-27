@@ -6,6 +6,26 @@ from pathlib import Path
 
 
 REQUIRED = {
+    "release": {
+        "path": ".github/workflows/release.yml",
+        "permission_contents": [
+            "permissions:",
+            "contents: write",
+            "id-token: write",
+            "attestations: write",
+            "packages: write",
+        ],
+        "ordered_contents": [
+            "- name: block release on unresolved audit findings",
+            "python scripts/security/validate_release_audit_gate.py",
+            "- name: render release security posture",
+            "dist/release-security-posture.json",
+            "- name: attest release security posture provenance",
+            "uses: actions/attest@v4",
+            "subject-path: dist/release-security-posture.json",
+            "dist/release-security-posture.json",
+        ],
+    },
     "promote": {
         "path": ".github/workflows/promote.yml",
         "permission_contents": [
@@ -45,6 +65,24 @@ REQUIRED = {
             "- name: upload rollback bundle",
         ],
     },
+    "promote_runtime_support_freeze": {
+        "path": ".github/workflows/promote.yml",
+        "permission_contents": [],
+        "ordered_contents": [
+            "- name: verify promoted runtime contract",
+            "--release-security-posture dist/release-security-posture.json",
+            "--output dist/post-deploy-verification.json",
+        ],
+    },
+    "rollback_runtime_support_freeze": {
+        "path": ".github/workflows/rollback.yml",
+        "permission_contents": [],
+        "ordered_contents": [
+            "- name: verify rolled-back runtime contract",
+            "--release-security-posture dist/release-security-posture.json",
+            "--output dist/post-rollback-verification.json",
+        ],
+    },
 }
 
 
@@ -60,7 +98,7 @@ def validate(label: str, root: Path) -> list[str]:
 
     last_index = -1
     for item in spec["ordered_contents"]:
-        idx = text.find(item)
+        idx = text.find(item, last_index + 1)
         if idx == -1:
             errors.append(f"{path}: missing required ordered content `{item}`")
             continue
@@ -78,7 +116,7 @@ def main() -> int:
 
     root = Path(args.root).resolve()
     errors: list[str] = []
-    for label in ("promote", "rollback"):
+    for label in ("release", "promote", "rollback", "promote_runtime_support_freeze", "rollback_runtime_support_freeze"):
         errors.extend(validate(label, root))
 
     if errors:

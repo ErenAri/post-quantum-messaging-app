@@ -58,7 +58,7 @@ A release candidate is promotable only when all conditions are true:
    - `readOnlyRootFilesystem: true`,
    - `capabilities.drop: [ALL]`.
 8. raw Kubernetes and rendered Helm deployment manifests use digest-pinned server images for hardened modes; mutable `:latest` or tag-only production references are rejected.
-9. release artifact includes a signed checksum manifest, a machine-readable `release-manifest.json` with the published GHCR server image digest, deployment-ready `container-image.txt` and `helm-image-overrides.yaml` references, GitHub artifact attestations for the server binary, release manifest, and SBOM archive, and a pushed container-image provenance attestation (`release.yml`).
+9. release artifact includes a signed checksum manifest, a machine-readable `release-manifest.json` with the published GHCR server image digest, deployment-ready `container-image.txt` and `helm-image-overrides.yaml` references, a machine-readable `release-security-posture.json` capturing the frozen support boundary plus audit-gate result, GitHub artifact attestations for the server binary, release manifest, release security posture, and SBOM archive, and a pushed container-image provenance attestation (`release.yml`).
 10. release promotion to hardened environments must consume the published release bundle (`download_release_bundle.*`, `verify_release_bundle.*`, or `promote.yml`) rather than manually transcribing image digests.
 11. promotion evidence must include the live pre-promotion deployment image and rollback mapping (`promotion-record.json`, `rollback-image.txt`, `rollback-helm-overrides.yaml`) whenever cluster access is available.
 12. applied promotions must record post-deploy verification evidence (`post-deploy-verification.json`) proving rollout success and the runtime `/health` + `/v1/capabilities` contract for the promoted artifact.
@@ -78,6 +78,8 @@ A release candidate is promotable only when all conditions are true:
 26. workflow-driven GitHub issue comments for incident publication and final evidence must be idempotent on rerun; duplicate retries must resolve to an existing marker-matched comment instead of posting a second copy.
 27. the promotion and rollback workflows must GitHub-attest the emitted bundle-manifest artifacts themselves, and CI must validate that those attestation and permission requirements remain present in workflow policy.
 28. any workflow that consumes a previously uploaded promotion/rollback bundle must verify the bundle-manifest inventory before using the bundle, and should verify the bundle-manifest attestation when `gh` is available.
+29. tagged releases must fail closed if `docs/AUDIT_FINDINGS.json` contains unresolved `critical` or `high` findings, or if a `risk_accepted` exception for those severities has expired (`scripts/security/validate_release_audit_gate.py`).
+30. applied promotion and rollback verification must prove the live `/v1/capabilities` support boundary still matches the published `release-security-posture.json` frozen at release time, not just that the endpoint is reachable.
 
 ## 4. Security Exception Policy
 
@@ -89,6 +91,7 @@ Any exception to a mandatory gate requires a signed risk record with:
 4. accountable owner and closure milestone.
 
 Exceptions are invalid after expiry and block subsequent promotions until renewed or closed.
+For tracked audit findings, exceptions live in `docs/AUDIT_FINDINGS.json` with `status: risk_accepted`, `owner`, and `risk_acceptance_expires_on_utc`.
 
 ## 5. Change Classification
 

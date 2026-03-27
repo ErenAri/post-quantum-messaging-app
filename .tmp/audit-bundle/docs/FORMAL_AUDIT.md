@@ -20,7 +20,11 @@ The following artifacts are expected to be delivered to an external assessor at 
 6. formal verification model: `verification/proverif/pqxdh_hybrid_model.pv`,
 7. Tamarin Prover model: `verification/tamarin/pqxdh_hybrid.spthy`,
 8. audit readiness package: `docs/AUDIT_READINESS.md`,
-9. test evidence:
+9. reproducible handoff archive:
+   - `python scripts/security/build_audit_readiness_bundle.py --output-dir /tmp/pqmsg-audit-bundle`,
+   - `python scripts/security/verify_audit_readiness_bundle.py --bundle-dir /tmp/pqmsg-audit-bundle`,
+   - `python scripts/security/prepare_external_audit_handoff.py --bundle-dir /tmp/pqmsg-audit-bundle --output-dir /tmp/pqmsg-audit-handoff`,
+10. test evidence:
    - `cargo test --workspace`,
    - `cargo clippy --workspace --all-targets -- -D warnings`,
    - fuzz smoke outputs from CI.

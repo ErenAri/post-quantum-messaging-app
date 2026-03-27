@@ -1,0 +1,37 @@
+{
+  "bundle_archive": {
+    "path": "audit-readiness-bundle.zip",
+    "sha256": "1af206ed0b94cf241f350c80447d201ecd99fb75f131b400485e1dac9224ca23",
+    "size_bytes": 102725
+  },
+  "bundle_manifest": {
+    "path": "audit-bundle-manifest.json",
+    "sha256": "8f70b2afd717baa600691d05116781a1dfae24f3f1b64a3cdc66dc7dd2e3d891"
+  },
+  "git_commit": "3f0b25a4b47ea521aef75dbe41db1539769ca784",
+  "handoff_type": "external_audit",
+  "support_matrix": {
+    "calling_supported": false,
+    "group_messaging_supported": false,
+    "manual_contact_bootstrap": [
+      "@username",
+      "opaque_invite"
+    ],
+    "private_contact_discovery_allowed_deployments": [
+      "development",
+      "pilot",
+      "production"
+    ],
+    "private_contact_discovery_service_contract": "attested_enclave_v1",
+    "private_group_messaging_supported": true,
+    "summary": "Android private beta for messaging only",
+    "supported_beta_clients": [
+      "android"
+    ],
+    "web_client_policy": "demo_only"
+  },
+  "verification": {
+    "archive_sha256_file": "audit-readiness-bundle.zip.sha256",
+    "bundle_dir_command": "python scripts/security/verify_audit_readiness_bundle.py --bundle-dir .tmp\\audit-bundle"
+  }
+}

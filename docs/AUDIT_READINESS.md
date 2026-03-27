@@ -22,15 +22,78 @@ To verify a generated bundle locally, run:
 python scripts/security/verify_audit_readiness_bundle.py --bundle-dir /tmp/pqmsg-audit-bundle
 ```
 
+To turn that verified bundle into an external-review handoff archive with checksum, machine-readable descriptor, and a human-readable finding summary, run:
+
+```bash
+python scripts/security/prepare_external_audit_handoff.py --bundle-dir /tmp/pqmsg-audit-bundle --output-dir /tmp/pqmsg-audit-handoff
+```
+
+To add or update a concrete finding in the registry, run:
+
+```bash
+python scripts/security/upsert_audit_finding.py \
+  --finding-id AUD-2026-001 \
+  --source external_audit \
+  --title "Example finding title" \
+  --severity high \
+  --affected-component crates/pqmsg-core/src/session.rs \
+  --exploit-path "Describe the concrete exploit path" \
+  --mitigation-plan "Describe the remediation plan" \
+  --verification-test "Describe the verification test" \
+  --status open
+```
+
+To render the current registry as a standalone Markdown summary, run:
+
+```bash
+python scripts/security/render_audit_findings_report.py --output /tmp/audit-findings-summary.md
+```
+
+To record a real audit engagement and later mark it complete, run:
+
+```bash
+python scripts/security/upsert_audit_engagement.py \
+  --engagement-id EXT-AUDIT-2026-01 \
+  --type external_audit \
+  --auditor-name "Example Security Lab" \
+  --scope "Protocol, server, Android beta path" \
+  --status in_progress
+```
+
+When the engagement is complete and its report is in hand, the final closeout check is:
+
+```bash
+python scripts/security/validate_final_audit_closeout.py
+```
+
 CI also validates that repository paths referenced in this document still exist via:
 
 ```bash
 python scripts/security/validate_audit_readiness_index.py
 ```
 
-The CI `audit-readiness-bundle` job now builds the full bundle, verifies it, uploads it as an artifact, and attests the bundle manifest provenance.
+The CI `audit-readiness-bundle` job now builds the full bundle, verifies it, uploads it as an artifact, prepares a zipped external handoff package, writes `audit-findings-summary.md`, and attests both the bundle manifest and handoff archive provenance.
 
 The current beta support boundary is also frozen as a machine-readable artifact in `docs/SUPPORT_MATRIX.json`, with CI drift checks in `scripts/security/validate_support_matrix.py`.
+
+External findings now also have a machine-readable registry in `docs/AUDIT_FINDINGS.json`,
+validated by `scripts/security/validate_audit_findings.py` and mirrored by the GitHub issue
+template `.github/ISSUE_TEMPLATE/security-audit-finding.yml`.
+The registry can be maintained locally with `scripts/security/upsert_audit_finding.py`, and a
+human-readable summary can be rendered on demand with
+`scripts/security/render_audit_findings_report.py`.
+External audit engagements themselves are now tracked separately in
+`docs/AUDIT_ENGAGEMENTS.json`, validated by `scripts/security/validate_audit_engagements.py`
+and maintained with `scripts/security/upsert_audit_engagement.py`.
+Tagged releases additionally fail closed on unresolved `critical` / `high` findings via
+`scripts/security/validate_release_audit_gate.py`.
+Release publication also emits `dist/release-security-posture.json` so the published artifact set
+records the exact support boundary and audit-gate state used for go/no-go.
+Applied promotion and rollback verification now compares the live `/v1/capabilities` support
+boundary against that frozen release posture before the bundle is accepted as green evidence.
+For the actual final human release decision after an external review,
+`scripts/security/validate_final_audit_closeout.py` checks both the findings gate and the
+presence of at least one completed `external_audit` engagement.
 
 ---
 
@@ -61,6 +124,13 @@ The current beta support boundary is also frozen as a machine-readable artifact 
 | Crypto Agility | `docs/CRYPTO_AGILITY.md` | Suite registry, FIPS mode, downgrade resistance |
 | Security Gates | `docs/SECURITY_GATES.md` | Mandatory quality gates (zeroize, constant-time, parsing) |
 | Formal Audit Scope | `docs/FORMAL_AUDIT.md` | External audit engagement plan |
+| Audit Findings Registry | `docs/AUDIT_FINDINGS.json` | Canonical finding/remediation tracker |
+| Audit Engagement Registry | `docs/AUDIT_ENGAGEMENTS.json` | Canonical external-audit engagement tracker |
+| Audit Release Gate | `scripts/security/validate_release_audit_gate.py` | Fails release on unresolved critical/high findings |
+| Final Audit Closeout Gate | `scripts/security/validate_final_audit_closeout.py` | Requires a completed external audit plus a clean blocking-findings gate |
+| Audit Engagement Upsert Tool | `scripts/security/upsert_audit_engagement.py` | Deterministic local maintenance of the engagement registry |
+| Audit Finding Upsert Tool | `scripts/security/upsert_audit_finding.py` | Deterministic local maintenance of the findings registry |
+| Audit Findings Report Renderer | `scripts/security/render_audit_findings_report.py` | Reusable Markdown summary of tracked findings |
 | Penetration Testing | `docs/PENETRATION_TESTING.md` | Repeatable pentest runbooks |
 | Release Governance | `docs/RELEASE_GOVERNANCE.md` | Change control, dual-reviewer, rollback |
 | Operations Runbook | `docs/OPERATIONS.md` | SLOs, incident response, DR drills |
@@ -69,6 +139,7 @@ The current beta support boundary is also frozen as a machine-readable artifact 
 | API Reference | `docs/API.md` | HTTP API, auth headers, replay controls |
 | Support Matrix | `docs/SUPPORT_MATRIX.json` | Canonical beta support boundary and holdbacks |
 | Deployment Guide | `docs/DEPLOYMENT.md` | Container build, K8s, Helm, autoscaling |
+| Audit Finding Intake Template | `.github/ISSUE_TEMPLATE/security-audit-finding.yml` | Structured GitHub intake for external findings |
 
 ---
 

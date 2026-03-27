@@ -189,6 +189,20 @@ jobs:
         run: |
           python scripts/security/validate_support_matrix.py
 
+  audit-findings-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: validate audit findings registry
+        run: |
+          python scripts/security/validate_audit_findings.py
+      - name: validate release audit gate
+        run: |
+          python scripts/security/validate_release_audit_gate.py
+
   release-governance-helper-smoke:
     runs-on: ubuntu-latest
     steps:
@@ -217,21 +231,39 @@ jobs:
       - name: validate audit-readiness index
         run: |
           python scripts/security/validate_audit_readiness_index.py
+      - name: validate audit findings registry
+        run: |
+          python scripts/security/validate_audit_findings.py
+      - name: validate release audit gate
+        run: |
+          python scripts/security/validate_release_audit_gate.py
       - name: build audit-readiness bundle
         run: |
           python scripts/security/build_audit_readiness_bundle.py --output-dir /tmp/pqmsg-audit-bundle
       - name: verify audit-readiness bundle
         run: |
           python scripts/security/verify_audit_readiness_bundle.py --bundle-dir /tmp/pqmsg-audit-bundle
+      - name: prepare external audit handoff package
+        run: |
+          python scripts/security/prepare_external_audit_handoff.py --bundle-dir /tmp/pqmsg-audit-bundle --output-dir /tmp/pqmsg-audit-handoff
       - name: attest audit-readiness bundle manifest provenance
         uses: actions/attest@v4
         with:
           subject-path: /tmp/pqmsg-audit-bundle/audit-bundle-manifest.json
+      - name: attest external audit handoff archive provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: /tmp/pqmsg-audit-handoff/audit-readiness-bundle.zip
       - name: upload audit-readiness bundle
         uses: actions/upload-artifact@v4
         with:
           name: audit-readiness-bundle
           path: /tmp/pqmsg-audit-bundle/**
+      - name: upload external audit handoff package
+        uses: actions/upload-artifact@v4
+        with:
+          name: external-audit-handoff
+          path: /tmp/pqmsg-audit-handoff/**
 
   benchmarks:
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}

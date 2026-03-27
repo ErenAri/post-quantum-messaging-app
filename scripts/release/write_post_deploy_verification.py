@@ -24,6 +24,7 @@ def main() -> int:
     parser.add_argument("--deployments", required=True)
     parser.add_argument("--pods", required=True)
     parser.add_argument("--promotion-record", required=True)
+    parser.add_argument("--release-security-posture", required=True)
     parser.add_argument("--expected-deployment-mode", required=True)
     parser.add_argument("--expected-security-profile", required=True)
     parser.add_argument("--output", required=True)
@@ -34,7 +35,23 @@ def main() -> int:
     deployments = load_json(Path(args.deployments))
     pods = load_json(Path(args.pods))
     promotion_record = load_json(Path(args.promotion_record))
+    release_security_posture = load_json(Path(args.release_security_posture))
     target_image = promotion_record["target_image"]
+    expected_support_scope = (
+        release_security_posture.get("support_matrix", {}).get("current_beta_scope", {}) or {}
+    )
+    expected_support_subset = {
+        "supported_beta_clients": expected_support_scope.get("supported_beta_clients"),
+        "web_client_policy": expected_support_scope.get("web_client_policy"),
+        "calling_supported": expected_support_scope.get("calling_supported"),
+        "group_messaging_supported": expected_support_scope.get("group_messaging_supported"),
+        "private_group_messaging_supported": expected_support_scope.get(
+            "private_group_messaging_supported"
+        ),
+    }
+    actual_support_subset = {
+        key: capabilities.get(key) for key in expected_support_subset.keys()
+    }
 
     deployment_images: list[dict[str, Any]] = []
     for item in deployments.get("items", []):
@@ -142,6 +159,11 @@ def main() -> int:
             {"key_transparency_supported": capabilities.get("key_transparency_supported")},
         ),
         check(
+            "capabilities_support_boundary_match_release_posture",
+            expected_support_subset == actual_support_subset,
+            {"expected": expected_support_subset, "actual": actual_support_subset},
+        ),
+        check(
             "deployment_present",
             len(deployment_images) > 0,
             {"deployments": len(deployments.get("items", []))},
@@ -165,6 +187,9 @@ def main() -> int:
         "expected_deployment_mode": args.expected_deployment_mode,
         "expected_security_profile": args.expected_security_profile,
         "target_image": target_image,
+        "release_security_posture_path": args.release_security_posture,
+        "expected_support_boundary": expected_support_subset,
+        "actual_support_boundary": actual_support_subset,
         "passed": not failed,
         "checks": checks,
     }

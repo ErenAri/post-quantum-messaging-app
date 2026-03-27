@@ -77,7 +77,7 @@ Current implementation boundary:
 - The preview discovery registry now also purges expired bootstrap-invite-backed token rows instead of merely filtering them at match time, which reduces stale handle persistence on the separate service.
 - When configured for an attested preview deployment, clients now also fetch `/v1/attestation?nonce_b64=...`, verify the returned attestation document hash against the signed manifest, require the attested blind-evaluation key to match the manifest-pinned OPRF public key, require any attested PCR set to match the manifest/app-server-pinned PCR set, require the echoed challenge nonce to match the per-request client nonce, verify the signed attestation payload under the manifest issuer key, reject stale evidence using the app-server-advertised max age, and continuity-pin that document contract locally.
 - This is intentionally marked `privacy_mode = "enclave_backed_private_discovery_v1"` and is still not a production claim of Signal-style private discovery.
-- `pqmsg-server` now only advertises that separate discovery path in `development` deployments. `pilot` and `production` stay on `manual_only`, and server boot now rejects `PQMSG_CONTACT_DISCOVERY_*` preview configuration entirely outside `development`, until a real private-discovery protocol and attestation story exist.
+- `pqmsg-server` now only advertises that separate discovery path when the full attested enclave-style contract is configured. If any required contract field is missing, capabilities fall back to `manual_only` instead of partially exposing discovery.
 
 ### 3. Client
 
