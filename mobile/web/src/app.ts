@@ -29,6 +29,7 @@ import {
   buildSenderCertificateAuthHeaders,
   buildContactDiscoveryTicketAuthHeaders,
   buildContactDiscoveryAttestationChallengeNonce,
+  contactDiscoveryManifestContractSha256,
   buildPushTokenAuthHeaders,
   buildListDevicesAuthHeaders,
   buildLinkDeviceAuthHeaders,
@@ -4188,6 +4189,7 @@ function buildContactDiscoveryCheckpoint(
     privacy_mode: manifest.privacy_mode,
     directory_backend: manifest.directory_backend,
     host_enclave_protocol_version: manifest.host_enclave_protocol_version,
+    host_release_id: manifest.host_release_id,
     enclave_release_id: manifest.enclave_release_id,
     match_result_format: manifest.match_result_format,
     oprf_suite: manifest.oprf_suite,
@@ -4196,6 +4198,7 @@ function buildContactDiscoveryCheckpoint(
     attestation_mode: manifest.attestation_mode,
     attestation_verifier: manifest.attestation_verifier ?? null,
     enclave_measurement_hex: manifest.enclave_measurement_hex ?? null,
+    attestation_pcrs_sha384: normalizeContactDiscoveryPcrs(manifest.attestation_pcrs_sha384),
     attestation_document_format: manifest.attestation_document_format ?? null,
     attestation_document_sha256: manifest.attestation_document_sha256 ?? null,
     attestation_challenge_mode: manifest.attestation_challenge_mode ?? null,
@@ -4223,6 +4226,9 @@ function diffContactDiscoveryCheckpoint(
   if (previous.host_enclave_protocol_version !== current.host_enclave_protocol_version) {
     changed.push("host_enclave_protocol_version");
   }
+  if (previous.host_release_id !== current.host_release_id) {
+    changed.push("host_release_id");
+  }
   if (previous.enclave_release_id !== current.enclave_release_id) {
     changed.push("enclave_release_id");
   }
@@ -4240,6 +4246,12 @@ function diffContactDiscoveryCheckpoint(
   }
   if (previous.enclave_measurement_hex !== current.enclave_measurement_hex) {
     changed.push("enclave_measurement_hex");
+  }
+  if (
+    JSON.stringify(normalizeContactDiscoveryPcrs(previous.attestation_pcrs_sha384))
+      !== JSON.stringify(normalizeContactDiscoveryPcrs(current.attestation_pcrs_sha384))
+  ) {
+    changed.push("attestation_pcrs_sha384");
   }
   if (previous.attestation_document_format !== current.attestation_document_format) {
     changed.push("attestation_document_format");
@@ -4280,37 +4292,45 @@ async function loadVerifiedContactDiscoveryManifest(
     capabilities.contact_discovery_manifest_issuer_ed25519_pub || "",
     capabilities.contact_discovery_attestation_verifier,
     capabilities.contact_discovery_expected_measurement_hex,
+    capabilities.contact_discovery_expected_pcrs_sha384,
     capabilities.contact_discovery_attestation_document_sha256,
   );
   if (
     !capabilities.contact_discovery_directory_backend
     || !capabilities.contact_discovery_host_enclave_protocol_version
+    || !capabilities.contact_discovery_host_release_id
     || !capabilities.contact_discovery_enclave_release_id
+    || !capabilities.contact_discovery_expected_manifest_contract_sha256
+    || !capabilities.contact_discovery_attestation_verifier
+    || !capabilities.contact_discovery_expected_measurement_hex
+    || !capabilities.contact_discovery_attestation_document_sha256
+    || !capabilities.contact_discovery_attestation_max_age_seconds
   ) {
     throw new Error("Private contact discovery backend contract is incomplete");
   }
+  const manifestContractSha256 = contactDiscoveryManifestContractSha256(manifest);
   if (
-    manifest.lookup_protocol !== "blind_token_directory_preview"
-    || manifest.privacy_mode !== "blind_evaluation_preview"
-    || manifest.directory_backend !== "simulated_enclave_preview"
+    manifest.lookup_protocol !== "attested_enclave_voprf_directory_v1"
+    || manifest.privacy_mode !== "enclave_backed_private_discovery_v1"
+    || manifest.directory_backend !== "attested_enclave_directory_v1"
     || manifest.host_enclave_protocol_version !== 1
+    || !manifest.host_release_id
     || !manifest.enclave_release_id
     || manifest.match_result_format !== "contact_invite_token"
-    || manifest.oprf_suite !== "ristretto255-sha512-preview"
-    || manifest.evaluation_proof_mode !== "dleq_per_element_preview"
+    || manifest.oprf_suite !== "ristretto255-sha512-v1"
+    || manifest.evaluation_proof_mode !== "dleq_per_element_v1"
     || !manifest.oprf_public_key_ristretto255
-    || (manifest.attestation_mode !== "unattested_development"
-      && (!manifest.attestation_verifier
-        || !manifest.enclave_measurement_hex
-        || !manifest.attestation_document_format
-        || !manifest.attestation_document_sha256
-        || !manifest.attestation_challenge_mode))
+    || manifest.attestation_mode !== "attested_enclave_v1"
+    || !manifest.attestation_verifier
+    || !manifest.enclave_measurement_hex
+    || !manifest.attestation_document_format
+    || !manifest.attestation_document_sha256
+    || !manifest.attestation_challenge_mode
   ) {
     throw new Error("Unsupported contact discovery manifest");
   }
   if (
-    manifest.attestation_document_sha256
-    && manifest.attestation_challenge_mode !== "nonce_b64_required_preview"
+    manifest.attestation_challenge_mode !== "nonce_b64_required_v1"
   ) {
     throw new Error("Unsupported contact discovery attestation challenge mode");
   }
@@ -4318,7 +4338,10 @@ async function loadVerifiedContactDiscoveryManifest(
     manifest.directory_backend !== capabilities.contact_discovery_directory_backend
     || manifest.host_enclave_protocol_version
       !== capabilities.contact_discovery_host_enclave_protocol_version
+    || manifest.host_release_id !== capabilities.contact_discovery_host_release_id
     || manifest.enclave_release_id !== capabilities.contact_discovery_enclave_release_id
+    || manifestContractSha256
+      !== capabilities.contact_discovery_expected_manifest_contract_sha256
   ) {
     throw new Error("Contact discovery backend contract mismatch");
   }
@@ -4333,8 +4356,11 @@ async function loadVerifiedContactDiscoveryManifest(
       manifest.attestation_mode,
       manifest.attestation_verifier || "",
       manifest.enclave_measurement_hex || "",
+      manifest.attestation_pcrs_sha384 ?? null,
       manifest.manifest_issuer_ed25519_pub,
       attestationChallengeNonce,
+      manifestContractSha256,
+      manifest.host_release_id,
       manifest.enclave_release_id,
       manifest.oprf_public_key_ristretto255,
       manifest.attestation_document_sha256,
@@ -4359,6 +4385,51 @@ async function loadVerifiedContactDiscoveryManifest(
     writeContactDiscoveryCheckpoint(setup.serverUrl, setup.userId, checkpoint);
   }
   return { manifest, continuityStatus };
+}
+
+function normalizeContactDiscoveryPcrs(
+  pcrs: Record<string, string> | null | undefined
+): Record<string, string> | null {
+  if (!pcrs) {
+    return null;
+  }
+  const entries = Object.entries(pcrs).sort(([lhs], [rhs]) => lhs.localeCompare(rhs));
+  if (!entries.length) {
+    return null;
+  }
+  return Object.fromEntries(entries);
+}
+
+function formatContactDiscoveryPcrs(
+  pcrs: Record<string, string> | null | undefined
+): string {
+  const normalized = normalizeContactDiscoveryPcrs(pcrs);
+  if (!normalized) {
+    return "not advertised";
+  }
+  return Object.entries(normalized)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(", ");
+}
+
+function requireContactDiscoveryServiceContract(
+  manifestContractSha256: string,
+  observedManifestContractSha256: string,
+  operationLabel: string,
+): void {
+  if (observedManifestContractSha256 !== manifestContractSha256) {
+    throw new Error(`Contact discovery ${operationLabel} contract mismatch`);
+  }
+}
+
+function requireContactDiscoveryTicketNonce(
+  expectedTicketNonce: string,
+  observedTicketNonce: string,
+  operationLabel: string,
+): void {
+  if (observedTicketNonce !== expectedTicketNonce) {
+    throw new Error(`Contact discovery ${operationLabel} ticket mismatch`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -4514,6 +4585,7 @@ async function renderSettings(): Promise<void> {
           <div class="settings-row"><span>Evaluation Proof</span><span>${escHtml(contactDiscoveryManifest?.evaluation_proof_mode || "unknown")}</span></div>
           <div class="settings-row"><span>Attestation Verifier</span><span class="mono">${escHtml(contactDiscoveryManifest?.attestation_verifier || "not advertised")}</span></div>
           <div class="settings-row"><span>Enclave Measurement</span><span class="mono">${escHtml(contactDiscoveryManifest?.enclave_measurement_hex || "not advertised")}</span></div>
+          <div class="settings-row"><span>Attestation PCRs</span><span class="mono">${escHtml(formatContactDiscoveryPcrs(contactDiscoveryManifest?.attestation_pcrs_sha384))}</span></div>
           <div class="settings-row"><span>Attestation Max Age</span><span>${escHtml(capabilities?.contact_discovery_attestation_max_age_seconds ? `${capabilities.contact_discovery_attestation_max_age_seconds}s` : "not advertised")}</span></div>`
               : ""
           }
@@ -6090,6 +6162,7 @@ async function renderDiscovery(): Promise<void> {
   ): Promise<{
     serviceOrigin: string;
     ticket: string;
+    ticketNonce: string;
     manifest: ContactDiscoveryManifestResponse;
   }> {
     const headers = buildContactDiscoveryTicketAuthHeaders(keys, purpose);
@@ -6105,6 +6178,7 @@ async function renderDiscovery(): Promise<void> {
     return {
       serviceOrigin: ticketOrigin,
       ticket: response.ticket,
+      ticketNonce: response.ticket_nonce,
       manifest: verifiedManifest.manifest,
     };
   }
@@ -6117,21 +6191,46 @@ async function renderDiscovery(): Promise<void> {
     try {
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
-      const { serviceOrigin, ticket, manifest } = await issueDiscoveryTicket(api, k, "upload");
+      const { serviceOrigin, ticket, ticketNonce, manifest } = await issueDiscoveryTicket(api, k, "upload");
+      const manifestContractSha256 = contactDiscoveryManifestContractSha256(manifest);
       const phonePrepared = prepareContactDiscoveryBlindRequest(phones);
       const emailPrepared = prepareContactDiscoveryBlindRequest(emails);
       const phoneEvaluated = phonePrepared.blindedElementsBase64.length === 0
-        ? { evaluation_proof_mode: manifest.evaluation_proof_mode, evaluated_elements_base64: [], dleq_proofs: [] }
+        ? {
+          ticket_nonce: ticketNonce,
+          manifest_contract_sha256: manifestContractSha256,
+          evaluation_proof_mode: manifest.evaluation_proof_mode,
+          evaluated_elements_base64: [],
+          dleq_proofs: []
+        }
         : await api.evaluateDiscoveryElementsAtService(serviceOrigin, {
           ticket,
           blinded_elements_base64: phonePrepared.blindedElementsBase64,
         });
       const emailEvaluated = emailPrepared.blindedElementsBase64.length === 0
-        ? { evaluation_proof_mode: manifest.evaluation_proof_mode, evaluated_elements_base64: [], dleq_proofs: [] }
+        ? {
+          ticket_nonce: ticketNonce,
+          manifest_contract_sha256: manifestContractSha256,
+          evaluation_proof_mode: manifest.evaluation_proof_mode,
+          evaluated_elements_base64: [],
+          dleq_proofs: []
+        }
         : await api.evaluateDiscoveryElementsAtService(serviceOrigin, {
           ticket,
           blinded_elements_base64: emailPrepared.blindedElementsBase64,
         });
+      requireContactDiscoveryServiceContract(
+        manifestContractSha256,
+        phoneEvaluated.manifest_contract_sha256,
+        "evaluate",
+      );
+      requireContactDiscoveryTicketNonce(ticketNonce, phoneEvaluated.ticket_nonce, "evaluate");
+      requireContactDiscoveryServiceContract(
+        manifestContractSha256,
+        emailEvaluated.manifest_contract_sha256,
+        "evaluate",
+      );
+      requireContactDiscoveryTicketNonce(ticketNonce, emailEvaluated.ticket_nonce, "evaluate");
       verifyContactDiscoveryEvaluationProofs(
         phonePrepared.blindedElementsBase64,
         phoneEvaluated,
@@ -6155,6 +6254,12 @@ async function renderDiscovery(): Promise<void> {
         phone_tokens_sha256: phoneTokens,
         email_tokens_sha256: emailTokens,
       });
+      requireContactDiscoveryServiceContract(
+        manifestContractSha256,
+        res.manifest_contract_sha256,
+        "upload",
+      );
+      requireContactDiscoveryTicketNonce(ticketNonce, res.ticket_nonce, "upload");
       statusEl.innerHTML = `<span class="text-success">Blind-evaluated and uploaded ${res.uploaded_phone_tokens} phone + ${res.uploaded_email_tokens} email tokens</span>`;
     } catch (e) {
       statusEl.innerHTML = `<span class="text-danger">Upload failed: ${escHtml(errorMsg(e))}</span>`;
@@ -6169,12 +6274,19 @@ async function renderDiscovery(): Promise<void> {
     try {
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
-      const { serviceOrigin, ticket, manifest } = await issueDiscoveryTicket(api, k, "match");
+      const { serviceOrigin, ticket, ticketNonce, manifest } = await issueDiscoveryTicket(api, k, "match");
+      const manifestContractSha256 = contactDiscoveryManifestContractSha256(manifest);
       const prepared = prepareContactDiscoveryBlindRequest(hashes);
       const evaluated = await api.evaluateDiscoveryElementsAtService(serviceOrigin, {
         ticket,
         blinded_elements_base64: prepared.blindedElementsBase64,
       });
+      requireContactDiscoveryServiceContract(
+        manifestContractSha256,
+        evaluated.manifest_contract_sha256,
+        "evaluate",
+      );
+      requireContactDiscoveryTicketNonce(ticketNonce, evaluated.ticket_nonce, "evaluate");
       verifyContactDiscoveryEvaluationProofs(
         prepared.blindedElementsBase64,
         evaluated,
@@ -6192,6 +6304,12 @@ async function renderDiscovery(): Promise<void> {
         ticket,
         tokens_sha256: tokens,
       });
+      requireContactDiscoveryServiceContract(
+        manifestContractSha256,
+        res.manifest_contract_sha256,
+        "match",
+      );
+      requireContactDiscoveryTicketNonce(ticketNonce, res.ticket_nonce, "match");
       if (res.matches.length === 0) {
         resultsEl.innerHTML = '<p class="text-secondary">No matches found.</p>';
         return;
@@ -6313,9 +6431,12 @@ async function renderServerInfo(): Promise<void> {
           <div class="settings-row"><span>Discovery Manifest Issuer</span><span class="mono">${escHtml(caps.contact_discovery_manifest_issuer_ed25519_pub || "not advertised")}</span></div>
           <div class="settings-row"><span>Discovery Backend</span><span>${escHtml(caps.contact_discovery_directory_backend || "not advertised")}</span></div>
           <div class="settings-row"><span>Host/Enclave Protocol</span><span>${escHtml(caps.contact_discovery_host_enclave_protocol_version ? `${caps.contact_discovery_host_enclave_protocol_version}` : "not advertised")}</span></div>
+          <div class="settings-row"><span>Host Release</span><span class="mono">${escHtml(caps.contact_discovery_host_release_id || "not advertised")}</span></div>
           <div class="settings-row"><span>Enclave Release</span><span class="mono">${escHtml(caps.contact_discovery_enclave_release_id || "not advertised")}</span></div>
+          <div class="settings-row"><span>Manifest Contract</span><span class="mono">${escHtml(caps.contact_discovery_expected_manifest_contract_sha256 || "not advertised")}</span></div>
           <div class="settings-row"><span>Discovery Attestation Verifier</span><span class="mono">${escHtml(caps.contact_discovery_attestation_verifier || "not advertised")}</span></div>
           <div class="settings-row"><span>Discovery Enclave Measurement</span><span class="mono">${escHtml(caps.contact_discovery_expected_measurement_hex || "not advertised")}</span></div>
+          <div class="settings-row"><span>Discovery Attestation PCRs</span><span class="mono">${escHtml(formatContactDiscoveryPcrs(caps.contact_discovery_expected_pcrs_sha384))}</span></div>
           <div class="settings-row"><span>Discovery Attestation Max Age</span><span>${escHtml(caps.contact_discovery_attestation_max_age_seconds ? `${caps.contact_discovery_attestation_max_age_seconds}s` : "not advertised")}</span></div>
           <div class="settings-row"><span>Prod Baseline</span><span>${caps.production_baseline_met ? "✓ Met" : "✗ Not met"}</span></div>
         </div>

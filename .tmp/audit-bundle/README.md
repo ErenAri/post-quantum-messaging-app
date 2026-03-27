@@ -14,10 +14,19 @@ As of March 9, 2026, the supported beta path is **Android private beta for messa
 - Web remains a demo surface and is not part of the supported beta.
 - Outbound web direct messaging and private-group messaging stay blocked whenever the server advertises `web_client_policy = demo_only`.
 - The server exposes `supported_beta_clients` so the beta support matrix is machine-readable instead of only documented prose.
+- Canonical machine-readable support posture now lives in `docs/SUPPORT_MATRIX.json`.
 - Calling remains out of scope for the beta on every client.
 - Manual contact bootstrap on the hardened Android/web path is `@username` or opaque invite only.
 - Private discovery is still not fully implemented.
-- The current separate discovery service now ships a signed manifest contract, client-side continuity pinning for that manifest, optional signed attestation-verifier / enclave-measurement / attestation-document-hash fields plus a `/v1/attestation` evidence fetch and app-server-pinned freshness window, blind-evaluates local handle hashes with manifest-pinned `dleq_per_element_preview` proofs before clients finalize them into tokens, and uses short-lived discovery tickets with a small signed operation budget plus opaque bootstrap invite tokens instead of stable account IDs, but it remains development-only until it moves beyond `blind_evaluation_preview` / `unattested_development`.
+- The separate discovery service now ships the repo’s final attested service contract: signed manifest + signed nonce-bound `/v1/attestation`, client-side continuity pinning, manifest/app-server-pinned verifier + measurement + optional PCR contract + attestation document hash, manifest/app-server-pinned OPRF public key, `dleq_per_element_v1` blind evaluation proofs, short-lived purpose-scoped discovery tickets with signed use budgets, and opaque bootstrap invite tokens instead of stable account IDs.
+- The signed discovery manifest now also pins `attestation_challenge_mode = nonce_b64_required_v1` whenever attestation evidence is configured, so supported clients fail closed if the preview silently downgrades from nonce-bound attestation back to a static evidence fetch.
+- The final intended private-discovery direction is now explicitly an enclave-backed separate service, following Signal's CDS/CDSI model, rather than a permanently widened blind-directory preview.
+- The current preview now also pins `directory_backend = attested_enclave_directory_v1`, `host_enclave_protocol_version = 1`, and `host_release_id = attested-host-v1` in the signed discovery contract so the eventual enclave-backed replacement has a fixed compatibility boundary and clients can continuity-pin host-side rollouts separately from enclave release changes.
+- When attestation evidence is configured, supported clients now also require the signed `/v1/attestation` payload to repeat that same `host_release_id`, so host-side rollout drift is caught in attestation as well as in the manifest/capability contract.
+- The attestation payload now also carries `manifest_contract_sha256`, which binds the evidence to the stable signed discovery contract rather than only to a loose set of matching fields.
+- The blind-evaluation preview now also echoes `manifest_contract_sha256` on evaluate/upload/match responses, and supported clients reject response-side contract drift instead of trusting post-attestation service replies implicitly.
+- Discovery tickets are now also bound to the app-server-pinned manifest contract hash, so the separate discovery service can reject stale or cross-contract tickets before evaluate/upload/match runs.
+- Discovery tickets now also carry a per-ticket nonce, and the blind-evaluation preview echoes that nonce on evaluate/upload/match responses so supported clients can reject response-side ticket drift as well as contract drift.
 - The server now rejects `PQMSG_CONTACT_DISCOVERY_*` preview configuration outside `development` so this discovery preview cannot be accidentally promoted into pilot/production by config drift alone.
 - Audit handoff is now scriptable: `scripts/security/build_audit_readiness_bundle.py` produces a hashed audit-readiness bundle from the current docs, workflows, and policy validators.
 - That audit bundle can now be verified locally with `scripts/security/verify_audit_readiness_bundle.py`, and CI publishes the full bundle artifact plus an attested bundle manifest.
@@ -511,3 +520,4 @@ cargo run -p pqmsg-server --bin migrate_sqlite_to_postgres -- --sqlite-url "sqli
 | [AUDIT_READINESS](docs/AUDIT_READINESS.md) | Comprehensive audit readiness package |
 | [SECURITY](SECURITY.md) | Vulnerability disclosure policy |
 | [CONTRIBUTING](CONTRIBUTING.md) | Contributor guide and code conventions |
+

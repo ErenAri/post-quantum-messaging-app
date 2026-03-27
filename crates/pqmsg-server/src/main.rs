@@ -14,6 +14,7 @@ use pqmsg_server::{
     SqliteEncryptionRotation,
 };
 use sentry::ClientOptions;
+use std::collections::BTreeMap;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -58,9 +59,10 @@ struct PostgresEncryptionConfig {
     backups_encrypted: bool,
 }
 
-const CONTACT_DISCOVERY_DIRECTORY_BACKEND: &str = "simulated_enclave_preview";
+const CONTACT_DISCOVERY_DIRECTORY_BACKEND: &str = "attested_enclave_directory_v1";
 const CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION: u32 = 1;
-const CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID: &str = "simulated-preview";
+const CONTACT_DISCOVERY_HOST_RELEASE_ID: &str = "attested-host-v1";
+const CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID: &str = "attested-enclave-v1";
 
 fn parse_env_u32(name: &str, default: u32) -> anyhow::Result<u32> {
     match env::var(name) {
@@ -146,6 +148,53 @@ fn validate_sha256_hex_env(name: &str, value: &str) -> anyhow::Result<String> {
         anyhow::bail!("invalid {name}='{value}': expected 64-character SHA-256 hex");
     }
     Ok(normalized)
+}
+
+fn validate_sha384_hex_env(name: &str, value: &str) -> anyhow::Result<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.len() != 96 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("invalid {name}='{value}': expected 96-character SHA-384 hex");
+    }
+    Ok(normalized)
+}
+
+fn normalize_attestation_pcr_key(name: &str, key: &str) -> anyhow::Result<String> {
+    let normalized = key.trim().to_ascii_lowercase();
+    if !matches!(
+        normalized.as_str(),
+        "pcr0" | "pcr1" | "pcr2" | "pcr3" | "pcr4" | "pcr8"
+    ) {
+        anyhow::bail!(
+            "invalid {name}: unsupported PCR key '{key}' (expected one of pcr0, pcr1, pcr2, pcr3, pcr4, pcr8)"
+        );
+    }
+    Ok(normalized)
+}
+
+fn parse_optional_attestation_pcrs_sha384_env(
+    name: &str,
+) -> anyhow::Result<Option<BTreeMap<String, String>>> {
+    let raw = match parse_env_optional_nonempty(name) {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+    let parsed = serde_json::from_str::<BTreeMap<String, String>>(&raw)
+        .with_context(|| format!("invalid {name}: expected JSON object of PCR->SHA384 hex"))?;
+    if parsed.is_empty() {
+        anyhow::bail!("invalid {name}: expected at least one PCR entry");
+    }
+    let mut normalized = BTreeMap::new();
+    for (key, value) in parsed {
+        let normalized_key = normalize_attestation_pcr_key(name, &key)?;
+        let normalized_value = validate_sha384_hex_env(name, &value)?;
+        if normalized
+            .insert(normalized_key.clone(), normalized_value)
+            .is_some()
+        {
+            anyhow::bail!("invalid {name}: duplicate PCR key '{normalized_key}'");
+        }
+    }
+    Ok(Some(normalized))
 }
 
 fn load_sqlite_encryption_config(
@@ -287,28 +336,77 @@ struct DeploymentContract {
     postgres_encryption: PostgresEncryptionConfig,
 }
 
-fn enforce_contact_discovery_preview_contract(
-    deployment_mode: DeploymentMode,
+fn enforce_contact_discovery_service_contract(
     contact_discovery_service_origin: Option<&str>,
     contact_discovery_manifest_issuer_ed25519_pub: Option<&str>,
+    contact_discovery_expected_manifest_contract_sha256: Option<&str>,
+    contact_discovery_host_release_id: Option<&str>,
+    contact_discovery_enclave_release_id: Option<&str>,
     contact_discovery_attestation_verifier: Option<&str>,
     contact_discovery_expected_measurement_hex: Option<&str>,
+    contact_discovery_expected_pcrs_sha384: Option<&BTreeMap<String, String>>,
     contact_discovery_attestation_document_sha256: Option<&str>,
     contact_discovery_attestation_max_age_seconds: Option<u32>,
 ) -> anyhow::Result<()> {
-    if deployment_mode == DeploymentMode::Development {
-        return Ok(());
-    }
-    let preview_configured = contact_discovery_service_origin.is_some()
+    let any_configured = contact_discovery_service_origin.is_some()
         || contact_discovery_manifest_issuer_ed25519_pub.is_some()
+        || contact_discovery_expected_manifest_contract_sha256.is_some()
+        || contact_discovery_host_release_id.is_some()
+        || contact_discovery_enclave_release_id.is_some()
         || contact_discovery_attestation_verifier.is_some()
         || contact_discovery_expected_measurement_hex.is_some()
+        || contact_discovery_expected_pcrs_sha384.is_some()
         || contact_discovery_attestation_document_sha256.is_some()
         || contact_discovery_attestation_max_age_seconds.is_some();
-    if preview_configured {
+    if !any_configured {
+        return Ok(());
+    }
+
+    let missing_required = [
+        (
+            "PQMSG_CONTACT_DISCOVERY_SERVICE_ORIGIN",
+            contact_discovery_service_origin.is_none(),
+        ),
+        (
+            "PQMSG_CONTACT_DISCOVERY_MANIFEST_ED25519_PUB",
+            contact_discovery_manifest_issuer_ed25519_pub.is_none(),
+        ),
+        (
+            "PQMSG_CONTACT_DISCOVERY_EXPECTED_MANIFEST_CONTRACT_SHA256",
+            contact_discovery_expected_manifest_contract_sha256.is_none(),
+        ),
+        (
+            "PQMSG_CONTACT_DISCOVERY_HOST_RELEASE_ID",
+            contact_discovery_host_release_id.is_none(),
+        ),
+        (
+            "PQMSG_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID",
+            contact_discovery_enclave_release_id.is_none(),
+        ),
+        (
+            "PQMSG_CONTACT_DISCOVERY_ATTESTATION_VERIFIER",
+            contact_discovery_attestation_verifier.is_none(),
+        ),
+        (
+            "PQMSG_CONTACT_DISCOVERY_ENCLAVE_MEASUREMENT_HEX",
+            contact_discovery_expected_measurement_hex.is_none(),
+        ),
+        (
+            "PQMSG_CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_SHA256",
+            contact_discovery_attestation_document_sha256.is_none(),
+        ),
+        (
+            "PQMSG_CONTACT_DISCOVERY_ATTESTATION_MAX_AGE_SECONDS",
+            contact_discovery_attestation_max_age_seconds.is_none(),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(name, missing)| missing.then_some(name))
+    .collect::<Vec<_>>();
+    if !missing_required.is_empty() {
         anyhow::bail!(
-            "PQMSG_CONTACT_DISCOVERY_* preview configuration is development-only; unset it for '{}' deployments",
-            deployment_mode.as_str()
+            "private contact discovery requires the full attested service contract; missing: {}",
+            missing_required.join(", ")
         );
     }
     Ok(())
@@ -772,6 +870,17 @@ async fn main() -> anyhow::Result<()> {
         });
     let contact_discovery_manifest_issuer_ed25519_pub =
         parse_env_optional_nonempty("PQMSG_CONTACT_DISCOVERY_MANIFEST_ED25519_PUB");
+    let contact_discovery_expected_manifest_contract_sha256 =
+        parse_env_optional_nonempty("PQMSG_CONTACT_DISCOVERY_EXPECTED_MANIFEST_CONTRACT_SHA256")
+            .map(|value| {
+                validate_sha256_hex_env(
+                    "PQMSG_CONTACT_DISCOVERY_EXPECTED_MANIFEST_CONTRACT_SHA256",
+                    &value,
+                )
+            })
+            .transpose()?;
+    let contact_discovery_host_release_id =
+        parse_env_optional_nonempty("PQMSG_CONTACT_DISCOVERY_HOST_RELEASE_ID");
     let contact_discovery_enclave_release_id =
         parse_env_optional_nonempty("PQMSG_CONTACT_DISCOVERY_ENCLAVE_RELEASE_ID");
     let contact_discovery_attestation_verifier =
@@ -782,6 +891,9 @@ async fn main() -> anyhow::Result<()> {
                 validate_sha256_hex_env("PQMSG_CONTACT_DISCOVERY_ENCLAVE_MEASUREMENT_HEX", &value)
             })
             .transpose()?;
+    let contact_discovery_expected_pcrs_sha384 = parse_optional_attestation_pcrs_sha384_env(
+        "PQMSG_CONTACT_DISCOVERY_EXPECTED_PCRS_SHA384_JSON",
+    )?;
     let contact_discovery_attestation_document_sha256 =
         parse_env_optional_nonempty("PQMSG_CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_SHA256")
             .map(|value| {
@@ -811,12 +923,15 @@ async fn main() -> anyhow::Result<()> {
             "PQMSG_CONTACT_DISCOVERY_ATTESTATION_VERIFIER, PQMSG_CONTACT_DISCOVERY_ENCLAVE_MEASUREMENT_HEX, PQMSG_CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_SHA256, and PQMSG_CONTACT_DISCOVERY_ATTESTATION_MAX_AGE_SECONDS must be configured together"
         );
     }
-    enforce_contact_discovery_preview_contract(
-        deployment_mode,
+    enforce_contact_discovery_service_contract(
         contact_discovery_service_origin.as_deref(),
         contact_discovery_manifest_issuer_ed25519_pub.as_deref(),
+        contact_discovery_expected_manifest_contract_sha256.as_deref(),
+        contact_discovery_host_release_id.as_deref(),
+        contact_discovery_enclave_release_id.as_deref(),
         contact_discovery_attestation_verifier.as_deref(),
         contact_discovery_expected_measurement_hex.as_deref(),
+        contact_discovery_expected_pcrs_sha384.as_ref(),
         contact_discovery_attestation_document_sha256.as_deref(),
         contact_discovery_attestation_max_age_seconds,
     )?;
@@ -894,6 +1009,9 @@ async fn main() -> anyhow::Result<()> {
             .with_contact_discovery_manifest_issuer_public_key_b64(
                 contact_discovery_manifest_issuer_ed25519_pub,
             )
+            .with_contact_discovery_expected_manifest_contract_sha256(
+                contact_discovery_expected_manifest_contract_sha256,
+            )
             .with_contact_discovery_directory_backend(
                 contact_discovery_service_origin
                     .as_ref()
@@ -904,6 +1022,13 @@ async fn main() -> anyhow::Result<()> {
                     .as_ref()
                     .map(|_| CONTACT_DISCOVERY_HOST_ENCLAVE_PROTOCOL_VERSION),
             )
+            .with_contact_discovery_host_release_id(contact_discovery_service_origin.as_ref().map(
+                |_| {
+                    contact_discovery_host_release_id
+                        .clone()
+                        .unwrap_or_else(|| CONTACT_DISCOVERY_HOST_RELEASE_ID.to_string())
+                },
+            ))
             .with_contact_discovery_enclave_release_id(
                 contact_discovery_service_origin.as_ref().map(|_| {
                     contact_discovery_enclave_release_id
@@ -915,6 +1040,7 @@ async fn main() -> anyhow::Result<()> {
             .with_contact_discovery_expected_measurement_hex(
                 contact_discovery_expected_measurement_hex,
             )
+            .with_contact_discovery_expected_pcrs_sha384(contact_discovery_expected_pcrs_sha384)
             .with_contact_discovery_attestation_document_sha256(
                 contact_discovery_attestation_document_sha256,
             )
@@ -1046,7 +1172,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::{
-        enforce_contact_discovery_preview_contract, enforce_deployment_contract,
+        enforce_contact_discovery_service_contract, enforce_deployment_contract,
         DeploymentContract, PostgresEncryptionConfig, PostgresStorageEncryption,
     };
     use pqmsg_core::alg::runtime_crypto_profile;
@@ -1271,21 +1397,42 @@ mod tests {
     }
 
     #[test]
-    fn pilot_rejects_contact_discovery_preview_configuration() {
+    fn contact_discovery_service_contract_requires_full_attested_configuration() {
+        let error = enforce_contact_discovery_service_contract(
+            Some("https://cdsi.example"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("missing attested discovery contract should fail closed");
+        assert!(error
+            .to_string()
+            .contains("private contact discovery requires the full attested service contract"));
+    }
+
+    #[test]
+    fn pilot_accepts_fully_configured_private_contact_discovery() {
         let measurement = "ab".repeat(32);
+        let manifest_contract_hash = "ef".repeat(32);
         let attestation_hash = "cd".repeat(32);
-        let error = enforce_contact_discovery_preview_contract(
-            DeploymentMode::Pilot,
+        enforce_contact_discovery_service_contract(
             Some("https://cdsi.example"),
             Some("pubkey"),
-            Some("sgx-dcap-preview"),
+            Some(manifest_contract_hash.as_str()),
+            Some("attested-host-v1"),
+            Some("attested-enclave-v1"),
+            Some("aws-nitro-root-v1"),
             Some(measurement.as_str()),
+            None,
             Some(attestation_hash.as_str()),
             Some(900),
         )
-        .expect_err("pilot should reject preview discovery configuration");
-        assert!(error
-            .to_string()
-            .contains("PQMSG_CONTACT_DISCOVERY_* preview configuration is development-only"));
+        .expect("pilot should allow fully attested private discovery");
     }
 }

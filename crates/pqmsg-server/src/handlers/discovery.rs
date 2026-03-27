@@ -56,21 +56,11 @@ fn ensure_contact_discovery_supported(_state: &AppState) -> Result<(), AppError>
 }
 
 fn ensure_contact_discovery_ticket_supported(state: &AppState) -> Result<String, AppError> {
-    let configured_service_origin = state
-        .contact_discovery_service_origin
-        .as_ref()
-        .cloned()
-        .ok_or_else(|| {
-            AppError::forbidden(
-                "private contact discovery service is not configured; use manual contacts or invite links",
-            )
-        })?;
-    if !matches!(state.deployment_mode, crate::DeploymentMode::Development) {
-        return Err(AppError::forbidden(
-            "private contact discovery service is only available in development deployments; use manual contacts or invite links",
-        ));
-    }
-    Ok(configured_service_origin)
+    state.contact_discovery_service_origin().ok_or_else(|| {
+        AppError::forbidden(
+            "private contact discovery service is not configured; use manual contacts or invite links",
+        )
+    })
 }
 
 #[derive(Serialize)]
@@ -79,6 +69,7 @@ struct ContactDiscoveryTicketPayload {
     user_id: String,
     device_id: String,
     purpose: String,
+    manifest_contract_sha256: String,
     contact_invite_token: String,
     contact_invite_expires_at: String,
     issued_at: String,
@@ -115,17 +106,26 @@ pub(crate) async fn create_contact_discovery_ticket(
     .await?;
     let issued_at = Utc::now();
     let expires_at = issued_at + Duration::minutes(5);
+    let manifest_contract_sha256 = state
+        .contact_discovery_expected_manifest_contract_sha256()
+        .ok_or_else(|| {
+            AppError::forbidden(
+                "private contact discovery manifest contract hash is not configured; use manual contacts or invite links",
+            )
+        })?;
+    let nonce = uuid::Uuid::new_v4().to_string();
     let payload = ContactDiscoveryTicketPayload {
         v: 1,
         user_id: user_id.clone(),
         device_id: auth.device_id.clone(),
         purpose: purpose.as_str().to_string(),
+        manifest_contract_sha256,
         contact_invite_token: bootstrap_invite.invite_token,
         contact_invite_expires_at: bootstrap_invite.expires_at,
         issued_at: issued_at.to_rfc3339(),
         expires_at: expires_at.to_rfc3339(),
         max_uses: purpose.max_uses(),
-        nonce: uuid::Uuid::new_v4().to_string(),
+        nonce: nonce.clone(),
     };
     let payload_bytes = serde_json::to_vec(&payload)
         .map_err(|_| AppError::internal("serialize contact discovery ticket"))?;
@@ -140,6 +140,7 @@ pub(crate) async fn create_contact_discovery_ticket(
         device_id: auth.device_id,
         service_origin,
         ticket,
+        ticket_nonce: nonce,
         expires_at: expires_at.to_rfc3339(),
     }))
 }

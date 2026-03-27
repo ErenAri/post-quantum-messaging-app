@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
 
-PREVIEW_ENV_KEYS = (
-    "PQMSG_CONTACT_DISCOVERY_SERVICE_ORIGIN",
-    "PQMSG_CONTACT_DISCOVERY_MANIFEST_ED25519_PUB",
-    "PQMSG_CONTACT_DISCOVERY_ATTESTATION_VERIFIER",
-    "PQMSG_CONTACT_DISCOVERY_ENCLAVE_MEASUREMENT_HEX",
-    "PQMSG_CONTACT_DISCOVERY_ATTESTATION_DOCUMENT_SHA256",
-    "PQMSG_CONTACT_DISCOVERY_ATTESTATION_MAX_AGE_SECONDS",
-)
+DEPRECATED_PREVIEW_MARKERS = [
+    "blind_token_directory_preview",
+    "blind_evaluation_preview",
+    "simulated_enclave_preview",
+    "unattested_development",
+    "service_boundary_only",
+    "sgx_preview",
+    "sgx-dcap-preview",
+    "simulated-host-preview",
+    "simulated-preview",
+    "ristretto255-sha512-preview",
+    "dleq_per_element_preview",
+    "nonce_b64_required_preview",
+]
 
 
-def validate_manifest(path: Path) -> list[str]:
+def validate(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
     failures: list[str] = []
-    for key in PREVIEW_ENV_KEYS:
-        if re.search(rf"(?m)^\s*{re.escape(key)}\s*:", text):
-            failures.append(key)
+    for marker in DEPRECATED_PREVIEW_MARKERS:
+        if marker in text:
+            failures.append(f"contains deprecated preview marker {marker!r}")
     return failures
 
 
@@ -33,25 +38,23 @@ def main(argv: list[str]) -> int:
         )
         return 2
 
-    failures: list[str] = []
+    errors: list[str] = []
     for raw_path in argv[1:]:
         path = Path(raw_path)
         if not path.is_file():
-            failures.append(f"{path}: file not found")
+            errors.append(f"{path}: file not found")
             continue
-        blocked = validate_manifest(path)
-        if blocked:
-            failures.append(
-                f"{path}: preview-only contact discovery envs present: {', '.join(blocked)}"
-            )
+        failures = validate(path)
+        if failures:
+            errors.append(f"{path}: " + "; ".join(failures))
 
-    if failures:
-        for failure in failures:
-            print(failure, file=sys.stderr)
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
         return 1
 
     for raw_path in argv[1:]:
-        print(f"{raw_path}: no preview contact discovery envs found")
+        print(f"{raw_path}: no deprecated preview contact discovery markers found")
     return 0
 
 

@@ -30,6 +30,8 @@ python scripts/security/validate_audit_readiness_index.py
 
 The CI `audit-readiness-bundle` job now builds the full bundle, verifies it, uploads it as an artifact, and attests the bundle manifest provenance.
 
+The current beta support boundary is also frozen as a machine-readable artifact in `docs/SUPPORT_MATRIX.json`, with CI drift checks in `scripts/security/validate_support_matrix.py`.
+
 ---
 
 ## 1. Repository Layout
@@ -65,6 +67,7 @@ The CI `audit-readiness-bundle` job now builds the full bundle, verifies it, upl
 | TLS Rotation | `docs/TLS_ROTATION.md` | Certificate lifecycle, pin rotation |
 | Observability | `docs/OBSERVABILITY.md` | Metrics, alerting, logging architecture |
 | API Reference | `docs/API.md` | HTTP API, auth headers, replay controls |
+| Support Matrix | `docs/SUPPORT_MATRIX.json` | Canonical beta support boundary and holdbacks |
 | Deployment Guide | `docs/DEPLOYMENT.md` | Container build, K8s, Helm, autoscaling |
 
 ---

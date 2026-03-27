@@ -203,6 +203,7 @@ export type ContactDiscoveryTicketResponse = {
   device_id: string;
   service_origin: string;
   ticket: string;
+  ticket_nonce: string;
   expires_at: string;
 };
 
@@ -216,6 +217,7 @@ export type ContactDiscoveryManifestResponse = {
   attestation_mode: string;
   attestation_verifier?: string | null;
   enclave_measurement_hex?: string | null;
+  attestation_pcrs_sha384?: Record<string, string> | null;
   attestation_document_format?: string | null;
   attestation_document_sha256?: string | null;
   attestation_challenge_mode?: string | null;
@@ -226,6 +228,7 @@ export type ContactDiscoveryManifestResponse = {
   privacy_mode: string;
   directory_backend: string;
   host_enclave_protocol_version: number;
+  host_release_id: string;
   enclave_release_id: string;
   match_result_format: string;
   oprf_suite: string;
@@ -241,9 +244,12 @@ export type ContactDiscoveryAttestationResponse = {
   attestation_mode: string;
   attestation_verifier: string;
   enclave_measurement_hex: string;
+  attested_pcrs_sha384?: Record<string, string> | null;
   directory_backend: string;
   host_enclave_protocol_version: number;
+  host_release_id: string;
   enclave_release_id: string;
+  manifest_contract_sha256: string;
   attested_oprf_public_key_ristretto255: string;
   document_format: string;
   document_base64: string;
@@ -755,6 +761,8 @@ export type PrivateDiscoveryEvaluateRequest = {
 export type PrivateDiscoveryEvaluateResponse = {
   user_id: string;
   device_id: string;
+  ticket_nonce: string;
+  manifest_contract_sha256: string;
   evaluation_proof_mode: string;
   evaluated_elements_base64: string[];
   dleq_proofs: Array<{
@@ -775,6 +783,8 @@ export type PrivateDiscoveryHandlesUploadRequest = {
 export type PrivateDiscoveryHandlesUploadResponse = {
   user_id: string;
   device_id: string;
+  ticket_nonce: string;
+  manifest_contract_sha256: string;
   uploaded_phone_tokens: number;
   uploaded_email_tokens: number;
   updated_at: string;
@@ -793,6 +803,8 @@ export type PrivateDiscoveryMatchItem = {
 
 export type PrivateDiscoveryMatchResponse = {
   user_id: string;
+  ticket_nonce: string;
+  manifest_contract_sha256: string;
   matches: PrivateDiscoveryMatchItem[];
   checked_at: string;
 };
@@ -869,9 +881,12 @@ export type ServerCapabilitiesResponse = {
   contact_discovery_manifest_issuer_ed25519_pub: string | null;
   contact_discovery_directory_backend: string | null;
   contact_discovery_host_enclave_protocol_version: number | null;
+  contact_discovery_host_release_id: string | null;
   contact_discovery_enclave_release_id: string | null;
+  contact_discovery_expected_manifest_contract_sha256?: string | null;
   contact_discovery_attestation_verifier: string | null;
   contact_discovery_expected_measurement_hex: string | null;
+  contact_discovery_expected_pcrs_sha384: Record<string, string> | null;
   contact_discovery_attestation_document_sha256: string | null;
   contact_discovery_attestation_max_age_seconds: number | null;
   presence_supported: boolean;

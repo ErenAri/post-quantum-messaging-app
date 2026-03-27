@@ -673,7 +673,27 @@ Response:
 
 `POST /v1/users/{user_id}/contact-discovery/ticket`
 
-Authenticated request with no body. This does not enable raw-hash discovery on the app server. Instead, when `contact_discovery_mode` is `private_service`, it mints a short-lived opaque ticket for a separate private discovery service. The signed ticket now also carries a dedicated opaque bootstrap invite token for discovery matches and a small signed operation budget, so the discovery service does not need to return a stable `user_id` directly and can reject replayed ticket reuse within the TTL.
+Authenticated request with a required purpose body. This does not enable raw-hash discovery on the app server. Instead, when `contact_discovery_mode` is `private_service`, it mints a short-lived opaque ticket for a separate private discovery service. The signed ticket now also carries the app-server-pinned `manifest_contract_sha256`, a dedicated opaque bootstrap invite token for discovery matches, a per-ticket nonce, and a small signed operation budget, so the discovery service can reject stale/cross-contract tickets and does not need to return a stable `user_id` directly.
+
+Request:
+
+```json
+{
+  "purpose": "match"
+}
+```
+
+Allowed purposes:
+
+- `upload`: valid for `/v1/discovery/evaluate` and `/v1/discovery/handles`
+- `match`: valid for `/v1/discovery/evaluate` and `/v1/discovery/match`
+
+The signed ticket use budget is also purpose-scoped in the current preview:
+
+- `upload`: `max_uses = 3`
+- `match`: `max_uses = 2`
+
+The separate discovery service now purges token rows once their bound bootstrap invite expires instead of keeping them indefinitely and merely filtering them during match.
 
 Response:
 
@@ -683,31 +703,37 @@ Response:
   "device_id": "alice-dev-1",
   "service_origin": "https://cdsi.example",
   "ticket": "base64(json-payload).base64(ed25519-signature)",
+  "ticket_nonce": "uuid-v4 string echoed from the signed payload",
   "expires_at": "2026-03-26T12:05:00Z"
 }
 ```
 
 `GET {contact_discovery_service_origin}/v1/manifest`
 
-Separate discovery-service manifest. Current development-only contract:
+Separate discovery-service manifest. Final attested service contract:
 
 ```json
 {
   "service": "pqmsg-discovery",
   "protocol_version": 1,
-  "attestation_mode": "unattested_development",
+  "attestation_mode": "attested_enclave_v1",
   "attestation_verifier": null,
   "enclave_measurement_hex": null,
+  "attestation_pcrs_sha384": null,
   "attestation_document_format": null,
   "attestation_document_sha256": null,
+  "attestation_challenge_mode": null,
   "ticket_format": "base64(json-payload).base64(ed25519-signature)",
   "ticket_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
   "ticket_max_ttl_seconds": 300,
-  "lookup_protocol": "blind_token_directory_preview",
-  "privacy_mode": "blind_evaluation_preview",
+  "lookup_protocol": "attested_enclave_voprf_directory_v1",
+  "privacy_mode": "enclave_backed_private_discovery_v1",
+  "directory_backend": "attested_enclave_directory_v1",
+  "host_enclave_protocol_version": 1,
+  "enclave_release_id": "attested-enclave-v1",
   "match_result_format": "contact_invite_token",
-  "oprf_suite": "ristretto255-sha512-preview",
-  "evaluation_proof_mode": "dleq_per_element_preview",
+  "oprf_suite": "ristretto255-sha512-v1",
+  "evaluation_proof_mode": "dleq_per_element_v1",
   "oprf_public_key_ristretto255": "base64(32-byte compressed ristretto point)",
   "signed_at": "2026-03-26T12:00:00Z",
   "expires_at": "2026-03-26T13:00:00Z",
@@ -720,29 +746,48 @@ The current client contract verifies both:
 
 - `ticket_issuer_ed25519_pub` against the app-server capabilities document
 - `manifest_issuer_ed25519_pub` / `manifest_signature_ed25519` against the signed manifest payload
-- if the app server advertises them, `attestation_verifier`, `enclave_measurement_hex`, `attestation_document_sha256`, and `contact_discovery_attestation_max_age_seconds` must also match the expected discovery-service contract
+- `contact_discovery_expected_manifest_contract_sha256` from app-server capabilities must match the locally computed stable manifest contract hash
+- if the app server advertises them, `attestation_verifier`, `enclave_measurement_hex`, `attestation_pcrs_sha384`, `attestation_document_sha256`, and `contact_discovery_attestation_max_age_seconds` must also match the expected discovery-service contract
+- if the manifest advertises attestation evidence, it must also advertise `attestation_challenge_mode = nonce_b64_required_v1`
 - `match_result_format = contact_invite_token`
-- `oprf_suite = ristretto255-sha512-preview`
-- `evaluation_proof_mode = dleq_per_element_preview`
-- `lookup_protocol = blind_token_directory_preview` / `privacy_mode = blind_evaluation_preview`
+- `directory_backend = attested_enclave_directory_v1`
+- `host_enclave_protocol_version = 1`
+- `host_release_id = attested-host-v1`
+- `enclave_release_id = attested-enclave-v1`
+- `manifest_contract_sha256 = sha256(stable signed manifest contract fields)`
+- `oprf_suite = ristretto255-sha512-v1`
+- `evaluation_proof_mode = dleq_per_element_v1`
+- `lookup_protocol = attested_enclave_voprf_directory_v1` / `privacy_mode = enclave_backed_private_discovery_v1`
 
 If the signed manifest carries `attestation_document_sha256`, supported clients also fetch:
 
-`GET {contact_discovery_service_origin}/v1/attestation`
+`GET {contact_discovery_service_origin}/v1/attestation?nonce_b64={base64(16..=64 random bytes)}`
 
 ```json
 {
-  "attestation_mode": "sgx_preview",
-  "attestation_verifier": "sgx-dcap-preview",
+  "attestation_mode": "attested_enclave_v1",
+  "attestation_verifier": "aws-nitro-root-v1",
   "enclave_measurement_hex": "64-hex measurement",
+  "attested_pcrs_sha384": {
+    "pcr0": "96-hex sha384",
+    "pcr8": "96-hex sha384"
+  },
+  "directory_backend": "attested_enclave_directory_v1",
+  "host_enclave_protocol_version": 1,
+  "host_release_id": "attested-host-v1",
+  "enclave_release_id": "attested-enclave-v1",
+  "manifest_contract_sha256": "64-hex sha256 over the stable manifest contract",
+  "attested_oprf_public_key_ristretto255": "base64(32-byte ristretto point)",
   "document_format": "opaque_b64_v1",
   "document_base64": "base64(enclave attestation document bytes)",
   "document_sha256": "64-hex sha256",
-  "published_at": "2026-03-26T12:00:00Z"
+  "published_at": "2026-03-26T12:00:00Z",
+  "challenge_nonce_base64": "base64(16..=64 random bytes)",
+  "attestation_signature_ed25519": "base64(64-byte Ed25519 signature over the attestation payload)"
 }
 ```
 
-Clients verify that the returned attestation document hash matches the signed manifest and the app-server capabilities contract before using the discovery service, and reject documents older than `contact_discovery_attestation_max_age_seconds`.
+Clients verify that the returned attestation document hash matches the signed manifest and the app-server capabilities contract, that `host_release_id` matches the manifest-pinned host release, that `manifest_contract_sha256` matches the stable contract hash of the signed manifest, that `attested_oprf_public_key_ristretto255` matches the manifest-pinned blind-evaluation key, that any advertised `attested_pcrs_sha384` map matches the manifest/app-server-pinned PCR set, that `challenge_nonce_base64` matches the per-request client nonce, that `attestation_signature_ed25519` verifies under `manifest_issuer_ed25519_pub`, and reject documents older than `contact_discovery_attestation_max_age_seconds`.
 
 `POST {contact_discovery_service_origin}/v1/discovery/evaluate`
 
@@ -761,7 +806,9 @@ Response:
 {
   "user_id": "alice",
   "device_id": "alice-device-1",
-  "evaluation_proof_mode": "dleq_per_element_preview",
+  "ticket_nonce": "uuid-v4 string echoed from the validated ticket",
+  "manifest_contract_sha256": "64-hex sha256 over the stable signed manifest contract",
+  "evaluation_proof_mode": "dleq_per_element_v1",
   "evaluated_elements_base64": ["base64(32-byte compressed ristretto point)"],
   "dleq_proofs": [
     {
@@ -776,7 +823,10 @@ Response:
 ```
 
 Supported Android and web clients now verify `dleq_proofs` against the manifest-pinned
-`oprf_public_key_ristretto255` before they locally finalize evaluated elements into discovery tokens.
+`oprf_public_key_ristretto255` before they locally finalize evaluated elements into discovery tokens,
+and they reject the response if `manifest_contract_sha256` does not match the already-verified
+signed discovery manifest contract or if `ticket_nonce` does not match the exact discovery ticket
+they just issued.
 
 `POST {contact_discovery_service_origin}/v1/discovery/handles`
 
@@ -796,6 +846,8 @@ Response:
 {
   "user_id": "alice",
   "device_id": "alice-device-1",
+  "ticket_nonce": "uuid-v4 string echoed from the validated ticket",
+  "manifest_contract_sha256": "64-hex sha256 over the stable signed manifest contract",
   "uploaded_phone_tokens": 1,
   "uploaded_email_tokens": 1,
   "updated_at": "2026-03-26T12:03:00Z"
@@ -818,6 +870,8 @@ Response:
 ```json
 {
   "user_id": "alice",
+  "ticket_nonce": "uuid-v4 string echoed from the validated ticket",
+  "manifest_contract_sha256": "64-hex sha256 over the stable signed manifest contract",
   "matches": [
     {
       "token_sha256": "hex...",
@@ -829,7 +883,12 @@ Response:
 }
 ```
 
-This current separate-service lookup mode is intentionally limited to `privacy_mode = "blind_evaluation_preview"` and is not a production claim of full private contact discovery. The service no longer returns stable account IDs directly; clients resolve the returned opaque bootstrap invite through `/v1/contact-invites/{invite_token}` or `/v1/contact-invites/{invite_token}/bundle` only when the user chooses to continue.
+Supported Android and web clients reject `handles` and `match` responses if
+`manifest_contract_sha256` drifts from the signed manifest contract they already verified before
+issuing the request, or if `ticket_nonce` does not match the exact discovery ticket used for that
+request.
+
+This current separate-service lookup mode is intentionally limited to `privacy_mode = "enclave_backed_private_discovery_v1"` and is not a production claim of full private contact discovery. The service no longer returns stable account IDs directly; clients resolve the returned opaque bootstrap invite through `/v1/contact-invites/{invite_token}` or `/v1/contact-invites/{invite_token}/bundle` only when the user chooses to continue.
 
 `GET /v1/contact-invites/{invite_token}`
 
@@ -1678,6 +1737,7 @@ Response:
   "contact_discovery_manifest_issuer_ed25519_pub": null,
   "contact_discovery_attestation_verifier": null,
   "contact_discovery_expected_measurement_hex": null,
+  "contact_discovery_expected_pcrs_sha384": null,
   "contact_discovery_attestation_document_sha256": null,
   "contact_discovery_attestation_max_age_seconds": null,
   "contact_discovery_ticket_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
@@ -1733,6 +1793,7 @@ Response:
   "contact_discovery_manifest_issuer_ed25519_pub": null,
   "contact_discovery_attestation_verifier": null,
   "contact_discovery_expected_measurement_hex": null,
+  "contact_discovery_expected_pcrs_sha384": null,
   "contact_discovery_attestation_document_sha256": null,
   "contact_discovery_attestation_max_age_seconds": null,
   "contact_discovery_ticket_issuer_ed25519_pub": "base64(32-byte Ed25519 public key)",
@@ -1753,18 +1814,22 @@ Response:
 
 Important capability flags:
 
-- `contact_discovery_supported`: whether a separate private discovery service is available on the current deployment. Hardened pilot/production deployments report `false`.
+- `contact_discovery_supported`: whether a separate private discovery service is available on the current deployment.
 - `contact_discovery_mode`: `manual_only` or `private_service`.
 - `contact_discovery_ticket_supported`: whether the server can mint short-lived tickets for a dedicated private discovery service.
 - `contact_discovery_manifest_issuer_ed25519_pub`: Ed25519 public key clients use to verify the separate discovery service manifest.
-- `contact_discovery_attestation_verifier`: optional attestation verifier identifier clients must match against the signed discovery manifest when the deployment pins an attested service contract.
-- `contact_discovery_expected_measurement_hex`: optional 64-hex enclave/build measurement clients must match against the signed discovery manifest when the deployment pins an attested service contract.
-- `contact_discovery_attestation_document_sha256`: optional 64-hex SHA-256 digest of the discovery service attestation document. When present, supported clients fetch `/v1/attestation`, verify the returned document hash, and continuity-pin it alongside the rest of the discovery-service contract.
-- `contact_discovery_attestation_max_age_seconds`: optional positive freshness window for `/v1/attestation`. When present, supported clients reject stale attestation documents even if the hash still matches.
+- `contact_discovery_directory_backend`: expected private-discovery backend contract for the separate service.
+- `contact_discovery_host_enclave_protocol_version`: expected host/enclave protocol version for the separate discovery service.
+- `contact_discovery_host_release_id`: expected host-side release identifier for the separate discovery service. Supported clients continuity-pin it alongside the rest of the discovery contract so silent host rollbacks/upgrades fail closed.
+- `contact_discovery_attestation_verifier`: attestation verifier identifier clients must match against the signed discovery manifest and attestation payload.
+- `contact_discovery_expected_measurement_hex`: 64-hex enclave/build measurement clients must match against the signed discovery manifest and attestation payload.
+- `contact_discovery_expected_pcrs_sha384`: optional JSON object of pinned Nitro-style PCR values (`pcr0`, `pcr1`, `pcr2`, `pcr3`, `pcr4`, `pcr8`) that clients must match against the signed discovery manifest and `/v1/attestation` payload.
+- `contact_discovery_attestation_document_sha256`: 64-hex SHA-256 digest of the discovery service attestation document. Supported clients fetch `/v1/attestation`, verify the returned document hash, and continuity-pin it alongside the rest of the discovery-service contract.
+- `contact_discovery_attestation_max_age_seconds`: positive freshness window for `/v1/attestation`. Supported clients reject stale attestation documents even if the hash still matches.
 - `contact_discovery_ticket_issuer_ed25519_pub`: Ed25519 public key the separate discovery service must trust for ticket verification.
-- `private_service` discovery is currently development-only. Because `pqmsg-discovery` still advertises `lookup_protocol = "blind_token_directory_preview"` and `privacy_mode = "blind_evaluation_preview"`, only development deployments advertise it; pilot/production fall back to `manual_only`, and hardened server boot now rejects `PQMSG_CONTACT_DISCOVERY_*` preview configuration entirely outside development.
-- Development clients now also require a signed discovery manifest whose issuer matches `contact_discovery_manifest_issuer_ed25519_pub`.
-- Supported Android/web clients keep a local continuity checkpoint for the discovery service contract and fail closed if the signed manifest changes `service_origin`, issuer keys, protocol fields, attestation mode, attestation verifier, enclave measurement, attestation document hash/format, or the OPRF public key on the same device.
+- `private_service` discovery now requires the full attested enclave-style contract. The app server will only advertise it when the separate service origin, signed-manifest issuer, manifest contract hash, host/enclave release ids, attestation verifier, enclave measurement, attestation document hash, and attestation freshness window are all configured together.
+- Supported clients require a signed discovery manifest whose issuer matches `contact_discovery_manifest_issuer_ed25519_pub`.
+- Supported Android/web clients keep a local continuity checkpoint for the discovery service contract and fail closed if the signed manifest changes `service_origin`, issuer keys, protocol fields, `host_release_id`, attestation mode, attestation verifier, enclave measurement, attestation PCR set, attestation document hash/format, or the OPRF public key on the same device.
 - `group_messaging_supported`: legacy clear-roster group API. Hardened deployments report `false`.
 - `private_group_state_supported`: opaque private-group state storage is available.
 - `private_group_messaging_supported`: the newer opaque private-group create/join/send flows are available.
@@ -1774,6 +1839,7 @@ Important capability flags:
 - `supported_beta_clients`: machine-readable supported client list for the current server profile. Default hardened posture is `["android"]`; `web` is added only when the server opts into the hardened web path.
 - `authenticated_direct_messaging_supported`: legacy authenticated DM compatibility surface. Hardened deployments report `false`.
 - `web_client_policy`: `demo_only` blocks outbound web messaging; `interop_candidate` permits the hardened web direct/private-group path.
+- `docs/SUPPORT_MATRIX.json`: canonical repo artifact for the current beta support posture; capability examples and prose docs should stay aligned with it.
 
 ### 4.14 Prometheus Metrics
 
@@ -2191,3 +2257,4 @@ Response:
   "subscribed": true
 }
 ```
+

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use sqlx::AnyPool;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -328,9 +328,12 @@ pub struct AppState {
     contact_discovery_manifest_issuer_ed25519_pub: Option<String>,
     contact_discovery_directory_backend: Option<String>,
     contact_discovery_host_enclave_protocol_version: Option<u32>,
+    contact_discovery_host_release_id: Option<String>,
     contact_discovery_enclave_release_id: Option<String>,
+    contact_discovery_expected_manifest_contract_sha256: Option<String>,
     contact_discovery_attestation_verifier: Option<String>,
     contact_discovery_expected_measurement_hex: Option<String>,
+    contact_discovery_expected_pcrs_sha384: Option<BTreeMap<String, String>>,
     contact_discovery_attestation_document_sha256: Option<String>,
     contact_discovery_attestation_max_age_seconds: Option<u32>,
     web_client_policy: String,
@@ -369,9 +372,12 @@ impl AppState {
             contact_discovery_manifest_issuer_ed25519_pub: None,
             contact_discovery_directory_backend: None,
             contact_discovery_host_enclave_protocol_version: None,
+            contact_discovery_host_release_id: None,
             contact_discovery_enclave_release_id: None,
+            contact_discovery_expected_manifest_contract_sha256: None,
             contact_discovery_attestation_verifier: None,
             contact_discovery_expected_measurement_hex: None,
+            contact_discovery_expected_pcrs_sha384: None,
             contact_discovery_attestation_document_sha256: None,
             contact_discovery_attestation_max_age_seconds: None,
             web_client_policy: DEFAULT_WEB_CLIENT_POLICY.to_string(),
@@ -414,9 +420,12 @@ impl AppState {
             contact_discovery_manifest_issuer_ed25519_pub: None,
             contact_discovery_directory_backend: None,
             contact_discovery_host_enclave_protocol_version: None,
+            contact_discovery_host_release_id: None,
             contact_discovery_enclave_release_id: None,
+            contact_discovery_expected_manifest_contract_sha256: None,
             contact_discovery_attestation_verifier: None,
             contact_discovery_expected_measurement_hex: None,
+            contact_discovery_expected_pcrs_sha384: None,
             contact_discovery_attestation_document_sha256: None,
             contact_discovery_attestation_max_age_seconds: None,
             web_client_policy: DEFAULT_WEB_CLIENT_POLICY.to_string(),
@@ -528,9 +537,7 @@ impl AppState {
 
     pub fn contact_discovery_directory_backend(&self) -> Option<String> {
         if self.contact_discovery_private_service_allowed() {
-            self.contact_discovery_directory_backend
-                .clone()
-                .or_else(|| Some("simulated_enclave_preview".to_string()))
+            self.contact_discovery_directory_backend.clone()
         } else {
             None
         }
@@ -539,7 +546,14 @@ impl AppState {
     pub fn contact_discovery_host_enclave_protocol_version(&self) -> Option<u32> {
         if self.contact_discovery_private_service_allowed() {
             self.contact_discovery_host_enclave_protocol_version
-                .or(Some(1))
+        } else {
+            None
+        }
+    }
+
+    pub fn contact_discovery_host_release_id(&self) -> Option<String> {
+        if self.contact_discovery_private_service_allowed() {
+            self.contact_discovery_host_release_id.clone()
         } else {
             None
         }
@@ -547,9 +561,16 @@ impl AppState {
 
     pub fn contact_discovery_enclave_release_id(&self) -> Option<String> {
         if self.contact_discovery_private_service_allowed() {
-            self.contact_discovery_enclave_release_id
+            self.contact_discovery_enclave_release_id.clone()
+        } else {
+            None
+        }
+    }
+
+    pub fn contact_discovery_expected_manifest_contract_sha256(&self) -> Option<String> {
+        if self.contact_discovery_private_service_allowed() {
+            self.contact_discovery_expected_manifest_contract_sha256
                 .clone()
-                .or(Some("simulated-preview".to_string()))
         } else {
             None
         }
@@ -566,6 +587,14 @@ impl AppState {
     pub fn contact_discovery_expected_measurement_hex(&self) -> Option<String> {
         if self.contact_discovery_private_service_allowed() {
             self.contact_discovery_expected_measurement_hex.clone()
+        } else {
+            None
+        }
+    }
+
+    pub fn contact_discovery_expected_pcrs_sha384(&self) -> Option<BTreeMap<String, String>> {
+        if self.contact_discovery_private_service_allowed() {
+            self.contact_discovery_expected_pcrs_sha384.clone()
         } else {
             None
         }
@@ -590,7 +619,19 @@ impl AppState {
     pub fn contact_discovery_private_service_allowed(&self) -> bool {
         self.contact_discovery_service_origin.is_some()
             && self.contact_discovery_manifest_issuer_ed25519_pub.is_some()
-            && matches!(self.deployment_mode, DeploymentMode::Development)
+            && self.contact_discovery_directory_backend.is_some()
+            && self
+                .contact_discovery_host_enclave_protocol_version
+                .is_some()
+            && self.contact_discovery_host_release_id.is_some()
+            && self.contact_discovery_enclave_release_id.is_some()
+            && self
+                .contact_discovery_expected_manifest_contract_sha256
+                .is_some()
+            && self.contact_discovery_attestation_verifier.is_some()
+            && self.contact_discovery_expected_measurement_hex.is_some()
+            && self.contact_discovery_attestation_document_sha256.is_some()
+            && self.contact_discovery_attestation_max_age_seconds.is_some()
     }
 
     pub fn presence_supported(&self) -> bool {
@@ -740,11 +781,28 @@ impl AppState {
         self
     }
 
+    pub fn with_contact_discovery_host_release_id(
+        mut self,
+        host_release_id: Option<String>,
+    ) -> Self {
+        self.contact_discovery_host_release_id = host_release_id;
+        self
+    }
+
     pub fn with_contact_discovery_enclave_release_id(
         mut self,
         enclave_release_id: Option<String>,
     ) -> Self {
         self.contact_discovery_enclave_release_id = enclave_release_id;
+        self
+    }
+
+    pub fn with_contact_discovery_expected_manifest_contract_sha256(
+        mut self,
+        expected_manifest_contract_sha256: Option<String>,
+    ) -> Self {
+        self.contact_discovery_expected_manifest_contract_sha256 =
+            expected_manifest_contract_sha256;
         self
     }
 
@@ -761,6 +819,14 @@ impl AppState {
         expected_measurement_hex: Option<String>,
     ) -> Self {
         self.contact_discovery_expected_measurement_hex = expected_measurement_hex;
+        self
+    }
+
+    pub fn with_contact_discovery_expected_pcrs_sha384(
+        mut self,
+        expected_pcrs_sha384: Option<BTreeMap<String, String>>,
+    ) -> Self {
+        self.contact_discovery_expected_pcrs_sha384 = expected_pcrs_sha384;
         self
     }
 

@@ -75,6 +75,7 @@ import {
   identityFingerprint,
   finalizeContactDiscoveryTokens,
   prepareContactDiscoveryBlindRequest,
+  contactDiscoveryManifestContractSha256,
   verifyContactDiscoveryManifest,
   verifyContactDiscoveryAttestationDocument,
   verifyContactDiscoveryEvaluationProofs,
@@ -168,23 +169,25 @@ describe("verifyContactDiscoveryManifest", () => {
     const payload = {
       service: "pqmsg-discovery",
       protocol_version: 1,
-      attestation_mode: "unattested_development",
-      attestation_verifier: null,
-      enclave_measurement_hex: null,
-      attestation_document_format: null,
-      attestation_document_sha256: null,
-      attestation_challenge_mode: null,
+      attestation_mode: "attested_enclave_v1",
+      attestation_verifier: "aws-nitro-root-v1",
+      enclave_measurement_hex: "aa".repeat(32),
+      attestation_pcrs_sha384: null,
+      attestation_document_format: "opaque_b64_v1",
+      attestation_document_sha256: "cd".repeat(32),
+      attestation_challenge_mode: "nonce_b64_required_v1",
       ticket_format: "base64(json-payload).base64(ed25519-signature)",
       ticket_issuer_ed25519_pub: "ticket-issuer-ed25519-pub",
       ticket_max_ttl_seconds: 300,
-      lookup_protocol: "blind_token_directory_preview",
-      privacy_mode: "blind_evaluation_preview",
-      directory_backend: "simulated_enclave_preview",
+      lookup_protocol: "attested_enclave_voprf_directory_v1",
+      privacy_mode: "enclave_backed_private_discovery_v1",
+      directory_backend: "attested_enclave_directory_v1",
       host_enclave_protocol_version: 1,
-      enclave_release_id: "simulated-preview",
+      host_release_id: "attested-host-v1",
+      enclave_release_id: "attested-enclave-v1",
       match_result_format: "contact_invite_token",
-      oprf_suite: "ristretto255-sha512-preview",
-      evaluation_proof_mode: "dleq_per_element_preview",
+      oprf_suite: "ristretto255-sha512-v1",
+      evaluation_proof_mode: "dleq_per_element_v1",
       oprf_public_key_ristretto255: bytesToBase64(ristretto255.Point.BASE.toBytes()),
       signed_at: new Date(Date.now() - 60_000).toISOString(),
       expires_at: new Date(Date.now() + 60_000).toISOString(),
@@ -201,12 +204,15 @@ describe("verifyContactDiscoveryManifest", () => {
 
   function signedAttestationResponse(overrides: Partial<Parameters<typeof verifyContactDiscoveryAttestationDocument>[0]> = {}) {
     const payload = {
-      attestation_mode: "sgx_preview",
-      attestation_verifier: "sgx-dcap-preview",
+      attestation_mode: "attested_enclave_v1",
+      attestation_verifier: "aws-nitro-root-v1",
       enclave_measurement_hex: "aa".repeat(32),
-      directory_backend: "simulated_enclave_preview",
+      attested_pcrs_sha384: null,
+      directory_backend: "attested_enclave_directory_v1",
       host_enclave_protocol_version: 1,
-      enclave_release_id: "simulated-preview",
+      host_release_id: "attested-host-v1",
+      enclave_release_id: "attested-enclave-v1",
+      manifest_contract_sha256: "",
       attested_oprf_public_key_ristretto255: bytesToBase64(ristretto255.Point.BASE.toBytes()),
       document_format: "opaque_b64_v1",
       document_base64: bytesToBase64(utf8ToBytes("{\"tee\":\"sgx\",\"svn\":1}")),
@@ -219,6 +225,8 @@ describe("verifyContactDiscoveryManifest", () => {
       .map((value) => value.toString(16).padStart(2, "0"))
       .join("");
     payload.document_sha256 = overrides.document_sha256 ?? documentSha256;
+    payload.manifest_contract_sha256 =
+      overrides.manifest_contract_sha256 ?? contactDiscoveryManifestContractSha256(signedManifest());
     const signature = bytesToBase64(
       ed25519.sign(utf8ToBytes(JSON.stringify(payload)), attestationSigningSecret),
     );
@@ -268,12 +276,15 @@ describe("verifyContactDiscoveryManifest", () => {
           document_base64: bytesToBase64(documentBytes),
           document_sha256: documentSha256,
         }),
-        "sgx_preview",
-        "sgx-dcap-preview",
+        "attested_enclave_v1",
+        "aws-nitro-root-v1",
         "aa".repeat(32),
+        null,
         attestationIssuerPub,
         attestationChallengeNonce,
-        "simulated-preview",
+        contactDiscoveryManifestContractSha256(signedManifest()),
+        "attested-host-v1",
+        "attested-enclave-v1",
         bytesToBase64(ristretto255.Point.BASE.toBytes()),
         documentSha256,
         900,
@@ -293,12 +304,15 @@ describe("verifyContactDiscoveryManifest", () => {
           document_sha256: documentSha256,
           published_at: new Date(Date.now() - 10_000).toISOString(),
         }),
-        "sgx_preview",
-        "sgx-dcap-preview",
+        "attested_enclave_v1",
+        "aws-nitro-root-v1",
         "aa".repeat(32),
+        null,
         attestationIssuerPub,
         attestationChallengeNonce,
-        "simulated-preview",
+        contactDiscoveryManifestContractSha256(signedManifest()),
+        "attested-host-v1",
+        "attested-enclave-v1",
         bytesToBase64(ristretto255.Point.BASE.toBytes()),
         documentSha256,
         1,
@@ -318,12 +332,15 @@ describe("verifyContactDiscoveryManifest", () => {
           document_base64: bytesToBase64(documentBytes),
           document_sha256: documentSha256,
         }),
-        "sgx_preview",
-        "sgx-dcap-preview",
+        "attested_enclave_v1",
+        "aws-nitro-root-v1",
         "aa".repeat(32),
+        null,
         attestationIssuerPub,
         attestationChallengeNonce,
-        "simulated-preview",
+        contactDiscoveryManifestContractSha256(signedManifest()),
+        "attested-host-v1",
+        "attested-enclave-v1",
         bytesToBase64(ristretto255.Point.BASE.toBytes()),
         documentSha256,
         900,
@@ -331,22 +348,92 @@ describe("verifyContactDiscoveryManifest", () => {
     }).toThrow(/OPRF public key mismatch/i);
   });
 
+  it("rejects a contact discovery attestation PCR set mismatch", () => {
+    const response = signedAttestationResponse({
+      attested_pcrs_sha384: { pcr0: "ef".repeat(48) },
+    });
+    expect(() => {
+      verifyContactDiscoveryAttestationDocument(
+        response,
+        "attested_enclave_v1",
+        "aws-nitro-root-v1",
+        "aa".repeat(32),
+        { pcr0: "12".repeat(48) },
+        attestationIssuerPub,
+        attestationChallengeNonce,
+        contactDiscoveryManifestContractSha256(signedManifest()),
+        "attested-host-v1",
+        "attested-enclave-v1",
+        bytesToBase64(ristretto255.Point.BASE.toBytes()),
+        response.document_sha256,
+        900,
+      );
+    }).toThrow(/PCR set mismatch/i);
+  });
+
   it("rejects a contact discovery attestation challenge nonce mismatch", () => {
     const response = signedAttestationResponse();
     expect(() => {
       verifyContactDiscoveryAttestationDocument(
         response,
-        "sgx_preview",
-        "sgx-dcap-preview",
+        "attested_enclave_v1",
+        "aws-nitro-root-v1",
         "aa".repeat(32),
+        null,
         attestationIssuerPub,
         bytesToBase64(new Uint8Array(16).fill(8)),
-        "simulated-preview",
+        contactDiscoveryManifestContractSha256(signedManifest()),
+        "attested-host-v1",
+        "attested-enclave-v1",
         bytesToBase64(ristretto255.Point.BASE.toBytes()),
         response.document_sha256,
         900,
       );
     }).toThrow(/challenge nonce mismatch/i);
+  });
+
+  it("rejects a contact discovery attestation host release mismatch", () => {
+    const response = signedAttestationResponse();
+    expect(() => {
+      verifyContactDiscoveryAttestationDocument(
+        response,
+        "attested_enclave_v1",
+        "aws-nitro-root-v1",
+        "aa".repeat(32),
+        null,
+        attestationIssuerPub,
+        attestationChallengeNonce,
+        contactDiscoveryManifestContractSha256(signedManifest()),
+        "wrong-host-preview",
+        "attested-enclave-v1",
+        bytesToBase64(ristretto255.Point.BASE.toBytes()),
+        response.document_sha256,
+        900,
+      );
+    }).toThrow(/host release mismatch/i);
+  });
+
+  it("rejects a contact discovery attestation manifest contract mismatch", () => {
+    const response = signedAttestationResponse({
+      manifest_contract_sha256: "ff".repeat(32),
+    });
+    expect(() => {
+      verifyContactDiscoveryAttestationDocument(
+        response,
+        "attested_enclave_v1",
+        "aws-nitro-root-v1",
+        "aa".repeat(32),
+        null,
+        attestationIssuerPub,
+        attestationChallengeNonce,
+        contactDiscoveryManifestContractSha256(signedManifest()),
+        "attested-host-v1",
+        "attested-enclave-v1",
+        bytesToBase64(ristretto255.Point.BASE.toBytes()),
+        response.document_sha256,
+        900,
+      );
+    }).toThrow(/manifest contract mismatch/i);
   });
 
   it("blind-evaluates discovery hashes into finalized tokens", () => {
@@ -404,7 +491,7 @@ describe("verifyContactDiscoveryManifest", () => {
       verifyContactDiscoveryEvaluationProofs(
         prepared.blindedElementsBase64,
         {
-          evaluation_proof_mode: "dleq_per_element_preview",
+          evaluation_proof_mode: "dleq_per_element_v1",
           evaluated_elements_base64: [bytesToBase64(evaluatedPoint.toBytes())],
           dleq_proofs: [{
             challenge_scalar_base64: bytesToBase64(ristretto255.Point.Fn.toBytes(challenge)),
@@ -690,3 +777,4 @@ describe("computeSafetyNumber", () => {
     ).toMatch(/^\d{5}( \d{5}){11}$/);
   });
 });
+

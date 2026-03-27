@@ -571,6 +571,7 @@ data class ContactDiscoveryTicketResponse(
     val device_id: String,
     val service_origin: String,
     val ticket: String,
+    val ticket_nonce: String,
     val expires_at: String,
 )
 
@@ -584,6 +585,7 @@ data class ContactDiscoveryManifestResponse(
     val attestation_mode: String,
     val attestation_verifier: String?,
     val enclave_measurement_hex: String?,
+    val attestation_pcrs_sha384: Map<String, String>?,
     val attestation_document_format: String?,
     val attestation_document_sha256: String?,
     val attestation_challenge_mode: String?,
@@ -594,6 +596,7 @@ data class ContactDiscoveryManifestResponse(
     val privacy_mode: String,
     val directory_backend: String,
     val host_enclave_protocol_version: Int,
+    val host_release_id: String,
     val enclave_release_id: String,
     val match_result_format: String,
     val oprf_suite: String,
@@ -609,9 +612,12 @@ data class ContactDiscoveryAttestationResponse(
     val attestation_mode: String,
     val attestation_verifier: String,
     val enclave_measurement_hex: String,
+    val attested_pcrs_sha384: Map<String, String>?,
     val directory_backend: String,
     val host_enclave_protocol_version: Int,
+    val host_release_id: String,
     val enclave_release_id: String,
+    val manifest_contract_sha256: String,
     val attested_oprf_public_key_ristretto255: String,
     val document_format: String,
     val document_base64: String,
@@ -629,6 +635,8 @@ data class PrivateDiscoveryEvaluateRequest(
 data class PrivateDiscoveryEvaluateResponse(
     val user_id: String,
     val device_id: String,
+    val ticket_nonce: String,
+    val manifest_contract_sha256: String,
     val evaluation_proof_mode: String,
     val evaluated_elements_base64: List<String>,
     val dleq_proofs: List<PrivateDiscoveryEvaluateProof>,
@@ -651,6 +659,8 @@ data class PrivateDiscoveryHandlesUploadRequest(
 data class PrivateDiscoveryHandlesUploadResponse(
     val user_id: String,
     val device_id: String,
+    val ticket_nonce: String,
+    val manifest_contract_sha256: String,
     val uploaded_phone_tokens: Int,
     val uploaded_email_tokens: Int,
     val updated_at: String,
@@ -669,6 +679,8 @@ data class PrivateDiscoveryMatchItem(
 
 data class PrivateDiscoveryMatchResponse(
     val user_id: String,
+    val ticket_nonce: String,
+    val manifest_contract_sha256: String,
     val matches: List<PrivateDiscoveryMatchItem>,
     val checked_at: String,
 )
@@ -831,9 +843,12 @@ data class ServerCapabilitiesResponse(
     val contact_discovery_manifest_issuer_ed25519_pub: String?,
     val contact_discovery_directory_backend: String?,
     val contact_discovery_host_enclave_protocol_version: Int?,
+    val contact_discovery_host_release_id: String?,
     val contact_discovery_enclave_release_id: String?,
+    val contact_discovery_expected_manifest_contract_sha256: String?,
     val contact_discovery_attestation_verifier: String?,
     val contact_discovery_expected_measurement_hex: String?,
+    val contact_discovery_expected_pcrs_sha384: Map<String, String>?,
     val contact_discovery_attestation_document_sha256: String?,
     val contact_discovery_attestation_max_age_seconds: Int?,
     val presence_supported: Boolean,
@@ -1514,25 +1529,36 @@ object ApiClientFactory {
             require(capabilities.contact_discovery_host_enclave_protocol_version > 0) {
                 "Server advertises an invalid private discovery host/enclave protocol version"
             }
+            require(!capabilities.contact_discovery_host_release_id.isNullOrBlank()) {
+                "Server advertises private contact discovery without a host release id"
+            }
             require(!capabilities.contact_discovery_enclave_release_id.isNullOrBlank()) {
                 "Server advertises private contact discovery without an enclave release id"
             }
-            val attestationFieldsPresent =
-                listOf(
-                    !capabilities.contact_discovery_attestation_verifier.isNullOrBlank(),
-                    !capabilities.contact_discovery_expected_measurement_hex.isNullOrBlank(),
-                    !capabilities.contact_discovery_attestation_document_sha256.isNullOrBlank(),
-                    capabilities.contact_discovery_attestation_max_age_seconds != null,
-                )
-            require(
-                attestationFieldsPresent.none { it } || attestationFieldsPresent.all { it },
-            ) {
-                "Server advertises a partial private discovery attestation contract"
+            require(!capabilities.contact_discovery_expected_manifest_contract_sha256.isNullOrBlank()) {
+                "Server advertises private contact discovery without a manifest contract hash"
             }
-            capabilities.contact_discovery_attestation_max_age_seconds?.let { maxAge ->
-                require(maxAge > 0) {
-                    "Server advertises an invalid private discovery attestation max age"
-                }
+            require(!capabilities.contact_discovery_attestation_verifier.isNullOrBlank()) {
+                "Server advertises private contact discovery without an attestation verifier"
+            }
+            require(!capabilities.contact_discovery_expected_measurement_hex.isNullOrBlank()) {
+                "Server advertises private contact discovery without an enclave measurement"
+            }
+            require(!capabilities.contact_discovery_attestation_document_sha256.isNullOrBlank()) {
+                "Server advertises private contact discovery without an attestation document hash"
+            }
+            val maxAge = capabilities.contact_discovery_attestation_max_age_seconds
+                ?: throw IllegalArgumentException(
+                    "Server advertises private contact discovery without an attestation max age",
+                )
+            require(maxAge > 0) {
+                "Server advertises an invalid private discovery attestation max age"
+            }
+            require(capabilities.contact_discovery_directory_backend == "attested_enclave_directory_v1") {
+                "Server advertises an unsupported private discovery backend"
+            }
+            require(capabilities.contact_discovery_host_enclave_protocol_version == 1) {
+                "Server advertises an unsupported private discovery host/enclave protocol version"
             }
         }
         require(!capabilities.authenticated_direct_messaging_supported) {

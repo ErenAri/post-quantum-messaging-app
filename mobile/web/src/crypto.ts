@@ -1175,6 +1175,7 @@ export function verifyContactDiscoveryManifest(
   expectedManifestIssuerPubB64: string,
   expectedAttestationVerifier: string | null = null,
   expectedEnclaveMeasurementHex: string | null = null,
+  expectedAttestationPcrsSha384: Record<string, string> | null = null,
   expectedAttestationDocumentSha256: string | null = null,
 ): void {
   if (manifest.ticket_issuer_ed25519_pub !== expectedTicketIssuerPubB64) {
@@ -1201,21 +1202,25 @@ export function verifyContactDiscoveryManifest(
       throw new Error("Contact discovery manifest enclave measurement mismatch");
     }
   }
+  if (expectedAttestationPcrsSha384) {
+    if (!contactDiscoveryPcrMapsEqual(manifest.attestation_pcrs_sha384, expectedAttestationPcrsSha384)) {
+      throw new Error("Contact discovery manifest attestation PCR set mismatch");
+    }
+  }
   if ((expectedAttestationDocumentSha256 ?? "").trim()) {
     if (manifest.attestation_document_sha256 !== expectedAttestationDocumentSha256) {
       throw new Error("Contact discovery manifest attestation document hash mismatch");
     }
   }
-  if (manifest.attestation_mode !== "unattested_development") {
-    if (
-      !manifest.attestation_verifier
-      || !manifest.enclave_measurement_hex
-      || !manifest.attestation_document_format
-      || !manifest.attestation_document_sha256
-      || !manifest.attestation_challenge_mode
-    ) {
-      throw new Error("Contact discovery manifest attestation contract is incomplete");
-    }
+  if (
+    manifest.attestation_mode !== "attested_enclave_v1"
+    || !manifest.attestation_verifier
+    || !manifest.enclave_measurement_hex
+    || !manifest.attestation_document_format
+    || !manifest.attestation_document_sha256
+    || !manifest.attestation_challenge_mode
+  ) {
+    throw new Error("Contact discovery manifest attestation contract is incomplete");
   }
   const payloadBytes = utf8ToBytes(JSON.stringify({
     service: manifest.service,
@@ -1223,6 +1228,7 @@ export function verifyContactDiscoveryManifest(
     attestation_mode: manifest.attestation_mode,
     attestation_verifier: manifest.attestation_verifier ?? null,
     enclave_measurement_hex: manifest.enclave_measurement_hex ?? null,
+    attestation_pcrs_sha384: normalizeContactDiscoveryPcrsSha384(manifest.attestation_pcrs_sha384),
     attestation_document_format: manifest.attestation_document_format ?? null,
     attestation_document_sha256: manifest.attestation_document_sha256 ?? null,
     attestation_challenge_mode: manifest.attestation_challenge_mode ?? null,
@@ -1233,6 +1239,7 @@ export function verifyContactDiscoveryManifest(
     privacy_mode: manifest.privacy_mode,
     directory_backend: manifest.directory_backend,
     host_enclave_protocol_version: manifest.host_enclave_protocol_version,
+    host_release_id: manifest.host_release_id,
     enclave_release_id: manifest.enclave_release_id,
     match_result_format: manifest.match_result_format,
     oprf_suite: manifest.oprf_suite,
@@ -1248,13 +1255,45 @@ export function verifyContactDiscoveryManifest(
   }
 }
 
+export function contactDiscoveryManifestContractSha256(
+  manifest: ContactDiscoveryManifestResponse,
+): string {
+  return bytesToHex(sha256(utf8ToBytes(JSON.stringify({
+    service: manifest.service,
+    protocol_version: manifest.protocol_version,
+    attestation_mode: manifest.attestation_mode,
+    attestation_verifier: manifest.attestation_verifier ?? null,
+    enclave_measurement_hex: manifest.enclave_measurement_hex ?? null,
+    attestation_pcrs_sha384: normalizeContactDiscoveryPcrsSha384(manifest.attestation_pcrs_sha384),
+    attestation_document_format: manifest.attestation_document_format ?? null,
+    attestation_document_sha256: manifest.attestation_document_sha256 ?? null,
+    attestation_challenge_mode: manifest.attestation_challenge_mode ?? null,
+    ticket_format: manifest.ticket_format,
+    ticket_issuer_ed25519_pub: manifest.ticket_issuer_ed25519_pub,
+    ticket_max_ttl_seconds: manifest.ticket_max_ttl_seconds,
+    lookup_protocol: manifest.lookup_protocol,
+    privacy_mode: manifest.privacy_mode,
+    directory_backend: manifest.directory_backend,
+    host_enclave_protocol_version: manifest.host_enclave_protocol_version,
+    host_release_id: manifest.host_release_id,
+    enclave_release_id: manifest.enclave_release_id,
+    match_result_format: manifest.match_result_format,
+    oprf_suite: manifest.oprf_suite,
+    evaluation_proof_mode: manifest.evaluation_proof_mode,
+    oprf_public_key_ristretto255: manifest.oprf_public_key_ristretto255,
+  }))));
+}
+
 export function verifyContactDiscoveryAttestationDocument(
   response: ContactDiscoveryAttestationResponse,
   expectedAttestationMode: string,
   expectedVerifier: string,
   expectedMeasurementHex: string,
+  expectedPcrsSha384: Record<string, string> | null,
   expectedManifestIssuerEd25519PubB64: string,
   expectedChallengeNonceBase64: string,
+  expectedManifestContractSha256: string,
+  expectedHostReleaseId: string,
   expectedEnclaveReleaseId: string,
   expectedOprfPublicKeyRistretto255B64: string,
   expectedDocumentSha256: string,
@@ -1267,9 +1306,12 @@ export function verifyContactDiscoveryAttestationDocument(
     attestation_mode: response.attestation_mode,
     attestation_verifier: response.attestation_verifier,
     enclave_measurement_hex: response.enclave_measurement_hex,
+    attested_pcrs_sha384: normalizeContactDiscoveryPcrsSha384(response.attested_pcrs_sha384),
     directory_backend: response.directory_backend,
     host_enclave_protocol_version: response.host_enclave_protocol_version,
+    host_release_id: response.host_release_id,
     enclave_release_id: response.enclave_release_id,
+    manifest_contract_sha256: response.manifest_contract_sha256,
     attested_oprf_public_key_ristretto255: response.attested_oprf_public_key_ristretto255,
     document_format: response.document_format,
     document_base64: response.document_base64,
@@ -1291,11 +1333,26 @@ export function verifyContactDiscoveryAttestationDocument(
   if (response.enclave_measurement_hex !== expectedMeasurementHex) {
     throw new Error("Contact discovery attestation measurement mismatch");
   }
+  if (expectedPcrsSha384 && !contactDiscoveryPcrMapsEqual(response.attested_pcrs_sha384, expectedPcrsSha384)) {
+    throw new Error("Contact discovery attestation PCR set mismatch");
+  }
+  if (response.host_release_id !== expectedHostReleaseId) {
+    throw new Error("Contact discovery attestation host release mismatch");
+  }
+  if (response.manifest_contract_sha256 !== expectedManifestContractSha256) {
+    throw new Error("Contact discovery attestation manifest contract mismatch");
+  }
   if (response.enclave_release_id !== expectedEnclaveReleaseId) {
     throw new Error("Contact discovery attestation enclave release mismatch");
   }
   if (response.attested_oprf_public_key_ristretto255 !== expectedOprfPublicKeyRistretto255B64) {
     throw new Error("Contact discovery attestation OPRF public key mismatch");
+  }
+  if (response.directory_backend !== "attested_enclave_directory_v1") {
+    throw new Error("Unsupported contact discovery backend");
+  }
+  if (response.host_enclave_protocol_version !== 1) {
+    throw new Error("Unsupported contact discovery host/enclave protocol version");
   }
   if (response.document_format !== "opaque_b64_v1") {
     throw new Error("Unsupported contact discovery attestation document format");
@@ -1326,6 +1383,27 @@ export function verifyContactDiscoveryAttestationDocument(
 
 export function buildContactDiscoveryAttestationChallengeNonce(): string {
   return bytesToBase64(randomBytes(16));
+}
+
+function normalizeContactDiscoveryPcrsSha384(
+  pcrs: Record<string, string> | null | undefined,
+): Record<string, string> | null {
+  if (!pcrs) {
+    return null;
+  }
+  const entries = Object.entries(pcrs).sort(([lhs], [rhs]) => lhs.localeCompare(rhs));
+  if (!entries.length) {
+    return null;
+  }
+  return Object.fromEntries(entries);
+}
+
+function contactDiscoveryPcrMapsEqual(
+  lhs: Record<string, string> | null | undefined,
+  rhs: Record<string, string> | null | undefined,
+): boolean {
+  return JSON.stringify(normalizeContactDiscoveryPcrsSha384(lhs))
+    === JSON.stringify(normalizeContactDiscoveryPcrsSha384(rhs));
 }
 
 export type ContactDiscoveryBlindRequest = {
@@ -1438,7 +1516,7 @@ export function verifyContactDiscoveryEvaluationProofs(
   },
   expectedOprfPublicKeyRistretto255B64: string,
 ): void {
-  if (response.evaluation_proof_mode !== "dleq_per_element_preview") {
+  if (response.evaluation_proof_mode !== "dleq_per_element_v1") {
     throw new Error("Unsupported contact discovery evaluation proof mode");
   }
   if (
@@ -1596,3 +1674,4 @@ async function deriveAesGcmKey(passphrase: string, salt: Uint8Array): Promise<Cr
 function unixTimestampSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
+

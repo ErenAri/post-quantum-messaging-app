@@ -187,7 +187,7 @@ Requirements:
 15. Both raw Kustomize and rendered Helm deployments must also carry a matching `NetworkPolicy` for the `pqmsg-server` pods; CI validates selector parity and the baseline ingress/egress ports with `scripts/security/validate_network_policy.py`.
 16. The raw Kustomize namespace manifest must carry Pod Security Admission `restricted` labels, and Helm operators must pre-label the target namespace to the same policy; CI validates the raw namespace with `scripts/security/validate_namespace_policy.py`.
 17. `pilot` and `production` image references must be pinned by digest, not mutable tags. The Helm chart now requires `image.digest` in `sha256:<64-hex>` format for hardened modes, and CI validates both raw and rendered deployment manifests with `scripts/security/validate_image_pinning.py`.
-18. Preview-only `PQMSG_CONTACT_DISCOVERY_*` env vars must stay out of hardened deployments. Server boot rejects them outside `development`, and CI validates both raw and rendered manifests with `scripts/security/validate_no_preview_contact_discovery.py`.
+18. Deprecated preview discovery markers must stay out of hardened deployments. The app server only advertises `private_service` discovery when the full attested enclave-style contract is configured, and CI validates both raw and rendered manifests with `scripts/security/validate_no_preview_contact_discovery.py`.
 
 Windows source-build note for local server work:
 

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use pqmsg_core::alg::RuntimeCryptoProfile;
 use serde::{Deserialize, Serialize};
 
@@ -149,6 +151,7 @@ pub(crate) struct ContactDiscoveryTicketResponse {
     pub(crate) device_id: String,
     pub(crate) service_origin: String,
     pub(crate) ticket: String,
+    pub(crate) ticket_nonce: String,
     pub(crate) expires_at: String,
 }
 
@@ -856,9 +859,12 @@ pub(crate) struct ServerCapabilitiesResponse {
     pub(crate) contact_discovery_manifest_issuer_ed25519_pub: Option<String>,
     pub(crate) contact_discovery_directory_backend: Option<String>,
     pub(crate) contact_discovery_host_enclave_protocol_version: Option<u32>,
+    pub(crate) contact_discovery_host_release_id: Option<String>,
     pub(crate) contact_discovery_enclave_release_id: Option<String>,
+    pub(crate) contact_discovery_expected_manifest_contract_sha256: Option<String>,
     pub(crate) contact_discovery_attestation_verifier: Option<String>,
     pub(crate) contact_discovery_expected_measurement_hex: Option<String>,
+    pub(crate) contact_discovery_expected_pcrs_sha384: Option<BTreeMap<String, String>>,
     pub(crate) contact_discovery_attestation_document_sha256: Option<String>,
     pub(crate) contact_discovery_attestation_max_age_seconds: Option<u32>,
     pub(crate) presence_supported: bool,

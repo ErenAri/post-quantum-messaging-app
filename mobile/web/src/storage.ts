@@ -93,6 +93,7 @@ export type ContactDiscoveryCheckpoint = {
   privacy_mode: string;
   directory_backend: string;
   host_enclave_protocol_version: number;
+  host_release_id: string;
   enclave_release_id: string;
   match_result_format: string;
   oprf_suite: string;
@@ -101,6 +102,7 @@ export type ContactDiscoveryCheckpoint = {
   attestation_mode: string;
   attestation_verifier: string | null;
   enclave_measurement_hex: string | null;
+  attestation_pcrs_sha384: Record<string, string> | null;
   attestation_document_format: string | null;
   attestation_document_sha256: string | null;
   attestation_challenge_mode: string | null;

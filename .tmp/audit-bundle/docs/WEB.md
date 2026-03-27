@@ -37,6 +37,7 @@ For the current beta:
 - Outbound web direct messaging and private-group messaging are blocked whenever the server reports `web_client_policy = demo_only`.
 - Even when the server permits hardened web messaging, private groups additionally require `private_group_messaging_supported = true`.
 - The live capability contract also exposes `supported_beta_clients`, so the server can advertise when `web` is actually in the supported beta matrix instead of demo-only.
+- `docs/SUPPORT_MATRIX.json` is the canonical machine-readable support matrix for the current beta posture.
 - Web messaging fails closed when the browser lacks HTTPS-or-loopback origin protection, an actual secure browser context, cross-origin isolation on hosted origins, IndexedDB, SubtleCrypto, WebAssembly, or text encoding support.
 - The SPA shell ships an explicit CSP plus hardened COOP/COEP/CORP browser response headers in the Vite dev/preview surface.
 - The service worker only caches same-origin app-shell assets; cross-origin API traffic and `/v1/*` messaging traffic are never cached by the web shell.

@@ -230,6 +230,16 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                         ),
                     )
                 }
+                if (!manifest.attestation_pcrs_sha384.isNullOrEmpty()) {
+                    add(
+                        "Attestation PCRs: " +
+                            manifest.attestation_pcrs_sha384
+                                .toSortedMap()
+                                .entries
+                                .joinToString(", ") { (key, value) -> "$key=$value" },
+                    )
+                }
+                add("Host release: ${manifest.host_release_id}")
                 add("Enclave release: ${manifest.enclave_release_id}")
             }
         return "$summary\n${manifestDetails.joinToString("\n")}"
@@ -274,6 +284,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
             capabilities.contact_discovery_manifest_issuer_ed25519_pub.orEmpty(),
             capabilities.contact_discovery_attestation_verifier.orEmpty(),
             capabilities.contact_discovery_expected_measurement_hex.orEmpty(),
+            gson.toJson(capabilities.contact_discovery_expected_pcrs_sha384),
             capabilities.contact_discovery_attestation_document_sha256.orEmpty(),
         )
         require(
@@ -282,27 +293,28 @@ class ContactDiscoveryActivity : AppCompatActivity() {
             "Contact discovery manifest issuer key is unavailable"
         }
         require(
-            manifest.lookup_protocol == "blind_token_directory_preview" &&
-                manifest.privacy_mode == "blind_evaluation_preview" &&
-                manifest.directory_backend == "simulated_enclave_preview" &&
+            manifest.lookup_protocol == "attested_enclave_voprf_directory_v1" &&
+                manifest.privacy_mode == "enclave_backed_private_discovery_v1" &&
+                manifest.directory_backend == "attested_enclave_directory_v1" &&
                 manifest.host_enclave_protocol_version == 1 &&
+                manifest.host_release_id.isNotBlank() &&
                 manifest.enclave_release_id.isNotBlank() &&
                 manifest.match_result_format == "contact_invite_token" &&
-                manifest.oprf_suite == "ristretto255-sha512-preview" &&
-                manifest.evaluation_proof_mode == "dleq_per_element_preview" &&
+                manifest.oprf_suite == "ristretto255-sha512-v1" &&
+                manifest.evaluation_proof_mode == "dleq_per_element_v1" &&
                 manifest.oprf_public_key_ristretto255.isNotBlank() &&
-                (manifest.attestation_mode == "unattested_development" ||
-                    (!manifest.attestation_verifier.isNullOrBlank() &&
-                        !manifest.enclave_measurement_hex.isNullOrBlank() &&
-                        !manifest.attestation_document_format.isNullOrBlank() &&
-                        !manifest.attestation_document_sha256.isNullOrBlank() &&
-                        !manifest.attestation_challenge_mode.isNullOrBlank())),
+                manifest.attestation_mode == "attested_enclave_v1" &&
+                !manifest.attestation_verifier.isNullOrBlank() &&
+                !manifest.enclave_measurement_hex.isNullOrBlank() &&
+                !manifest.attestation_document_format.isNullOrBlank() &&
+                !manifest.attestation_document_sha256.isNullOrBlank() &&
+                !manifest.attestation_challenge_mode.isNullOrBlank(),
         ) {
             "Unsupported contact discovery manifest"
         }
         require(
             manifest.attestation_document_sha256.isNullOrBlank() ||
-                manifest.attestation_challenge_mode == "nonce_b64_required_preview",
+                manifest.attestation_challenge_mode == "nonce_b64_required_v1",
         ) {
             "Unsupported contact discovery attestation challenge mode"
         }
@@ -310,7 +322,10 @@ class ContactDiscoveryActivity : AppCompatActivity() {
             manifest.directory_backend == capabilities.contact_discovery_directory_backend &&
                 manifest.host_enclave_protocol_version ==
                 capabilities.contact_discovery_host_enclave_protocol_version &&
-                manifest.enclave_release_id == capabilities.contact_discovery_enclave_release_id,
+                manifest.host_release_id == capabilities.contact_discovery_host_release_id &&
+                manifest.enclave_release_id == capabilities.contact_discovery_enclave_release_id &&
+                contactDiscoveryManifestContractSha256Hex(manifest) ==
+                capabilities.contact_discovery_expected_manifest_contract_sha256,
         ) {
             "Contact discovery backend contract mismatch"
         }
@@ -326,8 +341,11 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 expectedAttestationMode = manifest.attestation_mode,
                 expectedVerifier = manifest.attestation_verifier.orEmpty(),
                 expectedMeasurementHex = manifest.enclave_measurement_hex.orEmpty(),
+                expectedPcrsSha384 = manifest.attestation_pcrs_sha384,
                 expectedManifestIssuerEd25519Pub = manifest.manifest_issuer_ed25519_pub,
                 expectedChallengeNonceBase64 = challengeNonceBase64,
+                expectedManifestContractSha256 = contactDiscoveryManifestContractSha256Hex(manifest),
+                expectedHostReleaseId = manifest.host_release_id,
                 expectedEnclaveReleaseId = manifest.enclave_release_id,
                 expectedOprfPublicKeyRistretto255 = manifest.oprf_public_key_ristretto255,
                 expectedDocumentSha256 = manifest.attestation_document_sha256.orEmpty(),
@@ -407,6 +425,26 @@ class ContactDiscoveryActivity : AppCompatActivity() {
         )
     }
 
+    private fun requireDiscoveryServiceContract(
+        expectedManifestContractSha256: String,
+        observedManifestContractSha256: String,
+        operationLabel: String,
+    ) {
+        require(observedManifestContractSha256 == expectedManifestContractSha256) {
+            "Contact discovery $operationLabel contract mismatch"
+        }
+    }
+
+    private fun requireDiscoveryServiceTicketNonce(
+        expectedTicketNonce: String,
+        observedTicketNonce: String,
+        operationLabel: String,
+    ) {
+        require(observedTicketNonce == expectedTicketNonce) {
+            "Contact discovery $operationLabel ticket mismatch"
+        }
+    }
+
     private suspend fun issueDiscoveryTicket(
         context: ReadyMessagingContext,
         purpose: String,
@@ -455,6 +493,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                     "Private contact discovery is unavailable for this profile"
                 }
                 val manifest = loadVerifiedDiscoveryManifest(context).manifest
+                val manifestContractSha256 = contactDiscoveryManifestContractSha256Hex(manifest)
                 val ticket = issueDiscoveryTicket(context, "upload")
                 val discoveryApi = ApiClientFactory.createDiscovery(ticket.service_origin)
                 val phonePrepared = prepareDiscoveryBlindRequest(phoneHashes)
@@ -464,6 +503,8 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                         PrivateDiscoveryEvaluateResponse(
                             user_id = context.profile.userId,
                             device_id = context.profile.deviceId,
+                            ticket_nonce = ticket.ticket_nonce,
+                            manifest_contract_sha256 = manifestContractSha256,
                             evaluation_proof_mode = manifest.evaluation_proof_mode,
                             evaluated_elements_base64 = emptyList(),
                             dleq_proofs = emptyList(),
@@ -482,6 +523,8 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                         PrivateDiscoveryEvaluateResponse(
                             user_id = context.profile.userId,
                             device_id = context.profile.deviceId,
+                            ticket_nonce = ticket.ticket_nonce,
+                            manifest_contract_sha256 = manifestContractSha256,
                             evaluation_proof_mode = manifest.evaluation_proof_mode,
                             evaluated_elements_base64 = emptyList(),
                             dleq_proofs = emptyList(),
@@ -495,6 +538,26 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                             ),
                         )
                     }
+                requireDiscoveryServiceContract(
+                    manifestContractSha256,
+                    phoneEvaluated.manifest_contract_sha256,
+                    "evaluate",
+                )
+                requireDiscoveryServiceTicketNonce(
+                    ticket.ticket_nonce,
+                    phoneEvaluated.ticket_nonce,
+                    "evaluate",
+                )
+                requireDiscoveryServiceContract(
+                    manifestContractSha256,
+                    emailEvaluated.manifest_contract_sha256,
+                    "evaluate",
+                )
+                requireDiscoveryServiceTicketNonce(
+                    ticket.ticket_nonce,
+                    emailEvaluated.ticket_nonce,
+                    "evaluate",
+                )
                 val phoneTokens = verifyAndFinalizeDiscoveryTokens(
                     phonePrepared.blinded_elements_base64,
                     phonePrepared.blinding_scalars_base64,
@@ -513,6 +576,16 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                         phone_tokens_sha256 = phoneTokens,
                         email_tokens_sha256 = emailTokens,
                     ),
+                )
+                requireDiscoveryServiceContract(
+                    manifestContractSha256,
+                    response.manifest_contract_sha256,
+                    "upload",
+                )
+                requireDiscoveryServiceTicketNonce(
+                    ticket.ticket_nonce,
+                    response.ticket_nonce,
+                    "upload",
                 )
                 statusText.text = getString(
                     R.string.contacts_discovery_uploaded_status,
@@ -544,6 +617,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                     "Private contact discovery is unavailable for this profile"
                 }
                 val manifest = loadVerifiedDiscoveryManifest(context).manifest
+                val manifestContractSha256 = contactDiscoveryManifestContractSha256Hex(manifest)
                 val ticket = issueDiscoveryTicket(context, "match")
                 val discoveryApi = ApiClientFactory.createDiscovery(ticket.service_origin)
                 val prepared = prepareDiscoveryBlindRequest(hashes)
@@ -552,6 +626,16 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                         ticket = ticket.ticket,
                         blinded_elements_base64 = prepared.blinded_elements_base64,
                     ),
+                )
+                requireDiscoveryServiceContract(
+                    manifestContractSha256,
+                    evaluated.manifest_contract_sha256,
+                    "evaluate",
+                )
+                requireDiscoveryServiceTicketNonce(
+                    ticket.ticket_nonce,
+                    evaluated.ticket_nonce,
+                    "evaluate",
                 )
                 val tokens = verifyAndFinalizeDiscoveryTokens(
                     prepared.blinded_elements_base64,
@@ -565,6 +649,16 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                         ticket = ticket.ticket,
                         tokens_sha256 = tokens,
                     ),
+                )
+                requireDiscoveryServiceContract(
+                    manifestContractSha256,
+                    response.manifest_contract_sha256,
+                    "match",
+                )
+                requireDiscoveryServiceTicketNonce(
+                    ticket.ticket_nonce,
+                    response.ticket_nonce,
+                    "match",
                 )
                 if (response.matches.isEmpty()) {
                     discoveryMatchesText.visibility = View.VISIBLE
@@ -724,3 +818,4 @@ class ContactDiscoveryActivity : AppCompatActivity() {
         }
     }
 }
+

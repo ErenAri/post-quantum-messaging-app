@@ -26,6 +26,7 @@ use pqmsg_server::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::any::AnyPoolOptions;
+use std::collections::BTreeMap;
 use std::fs;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -250,8 +251,17 @@ async fn test_app_with_contact_discovery_service_origin(service_origin: &str) ->
                 .to_bytes(),
         ),
     ))
-    .with_contact_discovery_attestation_verifier(Some("sgx-dcap-preview".to_string()))
+    .with_contact_discovery_directory_backend(Some("attested_enclave_directory_v1".to_string()))
+    .with_contact_discovery_host_enclave_protocol_version(Some(1))
+    .with_contact_discovery_host_release_id(Some("attested-host-v1".to_string()))
+    .with_contact_discovery_enclave_release_id(Some("attested-enclave-v1".to_string()))
+    .with_contact_discovery_expected_manifest_contract_sha256(Some("ef".repeat(32)))
+    .with_contact_discovery_attestation_verifier(Some("aws-nitro-root-v1".to_string()))
     .with_contact_discovery_expected_measurement_hex(Some("ab".repeat(32)))
+    .with_contact_discovery_expected_pcrs_sha384(Some(BTreeMap::from([
+        ("pcr0".to_string(), "ef".repeat(48)),
+        ("pcr8".to_string(), "12".repeat(48)),
+    ])))
     .with_contact_discovery_attestation_document_sha256(Some("cd".repeat(32)))
     .with_contact_discovery_attestation_max_age_seconds(Some(900));
     build_router(state)
@@ -289,8 +299,17 @@ async fn test_app_with_contact_discovery_service_origin_and_deployment_mode(
                 .to_bytes(),
         ),
     ))
-    .with_contact_discovery_attestation_verifier(Some("sgx-dcap-preview".to_string()))
+    .with_contact_discovery_directory_backend(Some("attested_enclave_directory_v1".to_string()))
+    .with_contact_discovery_host_enclave_protocol_version(Some(1))
+    .with_contact_discovery_host_release_id(Some("attested-host-v1".to_string()))
+    .with_contact_discovery_enclave_release_id(Some("attested-enclave-v1".to_string()))
+    .with_contact_discovery_expected_manifest_contract_sha256(Some("ef".repeat(32)))
+    .with_contact_discovery_attestation_verifier(Some("aws-nitro-root-v1".to_string()))
     .with_contact_discovery_expected_measurement_hex(Some("ab".repeat(32)))
+    .with_contact_discovery_expected_pcrs_sha384(Some(BTreeMap::from([
+        ("pcr0".to_string(), "ef".repeat(48)),
+        ("pcr8".to_string(), "12".repeat(48)),
+    ])))
     .with_contact_discovery_attestation_document_sha256(Some("cd".repeat(32)))
     .with_contact_discovery_attestation_max_age_seconds(Some(900));
     build_router(state)
@@ -2566,9 +2585,12 @@ async fn capabilities_reports_client_contract() {
     assert!(body["contact_discovery_manifest_issuer_ed25519_pub"].is_null());
     assert!(body["contact_discovery_directory_backend"].is_null());
     assert!(body["contact_discovery_host_enclave_protocol_version"].is_null());
+    assert!(body["contact_discovery_host_release_id"].is_null());
     assert!(body["contact_discovery_enclave_release_id"].is_null());
+    assert!(body["contact_discovery_expected_manifest_contract_sha256"].is_null());
     assert!(body["contact_discovery_attestation_verifier"].is_null());
     assert!(body["contact_discovery_expected_measurement_hex"].is_null());
+    assert!(body["contact_discovery_expected_pcrs_sha384"].is_null());
     assert!(body["contact_discovery_attestation_document_sha256"].is_null());
     assert!(body["contact_discovery_attestation_max_age_seconds"].is_null());
     assert!(body["contact_discovery_ticket_issuer_ed25519_pub"]
@@ -2628,23 +2650,41 @@ async fn capabilities_report_private_contact_discovery_service_when_configured()
         .is_some_and(|value| !value.is_empty()));
     assert_eq!(
         body["contact_discovery_directory_backend"].as_str(),
-        Some("simulated_enclave_preview")
+        Some("attested_enclave_directory_v1")
     );
     assert_eq!(
         body["contact_discovery_host_enclave_protocol_version"].as_u64(),
         Some(1)
     );
     assert_eq!(
+        body["contact_discovery_host_release_id"].as_str(),
+        Some("attested-host-v1")
+    );
+    assert_eq!(
         body["contact_discovery_enclave_release_id"].as_str(),
-        Some("simulated-preview")
+        Some("attested-enclave-v1")
+    );
+    assert_eq!(
+        body["contact_discovery_expected_manifest_contract_sha256"].as_str(),
+        Some("efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef")
     );
     assert_eq!(
         body["contact_discovery_attestation_verifier"].as_str(),
-        Some("sgx-dcap-preview")
+        Some("aws-nitro-root-v1")
     );
     assert_eq!(
         body["contact_discovery_expected_measurement_hex"].as_str(),
         Some("abababababababababababababababababababababababababababababababab")
+    );
+    let expected_pcr0 = "ef".repeat(48);
+    let expected_pcr8 = "12".repeat(48);
+    assert_eq!(
+        body["contact_discovery_expected_pcrs_sha384"]["pcr0"].as_str(),
+        Some(expected_pcr0.as_str())
+    );
+    assert_eq!(
+        body["contact_discovery_expected_pcrs_sha384"]["pcr8"].as_str(),
+        Some(expected_pcr8.as_str())
     );
     assert_eq!(
         body["contact_discovery_attestation_document_sha256"].as_str(),
@@ -2657,7 +2697,10 @@ async fn capabilities_report_private_contact_discovery_service_when_configured()
 }
 
 #[tokio::test]
-async fn capabilities_do_not_advertise_development_only_private_discovery_in_pilot() {
+async fn capabilities_report_private_contact_discovery_service_in_pilot_when_configured() {
+    let manifest_contract_hash = "ef".repeat(32);
+    let measurement_hex = "ab".repeat(32);
+    let attestation_hash = "cd".repeat(32);
     let app = test_app_with_contact_discovery_service_origin_and_deployment_mode(
         "https://cdsi.example",
         DeploymentMode::Pilot,
@@ -2665,21 +2708,58 @@ async fn capabilities_do_not_advertise_development_only_private_discovery_in_pil
     .await;
     let (status, body) = json_request(app, Method::GET, "/v1/capabilities", json!({})).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["contact_discovery_supported"].as_bool(), Some(false));
-    assert_eq!(body["contact_discovery_mode"].as_str(), Some("manual_only"));
+    assert_eq!(body["contact_discovery_supported"].as_bool(), Some(true));
+    assert_eq!(
+        body["contact_discovery_mode"].as_str(),
+        Some("private_service")
+    );
     assert_eq!(
         body["contact_discovery_ticket_supported"].as_bool(),
-        Some(false)
+        Some(true)
     );
-    assert!(body["contact_discovery_service_origin"].is_null());
-    assert!(body["contact_discovery_manifest_issuer_ed25519_pub"].is_null());
-    assert!(body["contact_discovery_directory_backend"].is_null());
-    assert!(body["contact_discovery_host_enclave_protocol_version"].is_null());
-    assert!(body["contact_discovery_enclave_release_id"].is_null());
-    assert!(body["contact_discovery_attestation_verifier"].is_null());
-    assert!(body["contact_discovery_expected_measurement_hex"].is_null());
-    assert!(body["contact_discovery_attestation_document_sha256"].is_null());
-    assert!(body["contact_discovery_attestation_max_age_seconds"].is_null());
+    assert_eq!(
+        body["contact_discovery_service_origin"].as_str(),
+        Some("https://cdsi.example")
+    );
+    assert!(body["contact_discovery_manifest_issuer_ed25519_pub"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    assert_eq!(
+        body["contact_discovery_directory_backend"].as_str(),
+        Some("attested_enclave_directory_v1")
+    );
+    assert_eq!(
+        body["contact_discovery_host_enclave_protocol_version"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        body["contact_discovery_host_release_id"].as_str(),
+        Some("attested-host-v1")
+    );
+    assert_eq!(
+        body["contact_discovery_enclave_release_id"].as_str(),
+        Some("attested-enclave-v1")
+    );
+    assert_eq!(
+        body["contact_discovery_expected_manifest_contract_sha256"].as_str(),
+        Some(manifest_contract_hash.as_str())
+    );
+    assert_eq!(
+        body["contact_discovery_attestation_verifier"].as_str(),
+        Some("aws-nitro-root-v1")
+    );
+    assert_eq!(
+        body["contact_discovery_expected_measurement_hex"].as_str(),
+        Some(measurement_hex.as_str())
+    );
+    assert_eq!(
+        body["contact_discovery_attestation_document_sha256"].as_str(),
+        Some(attestation_hash.as_str())
+    );
+    assert_eq!(
+        body["contact_discovery_attestation_max_age_seconds"].as_u64(),
+        Some(900)
+    );
 }
 
 #[tokio::test]
@@ -2716,7 +2796,7 @@ async fn contact_discovery_ticket_requires_configured_service() {
 }
 
 #[tokio::test]
-async fn contact_discovery_ticket_is_forbidden_outside_development_deployments() {
+async fn contact_discovery_ticket_is_issued_in_pilot_when_service_is_configured() {
     let app = test_app_with_contact_discovery_service_origin_and_deployment_mode(
         "https://cdsi.example",
         DeploymentMode::Pilot,
@@ -2745,11 +2825,17 @@ async fn contact_discovery_ticket_is_forbidden_outside_development_deployments()
         &headers,
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        body["detail"].as_str(),
-        Some("private contact discovery service is only available in development deployments; use manual contacts or invite links")
+        body["service_origin"].as_str(),
+        Some("https://cdsi.example")
     );
+    assert!(body["ticket_nonce"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    assert!(body["ticket"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
 }
 
 #[tokio::test]
@@ -2776,6 +2862,7 @@ async fn contact_discovery_ticket_is_issued_for_configured_service() {
         body["service_origin"].as_str(),
         Some("https://cdsi.example")
     );
+    let issued_ticket_nonce = body["ticket_nonce"].as_str().expect("ticket nonce string");
     let ticket = body["ticket"].as_str().expect("ticket string");
     let mut parts = ticket.split('.');
     let payload_b64 = parts.next().expect("ticket payload");
@@ -2787,6 +2874,11 @@ async fn contact_discovery_ticket_is_issued_for_configured_service() {
     let payload: Value = serde_json::from_slice(&payload_bytes).expect("parse ticket payload");
     assert_eq!(payload["user_id"].as_str(), Some("alice-cdsi"));
     assert_eq!(payload["purpose"].as_str(), Some("match"));
+    assert_eq!(payload["nonce"].as_str(), Some(issued_ticket_nonce));
+    assert_eq!(
+        payload["manifest_contract_sha256"].as_str(),
+        Some("efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef")
+    );
     assert!(payload["contact_invite_token"]
         .as_str()
         .is_some_and(|value| !value.is_empty()));

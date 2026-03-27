@@ -4,6 +4,7 @@ import com.google.gson.Gson
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.Base64
+import uniffi.pqmsg_android.contactDiscoveryManifestContractSha256
 import uniffi.pqmsg_android.verifyContactDiscoveryAttestationResponseSignature
 
 private val contactDiscoveryManifestGson = Gson()
@@ -18,6 +19,7 @@ data class ContactDiscoveryManifestCheckpoint(
     val privacy_mode: String,
     val directory_backend: String,
     val host_enclave_protocol_version: Int,
+    val host_release_id: String,
     val enclave_release_id: String,
     val match_result_format: String,
     val oprf_suite: String,
@@ -26,6 +28,7 @@ data class ContactDiscoveryManifestCheckpoint(
     val attestation_mode: String,
     val attestation_verifier: String?,
     val enclave_measurement_hex: String?,
+    val attestation_pcrs_sha384: Map<String, String>?,
     val attestation_document_format: String?,
     val attestation_document_sha256: String?,
     val attestation_challenge_mode: String?,
@@ -37,8 +40,11 @@ fun verifyContactDiscoveryAttestationDocument(
     expectedAttestationMode: String,
     expectedVerifier: String,
     expectedMeasurementHex: String,
+    expectedPcrsSha384: Map<String, String>?,
     expectedManifestIssuerEd25519Pub: String,
     expectedChallengeNonceBase64: String,
+    expectedManifestContractSha256: String,
+    expectedHostReleaseId: String,
     expectedEnclaveReleaseId: String,
     expectedOprfPublicKeyRistretto255: String,
     expectedDocumentSha256: String,
@@ -53,11 +59,20 @@ fun verifyContactDiscoveryAttestationDocument(
     require(response.enclave_measurement_hex == expectedMeasurementHex) {
         "Contact discovery attestation measurement mismatch"
     }
-    require(response.directory_backend == "simulated_enclave_preview") {
+    require(normalizeContactDiscoveryPcrs(response.attested_pcrs_sha384) == normalizeContactDiscoveryPcrs(expectedPcrsSha384)) {
+        "Contact discovery attestation PCR set mismatch"
+    }
+    require(response.directory_backend == "attested_enclave_directory_v1") {
         "Unsupported contact discovery backend"
     }
     require(response.host_enclave_protocol_version == 1) {
         "Unsupported contact discovery host/enclave protocol version"
+    }
+    require(response.host_release_id == expectedHostReleaseId) {
+        "Contact discovery attestation host release mismatch"
+    }
+    require(response.manifest_contract_sha256 == expectedManifestContractSha256) {
+        "Contact discovery attestation manifest contract mismatch"
     }
     require(response.enclave_release_id == expectedEnclaveReleaseId) {
         "Contact discovery attestation enclave release mismatch"
@@ -95,6 +110,12 @@ fun verifyContactDiscoveryAttestationDocument(
     )
 }
 
+fun contactDiscoveryManifestContractSha256Hex(
+    manifest: ContactDiscoveryManifestResponse,
+): String {
+    return contactDiscoveryManifestContractSha256(contactDiscoveryManifestGson.toJson(manifest))
+}
+
 fun buildContactDiscoveryManifestCheckpoint(
     serviceOrigin: String,
     manifest: ContactDiscoveryManifestResponse,
@@ -110,6 +131,7 @@ fun buildContactDiscoveryManifestCheckpoint(
         privacy_mode = manifest.privacy_mode,
         directory_backend = manifest.directory_backend,
         host_enclave_protocol_version = manifest.host_enclave_protocol_version,
+        host_release_id = manifest.host_release_id,
         enclave_release_id = manifest.enclave_release_id,
         match_result_format = manifest.match_result_format,
         oprf_suite = manifest.oprf_suite,
@@ -118,6 +140,7 @@ fun buildContactDiscoveryManifestCheckpoint(
         attestation_mode = manifest.attestation_mode,
         attestation_verifier = manifest.attestation_verifier,
         enclave_measurement_hex = manifest.enclave_measurement_hex,
+        attestation_pcrs_sha384 = normalizeContactDiscoveryPcrs(manifest.attestation_pcrs_sha384),
         attestation_document_format = manifest.attestation_document_format,
         attestation_document_sha256 = manifest.attestation_document_sha256,
         attestation_challenge_mode = manifest.attestation_challenge_mode,
@@ -147,6 +170,9 @@ fun diffContactDiscoveryManifestCheckpoint(
     if (previous.host_enclave_protocol_version != current.host_enclave_protocol_version) {
         changedFields += "host_enclave_protocol_version"
     }
+    if (previous.host_release_id != current.host_release_id) {
+        changedFields += "host_release_id"
+    }
     if (previous.enclave_release_id != current.enclave_release_id) {
         changedFields += "enclave_release_id"
     }
@@ -167,6 +193,9 @@ fun diffContactDiscoveryManifestCheckpoint(
     if (previous.enclave_measurement_hex != current.enclave_measurement_hex) {
         changedFields += "enclave_measurement_hex"
     }
+    if (normalizeContactDiscoveryPcrs(previous.attestation_pcrs_sha384) != normalizeContactDiscoveryPcrs(current.attestation_pcrs_sha384)) {
+        changedFields += "attestation_pcrs_sha384"
+    }
     if (previous.attestation_document_format != current.attestation_document_format) {
         changedFields += "attestation_document_format"
     }
@@ -177,4 +206,13 @@ fun diffContactDiscoveryManifestCheckpoint(
         changedFields += "attestation_challenge_mode"
     }
     return changedFields
+}
+
+private fun normalizeContactDiscoveryPcrs(
+    pcrs: Map<String, String>?,
+): Map<String, String>? {
+    if (pcrs.isNullOrEmpty()) {
+        return null
+    }
+    return pcrs.toSortedMap()
 }

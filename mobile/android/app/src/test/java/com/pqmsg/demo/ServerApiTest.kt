@@ -129,6 +129,7 @@ class ServerApiTest {
               "contact_discovery_ticket_supported": false,
               "contact_discovery_service_origin": null,
               "contact_discovery_manifest_issuer_ed25519_pub": null,
+              "contact_discovery_expected_manifest_contract_sha256": null,
               "contact_discovery_attestation_verifier": null,
               "contact_discovery_expected_measurement_hex": null,
               "contact_discovery_attestation_document_sha256": null,
@@ -163,6 +164,7 @@ class ServerApiTest {
         assertEquals(false, parsed.contact_discovery_ticket_supported)
         assertNull(parsed.contact_discovery_service_origin)
         assertNull(parsed.contact_discovery_manifest_issuer_ed25519_pub)
+        assertNull(parsed.contact_discovery_expected_manifest_contract_sha256)
         assertNull(parsed.contact_discovery_attestation_verifier)
         assertNull(parsed.contact_discovery_expected_measurement_hex)
         assertNull(parsed.contact_discovery_attestation_document_sha256)
@@ -287,6 +289,7 @@ class ServerApiTest {
               "contact_discovery_manifest_issuer_ed25519_pub": null,
               "contact_discovery_directory_backend": null,
               "contact_discovery_host_enclave_protocol_version": null,
+              "contact_discovery_host_release_id": null,
               "contact_discovery_enclave_release_id": null,
               "contact_discovery_attestation_verifier": null,
               "contact_discovery_expected_measurement_hex": null,
@@ -422,10 +425,12 @@ class ServerApiTest {
               "contact_discovery_ticket_supported": true,
               "contact_discovery_service_origin": "https://cdsi.example",
               "contact_discovery_manifest_issuer_ed25519_pub": "manifest-ed25519-pub",
-              "contact_discovery_directory_backend": "simulated_enclave_preview",
+              "contact_discovery_directory_backend": "attested_enclave_directory_v1",
               "contact_discovery_host_enclave_protocol_version": 1,
-              "contact_discovery_enclave_release_id": "simulated-preview",
-              "contact_discovery_attestation_verifier": "sgx-dcap-preview",
+              "contact_discovery_host_release_id": "attested-host-v1",
+              "contact_discovery_enclave_release_id": "attested-enclave-v1",
+              "contact_discovery_expected_manifest_contract_sha256": "${"ef".repeat(32)}",
+              "contact_discovery_attestation_verifier": "aws-nitro-root-v1",
               "contact_discovery_expected_measurement_hex": "${"ab".repeat(32)}",
               "contact_discovery_attestation_document_sha256": "${"cd".repeat(32)}",
               "contact_discovery_attestation_max_age_seconds": 900,
@@ -490,10 +495,12 @@ class ServerApiTest {
               "contact_discovery_ticket_supported": true,
               "contact_discovery_service_origin": "https://cdsi.example",
               "contact_discovery_manifest_issuer_ed25519_pub": "manifest-ed25519-pub",
-              "contact_discovery_directory_backend": "simulated_enclave_preview",
+              "contact_discovery_directory_backend": "attested_enclave_directory_v1",
               "contact_discovery_host_enclave_protocol_version": 1,
-              "contact_discovery_enclave_release_id": "simulated-preview",
-              "contact_discovery_attestation_verifier": "sgx-dcap-preview",
+              "contact_discovery_host_release_id": "attested-host-v1",
+              "contact_discovery_enclave_release_id": "attested-enclave-v1",
+              "contact_discovery_expected_manifest_contract_sha256": "${"ef".repeat(32)}",
+              "contact_discovery_attestation_verifier": "aws-nitro-root-v1",
               "contact_discovery_expected_measurement_hex": "${"ab".repeat(32)}",
               "contact_discovery_attestation_document_sha256": "${"cd".repeat(32)}",
               "contact_discovery_attestation_max_age_seconds": 0,
@@ -526,3 +533,4 @@ class ServerApiTest {
         }
     }
 }
+

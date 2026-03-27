@@ -3,23 +3,23 @@
   "entries": [
     {
       "path": "README.md",
-      "sha256": "1e9ca870ee8662ae5af87451fc7c412286b82615c0b90c42e2ec5b6bcb4cac2a",
-      "size_bytes": 29442
+      "sha256": "f155b079900a3f3a4c7877e7d140add29a70aa74c081433f837e1587cf354ca0",
+      "size_bytes": 31291
     },
     {
       "path": "docs/AUDIT_READINESS.md",
-      "sha256": "36676a8e3e36346893d1105f2b118f55add09a975488d7a91d54f25942f7348f",
-      "size_bytes": 17710
+      "sha256": "53eefa522711312a4957a00927c984958b2f9f1fe7c467322db0941e0c424b5b",
+      "size_bytes": 17987
     },
     {
       "path": "docs/API.md",
-      "sha256": "2d55b324a04ed096fa25fc298d9cfeb34b2af386c287f8e27c0c201124c1fb3e",
-      "size_bytes": 62148
+      "sha256": "d10a4385fceaf0dfa097f8ca8910c086860e5c5b6157bbc2c0aeefc07c03114f",
+      "size_bytes": 66444
     },
     {
       "path": "docs/DEPLOYMENT.md",
-      "sha256": "ead25e13067d5bf9d8e986e516034d4fd413432f32a5ea1943a549dd48d651af",
-      "size_bytes": 15076
+      "sha256": "952df1e1fbdebb0d0c9787d3d5a999d3788e6a3954cd24127682af41df2ad24d",
+      "size_bytes": 15135
     },
     {
       "path": "docs/FULL_PAGE_ENCRYPTION_PLAN.md",
@@ -43,8 +43,8 @@
     },
     {
       "path": "docs/PRIVATE_CONTACT_DISCOVERY.md",
-      "sha256": "6c9b5a6275c198fb2da81cc871a975699079e4f33cc9fee27032e593da7a4c20",
-      "size_bytes": 10318
+      "sha256": "c1263bbf7364b6f0815e4b010aeaa15828e5526b1715635192643234db3a2cdc",
+      "size_bytes": 14515
     },
     {
       "path": "docs/PRIVATE_GROUPS.md",
@@ -62,19 +62,24 @@
       "size_bytes": 10252
     },
     {
+      "path": "docs/SUPPORT_MATRIX.json",
+      "sha256": "81aa998a7daa90440e29ec8670f3e1e667f46a10db0060ab7a440eeeb3f350f2",
+      "size_bytes": 537
+    },
+    {
       "path": "docs/THREAT_MODEL.md",
       "sha256": "1aa58faab598c65620db1464fc6af7ff7742b0e68e5ba3e70ef89a3cb5110c45",
       "size_bytes": 3925
     },
     {
       "path": "docs/WEB.md",
-      "sha256": "14f088e8c8adcd33cabdd1a9da9a5bdc077ed4652396b461c82edd680afc6cdc",
-      "size_bytes": 5793
+      "sha256": "61d8c71caf57513fc870313f4273d97291559b852149fa61b697c89f735a8f87",
+      "size_bytes": 5901
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "12170a11dcd1609a86638f3f55bdb23df5cf19c5526822c441ab43ac41ecff83",
-      "size_bytes": 17040
+      "sha256": "b79bd7eb0d225caadd41b1ab88039baccaa644b42de6c63921d69a58200cb25c",
+      "size_bytes": 17349
     },
     {
       "path": ".github/workflows/release.yml",
@@ -128,8 +133,8 @@
     },
     {
       "path": "scripts/security/validate_no_preview_contact_discovery.py",
-      "sha256": "db42f7eac85967911441fe2d17a7d785dc9f0273e55632b90aef1ce0f875129a",
-      "size_bytes": 1631
+      "sha256": "cfa3dafa40d27b5cf6fcc8d9955ae73cfa5a7d53ce8dfa5601072a4979d1d813",
+      "size_bytes": 1602
     },
     {
       "path": "scripts/security/validate_release_governance_workflows.py",
@@ -137,12 +142,17 @@
       "size_bytes": 2789
     },
     {
+      "path": "scripts/security/validate_support_matrix.py",
+      "sha256": "6b870ef9867e240dc97151cf21b1727964a6dc7aaa983e4aeb63d32f5e83e93e",
+      "size_bytes": 3242
+    },
+    {
       "path": "scripts/security/verify_audit_readiness_bundle.py",
       "sha256": "53beb66d6f7363a7d7935ecc9969069990fca650175a44ff6eed4d8faac56e86",
       "size_bytes": 2692
     }
   ],
-  "generated_at_utc": "2026-03-26T20:07:52.774065+00:00",
+  "generated_at_utc": "2026-03-27T14:35:12.904533+00:00",
   "git_branch": "main",
-  "git_commit": "90d1c656a7c09e5926275704637bf15be8ab778f"
+  "git_commit": "357acfc89c887386f801f03e83a49e6ebc0f4159"
 }

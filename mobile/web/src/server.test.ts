@@ -565,19 +565,24 @@ describe("PqmsgApi methods", () => {
       jsonResponse({
         service: "pqmsg-discovery",
         protocol_version: 1,
-        attestation_mode: "unattested_development",
-        attestation_verifier: null,
-        enclave_measurement_hex: null,
+        attestation_mode: "attested_enclave_v1",
+        attestation_verifier: "aws-nitro-root-v1",
+        enclave_measurement_hex: "ab".repeat(32),
+        attestation_document_format: "opaque_b64_v1",
+        attestation_document_sha256: "cd".repeat(32),
+        attestation_challenge_mode: "nonce_b64_required_v1",
         ticket_format: "base64(json-payload).base64(ed25519-signature)",
         ticket_issuer_ed25519_pub: "issuer-ed25519-pub",
         ticket_max_ttl_seconds: 300,
-        lookup_protocol: "blind_token_directory_preview",
-        privacy_mode: "blind_evaluation_preview",
-        directory_backend: "simulated_enclave_preview",
+        lookup_protocol: "attested_enclave_voprf_directory_v1",
+        privacy_mode: "enclave_backed_private_discovery_v1",
+        directory_backend: "attested_enclave_directory_v1",
         host_enclave_protocol_version: 1,
-        enclave_release_id: "simulated-preview",
+        host_release_id: "attested-host-v1",
+        enclave_release_id: "attested-enclave-v1",
         match_result_format: "contact_invite_token",
-        oprf_suite: "ristretto255-sha512-preview",
+        oprf_suite: "ristretto255-sha512-v1",
+        evaluation_proof_mode: "dleq_per_element_v1",
         oprf_public_key_ristretto255: "ristretto-oprf-pub",
         signed_at: "2026-03-26T12:00:00Z",
         expires_at: "2026-03-26T13:00:00Z",
@@ -595,12 +600,14 @@ describe("PqmsgApi methods", () => {
   it("getContactDiscoveryAttestation fetches the separate discovery service attestation", async () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
-        attestation_mode: "sgx_preview",
-        attestation_verifier: "sgx-dcap-preview",
+        attestation_mode: "attested_enclave_v1",
+        attestation_verifier: "aws-nitro-root-v1",
         enclave_measurement_hex: "ab".repeat(32),
-        directory_backend: "simulated_enclave_preview",
+        directory_backend: "attested_enclave_directory_v1",
         host_enclave_protocol_version: 1,
-        enclave_release_id: "simulated-preview",
+        host_release_id: "attested-host-v1",
+        enclave_release_id: "attested-enclave-v1",
+        manifest_contract_sha256: "ee".repeat(32),
         attested_oprf_public_key_ristretto255: "oprf-pub",
         document_format: "opaque_b64_v1",
         document_base64: "eyJ0ZWUiOiJzZ3gifQ==",
@@ -615,7 +622,7 @@ describe("PqmsgApi methods", () => {
       "bm9uY2UxMjM0NTY3ODkwMTIzNA==",
     );
     const [url, opts] = mockFetch.mock.calls[0];
-    expect(attestation.attestation_verifier).toBe("sgx-dcap-preview");
+    expect(attestation.attestation_verifier).toBe("aws-nitro-root-v1");
     expect(url).toBe(
       "https://cdsi.example/v1/attestation?nonce_b64=bm9uY2UxMjM0NTY3ODkwMTIzNA%3D%3D"
     );
@@ -627,7 +634,9 @@ describe("PqmsgApi methods", () => {
       jsonResponse({
         user_id: "alice",
         device_id: "alice-dev-1",
-        evaluation_proof_mode: "dleq_per_element_preview",
+        ticket_nonce: "ticket-nonce-1",
+        manifest_contract_sha256: "ee".repeat(32),
+        evaluation_proof_mode: "dleq_per_element_v1",
         evaluated_elements_base64: ["ZXZhbHVhdGVk"],
         dleq_proofs: [{
           challenge_scalar_base64: "Y2hhbGxlbmdl",
@@ -644,6 +653,7 @@ describe("PqmsgApi methods", () => {
     });
     const [url, opts] = mockFetch.mock.calls[0];
     expect(result.device_id).toBe("alice-dev-1");
+    expect(result.ticket_nonce).toBe("ticket-nonce-1");
     expect(url).toBe("https://cdsi.example/v1/discovery/evaluate");
     expect(opts.method).toBe("POST");
     expect(JSON.parse(String(opts.body))).toEqual({
@@ -657,6 +667,8 @@ describe("PqmsgApi methods", () => {
       jsonResponse({
         user_id: "alice",
         device_id: "alice-dev-1",
+        ticket_nonce: "ticket-nonce-1",
+        manifest_contract_sha256: "ee".repeat(32),
         uploaded_phone_tokens: 1,
         uploaded_email_tokens: 0,
         updated_at: "2026-03-13T00:00:00Z",
@@ -669,6 +681,7 @@ describe("PqmsgApi methods", () => {
     });
     const [url, opts] = mockFetch.mock.calls[0];
     expect(result.user_id).toBe("alice");
+    expect(result.ticket_nonce).toBe("ticket-nonce-1");
     expect(url).toBe("https://cdsi.example/v1/discovery/handles");
     expect(opts.method).toBe("POST");
     expect(JSON.parse(String(opts.body))).toEqual({
@@ -682,6 +695,8 @@ describe("PqmsgApi methods", () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
         user_id: "alice",
+        ticket_nonce: "ticket-nonce-2",
+        manifest_contract_sha256: "ee".repeat(32),
         matches: [
           {
             token_sha256: "11".repeat(32),
@@ -698,6 +713,7 @@ describe("PqmsgApi methods", () => {
     });
     const [url, opts] = mockFetch.mock.calls[0];
     expect(result.matches).toHaveLength(1);
+    expect(result.ticket_nonce).toBe("ticket-nonce-2");
     expect(url).toBe("https://cdsi.example/v1/discovery/match");
     expect(opts.method).toBe("POST");
     expect(JSON.parse(String(opts.body))).toEqual({
@@ -795,3 +811,4 @@ describe("PqmsgApi request body", () => {
     expect(opts.headers.get("accept")).toBe("application/json");
   });
 });
+

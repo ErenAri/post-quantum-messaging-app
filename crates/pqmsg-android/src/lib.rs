@@ -48,6 +48,7 @@ use rand::{CryptoRng, RngCore};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_ONE_TIME_PREKEYS: u32 = 256;
@@ -328,6 +329,7 @@ struct ContactDiscoveryManifestPayloadRecord {
     attestation_mode: String,
     attestation_verifier: Option<String>,
     enclave_measurement_hex: Option<String>,
+    attestation_pcrs_sha384: Option<BTreeMap<String, String>>,
     attestation_document_format: Option<String>,
     attestation_document_sha256: Option<String>,
     attestation_challenge_mode: Option<String>,
@@ -338,6 +340,7 @@ struct ContactDiscoveryManifestPayloadRecord {
     privacy_mode: String,
     directory_backend: String,
     host_enclave_protocol_version: u8,
+    host_release_id: String,
     enclave_release_id: String,
     match_result_format: String,
     oprf_suite: String,
@@ -360,9 +363,12 @@ struct ContactDiscoveryAttestationPayloadRecord {
     attestation_mode: String,
     attestation_verifier: String,
     enclave_measurement_hex: String,
+    attested_pcrs_sha384: Option<BTreeMap<String, String>>,
     directory_backend: String,
     host_enclave_protocol_version: u8,
+    host_release_id: String,
     enclave_release_id: String,
+    manifest_contract_sha256: String,
     attested_oprf_public_key_ristretto255: String,
     document_format: String,
     document_base64: String,
@@ -394,6 +400,7 @@ struct ContactDiscoveryEvaluateProofRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ContactDiscoveryEvaluateResponseRecord {
+    manifest_contract_sha256: String,
     evaluation_proof_mode: String,
     evaluated_elements_base64: Vec<String>,
     dleq_proofs: Vec<ContactDiscoveryEvaluateProofRecord>,
@@ -1409,6 +1416,7 @@ pub fn verify_contact_discovery_manifest(
     expected_manifest_issuer_ed25519_pub: String,
     expected_attestation_verifier: String,
     expected_enclave_measurement_hex: String,
+    expected_attestation_pcrs_sha384_json: String,
     expected_attestation_document_sha256: String,
 ) -> Result<bool, PqmsgAndroidError> {
     let manifest: ContactDiscoveryManifestRecord = serde_json::from_str(&manifest_json)?;
@@ -1453,6 +1461,15 @@ pub fn verify_contact_discovery_manifest(
             "contact discovery manifest enclave measurement mismatch",
         ));
     }
+    let expected_attestation_pcrs_sha384: Option<BTreeMap<String, String>> =
+        serde_json::from_str(&expected_attestation_pcrs_sha384_json).map_err(|_| {
+            invalid_input("expected_attestation_pcrs_sha384_json must be valid JSON")
+        })?;
+    if manifest.payload.attestation_pcrs_sha384 != expected_attestation_pcrs_sha384 {
+        return Err(operation_failed(
+            "contact discovery manifest attestation PCR set mismatch",
+        ));
+    }
     let expected_attestation_document_sha256 = expected_attestation_document_sha256.trim();
     if !expected_attestation_document_sha256.is_empty()
         && manifest.payload.attestation_document_sha256.as_deref()
@@ -1462,12 +1479,12 @@ pub fn verify_contact_discovery_manifest(
             "contact discovery manifest attestation document hash mismatch",
         ));
     }
-    if manifest.payload.attestation_mode != "unattested_development"
-        && (manifest.payload.attestation_verifier.is_none()
-            || manifest.payload.enclave_measurement_hex.is_none()
-            || manifest.payload.attestation_document_format.is_none()
-            || manifest.payload.attestation_document_sha256.is_none()
-            || manifest.payload.attestation_challenge_mode.is_none())
+    if manifest.payload.attestation_mode != "attested_enclave_v1"
+        || manifest.payload.attestation_verifier.is_none()
+        || manifest.payload.enclave_measurement_hex.is_none()
+        || manifest.payload.attestation_document_format.is_none()
+        || manifest.payload.attestation_document_sha256.is_none()
+        || manifest.payload.attestation_challenge_mode.is_none()
     {
         return Err(operation_failed(
             "contact discovery manifest attestation contract is incomplete",
@@ -1494,6 +1511,40 @@ pub fn verify_contact_discovery_manifest(
             operation_failed("contact discovery manifest signature verification failed")
         })?;
     Ok(true)
+}
+
+#[uniffi::export]
+pub fn contact_discovery_manifest_contract_sha256(
+    manifest_json: String,
+) -> Result<String, PqmsgAndroidError> {
+    let manifest: ContactDiscoveryManifestRecord = serde_json::from_str(&manifest_json)?;
+    let contract_payload = serde_json::json!({
+        "service": manifest.payload.service,
+        "protocol_version": manifest.payload.protocol_version,
+        "attestation_mode": manifest.payload.attestation_mode,
+        "attestation_verifier": manifest.payload.attestation_verifier,
+        "enclave_measurement_hex": manifest.payload.enclave_measurement_hex,
+        "attestation_pcrs_sha384": manifest.payload.attestation_pcrs_sha384,
+        "attestation_document_format": manifest.payload.attestation_document_format,
+        "attestation_document_sha256": manifest.payload.attestation_document_sha256,
+        "attestation_challenge_mode": manifest.payload.attestation_challenge_mode,
+        "ticket_format": manifest.payload.ticket_format,
+        "ticket_issuer_ed25519_pub": manifest.payload.ticket_issuer_ed25519_pub,
+        "ticket_max_ttl_seconds": manifest.payload.ticket_max_ttl_seconds,
+        "lookup_protocol": manifest.payload.lookup_protocol,
+        "privacy_mode": manifest.payload.privacy_mode,
+        "directory_backend": manifest.payload.directory_backend,
+        "host_enclave_protocol_version": manifest.payload.host_enclave_protocol_version,
+        "host_release_id": manifest.payload.host_release_id,
+        "enclave_release_id": manifest.payload.enclave_release_id,
+        "match_result_format": manifest.payload.match_result_format,
+        "oprf_suite": manifest.payload.oprf_suite,
+        "evaluation_proof_mode": manifest.payload.evaluation_proof_mode,
+        "oprf_public_key_ristretto255": manifest.payload.oprf_public_key_ristretto255,
+    });
+    let payload_bytes = serde_json::to_vec(&contract_payload)
+        .map_err(|_| operation_failed("serialize contact discovery manifest contract payload"))?;
+    Ok(hex_string(&Sha256::digest(payload_bytes)))
 }
 
 #[uniffi::export]
@@ -1693,7 +1744,7 @@ pub fn contact_discovery_verify_and_finalize_tokens(
     let blinding_scalars_base64: Vec<String> = serde_json::from_str(&blinding_scalars_json)?;
     let response: ContactDiscoveryEvaluateResponseRecord =
         serde_json::from_str(&evaluated_response_json)?;
-    if response.evaluation_proof_mode != "dleq_per_element_preview" {
+    if response.evaluation_proof_mode != "dleq_per_element_v1" {
         return Err(invalid_input(
             "unsupported contact discovery evaluation proof mode",
         ));
@@ -3901,23 +3952,25 @@ mod tests {
         let payload = ContactDiscoveryManifestPayloadRecord {
             service: "pqmsg-discovery".to_string(),
             protocol_version: 1,
-            attestation_mode: "unattested_development".to_string(),
-            attestation_verifier: None,
-            enclave_measurement_hex: None,
-            attestation_document_format: None,
-            attestation_document_sha256: None,
-            attestation_challenge_mode: None,
+            attestation_mode: "attested_enclave_v1".to_string(),
+            attestation_verifier: Some("aws-nitro-root-v1".to_string()),
+            enclave_measurement_hex: Some("ab".repeat(32)),
+            attestation_pcrs_sha384: None,
+            attestation_document_format: Some("opaque_b64_v1".to_string()),
+            attestation_document_sha256: Some("cd".repeat(32)),
+            attestation_challenge_mode: Some("nonce_b64_required_v1".to_string()),
             ticket_format: "base64(json-payload).base64(ed25519-signature)".to_string(),
             ticket_issuer_ed25519_pub: "ticket-issuer-ed25519-pub".to_string(),
             ticket_max_ttl_seconds: 300,
-            lookup_protocol: "blind_token_directory_preview".to_string(),
-            privacy_mode: "blind_evaluation_preview".to_string(),
-            directory_backend: "simulated_enclave_preview".to_string(),
+            lookup_protocol: "attested_enclave_voprf_directory_v1".to_string(),
+            privacy_mode: "enclave_backed_private_discovery_v1".to_string(),
+            directory_backend: "attested_enclave_directory_v1".to_string(),
             host_enclave_protocol_version: 1,
-            enclave_release_id: "simulated-preview".to_string(),
+            host_release_id: "attested-host-v1".to_string(),
+            enclave_release_id: "attested-enclave-v1".to_string(),
             match_result_format: "contact_invite_token".to_string(),
-            oprf_suite: "ristretto255-sha512-preview".to_string(),
-            evaluation_proof_mode: "dleq_per_element_preview".to_string(),
+            oprf_suite: "ristretto255-sha512-v1".to_string(),
+            evaluation_proof_mode: "dleq_per_element_v1".to_string(),
             oprf_public_key_ristretto255: B64.encode([0x33; 32]),
             signed_at: (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
             expires_at: (Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
@@ -3940,6 +3993,7 @@ mod tests {
             B64.encode(manifest_signing_key.verifying_key().as_bytes()),
             String::new(),
             String::new(),
+            "null".to_string(),
             String::new(),
         )
         .expect("verify manifest"));
@@ -3952,23 +4006,25 @@ mod tests {
             payload: ContactDiscoveryManifestPayloadRecord {
                 service: "pqmsg-discovery".to_string(),
                 protocol_version: 1,
-                attestation_mode: "unattested_development".to_string(),
-                attestation_verifier: None,
-                enclave_measurement_hex: None,
-                attestation_document_format: None,
-                attestation_document_sha256: None,
-                attestation_challenge_mode: None,
+                attestation_mode: "attested_enclave_v1".to_string(),
+                attestation_verifier: Some("aws-nitro-root-v1".to_string()),
+                enclave_measurement_hex: Some("ab".repeat(32)),
+                attestation_pcrs_sha384: None,
+                attestation_document_format: Some("opaque_b64_v1".to_string()),
+                attestation_document_sha256: Some("cd".repeat(32)),
+                attestation_challenge_mode: Some("nonce_b64_required_v1".to_string()),
                 ticket_format: "base64(json-payload).base64(ed25519-signature)".to_string(),
                 ticket_issuer_ed25519_pub: "ticket-issuer-ed25519-pub".to_string(),
                 ticket_max_ttl_seconds: 300,
-                lookup_protocol: "blind_token_directory_preview".to_string(),
-                privacy_mode: "blind_evaluation_preview".to_string(),
-                directory_backend: "simulated_enclave_preview".to_string(),
+                lookup_protocol: "attested_enclave_voprf_directory_v1".to_string(),
+                privacy_mode: "enclave_backed_private_discovery_v1".to_string(),
+                directory_backend: "attested_enclave_directory_v1".to_string(),
                 host_enclave_protocol_version: 1,
-                enclave_release_id: "simulated-preview".to_string(),
+                host_release_id: "attested-host-v1".to_string(),
+                enclave_release_id: "attested-enclave-v1".to_string(),
                 match_result_format: "contact_invite_token".to_string(),
-                oprf_suite: "ristretto255-sha512-preview".to_string(),
-                evaluation_proof_mode: "dleq_per_element_preview".to_string(),
+                oprf_suite: "ristretto255-sha512-v1".to_string(),
+                evaluation_proof_mode: "dleq_per_element_v1".to_string(),
                 oprf_public_key_ristretto255: B64.encode([0x44; 32]),
                 signed_at: (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
                 expires_at: (Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
@@ -3984,6 +4040,7 @@ mod tests {
             B64.encode(manifest_signing_key.verifying_key().as_bytes()),
             String::new(),
             String::new(),
+            "null".to_string(),
             String::new(),
         )
         .expect_err("manifest signature should fail");
@@ -3994,12 +4051,15 @@ mod tests {
     fn verify_contact_discovery_attestation_response_signature_accepts_valid_signature() {
         let manifest_signing_key = SigningKey::from_bytes(&[23u8; 32]);
         let payload = ContactDiscoveryAttestationPayloadRecord {
-            attestation_mode: "sgx_preview".to_string(),
-            attestation_verifier: "sgx-dcap-preview".to_string(),
+            attestation_mode: "attested_enclave_v1".to_string(),
+            attestation_verifier: "aws-nitro-root-v1".to_string(),
             enclave_measurement_hex: "aa".repeat(32),
-            directory_backend: "simulated_enclave_preview".to_string(),
+            attested_pcrs_sha384: None,
+            directory_backend: "attested_enclave_directory_v1".to_string(),
             host_enclave_protocol_version: 1,
-            enclave_release_id: "simulated-preview".to_string(),
+            host_release_id: "attested-host-v1".to_string(),
+            enclave_release_id: "attested-enclave-v1".to_string(),
+            manifest_contract_sha256: "11".repeat(32),
             attested_oprf_public_key_ristretto255: B64.encode([0x55; 32]),
             document_format: "opaque_b64_v1".to_string(),
             document_base64: B64.encode(br#"{"tee":"sgx","svn":1}"#),
@@ -4029,12 +4089,15 @@ mod tests {
     fn verify_contact_discovery_attestation_response_signature_rejects_nonce_mismatch() {
         let manifest_signing_key = SigningKey::from_bytes(&[24u8; 32]);
         let payload = ContactDiscoveryAttestationPayloadRecord {
-            attestation_mode: "sgx_preview".to_string(),
-            attestation_verifier: "sgx-dcap-preview".to_string(),
+            attestation_mode: "attested_enclave_v1".to_string(),
+            attestation_verifier: "aws-nitro-root-v1".to_string(),
             enclave_measurement_hex: "aa".repeat(32),
-            directory_backend: "simulated_enclave_preview".to_string(),
+            attested_pcrs_sha384: None,
+            directory_backend: "attested_enclave_directory_v1".to_string(),
             host_enclave_protocol_version: 1,
-            enclave_release_id: "simulated-preview".to_string(),
+            host_release_id: "attested-host-v1".to_string(),
+            enclave_release_id: "attested-enclave-v1".to_string(),
+            manifest_contract_sha256: "11".repeat(32),
             attested_oprf_public_key_ristretto255: B64.encode([0x66; 32]),
             document_format: "opaque_b64_v1".to_string(),
             document_base64: B64.encode(br#"{"tee":"sgx","svn":1}"#),
@@ -4126,7 +4189,8 @@ mod tests {
         );
         let response_scalar = nonce + challenge * server_scalar;
         let response = ContactDiscoveryEvaluateResponseRecord {
-            evaluation_proof_mode: "dleq_per_element_preview".to_string(),
+            manifest_contract_sha256: "11".repeat(32),
+            evaluation_proof_mode: "dleq_per_element_v1".to_string(),
             evaluated_elements_base64: vec![B64.encode(evaluated_point.compress().to_bytes())],
             dleq_proofs: vec![ContactDiscoveryEvaluateProofRecord {
                 challenge_scalar_base64: B64.encode(challenge.to_bytes()),
