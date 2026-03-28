@@ -84,6 +84,18 @@
         <item name="android:paddingRight">14dp</item>
     </style>
 
+    <style name="Widget.PQMsg.Chip.Reaction" parent="Widget.MaterialComponents.Chip.Action">
+        <item name="shapeAppearance">@style/ShapeAppearance.PQMsg.Small</item>
+        <item name="chipStrokeWidth">0dp</item>
+        <item name="chipMinHeight">28dp</item>
+        <item name="android:minHeight">28dp</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:checkable">false</item>
+        <item name="closeIconVisible">false</item>
+        <item name="checkedIconVisible">false</item>
+    </style>
+
     <style name="TextAppearance.PQMsg.ScreenTitle" parent="TextAppearance.MaterialComponents.Headline5">
         <item name="android:fontFamily">sans-serif-medium</item>
         <item name="android:textColor">@color/pq_ink</item>

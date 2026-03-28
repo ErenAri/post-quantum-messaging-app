@@ -18,6 +18,18 @@
     <color name="pq_bubble_sent_text">#FFFFFFFF</color>
     <color name="pq_bubble_received">#FFFFFFFF</color>
     <color name="pq_bubble_received_text">#10181F</color>
+    <color name="pq_reaction_sent_bg">#4DFFFFFF</color>
+    <color name="pq_reaction_sent_text">#FFFFFFFF</color>
+    <color name="pq_reaction_received_bg">#E8EEF7</color>
+    <color name="pq_reaction_received_text">#24323D</color>
+    <color name="pq_reply_chip_bg">#E8EEF7</color>
+    <color name="pq_reply_chip_text">#24323D</color>
+    <color name="pq_reply_chip_active_bg">#DCE7FF</color>
+    <color name="pq_reply_chip_active_text">#1D57D2</color>
+    <color name="pq_search_match_bg">#EEF4FF</color>
+    <color name="pq_search_match_stroke">#C7D8FF</color>
+    <color name="pq_search_active_bg">#DCE7FF</color>
+    <color name="pq_search_active_stroke">#2D6CF6</color>
     <color name="pq_toolbar_icon_bg">#E9EEF4</color>
     <color name="pq_toolbar_icon_fg">#24323D</color>
 </resources>

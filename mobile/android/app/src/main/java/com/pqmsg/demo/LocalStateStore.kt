@@ -155,6 +155,15 @@ class LocalStateStore(context: Context) {
         saveProgress(userId, SetupProgress())
     }
 
+    fun hasSeenThreadTips(): Boolean {
+        return getBoolean("thread_tips_seen", false)
+    }
+
+    fun markThreadTipsSeen() {
+        prefs.edit().putBoolean("thread_tips_seen", true).apply()
+        removeLegacyKeys("thread_tips_seen")
+    }
+
     fun writeKeys(userId: String, keysJson: String) {
         val path = File(rootDir, "keys/$userId.json")
         writeProtectedFile(path, keysJson)
@@ -592,6 +601,24 @@ class LocalStateStore(context: Context) {
         messageStore.updateDirectMessageReactions(userId, peerUserId, direction, sentAtMillis, reactions)
     }
 
+    fun deleteThreadMessage(
+        userId: String,
+        peerUserId: String,
+        direction: String,
+        sentAtMillis: Long,
+        transportMessageId: Long?,
+    ) {
+        if (userId.isBlank() || peerUserId.isBlank()) return
+        migrateLegacyDirectThread(userId, peerUserId)
+        messageStore.deleteDirectMessage(
+            userId = userId,
+            peerUserId = peerUserId,
+            direction = direction,
+            sentAtMillis = sentAtMillis,
+            transportMessageId = transportMessageId,
+        )
+    }
+
     fun countSessions(userId: String): Int {
         if (userId.isBlank()) {
             return 0
@@ -763,6 +790,24 @@ class LocalStateStore(context: Context) {
         if (userId.isBlank() || groupId.isBlank()) return
         migrateLegacyGroupThread(userId, groupId)
         messageStore.updateGroupMessageReactions(userId, groupId, direction, sentAtMillis, reactions)
+    }
+
+    fun deleteGroupThreadMessage(
+        userId: String,
+        groupId: String,
+        direction: String,
+        sentAtMillis: Long,
+        transportMessageId: Long?,
+    ) {
+        if (userId.isBlank() || groupId.isBlank()) return
+        migrateLegacyGroupThread(userId, groupId)
+        messageStore.deleteGroupMessage(
+            userId = userId,
+            groupId = groupId,
+            direction = direction,
+            sentAtMillis = sentAtMillis,
+            transportMessageId = transportMessageId,
+        )
     }
 
     private fun readGroupIds(userId: String): LinkedHashSet<String> {

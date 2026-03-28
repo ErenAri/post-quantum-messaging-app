@@ -120,6 +120,7 @@ const CURSORS_KEY = "pqmsg.web.cursors.v1";
 const PRIVATE_GROUP_CURSORS_KEY = "pqmsg.web.privategroupcursors.v1";
 const TRANSPARENCY_KEY = "pqmsg.web.transparency.v1";
 const CONTACT_DISCOVERY_KEY = "pqmsg.web.contactdiscovery.v1";
+const THREAD_TIPS_KEY = "pqmsg.web.threadtips.v1";
 const METADATA_KEYS = [
   SETUP_KEY,
   CONVERSATIONS_KEY,
@@ -132,6 +133,7 @@ const METADATA_KEYS = [
   PRIVATE_GROUP_CURSORS_KEY,
   TRANSPARENCY_KEY,
   CONTACT_DISCOVERY_KEY,
+  THREAD_TIPS_KEY,
 ] as const;
 const metadataCache = new Map<string, string | null>();
 const localKeyUsers = new Set<string>();
@@ -188,6 +190,14 @@ export function loadSetup(): SetupConfig {
 
 export function saveSetup(setup: SetupConfig): void {
   writeRecord(SETUP_KEY, setup);
+}
+
+export function hasSeenThreadTips(): boolean {
+  return parseRecord<boolean>(THREAD_TIPS_KEY, false);
+}
+
+export function markThreadTipsSeen(): void {
+  writeRecord(THREAD_TIPS_KEY, true);
 }
 
 export async function saveKeys(

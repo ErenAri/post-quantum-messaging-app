@@ -1,5 +1,8 @@
 package com.pqmsg.demo
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
@@ -10,6 +13,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.ListView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -48,19 +52,34 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var attachMediaButton: Button
     private lateinit var clearAttachmentButton: Button
     private lateinit var sendButton: Button
+    private lateinit var searchButton: Button
     private lateinit var syncButton: Button
+    private lateinit var threadTipsButton: Button
     private lateinit var backButton: Button
     private lateinit var chatHeaderContainer: View
     private lateinit var chatMessages: ListView
     private lateinit var chatEmptyText: TextView
     private lateinit var chatTitleText: TextView
     private lateinit var chatMeta: TextView
+    private lateinit var selectionModeLayout: View
+    private lateinit var selectionCountText: TextView
+    private lateinit var selectionCopyButton: Button
+    private lateinit var selectionShareButton: Button
+    private lateinit var selectionDeleteButton: Button
+    private lateinit var selectionCloseButton: Button
+    private lateinit var searchModeLayout: View
+    private lateinit var searchInput: EditText
+    private lateinit var searchCountText: TextView
+    private lateinit var searchPrevButton: Button
+    private lateinit var searchNextButton: Button
+    private lateinit var searchCloseButton: Button
     private lateinit var replyPreviewLayout: View
     private lateinit var replyPreviewText: TextView
     private lateinit var clearReplyButton: Button
     private lateinit var attachmentPreviewCard: View
     private lateinit var attachmentTitle: TextView
     private lateinit var attachmentInfo: TextView
+    private lateinit var composerBar: View
     private lateinit var errorSummaryText: TextView
     private lateinit var errorDetailsText: TextView
     private lateinit var errorToggleButton: Button
@@ -78,7 +97,11 @@ class ChatActivity : AppCompatActivity() {
     private var ephemeralTtlSeconds: Long? = null
     private var localStoreAvailable = true
     private lateinit var threadAdapter: ThreadMessageAdapter
+    private var currentThreadMessages: List<ThreadMessage> = emptyList()
     private var pendingReplyMessage: ThreadMessage? = null
+    private val selectedMessageKeys = linkedSetOf<String>()
+    private var searchResultKeys: List<String> = emptyList()
+    private var activeSearchIndex = 0
 
     private val pickAttachmentLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -131,28 +154,58 @@ class ChatActivity : AppCompatActivity() {
         attachMediaButton = findViewById(R.id.buttonAttachMedia)
         clearAttachmentButton = findViewById(R.id.buttonClearAttachment)
         sendButton = findViewById(R.id.buttonSend)
+        searchButton = findViewById(R.id.buttonThreadSearch)
         syncButton = findViewById(R.id.buttonSyncThread)
+        threadTipsButton = findViewById(R.id.buttonThreadTips)
         backButton = findViewById(R.id.buttonBackSetup)
         chatHeaderContainer = findViewById(R.id.chatHeaderContainer)
         chatMessages = findViewById(R.id.listChatMessages)
         chatEmptyText = findViewById(R.id.textChatEmpty)
         chatTitleText = findViewById(R.id.textChatTitle)
         chatMeta = findViewById(R.id.textChatMeta)
+        selectionModeLayout = findViewById(R.id.layoutChatSelectionMode)
+        selectionCountText = findViewById(R.id.textChatSelectionCount)
+        selectionCopyButton = findViewById(R.id.buttonChatSelectionCopy)
+        selectionShareButton = findViewById(R.id.buttonChatSelectionShare)
+        selectionDeleteButton = findViewById(R.id.buttonChatSelectionDelete)
+        selectionCloseButton = findViewById(R.id.buttonChatSelectionClose)
+        searchModeLayout = findViewById(R.id.layoutChatSearchMode)
+        searchInput = findViewById(R.id.editThreadSearch)
+        searchCountText = findViewById(R.id.textThreadSearchCount)
+        searchPrevButton = findViewById(R.id.buttonThreadSearchPrev)
+        searchNextButton = findViewById(R.id.buttonThreadSearchNext)
+        searchCloseButton = findViewById(R.id.buttonThreadSearchClose)
         replyPreviewLayout = findViewById(R.id.layoutReplyPreview)
         replyPreviewText = findViewById(R.id.textReplyPreview)
         clearReplyButton = findViewById(R.id.buttonClearReply)
         attachmentPreviewCard = findViewById(R.id.cardAttachmentPreview)
         attachmentTitle = findViewById(R.id.textAttachmentPreviewTitle)
         attachmentInfo = findViewById(R.id.textAttachmentPreviewMeta)
+        composerBar = findViewById(R.id.layoutChatComposerBar)
         errorSummaryText = findViewById(R.id.textErrorSummaryChat)
         errorDetailsText = findViewById(R.id.textErrorDetailsChat)
         errorToggleButton = findViewById(R.id.buttonToggleErrorDetailsChat)
-        threadAdapter = ThreadMessageAdapter(this)
+        threadAdapter = ThreadMessageAdapter(
+            this,
+            onSwipeReply = { message -> beginReply(message) },
+            onOpenReplyThread = { message -> openReplyThread(message) },
+            onOpenQuotedReply = { targetId -> jumpToReplySource(targetId) },
+        )
         chatMessages.adapter = threadAdapter
         chatMessages.emptyView = chatEmptyText
+        chatMessages.setOnItemClickListener { _, _, position, _ ->
+            if (!isSelectionModeActive()) {
+                return@setOnItemClickListener
+            }
+            toggleSelectedMessage(threadAdapter.getItem(position))
+        }
         chatMessages.setOnItemLongClickListener { _, _, position, _ ->
             val message = threadAdapter.getItem(position)
-            showThreadMessageActions(message)
+            if (isSelectionModeActive()) {
+                toggleSelectedMessage(message)
+            } else {
+                showThreadMessageActions(message)
+            }
             true
         }
 
@@ -160,11 +213,15 @@ class ChatActivity : AppCompatActivity() {
         configureErrorToggle()
         configureAttachmentButtons()
         configureReplyPreview()
+        configureSelectionMode()
+        configureThreadSearch()
         renderAttachmentInfo()
         renderReplyPreview()
+        renderSelectionMode()
         renderThreadHistory()
         refreshMeta()
         syncActionAvailability()
+        maybeShowThreadTipsOnFirstOpen()
 
         sendButton.setOnClickListener {
             lifecycleScope.launch {
@@ -176,6 +233,12 @@ class ChatActivity : AppCompatActivity() {
 
         syncButton.setOnClickListener {
             syncThread()
+        }
+        searchButton.setOnClickListener {
+            openThreadSearch()
+        }
+        threadTipsButton.setOnClickListener {
+            showThreadTipsDialog()
         }
 
         chatHeaderContainer.setOnClickListener {
@@ -208,6 +271,22 @@ class ChatActivity : AppCompatActivity() {
         typingJob?.cancel()
     }
 
+    private fun showThreadTipsDialog() {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.thread_tips_title)
+            .setMessage(getString(R.string.thread_tips_direct_body))
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun maybeShowThreadTipsOnFirstOpen() {
+        if (store.hasSeenThreadTips()) {
+            return
+        }
+        store.markThreadTipsSeen()
+        showThreadTipsDialog()
+    }
+
     private fun configureInputObservers() {
         messageInput.doAfterTextChanged {
             syncActionAvailability()
@@ -233,11 +312,37 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
+    private fun configureThreadSearch() {
+        searchInput.doAfterTextChanged {
+            activeSearchIndex = 0
+            syncThreadSearch(scrollToActive = false)
+        }
+        searchPrevButton.setOnClickListener { moveThreadSearch(-1) }
+        searchNextButton.setOnClickListener { moveThreadSearch(1) }
+        searchCloseButton.setOnClickListener { closeThreadSearch() }
+        syncThreadSearch(scrollToActive = false)
+    }
+
     private fun configureReplyPreview() {
         clearReplyButton.setOnClickListener {
             pendingReplyMessage = null
             renderReplyPreview()
             syncActionAvailability()
+        }
+    }
+
+    private fun configureSelectionMode() {
+        selectionCopyButton.setOnClickListener {
+            copySelectedMessages()
+        }
+        selectionShareButton.setOnClickListener {
+            shareSelectedMessages()
+        }
+        selectionDeleteButton.setOnClickListener {
+            confirmDeleteSelectedMessages()
+        }
+        selectionCloseButton.setOnClickListener {
+            clearSelectionMode()
         }
     }
 
@@ -829,26 +934,108 @@ class ChatActivity : AppCompatActivity() {
             store.listThreadMessages(setup.userId, activePeerUserId)
         }.onSuccess { messages ->
             localStoreAvailable = true
+            currentThreadMessages = messages
             threadAdapter.submitList(messages)
+            syncSelectionAfterThreadUpdate()
+            syncThreadSearch(scrollToActive = false)
             chatEmptyText.text = getString(R.string.chat_log_empty)
             chatMessages.post {
-                if (messages.isNotEmpty()) {
+                if (messages.isNotEmpty() && !isSelectionModeActive()) {
                     chatMessages.setSelection(messages.lastIndex)
                 }
             }
         }.onFailure {
             localStoreAvailable = false
+            currentThreadMessages = emptyList()
             renderError(UiErrorMapper.fromThrowable(it, "Open local secure state"))
             threadAdapter.submitList(emptyList())
+            syncSelectionAfterThreadUpdate()
+            syncThreadSearch(scrollToActive = false)
             chatEmptyText.text =
                 "Local encrypted message history is unavailable on this device.\nRe-import a linked-device package or fully reprovision this device."
         }
         syncActionAvailability()
     }
 
+    private fun openThreadSearch() {
+        if (isSelectionModeActive()) {
+            clearSelectionMode()
+        }
+        searchModeLayout.visibility = View.VISIBLE
+        searchInput.requestFocus()
+        searchInput.selectAll()
+        syncThreadSearch(scrollToActive = false)
+    }
+
+    private fun closeThreadSearch() {
+        activeSearchIndex = 0
+        searchResultKeys = emptyList()
+        searchInput.setText("")
+        searchModeLayout.visibility = View.GONE
+        searchCountText.text = getString(R.string.thread_search_empty)
+        searchPrevButton.isEnabled = false
+        searchNextButton.isEnabled = false
+        threadAdapter.setSearchState(emptySet(), null)
+    }
+
+    private fun moveThreadSearch(delta: Int) {
+        if (searchResultKeys.isEmpty()) {
+            return
+        }
+        activeSearchIndex = (activeSearchIndex + delta + searchResultKeys.size) % searchResultKeys.size
+        syncThreadSearch()
+    }
+
+    private fun syncThreadSearch(scrollToActive: Boolean = true) {
+        if (searchModeLayout.visibility != View.VISIBLE) {
+            searchResultKeys = emptyList()
+            activeSearchIndex = 0
+            threadAdapter.setSearchState(emptySet(), null)
+            return
+        }
+        val query = searchInput.text?.toString()?.trim().orEmpty()
+        if (query.isBlank()) {
+            searchResultKeys = emptyList()
+            activeSearchIndex = 0
+            searchCountText.text = getString(R.string.thread_search_empty)
+            searchPrevButton.isEnabled = false
+            searchNextButton.isEnabled = false
+            threadAdapter.setSearchState(emptySet(), null)
+            return
+        }
+        val matches = currentThreadMessages.filter { it.body.contains(query, ignoreCase = true) }
+            .map { threadMessageKey(it) }
+        searchResultKeys = matches
+        if (matches.isEmpty()) {
+            activeSearchIndex = 0
+            searchCountText.text = getString(R.string.thread_search_no_results)
+            searchPrevButton.isEnabled = false
+            searchNextButton.isEnabled = false
+            threadAdapter.setSearchState(emptySet(), null)
+            return
+        }
+        if (activeSearchIndex !in matches.indices) {
+            activeSearchIndex = 0
+        }
+        val activeKey = matches[activeSearchIndex]
+        searchCountText.text =
+            getString(R.string.thread_search_count, activeSearchIndex + 1, matches.size)
+        searchPrevButton.isEnabled = matches.size > 1
+        searchNextButton.isEnabled = matches.size > 1
+        threadAdapter.setSearchState(matches.toSet(), activeKey)
+        if (scrollToActive) {
+            val activeIndex = currentThreadMessages.indexOfFirst { threadMessageKey(it) == activeKey }
+            if (activeIndex >= 0) {
+                chatMessages.post {
+                    chatMessages.smoothScrollToPosition(activeIndex)
+                }
+            }
+        }
+    }
+
     private fun renderReplyPreview() {
         val reply = pendingReplyMessage
-        if (reply == null) {
+        if (reply == null || isSelectionModeActive()) {
             replyPreviewLayout.visibility = View.GONE
             replyPreviewText.text = ""
             return
@@ -859,6 +1046,12 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private fun syncActionAvailability() {
+        if (isSelectionModeActive()) {
+            sendButton.isEnabled = false
+            clearAttachmentButton.isEnabled = false
+            syncButton.isEnabled = false
+            return
+        }
         val hasPayload = messageInput.text.toString().isNotBlank() || pendingAttachment != null
         val hasIdentity = hasIdentity()
         sendButton.isEnabled = hasPayload && hasIdentity && localStoreAvailable && !syncInFlight
@@ -866,24 +1059,138 @@ class ChatActivity : AppCompatActivity() {
         syncButton.isEnabled = hasIdentity && localStoreAvailable && !syncInFlight
     }
 
+    private fun threadMessageKey(message: ThreadMessage): String = threadAdapter.messageKey(message)
+
+    private fun isSelectionModeActive(): Boolean = selectedMessageKeys.isNotEmpty()
+
+    private fun selectedMessages(): List<ThreadMessage> {
+        if (selectedMessageKeys.isEmpty()) {
+            return emptyList()
+        }
+        val keys = selectedMessageKeys.toSet()
+        return currentThreadMessages.filter { keys.contains(threadMessageKey(it)) }
+    }
+
+    private fun enterSelectionMode(message: ThreadMessage) {
+        selectedMessageKeys.clear()
+        selectedMessageKeys.add(threadMessageKey(message))
+        renderSelectionMode()
+    }
+
+    private fun toggleSelectedMessage(message: ThreadMessage) {
+        val key = threadMessageKey(message)
+        if (!selectedMessageKeys.add(key)) {
+            selectedMessageKeys.remove(key)
+        }
+        if (selectedMessageKeys.isEmpty()) {
+            clearSelectionMode()
+        } else {
+            renderSelectionMode()
+        }
+    }
+
+    private fun clearSelectionMode() {
+        if (selectedMessageKeys.isEmpty()) {
+            renderSelectionMode()
+            return
+        }
+        selectedMessageKeys.clear()
+        renderSelectionMode()
+    }
+
+    private fun syncSelectionAfterThreadUpdate() {
+        if (selectedMessageKeys.isEmpty()) {
+            threadAdapter.setSelectionState(false, emptySet())
+            return
+        }
+        val validKeys = currentThreadMessages.mapTo(linkedSetOf()) { threadMessageKey(it) }
+        selectedMessageKeys.retainAll(validKeys)
+        renderSelectionMode()
+    }
+
+    private fun renderSelectionMode() {
+        val active = isSelectionModeActive()
+        selectionModeLayout.visibility = if (active) View.VISIBLE else View.GONE
+        composerBar.visibility = if (active) View.GONE else View.VISIBLE
+        selectionCountText.text = resources.getQuantityString(
+            R.plurals.thread_selection_count,
+            selectedMessageKeys.size,
+            selectedMessageKeys.size,
+        )
+        selectionCopyButton.isEnabled = active
+        selectionShareButton.isEnabled = active
+        selectionDeleteButton.isEnabled = active
+        threadAdapter.setSelectionState(active, selectedMessageKeys)
+        if (active) {
+            replyPreviewLayout.visibility = View.GONE
+            attachmentPreviewCard.visibility = View.GONE
+        } else {
+            renderReplyPreview()
+            renderAttachmentInfo()
+        }
+        syncActionAvailability()
+    }
+
     private fun showThreadMessageActions(message: ThreadMessage) {
         val options = arrayOf(
             getString(R.string.thread_action_reply),
             getString(R.string.thread_action_react),
+            getString(R.string.thread_action_copy),
+            getString(R.string.thread_action_share),
+            getString(R.string.thread_action_delete_local),
+            getString(R.string.thread_action_select_multiple),
         )
         AlertDialog.Builder(this)
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> {
-                        pendingReplyMessage = message
-                        renderReplyPreview()
-                        messageInput.requestFocus()
-                    }
-                    1 -> showReactionPicker(message)
+                    0 -> beginReply(message)
+                    1 -> showReactionPickerSheet(message)
+                    2 -> copyThreadMessage(message)
+                    3 -> shareThreadMessage(message)
+                    4 -> confirmDeleteThreadMessage(message)
+                    5 -> enterSelectionMode(message)
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    private fun beginReply(message: ThreadMessage) {
+        pendingReplyMessage = message
+        renderReplyPreview()
+        syncActionAvailability()
+        messageInput.requestFocus()
+    }
+
+    private fun openReplyThread(message: ThreadMessage) {
+        val targetId = message.transportMessageId ?: message.sentAtMillis
+        if (threadAdapter.getFocusedReplyThreadId() == targetId) {
+            threadAdapter.focusReplyThread(null)
+            return
+        }
+        val firstReplyIndex = currentThreadMessages.indexOfFirst { it.replyToId == targetId }
+        if (firstReplyIndex < 0) {
+            threadAdapter.focusReplyThread(null)
+            return
+        }
+        threadAdapter.focusReplyThread(targetId)
+        chatMessages.post {
+            chatMessages.smoothScrollToPosition(firstReplyIndex)
+        }
+    }
+
+    private fun jumpToReplySource(targetId: Long) {
+        val sourceIndex = currentThreadMessages.indexOfFirst {
+            (it.transportMessageId ?: it.sentAtMillis) == targetId
+        }
+        if (sourceIndex < 0) {
+            threadAdapter.focusReplyThread(null)
+            return
+        }
+        threadAdapter.focusReplyThread(targetId)
+        chatMessages.post {
+            chatMessages.smoothScrollToPosition(sourceIndex)
+        }
     }
 
     private fun showReactionPicker(message: ThreadMessage) {
@@ -911,6 +1218,156 @@ class ChatActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun showReactionPickerSheet(message: ThreadMessage) {
+        val emojiOptions = arrayOf(
+            "\uD83D\uDC4D",
+            "\u2764\uFE0F",
+            "\uD83D\uDE02",
+            "\uD83D\uDE2E",
+            "\uD83D\uDE22",
+            "\uD83D\uDC4F",
+        )
+        AlertDialog.Builder(this)
+            .setItems(emojiOptions) { _, which ->
+                val setup = currentSetup()
+                val next = LinkedHashMap(message.reactions.orEmpty())
+                val emoji = emojiOptions[which]
+                if (next[emoji] == "You") {
+                    next.remove(emoji)
+                } else {
+                    next[emoji] = "You"
+                }
+                store.updateThreadMessageReactions(
+                    userId = setup.userId,
+                    peerUserId = activePeerUserId,
+                    direction = message.direction,
+                    sentAtMillis = message.sentAtMillis,
+                    reactions = next.ifEmpty { null },
+                )
+                renderThreadHistory()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun copyThreadMessage(message: ThreadMessage) {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("pqmsg-message", message.body))
+        Toast.makeText(this, R.string.thread_message_copied, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun shareThreadMessage(message: ThreadMessage) {
+        startActivity(
+            Intent.createChooser(
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, message.body)
+                },
+                getString(R.string.thread_share_chooser_title),
+            ),
+        )
+    }
+
+    private fun confirmDeleteThreadMessage(message: ThreadMessage) {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.thread_delete_local_title)
+            .setMessage(R.string.thread_delete_local_message)
+            .setPositiveButton(R.string.thread_action_delete_local) { _, _ ->
+                val setup = currentSetup()
+                store.deleteThreadMessage(
+                    userId = setup.userId,
+                    peerUserId = activePeerUserId,
+                    direction = message.direction,
+                    sentAtMillis = message.sentAtMillis,
+                    transportMessageId = message.transportMessageId,
+                )
+                if (pendingReplyMessage?.direction == message.direction &&
+                    pendingReplyMessage?.sentAtMillis == message.sentAtMillis &&
+                    pendingReplyMessage?.transportMessageId == message.transportMessageId
+                ) {
+                    pendingReplyMessage = null
+                    renderReplyPreview()
+                }
+                renderThreadHistory()
+                Toast.makeText(this, R.string.thread_delete_local_done, Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun copySelectedMessages() {
+        val messages = selectedMessages()
+        if (messages.isEmpty()) {
+            clearSelectionMode()
+            return
+        }
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText(
+                "pqmsg-messages",
+                messages.joinToString("\n\n") { it.body },
+            ),
+        )
+        Toast.makeText(this, R.string.thread_messages_copied, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun shareSelectedMessages() {
+        val messages = selectedMessages()
+        if (messages.isEmpty()) {
+            clearSelectionMode()
+            return
+        }
+        startActivity(
+            Intent.createChooser(
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, messages.joinToString("\n\n") { it.body })
+                },
+                getString(R.string.thread_share_chooser_multiple_title),
+            ),
+        )
+    }
+
+    private fun confirmDeleteSelectedMessages() {
+        val messages = selectedMessages()
+        if (messages.isEmpty()) {
+            clearSelectionMode()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.thread_delete_local_multiple_title)
+            .setMessage(
+                getString(
+                    R.string.thread_delete_local_multiple_message,
+                    messages.size,
+                ),
+            )
+            .setPositiveButton(R.string.thread_selection_delete) { _, _ ->
+                val setup = currentSetup()
+                messages.forEach { message ->
+                    store.deleteThreadMessage(
+                        userId = setup.userId,
+                        peerUserId = activePeerUserId,
+                        direction = message.direction,
+                        sentAtMillis = message.sentAtMillis,
+                        transportMessageId = message.transportMessageId,
+                    )
+                }
+                if (pendingReplyMessage != null) {
+                    val pendingKey = threadMessageKey(pendingReplyMessage!!)
+                    if (messages.any { threadMessageKey(it) == pendingKey }) {
+                        pendingReplyMessage = null
+                    }
+                }
+                selectedMessageKeys.clear()
+                renderReplyPreview()
+                renderThreadHistory()
+                Toast.makeText(this, R.string.thread_delete_local_multiple_done, Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun hasIdentity(): Boolean {
         val setup = currentSetup()
         return setup.userId.isNotBlank() && !store.readKeys(setup.userId).isNullOrBlank()
@@ -933,6 +1390,10 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private fun renderAttachmentInfo() {
+        if (isSelectionModeActive()) {
+            attachmentPreviewCard.visibility = View.GONE
+            return
+        }
         val attachment = pendingAttachment
         if (attachment == null) {
             attachmentPreviewCard.visibility = View.GONE

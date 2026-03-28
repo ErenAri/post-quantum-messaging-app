@@ -54,11 +54,151 @@
         </LinearLayout>
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/buttonSyncGroup"
+            android:id="@+id/buttonGroupThreadSearch"
             style="@style/Widget.PQMsg.Button.Compact"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="@string/button_thread_search" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonGroupThreadTips"
+            style="@style/Widget.PQMsg.Button.Compact"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="@string/button_thread_tips" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonSyncGroup"
+            style="@style/Widget.PQMsg.Button.Compact"
+            android:layout_width="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_height="wrap_content"
             android:text="@string/button_sync_thread" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/layoutGroupSelectionMode"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:background="@drawable/bg_detail_panel"
+        android:orientation="vertical"
+        android:paddingHorizontal="14dp"
+        android:paddingVertical="10dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/textGroupSelectionCount"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:gravity="end"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonGroupSelectionCopy"
+                style="@style/Widget.PQMsg.Button.Compact"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/thread_selection_copy" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonGroupSelectionShare"
+                style="@style/Widget.PQMsg.Button.Compact"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/thread_selection_share" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonGroupSelectionDelete"
+                style="@style/Widget.PQMsg.Button.Danger"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/thread_selection_delete" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonGroupSelectionClose"
+                style="@style/Widget.PQMsg.Button.Compact"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/thread_selection_close" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/layoutGroupSearchMode"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:background="@drawable/bg_detail_panel"
+        android:orientation="vertical"
+        android:paddingHorizontal="14dp"
+        android:paddingVertical="10dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.PQMsg.TextInputLayout"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="@string/thread_search_hint">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/editGroupThreadSearch"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:imeOptions="actionSearch"
+                    android:maxLines="1" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonGroupThreadSearchPrev"
+                style="@style/Widget.PQMsg.Button.Compact"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/thread_search_previous" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonGroupThreadSearchNext"
+                style="@style/Widget.PQMsg.Button.Compact"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/thread_search_next" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonGroupThreadSearchClose"
+                style="@style/Widget.PQMsg.Button.Compact"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/thread_search_close" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/textGroupThreadSearchCount"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/thread_search_empty"
+            android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
     </LinearLayout>
 
 
@@ -127,6 +267,7 @@
     </LinearLayout>
 
     <LinearLayout
+        android:id="@+id/layoutGroupComposerBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"

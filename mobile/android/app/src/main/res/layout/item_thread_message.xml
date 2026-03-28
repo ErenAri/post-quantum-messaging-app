@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/threadMessageRow"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
@@ -34,13 +35,24 @@
             android:maxWidth="280dp"
             android:textAppearance="@style/TextAppearance.MaterialComponents.Body1" />
 
-        <TextView
-            android:id="@+id/textThreadMessageReactions"
+        <com.google.android.material.chip.ChipGroup
+            android:id="@+id/threadMessageReactions"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:textAppearance="@style/TextAppearance.MaterialComponents.Caption"
-            android:visibility="gone" />
+            android:visibility="gone"
+            app:chipSpacingHorizontal="6dp"
+            app:chipSpacingVertical="6dp"
+            app:singleLine="false" />
+
+        <com.google.android.material.chip.Chip
+            android:id="@+id/chipThreadReplies"
+            style="@style/Widget.PQMsg.Chip.Reaction"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:visibility="gone"
+            app:ensureMinTouchTargetSize="false" />
 
         <TextView
             android:id="@+id/textThreadMessageMeta"

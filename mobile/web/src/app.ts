@@ -71,6 +71,7 @@ import {
   clearAllDirectMessageSessions,
   DEFAULT_SETUP,
   initMetadataStorage,
+  hasSeenThreadTips,
   loadConversationMeta,
   loadConversationMetas,
   loadDirectMessageSession,
@@ -86,6 +87,7 @@ import {
   readPrivateGroupCursor,
   loadKeys,
   loadSetup,
+  markThreadTipsSeen,
   markConversationRead,
   markGroupConversationRead,
   removePrivateGroup,
@@ -121,6 +123,7 @@ import {
   saveMessage,
   updateMessageStatus,
   getMessages,
+  deleteMessages,
   clearAllMessages,
   clearOutboxMessages,
   searchMessages,
@@ -191,6 +194,9 @@ let keys: GeneratedKeys | null = null;
 let realtimeInbox: RealtimeInbox | null = null;
 let activeChatPeer: string | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
+let disposeMessageSelectionShortcuts: (() => void) | null = null;
+let keyboardShortcutOverlay: HTMLElement | null = null;
+let keyboardShortcutLauncherInstalled = false;
 
 // Phase 2 state
 let presenceHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -817,7 +823,122 @@ async function bootstrapApp(): Promise<void> {
 
   onViewChange(render);
   onNotification(showToast);
+  installKeyboardShortcutLauncher();
   render(getCurrentView());
+}
+
+function hideKeyboardShortcutOverlay(): void {
+  keyboardShortcutOverlay?.remove();
+  keyboardShortcutOverlay = null;
+}
+
+function showKeyboardShortcutOverlay(): void {
+  if (keyboardShortcutOverlay) {
+    return;
+  }
+  const overlay = document.createElement("div");
+  overlay.className = "shortcut-sheet";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-labelledby", "shortcut-sheet-title");
+  overlay.innerHTML = `
+    <div class="shortcut-card">
+      <div class="shortcut-head">
+        <div>
+          <h2 id="shortcut-sheet-title">Keyboard shortcuts</h2>
+          <p>Signal Desktop exposes shortcuts with <span class="mono">Ctrl /</span> or <span class="mono">Cmd /</span>. This web build now does the same for the shortcuts it currently supports.</p>
+        </div>
+        <button id="shortcut-sheet-close" class="icon-btn" aria-label="Close keyboard shortcuts">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+            <path d="M18 6L6 18M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+      <div class="shortcut-grid">
+        <section class="shortcut-section">
+          <h3>General</h3>
+          <div class="shortcut-row">
+            <span>Show keyboard shortcuts</span>
+            <span class="shortcut-keys"><kbd>Ctrl</kbd><kbd>/</kbd> <span class="shortcut-sep">or</span> <kbd>Cmd</kbd><kbd>/</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span>Search in conversation</span>
+            <span class="shortcut-keys"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>F</kbd> <span class="shortcut-sep">or</span> <kbd>Cmd</kbd><kbd>Shift</kbd><kbd>F</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span>Close shortcut sheet or selection mode</span>
+            <span class="shortcut-keys"><kbd>Esc</kbd></span>
+          </div>
+        </section>
+        <section class="shortcut-section">
+          <h3>Selected messages</h3>
+          <div class="shortcut-row">
+            <span>Share selected messages</span>
+            <span class="shortcut-keys"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>S</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span>Delete selected messages from this device</span>
+            <span class="shortcut-keys"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>D</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span>Reply to a single selected message</span>
+            <span class="shortcut-keys"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>R</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span>React to a single selected message</span>
+            <span class="shortcut-keys"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>E</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span>Open selected message menu</span>
+            <span class="shortcut-keys"><kbd>Shift</kbd><kbd>F10</kbd></span>
+          </div>
+        </section>
+        <section class="shortcut-section">
+          <h3>Thread navigation</h3>
+          <div class="shortcut-row">
+            <span>Reply to a message</span>
+            <span class="shortcut-keys">Swipe right on Android <span class="shortcut-sep">or</span> right-click a bubble on web</span>
+          </div>
+          <div class="shortcut-row">
+            <span>Jump through a reply thread</span>
+            <span class="shortcut-keys">Click a quoted reply or reply count chip</span>
+          </div>
+        </section>
+      </div>
+      <p class="shortcut-footnote">To enter selection mode, right-click a message bubble and choose <strong>Select messages</strong>, then click additional bubbles.</p>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  keyboardShortcutOverlay = overlay;
+  overlay.querySelector<HTMLElement>("#shortcut-sheet-close")?.addEventListener("click", hideKeyboardShortcutOverlay);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      hideKeyboardShortcutOverlay();
+    }
+  });
+}
+
+function installKeyboardShortcutLauncher(): void {
+  if (keyboardShortcutLauncherInstalled) {
+    return;
+  }
+  keyboardShortcutLauncherInstalled = true;
+  window.addEventListener("keydown", (event) => {
+    const isShowShortcuts = (event.ctrlKey || event.metaKey) && !event.altKey && event.code === "Slash";
+    if (isShowShortcuts) {
+      event.preventDefault();
+      if (keyboardShortcutOverlay) {
+        hideKeyboardShortcutOverlay();
+      } else {
+        showKeyboardShortcutOverlay();
+      }
+      return;
+    }
+    if (event.key === "Escape" && keyboardShortcutOverlay) {
+      event.preventDefault();
+      hideKeyboardShortcutOverlay();
+    }
+  });
 }
 
 async function loadServerCapabilitiesCached(): Promise<ServerCapabilitiesResponse | null> {
@@ -1262,6 +1383,8 @@ window.addEventListener("online", () => { showOfflineBanner(false); void drainOu
 // ---------------------------------------------------------------------------
 
 function render(view: AppView): void {
+  disposeMessageSelectionShortcuts?.();
+  disposeMessageSelectionShortcuts = null;
   switch (view.screen) {
     case "onboarding":
       renderOnboarding();
@@ -2091,6 +2214,12 @@ function renderConversations(): void {
           <p class="topbar-sub">${escHtml(setup.displayName || setup.userId)} <span class="mono">@${escHtml(setup.userId)}</span></p>
         </div>
         <div class="topbar-actions">
+          <button id="conv-shortcuts" class="icon-btn" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="6" width="18" height="12" rx="2"/>
+              <path d="M7 10h.01M10 10h.01M13 10h.01M16 10h.01M7 14h10"/>
+            </svg>
+          </button>
           <button id="conv-search" class="icon-btn" title="Search messages" aria-label="Search messages">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
@@ -2146,6 +2275,7 @@ function renderConversations(): void {
     }), 0);
   });
   q("#conv-search").addEventListener("click", () => navigateTo({ screen: "search" }));
+  q("#conv-shortcuts").addEventListener("click", () => showKeyboardShortcutOverlay());
   q("#conv-settings").addEventListener("click", () => navigateTo({ screen: "settings" }));
   for (const chip of document.querySelectorAll<HTMLButtonElement>("[data-inbox-filter]")) {
     chip.addEventListener("click", () => {
@@ -2560,6 +2690,17 @@ async function renderChat(peerId: string): Promise<void> {
           <span class="chat-header-name">${escHtml(displayName)}</span>
           <span class="chat-header-status ${presenceClass}" id="chat-status">${presenceText}${identity.secondaryLabel ? ` · ${escHtml(identity.secondaryLabel)}` : ""}</span>
         </div>
+        <button id="chat-search" class="icon-btn" title="Search in conversation" aria-label="Search in conversation">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path>
+          </svg>
+        </button>
+        <button id="chat-shortcuts" class="icon-btn" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="5" width="18" height="14" rx="2"/>
+            <path d="M7 9h.01M10 9h.01M13 9h.01M16 9h.01M8 13h8M7 16h4"/>
+          </svg>
+        </button>
         <button id="chat-details-toggle" class="icon-btn" title="Chat details" aria-label="Chat details">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>
@@ -2573,6 +2714,27 @@ async function renderChat(peerId: string): Promise<void> {
         <span class="context-pill">${escHtml(presenceText)}</span>
         <button id="chat-open-details-inline" type="button" class="context-pill context-pill-link">Privacy & send defaults</button>
       </div>
+      <div id="thread-search-bar" class="thread-search-bar hidden" role="search">
+        <input id="thread-search-input" type="text" class="thread-search-input" placeholder="Search in conversation" autocomplete="off" aria-label="Search in conversation" />
+        <span id="thread-search-count" class="thread-search-count"></span>
+        <div class="thread-search-actions">
+          <button id="thread-search-prev" class="icon-btn" title="Previous result" aria-label="Previous result">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m15 18-6-6 6-6"/>
+            </svg>
+          </button>
+          <button id="thread-search-next" class="icon-btn" title="Next result" aria-label="Next result">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m9 18 6-6-6-6"/>
+            </svg>
+          </button>
+          <button id="thread-search-close" class="icon-btn" title="Close search" aria-label="Close search">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+              <path d="M18 6L6 18M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+      </div>
       ${directMessagingBlockedReason ? `
         <div class="beta-banner beta-banner-warning chat-holdback-banner">
           <strong>Direct messaging unavailable</strong>
@@ -2585,6 +2747,15 @@ async function renderChat(peerId: string): Promise<void> {
           <span class="typing-text">${escHtml(displayName)} is typing</span>
         </div>
       ` : ""}
+      <div id="message-selection-bar" class="message-selection-bar hidden">
+        <span id="message-selection-count" class="message-selection-count">0 selected</span>
+        <div class="message-selection-actions">
+          <button id="message-selection-copy" class="btn-secondary">Copy</button>
+          <button id="message-selection-share" class="btn-secondary">Share</button>
+          <button id="message-selection-delete" class="btn-secondary danger-lite">Delete</button>
+          <button id="message-selection-close" class="btn-secondary">Close</button>
+        </div>
+      </div>
       <div id="chat-details-sheet" class="chat-details-sheet hidden">
         <div class="chat-details-card">
           <div class="chat-details-head">
@@ -2622,7 +2793,7 @@ async function renderChat(peerId: string): Promise<void> {
       </div>
       <div id="attachment-preview" class="attachment-preview hidden" aria-live="polite"></div>
       <div id="chat-emoji-tray" class="emoji-tray hidden" aria-label="Quick emoji"></div>
-      <div class="chat-input-bar">
+      <div id="chat-input-bar" class="chat-input-bar">
         <button id="chat-emoji" class="icon-btn attach-btn" title="Insert emoji" aria-label="Insert emoji">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="9"/>
@@ -2719,8 +2890,23 @@ async function renderChat(peerId: string): Promise<void> {
 
   const msgList = q("#messages-list");
   const container = q("#messages-container");
+  const conversationId = convId(setup.userId, peerId);
+  msgList.dataset.conversationId = conversationId;
   const input = q<HTMLInputElement>("#chat-input");
   const sendBtn = q<HTMLButtonElement>("#chat-send");
+  const selectionBar = q<HTMLElement>("#message-selection-bar");
+  const selectionCount = q<HTMLElement>("#message-selection-count");
+  const selectionCopyBtn = q<HTMLButtonElement>("#message-selection-copy");
+  const selectionShareBtn = q<HTMLButtonElement>("#message-selection-share");
+  const selectionDeleteBtn = q<HTMLButtonElement>("#message-selection-delete");
+  const selectionCloseBtn = q<HTMLButtonElement>("#message-selection-close");
+  const inputBar = q<HTMLElement>("#chat-input-bar");
+  const threadSearchBar = q<HTMLElement>("#thread-search-bar");
+  const threadSearchInput = q<HTMLInputElement>("#thread-search-input");
+  const threadSearchCount = q<HTMLElement>("#thread-search-count");
+  const threadSearchPrev = q<HTMLButtonElement>("#thread-search-prev");
+  const threadSearchNext = q<HTMLButtonElement>("#thread-search-next");
+  const threadSearchClose = q<HTMLButtonElement>("#thread-search-close");
   const emojiBtn = q<HTMLButtonElement>("#chat-emoji");
   const attachBtn = q<HTMLButtonElement>("#chat-attach");
   const fileInput = q<HTMLInputElement>("#file-input");
@@ -2733,11 +2919,98 @@ async function renderChat(peerId: string): Promise<void> {
   const useSealed = true;
   let pendingAttachmentFile: File | null = null;
   let pendingAttachmentPreviewUrl: string | null = null;
+  const syncSelection = async (): Promise<void> => {
+    await syncMessageSelectionUi(
+      conversationId,
+      msgList,
+      selectionBar,
+      selectionCount,
+      inputBar,
+      attachmentPreview,
+    );
+  };
   const syncSendAvailability = (): void => {
     const busy = sendInFlight;
     sendBtn.disabled = !directMessagingReady || (!input.value.trim() && !pendingAttachmentFile) || busy;
     attachBtn.disabled = busy;
     emojiBtn.disabled = busy;
+  };
+  let threadSearchIndex = 0;
+  const syncThreadSearch = (scrollToActive = true): void => {
+    if (threadSearchBar.classList.contains("hidden")) {
+      msgList.dataset.threadSearchQuery = "";
+      msgList.dataset.threadSearchActiveId = "";
+      refreshThreadSearchDecorations(msgList);
+      return;
+    }
+    const query = threadSearchInput.value.trim();
+    msgList.dataset.threadSearchQuery = query;
+    if (!query) {
+      msgList.dataset.threadSearchActiveId = "";
+      refreshThreadSearchDecorations(msgList);
+      threadSearchCount.textContent = "Type to search this conversation";
+      threadSearchPrev.disabled = true;
+      threadSearchNext.disabled = true;
+      return;
+    }
+    let matches = refreshThreadSearchDecorations(msgList);
+    if (matches.length === 0) {
+      threadSearchIndex = 0;
+      msgList.dataset.threadSearchActiveId = "";
+      refreshThreadSearchDecorations(msgList);
+      threadSearchCount.textContent = "No matches";
+      threadSearchPrev.disabled = true;
+      threadSearchNext.disabled = true;
+      return;
+    }
+    if (threadSearchIndex >= matches.length) {
+      threadSearchIndex = 0;
+    }
+    const activeId = matches[threadSearchIndex];
+    msgList.dataset.threadSearchActiveId = activeId;
+    matches = refreshThreadSearchDecorations(msgList);
+    threadSearchCount.textContent = `${threadSearchIndex + 1} of ${matches.length}`;
+    threadSearchPrev.disabled = matches.length < 2;
+    threadSearchNext.disabled = matches.length < 2;
+    if (scrollToActive) {
+      msgList.querySelector<HTMLElement>(`#msg-${CSS.escape(activeId)}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  };
+  const openThreadSearch = (): void => {
+    if (isMessageSelectionActive(conversationId)) {
+      clearMessageSelection(conversationId);
+      void syncSelection();
+    }
+    threadSearchBar.classList.remove("hidden");
+    threadSearchInput.focus();
+    threadSearchInput.select();
+    syncThreadSearch(false);
+  };
+  const closeThreadSearch = (focusComposer = true): void => {
+    threadSearchIndex = 0;
+    threadSearchInput.value = "";
+    threadSearchBar.classList.add("hidden");
+    msgList.dataset.threadSearchQuery = "";
+    msgList.dataset.threadSearchActiveId = "";
+    refreshThreadSearchDecorations(msgList);
+    threadSearchCount.textContent = "";
+    threadSearchPrev.disabled = true;
+    threadSearchNext.disabled = true;
+    if (focusComposer) {
+      input.focus();
+    }
+  };
+  const moveThreadSearch = (delta: number): void => {
+    const query = threadSearchInput.value.trim();
+    if (!query) {
+      return;
+    }
+    const matches = refreshThreadSearchDecorations(msgList);
+    if (matches.length === 0) {
+      return;
+    }
+    threadSearchIndex = (threadSearchIndex + delta + matches.length) % matches.length;
+    syncThreadSearch();
   };
   const updateInputPlaceholder = (): void => {
     input.placeholder = pendingAttachmentFile ? "Add a caption" : "Write a message";
@@ -2752,6 +3025,7 @@ async function renderChat(peerId: string): Promise<void> {
     attachmentPreview.innerHTML = "";
     updateInputPlaceholder();
     syncSendAvailability();
+    void syncSelection();
   };
   const renderAttachmentPreview = (): void => {
     if (!pendingAttachmentFile) {
@@ -2759,6 +3033,7 @@ async function renderChat(peerId: string): Promise<void> {
       attachmentPreview.innerHTML = "";
       updateInputPlaceholder();
       syncSendAvailability();
+      void syncSelection();
       return;
     }
     if (pendingAttachmentPreviewUrl) {
@@ -2796,6 +3071,7 @@ async function renderChat(peerId: string): Promise<void> {
     q("#attachment-preview-clear").addEventListener("click", clearPendingAttachment);
     updateInputPlaceholder();
     syncSendAvailability();
+    void syncSelection();
   };
   const insertQuickEmoji = (emoji: string): void => {
     const start = input.selectionStart ?? input.value.length;
@@ -2811,6 +3087,7 @@ async function renderChat(peerId: string): Promise<void> {
     .join("");
 
   q("#chat-back").addEventListener("click", () => {
+    clearMessageSelection(conversationId);
     clearPendingAttachment();
     activeChatPeer = null;
     stopChatTimers();
@@ -2820,12 +3097,36 @@ async function renderChat(peerId: string): Promise<void> {
   q("#chat-details-toggle").addEventListener("click", () => {
     detailsSheet.classList.remove("hidden");
   });
+  q("#chat-search").addEventListener("click", () => {
+    openThreadSearch();
+  });
+  q("#chat-shortcuts").addEventListener("click", () => {
+    showKeyboardShortcutOverlay();
+  });
   inlineDetailsBtn.addEventListener("click", () => {
     detailsSheet.classList.remove("hidden");
   });
   q("#chat-details-close").addEventListener("click", () => {
     detailsSheet.classList.add("hidden");
   });
+  threadSearchInput.addEventListener("input", () => {
+    threadSearchIndex = 0;
+    syncThreadSearch(false);
+  });
+  threadSearchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      moveThreadSearch(event.shiftKey ? -1 : 1);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeThreadSearch(false);
+    }
+  });
+  threadSearchPrev.addEventListener("click", () => moveThreadSearch(-1));
+  threadSearchNext.addEventListener("click", () => moveThreadSearch(1));
+  threadSearchClose.addEventListener("click", () => closeThreadSearch());
   detailsSheet.addEventListener("click", (e) => {
     if (e.target === detailsSheet) {
       detailsSheet.classList.add("hidden");
@@ -3097,21 +3398,192 @@ async function renderChat(peerId: string): Promise<void> {
   });
 
   // Message context menu (right-click / long-press) — Reply, React, Edit, Delete
+  msgList.addEventListener("click", (e) => {
+    if (!isMessageSelectionActive(conversationId)) {
+      return;
+    }
+    const bubble = (e.target as HTMLElement).closest(".bubble") as HTMLElement | null;
+    if (!bubble) return;
+    e.preventDefault();
+    toggleMessageSelection(conversationId, bubble.id.replace("msg-", ""));
+    void syncSelection();
+  });
+
   msgList.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     const bubble = (e.target as HTMLElement).closest(".bubble") as HTMLElement | null;
     if (!bubble) return;
     const msgId = bubble.id.replace("msg-", "");
+    if (isMessageSelectionActive(conversationId)) {
+      toggleMessageSelection(conversationId, msgId);
+      void syncSelection();
+      return;
+    }
     const isMine = bubble.classList.contains("bubble-sent");
     const serverMid = bubble.getAttribute("data-server-mid");
-    showBubbleContextMenu(e as MouseEvent, msgId, isMine, serverMid ? Number(serverMid) : null, bubble, input, sendBtn, peerId);
+    showBubbleContextMenu(
+      e as MouseEvent,
+      msgId,
+      isMine,
+      serverMid ? Number(serverMid) : null,
+      bubble,
+      input,
+      sendBtn,
+      peerId,
+      () => { void syncSelection(); },
+    );
+  });
+
+  selectionCloseBtn.addEventListener("click", () => {
+    clearMessageSelection(conversationId);
+    void syncSelection();
+  });
+  selectionCopyBtn.addEventListener("click", async () => {
+    if (!isMessageSelectionActive(conversationId)) return;
+    const selected = (await getMessages(conversationId)).filter((message) =>
+      messageSelectionState?.selectedIds.has(message.id),
+    );
+    await navigator.clipboard.writeText(selected.map((message) => message.text).join("\n\n"));
+    notify("Messages copied", "success");
+  });
+  selectionShareBtn.addEventListener("click", async () => {
+    if (!isMessageSelectionActive(conversationId)) return;
+    const selected = (await getMessages(conversationId)).filter((message) =>
+      messageSelectionState?.selectedIds.has(message.id),
+    );
+    const payload = selected.map((message) => message.text).join("\n\n");
+    if (navigator.share) {
+      try {
+        await navigator.share({ text: payload });
+      } catch {
+        await navigator.clipboard.writeText(payload);
+      }
+    } else {
+      await navigator.clipboard.writeText(payload);
+    }
+    notify("Selected messages ready to share", "success");
+  });
+  selectionDeleteBtn.addEventListener("click", async () => {
+    if (!isMessageSelectionActive(conversationId)) return;
+    const ids = Array.from(messageSelectionState?.selectedIds ?? []);
+    if (ids.length === 0) return;
+    await deleteMessages(ids);
+    clearMessageSelection(conversationId);
+    const history = await getMessages(conversationId);
+    renderMessageList(msgList, history);
+    await syncSelection();
+    notify("Messages deleted from this device", "success");
+  });
+
+  const selectedBubble = (): HTMLElement | null => {
+    if (!isMessageSelectionActive(conversationId)) {
+      return null;
+    }
+    const firstSelectedId = Array.from(messageSelectionState?.selectedIds ?? [])[0];
+    if (!firstSelectedId) {
+      return null;
+    }
+    return msgList.querySelector<HTMLElement>(`#msg-${CSS.escape(firstSelectedId)}`);
+  };
+  const openSelectedContextMenu = (): void => {
+    const bubble = selectedBubble();
+    if (!bubble) return;
+    const rect = bubble.getBoundingClientRect();
+    const msgId = bubble.id.replace("msg-", "");
+    showBubbleContextMenu(
+      { clientX: rect.right - 12, clientY: rect.top + Math.min(rect.height / 2, 28) } as MouseEvent,
+      msgId,
+      bubble.classList.contains("bubble-sent"),
+      bubble.getAttribute("data-server-mid") ? Number(bubble.getAttribute("data-server-mid")) : null,
+      bubble,
+      input,
+      sendBtn,
+      peerId,
+      () => { void syncSelection(); },
+    );
+  };
+  const replyToSelectedMessage = (): void => {
+    const bubble = selectedBubble();
+    if (!bubble) return;
+    const msgId = bubble.id.replace("msg-", "");
+    const text = bubble.querySelector(".bubble-text")?.textContent || "";
+    clearMessageSelection(conversationId);
+    void syncSelection();
+    replyContext = { msgId, preview: text.slice(0, 60) };
+    showReplyBar(input);
+    input.focus();
+  };
+  const reactToSelectedMessage = (): void => {
+    const bubble = selectedBubble();
+    if (!bubble) return;
+    const rect = bubble.getBoundingClientRect();
+    showReactionPicker(
+      rect.right - 12,
+      rect.top + Math.min(rect.height / 2, 28),
+      bubble.id.replace("msg-", ""),
+      bubble,
+      peerId,
+    );
+  };
+  installMessageSelectionShortcuts((event) => {
+    const withModifier = event.ctrlKey || event.metaKey;
+    const key = event.key.toLowerCase();
+    if (withModifier && event.shiftKey && key === "f") {
+      event.preventDefault();
+      openThreadSearch();
+      return;
+    }
+    if (event.key === "Escape" && !threadSearchBar.classList.contains("hidden")) {
+      event.preventDefault();
+      closeThreadSearch(false);
+      return;
+    }
+    if (!isMessageSelectionActive(conversationId)) {
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      clearMessageSelection(conversationId);
+      void syncSelection();
+      return;
+    }
+    if (withModifier && event.shiftKey && key === "s") {
+      event.preventDefault();
+      selectionShareBtn.click();
+      return;
+    }
+    if (withModifier && event.shiftKey && key === "d") {
+      event.preventDefault();
+      selectionDeleteBtn.click();
+      return;
+    }
+    if (withModifier && event.shiftKey && key === "r" && (messageSelectionState?.selectedIds.size ?? 0) === 1) {
+      event.preventDefault();
+      replyToSelectedMessage();
+      return;
+    }
+    if (withModifier && event.shiftKey && key === "e" && (messageSelectionState?.selectedIds.size ?? 0) === 1) {
+      event.preventDefault();
+      reactToSelectedMessage();
+      return;
+    }
+    if (!withModifier && event.shiftKey && event.key === "F10") {
+      event.preventDefault();
+      openSelectedContextMenu();
+    }
   });
 
   // Load history from IndexedDB
-  const cid = convId(setup.userId, peerId);
+  const cid = conversationId;
   const history = await getMessages(cid);
   renderMessageList(msgList, history);
+  await syncSelection();
+  syncThreadSearch(false);
   scrollToBottom(container);
+  if (!hasSeenThreadTips()) {
+    markThreadTipsSeen();
+    showKeyboardShortcutOverlay();
+  }
 
   // Focus input
   input.focus();
@@ -3132,6 +3604,9 @@ async function renderChat(peerId: string): Promise<void> {
 }
 
 function renderMessageList(container: HTMLElement, msgs: StoredMessage[]): void {
+  if (msgs[0]?.conversationId) {
+    container.dataset.conversationId = msgs[0].conversationId;
+  }
   container.innerHTML = "";
   let lastDate = "";
   for (const msg of msgs) {
@@ -3145,6 +3620,9 @@ function renderMessageList(container: HTMLElement, msgs: StoredMessage[]): void 
     }
     appendBubbleElement(container, msg);
   }
+  refreshReplyThreadDecorations(container);
+  refreshThreadSearchDecorations(container);
+  refreshMessageSelectionDecorations(container);
 }
 
 function appendBubble(container: HTMLElement, msg: StoredMessage, scrollContainer: HTMLElement): void {
@@ -3160,6 +3638,9 @@ function appendBubble(container: HTMLElement, msg: StoredMessage, scrollContaine
   }
 
   appendBubbleElement(container, msg);
+  refreshReplyThreadDecorations(container);
+  refreshThreadSearchDecorations(container);
+  refreshMessageSelectionDecorations(container);
   scrollToBottom(scrollContainer);
 }
 
@@ -3199,7 +3680,11 @@ function renderBubbleBody(msg: StoredMessage): string {
 
 function renderReplyQuote(msg: StoredMessage): string {
   if (!msg.replyToId || !msg.replyPreview) return "";
-  return `<div class="reply-quote">${escHtml(msg.replyPreview)}</div>`;
+  return `<button type="button" class="reply-quote" data-target-id="${escHtml(msg.replyToId)}">${escHtml(msg.replyPreview)}</button>`;
+}
+
+function replyCountLabel(count: number): string {
+  return count === 1 ? "1 reply" : `${count} replies`;
 }
 
 function renderReactions(msg: StoredMessage): string {
@@ -3222,6 +3707,10 @@ function appendBubbleElement(container: HTMLElement, msg: StoredMessage): void {
   bubble.id = `msg-${msg.id}`;
   bubble.setAttribute("role", "listitem");
   bubble.setAttribute("data-date", new Date(msg.timestamp).toLocaleDateString());
+  bubble.dataset.conversationId = msg.conversationId;
+  if (msg.replyToId) {
+    bubble.dataset.replyToId = msg.replyToId;
+  }
   if (msg.serverMessageId) {
     bubble.setAttribute("data-server-mid", String(msg.serverMessageId));
   }
@@ -3259,6 +3748,214 @@ function appendBubbleElement(container: HTMLElement, msg: StoredMessage): void {
       void downloadAndOpenFile(fileLink.dataset.fileId!);
     });
   }
+
+  const replyQuote = bubble.querySelector<HTMLButtonElement>(".reply-quote[data-target-id]");
+  if (replyQuote) {
+    replyQuote.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openReplySource(container, replyQuote.dataset.targetId || "");
+    });
+  }
+}
+
+function refreshReplyThreadDecorations(container: HTMLElement): void {
+  const bubbles = Array.from(container.querySelectorAll<HTMLElement>(".bubble"));
+  const conversationId = container.dataset.conversationId || bubbles[0]?.dataset.conversationId || "";
+  const replyCounts = new Map<string, number>();
+  for (const bubble of bubbles) {
+    const replyToId = bubble.dataset.replyToId;
+    if (!replyToId) continue;
+    replyCounts.set(replyToId, (replyCounts.get(replyToId) ?? 0) + 1);
+  }
+
+  let focusedTargetId = conversationId ? replyThreadFocusByConversation.get(conversationId) ?? null : null;
+  if (focusedTargetId && !bubbles.some((bubble) => bubble.id === `msg-${focusedTargetId}` || bubble.dataset.replyToId === focusedTargetId)) {
+    focusedTargetId = null;
+    if (conversationId) replyThreadFocusByConversation.delete(conversationId);
+  }
+
+  for (const bubble of bubbles) {
+    const msgId = bubble.id.replace("msg-", "");
+    const replyCount = replyCounts.get(msgId) ?? 0;
+    let pill = bubble.querySelector<HTMLButtonElement>(".reply-thread-pill");
+    if (replyCount > 0) {
+      if (!pill) {
+        pill = document.createElement("button");
+        pill.type = "button";
+        pill.className = "reply-thread-pill";
+        const meta = bubble.querySelector(".bubble-meta");
+        if (meta) {
+          meta.insertAdjacentElement("beforebegin", pill);
+        } else {
+          bubble.appendChild(pill);
+        }
+      }
+      pill.textContent = replyCountLabel(replyCount);
+      pill.dataset.targetId = msgId;
+      pill.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleReplyThreadFocus(container, msgId);
+      };
+      pill.classList.toggle("reply-thread-pill-active", focusedTargetId === msgId);
+    } else if (pill) {
+      pill.remove();
+    }
+
+    const isReplySource = focusedTargetId === msgId;
+    const isReplyChainMessage = !!focusedTargetId && bubble.dataset.replyToId === focusedTargetId;
+    bubble.classList.toggle("bubble-reply-source-active", isReplySource);
+    bubble.classList.toggle("bubble-reply-active", isReplyChainMessage);
+    bubble.querySelector(".reply-quote")?.classList.toggle("reply-quote-active", isReplyChainMessage);
+  }
+}
+
+function refreshThreadSearchDecorations(container: HTMLElement): string[] {
+  const bubbles = Array.from(container.querySelectorAll<HTMLElement>(".bubble"));
+  const query = (container.dataset.threadSearchQuery || "").trim().toLowerCase();
+  const activeId = container.dataset.threadSearchActiveId || "";
+  const matches: string[] = [];
+  for (const bubble of bubbles) {
+    const bubbleId = bubble.id.replace("msg-", "");
+    const bubbleText = bubble.querySelector(".bubble-text")?.textContent?.toLowerCase() || "";
+    const isMatch = !!query && bubbleText.includes(query);
+    if (isMatch) {
+      matches.push(bubbleId);
+    }
+    bubble.classList.toggle("bubble-search-match", isMatch);
+    bubble.classList.toggle("bubble-search-active", isMatch && bubbleId === activeId);
+  }
+  return matches;
+}
+
+function toggleReplyThreadFocus(container: HTMLElement, targetId: string): void {
+  const conversationId = container.dataset.conversationId || "";
+  if (!conversationId) return;
+  const current = replyThreadFocusByConversation.get(conversationId) ?? null;
+  const next = current === targetId ? null : targetId;
+  setReplyThreadFocus(container, next);
+  if (!next) return;
+  const firstReply = Array.from(container.querySelectorAll<HTMLElement>(".bubble")).find(
+    (bubble) => bubble.dataset.replyToId === next,
+  );
+  firstReply?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function setReplyThreadFocus(container: HTMLElement, targetId: string | null): void {
+  const conversationId = container.dataset.conversationId || "";
+  if (!conversationId) return;
+  if (targetId == null) {
+    replyThreadFocusByConversation.delete(conversationId);
+  } else {
+    replyThreadFocusByConversation.set(conversationId, targetId);
+  }
+  refreshReplyThreadDecorations(container);
+}
+
+function openReplySource(container: HTMLElement, targetId: string): void {
+  if (!targetId) return;
+  setReplyThreadFocus(container, targetId);
+  const sourceBubble = container.querySelector<HTMLElement>(`#msg-${CSS.escape(targetId)}`);
+  sourceBubble?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function isMessageSelectionActive(conversationId?: string): boolean {
+  if (!messageSelectionState) {
+    return false;
+  }
+  return conversationId ? messageSelectionState.conversationId === conversationId : true;
+}
+
+function enterMessageSelection(conversationId: string, msgId: string): void {
+  messageSelectionState = {
+    conversationId,
+    selectedIds: new Set([msgId]),
+  };
+}
+
+function toggleMessageSelection(conversationId: string, msgId: string): void {
+  if (!isMessageSelectionActive(conversationId)) {
+    enterMessageSelection(conversationId, msgId);
+    return;
+  }
+  const selectedIds = messageSelectionState!.selectedIds;
+  if (selectedIds.has(msgId)) {
+    selectedIds.delete(msgId);
+  } else {
+    selectedIds.add(msgId);
+  }
+  if (selectedIds.size === 0) {
+    messageSelectionState = null;
+  }
+}
+
+function clearMessageSelection(conversationId?: string): void {
+  if (!messageSelectionState) {
+    return;
+  }
+  if (conversationId && messageSelectionState.conversationId !== conversationId) {
+    return;
+  }
+  messageSelectionState = null;
+}
+
+function refreshMessageSelectionDecorations(container: HTMLElement): void {
+  const conversationId = container.dataset.conversationId || "";
+  const active = isMessageSelectionActive(conversationId);
+  const selectedIds = active ? messageSelectionState!.selectedIds : null;
+  container.classList.toggle("messages-selection-active", active);
+  for (const bubble of container.querySelectorAll<HTMLElement>(".bubble")) {
+    const msgId = bubble.id.replace("msg-", "");
+    bubble.classList.toggle("bubble-selected", Boolean(selectedIds?.has(msgId)));
+  }
+}
+
+async function syncMessageSelectionUi(
+  conversationId: string,
+  container: HTMLElement,
+  selectionBar: HTMLElement,
+  selectionCount: HTMLElement,
+  inputBar: HTMLElement,
+  attachmentPreview?: HTMLElement,
+): Promise<void> {
+  if (!isMessageSelectionActive(conversationId)) {
+    selectionBar.classList.add("hidden");
+    inputBar.classList.remove("hidden");
+    if (attachmentPreview && attachmentPreview.innerHTML.trim()) {
+      attachmentPreview.classList.remove("hidden");
+    }
+    refreshMessageSelectionDecorations(container);
+    return;
+  }
+  const messages = await getMessages(conversationId);
+  const validIds = new Set(messages.map((message) => message.id));
+  messageSelectionState!.selectedIds.forEach((id) => {
+    if (!validIds.has(id)) {
+      messageSelectionState!.selectedIds.delete(id);
+    }
+  });
+  if (messageSelectionState!.selectedIds.size === 0) {
+    clearMessageSelection(conversationId);
+    selectionBar.classList.add("hidden");
+    inputBar.classList.remove("hidden");
+    refreshMessageSelectionDecorations(container);
+    return;
+  }
+  selectionCount.textContent = `${messageSelectionState!.selectedIds.size} selected`;
+  selectionBar.classList.remove("hidden");
+  inputBar.classList.add("hidden");
+  attachmentPreview?.classList.add("hidden");
+  refreshMessageSelectionDecorations(container);
+}
+
+function installMessageSelectionShortcuts(handler: (event: KeyboardEvent) => void): void {
+  disposeMessageSelectionShortcuts?.();
+  const listener = (event: KeyboardEvent) => handler(event);
+  window.addEventListener("keydown", listener);
+  disposeMessageSelectionShortcuts = () => {
+    window.removeEventListener("keydown", listener);
+  };
 }
 
 function updateBubbleStatus(msgId: string, status: StoredMessage["status"]): void {
@@ -3486,6 +4183,17 @@ async function renderGroupChat(groupId: string): Promise<void> {
           <span class="chat-header-name">${escHtml(groupTitle)}</span>
           <span class="chat-header-status" id="gc-member-count">group</span>
         </div>
+        <button id="gc-search" class="icon-btn" title="Search in conversation" aria-label="Search in conversation">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path>
+          </svg>
+        </button>
+        <button id="gc-shortcuts" class="icon-btn" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="5" width="18" height="14" rx="2"/>
+            <path d="M7 9h.01M10 9h.01M13 9h.01M16 9h.01M8 13h8M7 16h4"/>
+          </svg>
+        </button>
         <button id="gc-info" class="icon-btn" title="Group info" aria-label="Group info">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>
@@ -3497,10 +4205,40 @@ async function renderGroupChat(groupId: string): Promise<void> {
         <strong>Opaque private-group state</strong>
         <p>${canManage ? "This device can rotate the current epoch and issue member invites." : "This device can read and send group messages, but cannot rotate membership."}</p>
       </div>
+      <div id="thread-search-bar" class="thread-search-bar hidden" role="search">
+        <input id="thread-search-input" type="text" class="thread-search-input" placeholder="Search in conversation" autocomplete="off" aria-label="Search in conversation" />
+        <span id="thread-search-count" class="thread-search-count"></span>
+        <div class="thread-search-actions">
+          <button id="thread-search-prev" class="icon-btn" title="Previous result" aria-label="Previous result">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m15 18-6-6 6-6"/>
+            </svg>
+          </button>
+          <button id="thread-search-next" class="icon-btn" title="Next result" aria-label="Next result">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m9 18 6-6-6-6"/>
+            </svg>
+          </button>
+          <button id="thread-search-close" class="icon-btn" title="Close search" aria-label="Close search">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+              <path d="M18 6L6 18M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div id="message-selection-bar" class="message-selection-bar hidden">
+        <span id="message-selection-count" class="message-selection-count">0 selected</span>
+        <div class="message-selection-actions">
+          <button id="message-selection-copy" class="btn-secondary">Copy</button>
+          <button id="message-selection-share" class="btn-secondary">Share</button>
+          <button id="message-selection-delete" class="btn-secondary danger-lite">Delete</button>
+          <button id="message-selection-close" class="btn-secondary">Close</button>
+        </div>
+      </div>
       <div class="messages-container" id="messages-container">
         <div class="messages" id="messages-list" role="log" aria-live="polite"></div>
       </div>
-      <div class="chat-input-bar">
+      <div id="group-input-bar" class="chat-input-bar">
         <input id="gc-input" type="text" placeholder="Message ${escHtml(groupTitle)}" autocomplete="off" aria-label="Group message" />
         <button id="gc-send" class="send-btn" aria-label="Send group message">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
@@ -3514,28 +4252,179 @@ async function renderGroupChat(groupId: string): Promise<void> {
 
   const msgList = q("#messages-list");
   const container = q("#messages-container");
+  const conversationId = `group:${groupId}`;
+  msgList.dataset.conversationId = conversationId;
   const input = q<HTMLInputElement>("#gc-input");
   const sendButton = q<HTMLButtonElement>("#gc-send");
   const statusEl = q<HTMLElement>("#gc-status");
+  const selectionBar = q<HTMLElement>("#message-selection-bar");
+  const selectionCount = q<HTMLElement>("#message-selection-count");
+  const selectionCopyBtn = q<HTMLButtonElement>("#message-selection-copy");
+  const selectionShareBtn = q<HTMLButtonElement>("#message-selection-share");
+  const selectionDeleteBtn = q<HTMLButtonElement>("#message-selection-delete");
+  const selectionCloseBtn = q<HTMLButtonElement>("#message-selection-close");
+  const inputBar = q<HTMLElement>("#group-input-bar");
+  const threadSearchBar = q<HTMLElement>("#thread-search-bar");
+  const threadSearchInput = q<HTMLInputElement>("#thread-search-input");
+  const threadSearchCount = q<HTMLElement>("#thread-search-count");
+  const threadSearchPrev = q<HTMLButtonElement>("#thread-search-prev");
+  const threadSearchNext = q<HTMLButtonElement>("#thread-search-next");
+  const threadSearchClose = q<HTMLButtonElement>("#thread-search-close");
+  const syncSelection = async (): Promise<void> => {
+    await syncMessageSelectionUi(
+      conversationId,
+      msgList,
+      selectionBar,
+      selectionCount,
+      inputBar,
+    );
+  };
+  let threadSearchIndex = 0;
+  const syncThreadSearch = (scrollToActive = true): void => {
+    if (threadSearchBar.classList.contains("hidden")) {
+      msgList.dataset.threadSearchQuery = "";
+      msgList.dataset.threadSearchActiveId = "";
+      refreshThreadSearchDecorations(msgList);
+      return;
+    }
+    const query = threadSearchInput.value.trim();
+    msgList.dataset.threadSearchQuery = query;
+    if (!query) {
+      msgList.dataset.threadSearchActiveId = "";
+      refreshThreadSearchDecorations(msgList);
+      threadSearchCount.textContent = "Type to search this conversation";
+      threadSearchPrev.disabled = true;
+      threadSearchNext.disabled = true;
+      return;
+    }
+    let matches = refreshThreadSearchDecorations(msgList);
+    if (matches.length === 0) {
+      threadSearchIndex = 0;
+      msgList.dataset.threadSearchActiveId = "";
+      refreshThreadSearchDecorations(msgList);
+      threadSearchCount.textContent = "No matches";
+      threadSearchPrev.disabled = true;
+      threadSearchNext.disabled = true;
+      return;
+    }
+    if (threadSearchIndex >= matches.length) {
+      threadSearchIndex = 0;
+    }
+    const activeId = matches[threadSearchIndex];
+    msgList.dataset.threadSearchActiveId = activeId;
+    matches = refreshThreadSearchDecorations(msgList);
+    threadSearchCount.textContent = `${threadSearchIndex + 1} of ${matches.length}`;
+    threadSearchPrev.disabled = matches.length < 2;
+    threadSearchNext.disabled = matches.length < 2;
+    if (scrollToActive) {
+      msgList.querySelector<HTMLElement>(`#msg-${CSS.escape(activeId)}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  };
+  const openThreadSearch = (): void => {
+    if (isMessageSelectionActive(conversationId)) {
+      clearMessageSelection(conversationId);
+      void syncSelection();
+    }
+    threadSearchBar.classList.remove("hidden");
+    threadSearchInput.focus();
+    threadSearchInput.select();
+    syncThreadSearch(false);
+  };
+  const closeThreadSearch = (focusComposer = true): void => {
+    threadSearchIndex = 0;
+    threadSearchInput.value = "";
+    threadSearchBar.classList.add("hidden");
+    msgList.dataset.threadSearchQuery = "";
+    msgList.dataset.threadSearchActiveId = "";
+    refreshThreadSearchDecorations(msgList);
+    threadSearchCount.textContent = "";
+    threadSearchPrev.disabled = true;
+    threadSearchNext.disabled = true;
+    if (focusComposer) {
+      input.focus();
+    }
+  };
+  const moveThreadSearch = (delta: number): void => {
+    const query = threadSearchInput.value.trim();
+    if (!query) {
+      return;
+    }
+    const matches = refreshThreadSearchDecorations(msgList);
+    if (matches.length === 0) {
+      return;
+    }
+    threadSearchIndex = (threadSearchIndex + delta + matches.length) % matches.length;
+    syncThreadSearch();
+  };
 
   q("#gc-back").addEventListener("click", () => {
+    clearMessageSelection(conversationId);
     activeGroupId = null;
     navigateTo({ screen: "conversations" });
   });
-  q("#gc-info").addEventListener("click", () => navigateTo({ screen: "group-info", groupId }));
+  q("#gc-info").addEventListener("click", () => {
+    clearMessageSelection(conversationId);
+    navigateTo({ screen: "group-info", groupId });
+  });
+  q("#gc-search").addEventListener("click", () => {
+    openThreadSearch();
+  });
+  q("#gc-shortcuts").addEventListener("click", () => {
+    showKeyboardShortcutOverlay();
+  });
+  threadSearchInput.addEventListener("input", () => {
+    threadSearchIndex = 0;
+    syncThreadSearch(false);
+  });
+  threadSearchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      moveThreadSearch(event.shiftKey ? -1 : 1);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeThreadSearch(false);
+    }
+  });
+  threadSearchPrev.addEventListener("click", () => moveThreadSearch(-1));
+  threadSearchNext.addEventListener("click", () => moveThreadSearch(1));
+  threadSearchClose.addEventListener("click", () => closeThreadSearch());
 
   // Load group message history
   await syncPrivateGroupMessagesForGroup(groupId).catch(() => {});
-  const history = await getMessages(`group:${groupId}`);
+  const history = await getMessages(conversationId);
   renderMessageList(msgList, history);
+  await syncSelection();
+  syncThreadSearch(false);
   scrollToBottom(container);
+  if (!hasSeenThreadTips()) {
+    markThreadTipsSeen();
+    showKeyboardShortcutOverlay();
+  }
 
   // Group chat context menu
+  msgList.addEventListener("click", (e) => {
+    if (!isMessageSelectionActive(conversationId)) {
+      return;
+    }
+    const bubble = (e.target as HTMLElement).closest(".bubble") as HTMLElement | null;
+    if (!bubble) return;
+    e.preventDefault();
+    toggleMessageSelection(conversationId, bubble.id.replace("msg-", ""));
+    void syncSelection();
+  });
+
   msgList.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     const bubble = (e.target as HTMLElement).closest(".bubble") as HTMLElement | null;
     if (!bubble) return;
     const msgId = bubble.id.replace("msg-", "");
+    if (isMessageSelectionActive(conversationId)) {
+      toggleMessageSelection(conversationId, msgId);
+      void syncSelection();
+      return;
+    }
     const isMine = bubble.classList.contains("bubble-sent");
     const serverMid = bubble.getAttribute("data-server-mid");
     showBubbleContextMenu(
@@ -3546,7 +4435,147 @@ async function renderGroupChat(groupId: string): Promise<void> {
       bubble,
       input,
       sendButton,
+      undefined,
+      () => { void syncSelection(); },
     );
+  });
+
+  selectionCloseBtn.addEventListener("click", () => {
+    clearMessageSelection(conversationId);
+    void syncSelection();
+  });
+  selectionCopyBtn.addEventListener("click", async () => {
+    if (!isMessageSelectionActive(conversationId)) return;
+    const selected = (await getMessages(conversationId)).filter((message) =>
+      messageSelectionState?.selectedIds.has(message.id),
+    );
+    await navigator.clipboard.writeText(selected.map((message) => message.text).join("\n\n"));
+    notify("Messages copied", "success");
+  });
+  selectionShareBtn.addEventListener("click", async () => {
+    if (!isMessageSelectionActive(conversationId)) return;
+    const selected = (await getMessages(conversationId)).filter((message) =>
+      messageSelectionState?.selectedIds.has(message.id),
+    );
+    const payload = selected.map((message) => message.text).join("\n\n");
+    if (navigator.share) {
+      try {
+        await navigator.share({ text: payload });
+      } catch {
+        await navigator.clipboard.writeText(payload);
+      }
+    } else {
+      await navigator.clipboard.writeText(payload);
+    }
+    notify("Selected messages ready to share", "success");
+  });
+  selectionDeleteBtn.addEventListener("click", async () => {
+    if (!isMessageSelectionActive(conversationId)) return;
+    const ids = Array.from(messageSelectionState?.selectedIds ?? []);
+    if (ids.length === 0) return;
+    await deleteMessages(ids);
+    clearMessageSelection(conversationId);
+    const nextHistory = await getMessages(conversationId);
+    renderMessageList(msgList, nextHistory);
+    await syncSelection();
+    notify("Messages deleted from this device", "success");
+  });
+
+  const selectedBubble = (): HTMLElement | null => {
+    if (!isMessageSelectionActive(conversationId)) {
+      return null;
+    }
+    const firstSelectedId = Array.from(messageSelectionState?.selectedIds ?? [])[0];
+    if (!firstSelectedId) {
+      return null;
+    }
+    return msgList.querySelector<HTMLElement>(`#msg-${CSS.escape(firstSelectedId)}`);
+  };
+  const openSelectedContextMenu = (): void => {
+    const bubble = selectedBubble();
+    if (!bubble) return;
+    const rect = bubble.getBoundingClientRect();
+    const msgId = bubble.id.replace("msg-", "");
+    showBubbleContextMenu(
+      { clientX: rect.right - 12, clientY: rect.top + Math.min(rect.height / 2, 28) } as MouseEvent,
+      msgId,
+      bubble.classList.contains("bubble-sent"),
+      bubble.getAttribute("data-server-mid") ? Number(bubble.getAttribute("data-server-mid")) : null,
+      bubble,
+      input,
+      sendButton,
+      undefined,
+      () => { void syncSelection(); },
+    );
+  };
+  const replyToSelectedMessage = (): void => {
+    const bubble = selectedBubble();
+    if (!bubble) return;
+    const msgId = bubble.id.replace("msg-", "");
+    const text = bubble.querySelector(".bubble-text")?.textContent || "";
+    clearMessageSelection(conversationId);
+    void syncSelection();
+    replyContext = { msgId, preview: text.slice(0, 60) };
+    showReplyBar(input);
+    input.focus();
+  };
+  const reactToSelectedMessage = (): void => {
+    const bubble = selectedBubble();
+    if (!bubble) return;
+    const rect = bubble.getBoundingClientRect();
+    showReactionPicker(
+      rect.right - 12,
+      rect.top + Math.min(rect.height / 2, 28),
+      bubble.id.replace("msg-", ""),
+      bubble,
+    );
+  };
+  installMessageSelectionShortcuts((event) => {
+    const withModifier = event.ctrlKey || event.metaKey;
+    const key = event.key.toLowerCase();
+    if (withModifier && event.shiftKey && key === "f") {
+      event.preventDefault();
+      openThreadSearch();
+      return;
+    }
+    if (event.key === "Escape" && !threadSearchBar.classList.contains("hidden")) {
+      event.preventDefault();
+      closeThreadSearch(false);
+      return;
+    }
+    if (!isMessageSelectionActive(conversationId)) {
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      clearMessageSelection(conversationId);
+      void syncSelection();
+      return;
+    }
+    if (withModifier && event.shiftKey && key === "s") {
+      event.preventDefault();
+      selectionShareBtn.click();
+      return;
+    }
+    if (withModifier && event.shiftKey && key === "d") {
+      event.preventDefault();
+      selectionDeleteBtn.click();
+      return;
+    }
+    if (withModifier && event.shiftKey && key === "r" && (messageSelectionState?.selectedIds.size ?? 0) === 1) {
+      event.preventDefault();
+      replyToSelectedMessage();
+      return;
+    }
+    if (withModifier && event.shiftKey && key === "e" && (messageSelectionState?.selectedIds.size ?? 0) === 1) {
+      event.preventDefault();
+      reactToSelectedMessage();
+      return;
+    }
+    if (!withModifier && event.shiftKey && event.key === "F10") {
+      event.preventDefault();
+      openSelectedContextMenu();
+    }
   });
 
   // Load members count
@@ -4167,7 +5196,11 @@ function showDeleteConfirm(bubble: HTMLElement, serverMessageId: number): void {
       const api = new PqmsgApi(setup.serverUrl);
       const headers = buildInboxDeleteAuthHeaders(k, [serverMessageId]);
       await api.deleteInboxMessages(k.userId, { message_ids: [serverMessageId] }, headers);
+      const messageList = bubble.parentElement;
       bubble.remove();
+      if (messageList instanceof HTMLElement) {
+        refreshReplyThreadDecorations(messageList);
+      }
       notify("Message deleted", "success");
     } catch (e) {
       notify(`Delete failed: ${errorMsg(e)}`, "error");
@@ -5359,6 +6392,8 @@ const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
 let replyContext: { msgId: string; preview: string } | null = null;
 // State for edit compose
 let editContext: { msgId: string; originalText: string } | null = null;
+const replyThreadFocusByConversation = new Map<string, string | null>();
+let messageSelectionState: { conversationId: string; selectedIds: Set<string> } | null = null;
 
 function showBubbleContextMenu(
   e: MouseEvent,
@@ -5369,6 +6404,7 @@ function showBubbleContextMenu(
   inputEl: HTMLInputElement,
   sendBtnEl: HTMLButtonElement,
   peerId?: string,
+  onSelectionChange?: () => void,
 ): void {
   // Remove any existing context menu
   document.querySelector(".ctx-menu")?.remove();
@@ -5384,6 +6420,7 @@ function showBubbleContextMenu(
     items += `<div class="ctx-item" data-action="edit">✏️ Edit</div>`;
     if (serverMid) items += `<div class="ctx-item ctx-danger" data-action="delete">🗑️ Delete</div>`;
   }
+  items += `<div class="ctx-item" data-action="select">Select messages</div>`;
   menu.innerHTML = items;
   document.body.appendChild(menu);
 
@@ -5417,6 +6454,13 @@ function showBubbleContextMenu(
 
     if (action === "delete" && serverMid) {
       showDeleteConfirm(bubble, serverMid);
+    }
+
+    if (action === "select") {
+      const conversationId = bubble.dataset.conversationId || "";
+      if (!conversationId) return;
+      enterMessageSelection(conversationId, msgId);
+      onSelectionChange?.();
     }
   });
 }

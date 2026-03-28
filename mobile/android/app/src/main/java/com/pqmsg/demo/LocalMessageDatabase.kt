@@ -539,6 +539,27 @@ class LocalMessageDatabase(
         )
     }
 
+    fun deleteDirectMessage(
+        userId: String,
+        peerUserId: String,
+        direction: String,
+        sentAtMillis: Long,
+        transportMessageId: Long?,
+    ) {
+        if (userId.isBlank() || peerUserId.isBlank()) return
+        val db = writableDb()
+        val where: String
+        val args: Array<String>
+        if (transportMessageId != null) {
+            where = "user_id = ? AND peer_user_id = ? AND direction = ? AND transport_message_id = ?"
+            args = arrayOf(userId, peerUserId, direction, transportMessageId.toString())
+        } else {
+            where = "user_id = ? AND peer_user_id = ? AND direction = ? AND sent_at_millis = ?"
+            args = arrayOf(userId, peerUserId, direction, sentAtMillis.toString())
+        }
+        db.delete("direct_messages", where, args)
+    }
+
     fun updateGroupMessageReactions(
         userId: String,
         groupId: String,
@@ -558,6 +579,27 @@ class LocalMessageDatabase(
             "user_id = ? AND group_id = ? AND direction = ? AND sent_at_millis = ?",
             arrayOf(userId, groupId, direction, sentAtMillis.toString()),
         )
+    }
+
+    fun deleteGroupMessage(
+        userId: String,
+        groupId: String,
+        direction: String,
+        sentAtMillis: Long,
+        transportMessageId: Long?,
+    ) {
+        if (userId.isBlank() || groupId.isBlank()) return
+        val db = writableDb()
+        val where: String
+        val args: Array<String>
+        if (transportMessageId != null) {
+            where = "user_id = ? AND group_id = ? AND direction = ? AND transport_message_id = ?"
+            args = arrayOf(userId, groupId, direction, transportMessageId.toString())
+        } else {
+            where = "user_id = ? AND group_id = ? AND direction = ? AND sent_at_millis = ?"
+            args = arrayOf(userId, groupId, direction, sentAtMillis.toString())
+        }
+        db.delete("group_messages", where, args)
     }
 
     fun importGroupMessages(userId: String, groupId: String, messages: List<ThreadMessage>) {

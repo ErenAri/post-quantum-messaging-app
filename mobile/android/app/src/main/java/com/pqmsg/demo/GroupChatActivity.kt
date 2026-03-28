@@ -1,11 +1,15 @@
 package com.pqmsg.demo
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.widget.EditText
 import android.widget.ListView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
@@ -36,14 +40,29 @@ class GroupChatActivity : AppCompatActivity() {
     private lateinit var metaText: TextView
     private lateinit var messageInput: EditText
     private lateinit var sendButton: MaterialButton
+    private lateinit var searchButton: MaterialButton
     private lateinit var syncButton: MaterialButton
+    private lateinit var threadTipsButton: MaterialButton
     private lateinit var backButton: MaterialButton
     private lateinit var groupHeaderContainer: View
     private lateinit var groupMessages: ListView
     private lateinit var groupEmptyText: TextView
+    private lateinit var selectionModeLayout: View
+    private lateinit var selectionCountText: TextView
+    private lateinit var selectionCopyButton: MaterialButton
+    private lateinit var selectionShareButton: MaterialButton
+    private lateinit var selectionDeleteButton: MaterialButton
+    private lateinit var selectionCloseButton: MaterialButton
+    private lateinit var searchModeLayout: View
+    private lateinit var searchInput: EditText
+    private lateinit var searchCountText: TextView
+    private lateinit var searchPrevButton: MaterialButton
+    private lateinit var searchNextButton: MaterialButton
+    private lateinit var searchCloseButton: MaterialButton
     private lateinit var replyPreviewLayout: View
     private lateinit var replyPreviewText: TextView
     private lateinit var clearReplyButton: MaterialButton
+    private lateinit var composerBar: View
     private var groupId = ""
     private var groupName = ""
     private var syncInFlight = false
@@ -51,7 +70,11 @@ class GroupChatActivity : AppCompatActivity() {
     private var privateGroupCredential: PrivateGroupMemberCredential? = null
     private var localStoreAvailable = true
     private lateinit var threadAdapter: ThreadMessageAdapter
+    private var currentThreadMessages: List<ThreadMessage> = emptyList()
     private var pendingReplyMessage: ThreadMessage? = null
+    private val selectedMessageKeys = linkedSetOf<String>()
+    private var searchResultKeys: List<String> = emptyList()
+    private var activeSearchIndex = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,20 +90,50 @@ class GroupChatActivity : AppCompatActivity() {
         metaText = findViewById(R.id.textGroupMeta)
         messageInput = findViewById(R.id.editGroupMessage)
         sendButton = findViewById(R.id.buttonSendGroup)
+        searchButton = findViewById(R.id.buttonGroupThreadSearch)
         syncButton = findViewById(R.id.buttonSyncGroup)
+        threadTipsButton = findViewById(R.id.buttonGroupThreadTips)
         backButton = findViewById(R.id.buttonBackFromGroup)
         groupHeaderContainer = findViewById(R.id.groupHeaderContainer)
         groupMessages = findViewById(R.id.listGroupMessages)
         groupEmptyText = findViewById(R.id.textGroupChatEmpty)
+        selectionModeLayout = findViewById(R.id.layoutGroupSelectionMode)
+        selectionCountText = findViewById(R.id.textGroupSelectionCount)
+        selectionCopyButton = findViewById(R.id.buttonGroupSelectionCopy)
+        selectionShareButton = findViewById(R.id.buttonGroupSelectionShare)
+        selectionDeleteButton = findViewById(R.id.buttonGroupSelectionDelete)
+        selectionCloseButton = findViewById(R.id.buttonGroupSelectionClose)
+        searchModeLayout = findViewById(R.id.layoutGroupSearchMode)
+        searchInput = findViewById(R.id.editGroupThreadSearch)
+        searchCountText = findViewById(R.id.textGroupThreadSearchCount)
+        searchPrevButton = findViewById(R.id.buttonGroupThreadSearchPrev)
+        searchNextButton = findViewById(R.id.buttonGroupThreadSearchNext)
+        searchCloseButton = findViewById(R.id.buttonGroupThreadSearchClose)
         replyPreviewLayout = findViewById(R.id.layoutGroupReplyPreview)
         replyPreviewText = findViewById(R.id.textGroupReplyPreview)
         clearReplyButton = findViewById(R.id.buttonClearGroupReply)
-        threadAdapter = ThreadMessageAdapter(this)
+        composerBar = findViewById(R.id.layoutGroupComposerBar)
+        threadAdapter = ThreadMessageAdapter(
+            this,
+            onSwipeReply = { message -> beginReply(message) },
+            onOpenReplyThread = { message -> openReplyThread(message) },
+            onOpenQuotedReply = { targetId -> jumpToReplySource(targetId) },
+        )
         groupMessages.adapter = threadAdapter
         groupMessages.emptyView = groupEmptyText
+        groupMessages.setOnItemClickListener { _, _, position, _ ->
+            if (!isSelectionModeActive()) {
+                return@setOnItemClickListener
+            }
+            toggleSelectedMessage(threadAdapter.getItem(position))
+        }
         groupMessages.setOnItemLongClickListener { _, _, position, _ ->
             val message = threadAdapter.getItem(position)
-            showThreadMessageActions(message)
+            if (isSelectionModeActive()) {
+                toggleSelectedMessage(message)
+            } else {
+                showThreadMessageActions(message)
+            }
             true
         }
 
@@ -92,6 +145,10 @@ class GroupChatActivity : AppCompatActivity() {
             renderReplyPreview()
             syncActions()
         }
+        configureSelectionMode()
+        configureThreadSearch()
+        searchButton.setOnClickListener { openThreadSearch() }
+        threadTipsButton.setOnClickListener { showThreadTipsDialog() }
         sendButton.setOnClickListener {
             lifecycleScope.launch { runAction("Send group message") { sendGroupMessage() } }
         }
@@ -106,8 +163,10 @@ class GroupChatActivity : AppCompatActivity() {
 
         renderChatLog()
         renderReplyPreview()
+        renderSelectionMode()
         refreshMeta()
         syncActions()
+        maybeShowThreadTipsOnFirstOpen()
     }
 
     override fun onResume() {
@@ -122,6 +181,7 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     private fun renderUnavailableState() {
+        selectedMessageKeys.clear()
         titleText.text = groupName
         messageInput.setText("")
         messageInput.hint = "Private-group state unavailable"
@@ -129,9 +189,27 @@ class GroupChatActivity : AppCompatActivity() {
         sendButton.isEnabled = false
         syncButton.isEnabled = true
         threadAdapter.submitList(emptyList())
+        renderSelectionMode()
         groupEmptyText.text = "This device does not have the local opaque state needed to open this private group."
         metaText.text = "Open the group from an invite link or a device that already has the current epoch state."
         renderReplyPreview()
+        syncThreadSearch(scrollToActive = false)
+    }
+
+    private fun showThreadTipsDialog() {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.thread_tips_title)
+            .setMessage(getString(R.string.thread_tips_group_body))
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun maybeShowThreadTipsOnFirstOpen() {
+        if (store.hasSeenThreadTips()) {
+            return
+        }
+        store.markThreadTipsSeen()
+        showThreadTipsDialog()
     }
 
     private suspend fun runAction(label: String, block: suspend () -> Unit) {
@@ -191,7 +269,38 @@ class GroupChatActivity : AppCompatActivity() {
         }
     }
 
+    private fun configureSelectionMode() {
+        selectionCopyButton.setOnClickListener {
+            copySelectedMessages()
+        }
+        selectionShareButton.setOnClickListener {
+            shareSelectedMessages()
+        }
+        selectionDeleteButton.setOnClickListener {
+            confirmDeleteSelectedMessages()
+        }
+        selectionCloseButton.setOnClickListener {
+            clearSelectionMode()
+        }
+    }
+
+    private fun configureThreadSearch() {
+        searchInput.doAfterTextChanged {
+            activeSearchIndex = 0
+            syncThreadSearch(scrollToActive = false)
+        }
+        searchPrevButton.setOnClickListener { moveThreadSearch(-1) }
+        searchNextButton.setOnClickListener { moveThreadSearch(1) }
+        searchCloseButton.setOnClickListener { closeThreadSearch() }
+        syncThreadSearch(scrollToActive = false)
+    }
+
     private fun syncActions() {
+        if (isSelectionModeActive()) {
+            sendButton.isEnabled = false
+            syncButton.isEnabled = false
+            return
+        }
         val hasText = messageInput.text.toString().isNotBlank()
         sendButton.isEnabled =
             hasText && !syncInFlight && localStoreAvailable && privateGroupState != null && privateGroupCredential != null
@@ -200,7 +309,7 @@ class GroupChatActivity : AppCompatActivity() {
 
     private fun renderReplyPreview() {
         val reply = pendingReplyMessage
-        if (reply == null) {
+        if (reply == null || isSelectionModeActive()) {
             replyPreviewLayout.visibility = View.GONE
             replyPreviewText.text = ""
             return
@@ -210,24 +319,212 @@ class GroupChatActivity : AppCompatActivity() {
             "${getString(R.string.thread_reply_prefix)}: ${reply.body.take(72)}"
     }
 
+    private fun threadMessageKey(message: ThreadMessage): String = threadAdapter.messageKey(message)
+
+    private fun isSelectionModeActive(): Boolean = selectedMessageKeys.isNotEmpty()
+
+    private fun selectedMessages(): List<ThreadMessage> {
+        if (selectedMessageKeys.isEmpty()) {
+            return emptyList()
+        }
+        val keys = selectedMessageKeys.toSet()
+        return currentThreadMessages.filter { keys.contains(threadMessageKey(it)) }
+    }
+
+    private fun enterSelectionMode(message: ThreadMessage) {
+        selectedMessageKeys.clear()
+        selectedMessageKeys.add(threadMessageKey(message))
+        renderSelectionMode()
+    }
+
+    private fun toggleSelectedMessage(message: ThreadMessage) {
+        val key = threadMessageKey(message)
+        if (!selectedMessageKeys.add(key)) {
+            selectedMessageKeys.remove(key)
+        }
+        if (selectedMessageKeys.isEmpty()) {
+            clearSelectionMode()
+        } else {
+            renderSelectionMode()
+        }
+    }
+
+    private fun clearSelectionMode() {
+        if (selectedMessageKeys.isEmpty()) {
+            renderSelectionMode()
+            return
+        }
+        selectedMessageKeys.clear()
+        renderSelectionMode()
+    }
+
+    private fun syncSelectionAfterThreadUpdate() {
+        if (selectedMessageKeys.isEmpty()) {
+            threadAdapter.setSelectionState(false, emptySet())
+            return
+        }
+        val validKeys = currentThreadMessages.mapTo(linkedSetOf()) { threadMessageKey(it) }
+        selectedMessageKeys.retainAll(validKeys)
+        renderSelectionMode()
+    }
+
+    private fun renderSelectionMode() {
+        val active = isSelectionModeActive()
+        selectionModeLayout.visibility = if (active) View.VISIBLE else View.GONE
+        composerBar.visibility = if (active) View.GONE else View.VISIBLE
+        selectionCountText.text = resources.getQuantityString(
+            R.plurals.thread_selection_count,
+            selectedMessageKeys.size,
+            selectedMessageKeys.size,
+        )
+        selectionCopyButton.isEnabled = active
+        selectionShareButton.isEnabled = active
+        selectionDeleteButton.isEnabled = active
+        threadAdapter.setSelectionState(active, selectedMessageKeys)
+        if (active) {
+            replyPreviewLayout.visibility = View.GONE
+        } else {
+            renderReplyPreview()
+        }
+        syncActions()
+    }
+
+    private fun openThreadSearch() {
+        if (isSelectionModeActive()) {
+            clearSelectionMode()
+        }
+        searchModeLayout.visibility = View.VISIBLE
+        searchInput.requestFocus()
+        searchInput.selectAll()
+        syncThreadSearch(scrollToActive = false)
+    }
+
+    private fun closeThreadSearch() {
+        activeSearchIndex = 0
+        searchResultKeys = emptyList()
+        searchInput.setText("")
+        searchModeLayout.visibility = View.GONE
+        searchCountText.text = getString(R.string.thread_search_empty)
+        searchPrevButton.isEnabled = false
+        searchNextButton.isEnabled = false
+        threadAdapter.setSearchState(emptySet(), null)
+    }
+
+    private fun moveThreadSearch(delta: Int) {
+        if (searchResultKeys.isEmpty()) {
+            return
+        }
+        activeSearchIndex = (activeSearchIndex + delta + searchResultKeys.size) % searchResultKeys.size
+        syncThreadSearch()
+    }
+
+    private fun syncThreadSearch(scrollToActive: Boolean = true) {
+        if (searchModeLayout.visibility != View.VISIBLE) {
+            searchResultKeys = emptyList()
+            activeSearchIndex = 0
+            threadAdapter.setSearchState(emptySet(), null)
+            return
+        }
+        val query = searchInput.text?.toString()?.trim().orEmpty()
+        if (query.isBlank()) {
+            searchResultKeys = emptyList()
+            activeSearchIndex = 0
+            searchCountText.text = getString(R.string.thread_search_empty)
+            searchPrevButton.isEnabled = false
+            searchNextButton.isEnabled = false
+            threadAdapter.setSearchState(emptySet(), null)
+            return
+        }
+        val matches = currentThreadMessages.filter { it.body.contains(query, ignoreCase = true) }
+            .map { threadMessageKey(it) }
+        searchResultKeys = matches
+        if (matches.isEmpty()) {
+            activeSearchIndex = 0
+            searchCountText.text = getString(R.string.thread_search_no_results)
+            searchPrevButton.isEnabled = false
+            searchNextButton.isEnabled = false
+            threadAdapter.setSearchState(emptySet(), null)
+            return
+        }
+        if (activeSearchIndex !in matches.indices) {
+            activeSearchIndex = 0
+        }
+        val activeKey = matches[activeSearchIndex]
+        searchCountText.text =
+            getString(R.string.thread_search_count, activeSearchIndex + 1, matches.size)
+        searchPrevButton.isEnabled = matches.size > 1
+        searchNextButton.isEnabled = matches.size > 1
+        threadAdapter.setSearchState(matches.toSet(), activeKey)
+        if (scrollToActive) {
+            val activeIndex = currentThreadMessages.indexOfFirst { threadMessageKey(it) == activeKey }
+            if (activeIndex >= 0) {
+                groupMessages.post {
+                    groupMessages.smoothScrollToPosition(activeIndex)
+                }
+            }
+        }
+    }
+
     private fun showThreadMessageActions(message: ThreadMessage) {
         val options = arrayOf(
             getString(R.string.thread_action_reply),
             getString(R.string.thread_action_react),
+            getString(R.string.thread_action_copy),
+            getString(R.string.thread_action_share),
+            getString(R.string.thread_action_delete_local),
+            getString(R.string.thread_action_select_multiple),
         )
         AlertDialog.Builder(this)
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> {
-                        pendingReplyMessage = message
-                        renderReplyPreview()
-                        messageInput.requestFocus()
-                    }
-                    1 -> showReactionPicker(message)
+                    0 -> beginReply(message)
+                    1 -> showReactionPickerSheet(message)
+                    2 -> copyThreadMessage(message)
+                    3 -> shareThreadMessage(message)
+                    4 -> confirmDeleteThreadMessage(message)
+                    5 -> enterSelectionMode(message)
                 }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    private fun beginReply(message: ThreadMessage) {
+        pendingReplyMessage = message
+        renderReplyPreview()
+        syncActions()
+        messageInput.requestFocus()
+    }
+
+    private fun openReplyThread(message: ThreadMessage) {
+        val targetId = message.transportMessageId ?: message.sentAtMillis
+        if (threadAdapter.getFocusedReplyThreadId() == targetId) {
+            threadAdapter.focusReplyThread(null)
+            return
+        }
+        val firstReplyIndex = currentThreadMessages.indexOfFirst { it.replyToId == targetId }
+        if (firstReplyIndex < 0) {
+            threadAdapter.focusReplyThread(null)
+            return
+        }
+        threadAdapter.focusReplyThread(targetId)
+        groupMessages.post {
+            groupMessages.smoothScrollToPosition(firstReplyIndex)
+        }
+    }
+
+    private fun jumpToReplySource(targetId: Long) {
+        val sourceIndex = currentThreadMessages.indexOfFirst {
+            (it.transportMessageId ?: it.sentAtMillis) == targetId
+        }
+        if (sourceIndex < 0) {
+            threadAdapter.focusReplyThread(null)
+            return
+        }
+        threadAdapter.focusReplyThread(targetId)
+        groupMessages.post {
+            groupMessages.smoothScrollToPosition(sourceIndex)
+        }
     }
 
     private fun showReactionPicker(message: ThreadMessage) {
@@ -250,6 +547,156 @@ class GroupChatActivity : AppCompatActivity() {
                     reactions = next.ifEmpty { null },
                 )
                 renderChatLog()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showReactionPickerSheet(message: ThreadMessage) {
+        val emojiOptions = arrayOf(
+            "\uD83D\uDC4D",
+            "\u2764\uFE0F",
+            "\uD83D\uDE02",
+            "\uD83D\uDE2E",
+            "\uD83D\uDE22",
+            "\uD83D\uDC4F",
+        )
+        AlertDialog.Builder(this)
+            .setItems(emojiOptions) { _, which ->
+                val setup = store.loadSetup()
+                val next = LinkedHashMap(message.reactions.orEmpty())
+                val emoji = emojiOptions[which]
+                if (next[emoji] == "You") {
+                    next.remove(emoji)
+                } else {
+                    next[emoji] = "You"
+                }
+                store.updateGroupThreadMessageReactions(
+                    userId = setup.userId,
+                    groupId = groupId,
+                    direction = message.direction,
+                    sentAtMillis = message.sentAtMillis,
+                    reactions = next.ifEmpty { null },
+                )
+                renderChatLog()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun copyThreadMessage(message: ThreadMessage) {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("pqmsg-group-message", message.body))
+        Toast.makeText(this, R.string.thread_message_copied, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun shareThreadMessage(message: ThreadMessage) {
+        startActivity(
+            Intent.createChooser(
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, message.body)
+                },
+                getString(R.string.thread_share_chooser_title),
+            ),
+        )
+    }
+
+    private fun confirmDeleteThreadMessage(message: ThreadMessage) {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.thread_delete_local_title)
+            .setMessage(R.string.thread_delete_local_message)
+            .setPositiveButton(R.string.thread_action_delete_local) { _, _ ->
+                val setup = store.loadSetup()
+                store.deleteGroupThreadMessage(
+                    userId = setup.userId,
+                    groupId = groupId,
+                    direction = message.direction,
+                    sentAtMillis = message.sentAtMillis,
+                    transportMessageId = message.transportMessageId,
+                )
+                if (pendingReplyMessage?.direction == message.direction &&
+                    pendingReplyMessage?.sentAtMillis == message.sentAtMillis &&
+                    pendingReplyMessage?.transportMessageId == message.transportMessageId
+                ) {
+                    pendingReplyMessage = null
+                    renderReplyPreview()
+                }
+                renderChatLog()
+                Toast.makeText(this, R.string.thread_delete_local_done, Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun copySelectedMessages() {
+        val messages = selectedMessages()
+        if (messages.isEmpty()) {
+            clearSelectionMode()
+            return
+        }
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText(
+                "pqmsg-group-messages",
+                messages.joinToString("\n\n") { it.body },
+            ),
+        )
+        Toast.makeText(this, R.string.thread_messages_copied, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun shareSelectedMessages() {
+        val messages = selectedMessages()
+        if (messages.isEmpty()) {
+            clearSelectionMode()
+            return
+        }
+        startActivity(
+            Intent.createChooser(
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, messages.joinToString("\n\n") { it.body })
+                },
+                getString(R.string.thread_share_chooser_multiple_title),
+            ),
+        )
+    }
+
+    private fun confirmDeleteSelectedMessages() {
+        val messages = selectedMessages()
+        if (messages.isEmpty()) {
+            clearSelectionMode()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.thread_delete_local_multiple_title)
+            .setMessage(
+                getString(
+                    R.string.thread_delete_local_multiple_message,
+                    messages.size,
+                ),
+            )
+            .setPositiveButton(R.string.thread_selection_delete) { _, _ ->
+                val setup = store.loadSetup()
+                messages.forEach { message ->
+                    store.deleteGroupThreadMessage(
+                        userId = setup.userId,
+                        groupId = groupId,
+                        direction = message.direction,
+                        sentAtMillis = message.sentAtMillis,
+                        transportMessageId = message.transportMessageId,
+                    )
+                }
+                if (pendingReplyMessage != null) {
+                    val pendingKey = threadMessageKey(pendingReplyMessage!!)
+                    if (messages.any { threadMessageKey(it) == pendingKey }) {
+                        pendingReplyMessage = null
+                    }
+                }
+                selectedMessageKeys.clear()
+                renderReplyPreview()
+                renderChatLog()
+                Toast.makeText(this, R.string.thread_delete_local_multiple_done, Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -764,17 +1211,23 @@ class GroupChatActivity : AppCompatActivity() {
             store.listGroupThreadMessages(setup.userId, groupId)
         }.onSuccess { messages ->
             localStoreAvailable = true
+            currentThreadMessages = messages
             threadAdapter.submitList(messages)
+            syncSelectionAfterThreadUpdate()
+            syncThreadSearch(scrollToActive = false)
             groupEmptyText.text = getString(R.string.group_chat_log_empty)
             groupMessages.post {
-                if (messages.isNotEmpty()) {
+                if (messages.isNotEmpty() && !isSelectionModeActive()) {
                     groupMessages.setSelection(messages.lastIndex)
                 }
             }
         }.onFailure {
             localStoreAvailable = false
+            currentThreadMessages = emptyList()
             metaText.text = UiErrorMapper.fromThrowable(it, "Open local secure state").headline
             threadAdapter.submitList(emptyList())
+            syncSelectionAfterThreadUpdate()
+            syncThreadSearch(scrollToActive = false)
             groupEmptyText.text =
                 "Local encrypted group history is unavailable on this device.\nRe-import the current group state from a linked device or fully reprovision this device."
         }

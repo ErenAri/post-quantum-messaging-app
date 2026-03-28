@@ -593,6 +593,179 @@ html, body {
   padding: 10px 12px 0;
   background: var(--bg);
 }
+.thread-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px 0;
+  background: var(--bg);
+}
+.thread-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+}
+.thread-search-input:focus {
+  border-color: rgba(45,108,246,.45);
+  box-shadow: 0 0 0 3px rgba(45,108,246,.12);
+}
+.thread-search-count {
+  min-width: 72px;
+  text-align: right;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+.thread-search-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.message-selection-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
+}
+.message-selection-count {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.message-selection-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.danger-lite {
+  border-color: rgba(187,62,52,.35);
+  color: var(--danger);
+}
+.danger-lite:hover {
+  background: rgba(187,62,52,.08);
+  border-color: rgba(187,62,52,.55);
+}
+.shortcut-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 1500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, .48);
+  backdrop-filter: blur(6px);
+}
+.shortcut-card {
+  width: min(680px, 100%);
+  max-height: min(88vh, 760px);
+  overflow: auto;
+  padding: 22px 22px 18px;
+  border-radius: 24px;
+  border: 1px solid rgba(45,108,246,.14);
+  background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(246,249,252,.98));
+  box-shadow: 0 28px 64px rgba(15,23,42,.22);
+}
+.shortcut-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.shortcut-head h2 {
+  margin: 0 0 6px;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+}
+.shortcut-head p {
+  margin: 0;
+  max-width: 52ch;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.shortcut-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.shortcut-section {
+  padding: 14px 16px;
+  border: 1px solid rgba(15,23,42,.08);
+  border-radius: 18px;
+  background: rgba(255,255,255,.82);
+}
+.shortcut-section h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .02em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 0;
+  border-top: 1px solid rgba(15,23,42,.06);
+  font-size: 14px;
+  color: var(--text);
+}
+.shortcut-row:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+.shortcut-row:last-of-type {
+  padding-bottom: 0;
+}
+.shortcut-keys {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+  color: var(--text-secondary);
+}
+.shortcut-sep {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.shortcut-card kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 9px;
+  border: 1px solid rgba(15,23,42,.12);
+  background: #fff;
+  box-shadow: inset 0 -1px 0 rgba(15,23,42,.08);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+.shortcut-footnote {
+  margin: 16px 2px 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
 .context-pill {
   display: inline-flex;
   align-items: center;
@@ -737,6 +910,7 @@ html, body {
   word-wrap: break-word;
   animation: fadeIn .15s ease;
   clear: both;
+  transition: box-shadow .16s ease, transform .16s ease;
 }
 .bubble-sent {
   background: var(--bg-bubble-sent);
@@ -763,8 +937,88 @@ html, body {
   color: var(--text-bubble);
   padding: 2px 4px;
 }
+.bubble-reply-source-active {
+  box-shadow: 0 0 0 2px rgba(45,108,246,0.22);
+}
+.bubble-selected {
+  box-shadow: 0 0 0 2px rgba(45,108,246,0.28);
+  transform: translateY(-1px);
+}
+.bubble-search-match {
+  box-shadow: 0 0 0 2px rgba(45,108,246,0.14);
+}
+.bubble-search-active {
+  box-shadow: 0 0 0 2px rgba(45,108,246,0.36), 0 10px 24px rgba(45,108,246,0.12);
+  transform: translateY(-1px);
+}
+.bubble-reply-active {
+  transform: translateX(4px);
+}
+.messages-selection-active .reply-thread-pill,
+.messages-selection-active .reply-quote,
+.messages-selection-active .reaction-pill,
+.messages-selection-active .media-img,
+.messages-selection-active .media-file-link {
+  pointer-events: none;
+}
+
+@media (max-width: 720px) {
+  .shortcut-sheet {
+    padding: 12px;
+    align-items: flex-end;
+  }
+  .shortcut-card {
+    width: 100%;
+    max-height: 92vh;
+    border-radius: 22px 22px 18px 18px;
+    padding: 18px 16px 16px;
+  }
+  .shortcut-grid {
+    grid-template-columns: 1fr;
+  }
+  .thread-search-bar {
+    flex-wrap: wrap;
+    align-items: stretch;
+  }
+  .thread-search-count {
+    min-width: 0;
+    text-align: left;
+  }
+  .thread-search-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .shortcut-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .shortcut-keys {
+    justify-content: flex-start;
+  }
+}
 .bubble-media-caption {
   padding-top: 8px;
+}
+.reply-thread-pill {
+  align-self: flex-start;
+  margin: 4px 4px 2px;
+  padding: 4px 10px;
+  border: none;
+  border-radius: 999px;
+  background: #e8eef7;
+  color: #24323d;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.reply-thread-pill:hover {
+  background: #dce7ff;
+  color: #1d57d2;
+}
+.reply-thread-pill-active {
+  background: #dce7ff;
+  color: #1d57d2;
 }
 .bubble-meta {
   display: flex;
@@ -1643,6 +1897,8 @@ html, body {
 
 /* === Rich interactions (B2) === */
 .reply-quote {
+  display: block;
+  width: 100%;
   border-left: 3px solid var(--accent);
   padding: 4px 8px;
   margin-bottom: 4px;
@@ -1653,6 +1909,16 @@ html, body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-align: left;
+  border-top: none;
+  border-right: none;
+  border-bottom: none;
+  cursor: pointer;
+  font: inherit;
+}
+.reply-quote-active {
+  background: rgba(45,108,246,0.12);
+  color: #1d57d2;
 }
 .reply-compose-bar {
   display: flex;
