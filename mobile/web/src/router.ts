@@ -26,6 +26,8 @@ export type AppNotification = {
   id: number;
   text: string;
   type: "info" | "error" | "success";
+  actionLabel?: string;
+  action?: () => void;
 };
 
 let currentView: AppView = { screen: "onboarding" };
@@ -48,8 +50,12 @@ export function onViewChange(listener: (view: AppView) => void): void {
   viewChangeListeners.push(listener);
 }
 
-export function notify(text: string, type: AppNotification["type"] = "info"): void {
-  const notification: AppNotification = { id: nextNotificationId++, text, type };
+export function notify(
+  text: string,
+  type: AppNotification["type"] = "info",
+  options?: Pick<AppNotification, "actionLabel" | "action">
+): void {
+  const notification: AppNotification = { id: nextNotificationId++, text, type, ...options };
   for (const listener of notificationListeners) {
     listener(notification);
   }

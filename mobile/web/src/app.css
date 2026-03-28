@@ -1449,7 +1449,7 @@ html, body {
   bottom: 24px;
   left: 50%;
   transform: translateX(-50%) translateY(80px);
-  padding: 10px 20px;
+  padding: 10px 14px;
   border-radius: 8px;
   font-size: 14px;
   color: #fff;
@@ -1458,9 +1458,35 @@ html, body {
   z-index: 1000;
   opacity: 0;
   transition: transform .25s ease, opacity .25s ease;
-  pointer-events: none;
+  pointer-events: auto;
   max-width: 80%;
-  text-align: center;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+}
+.toast-text {
+  min-width: 0;
+}
+.toast-action {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .02em;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.toast-success .toast-action {
+  color: #c8ffd8;
+}
+.toast-info .toast-action {
+  color: var(--accent);
+}
+.toast-error .toast-action {
+  color: #ffd0cb;
 }
 .toast-show {
   opacity: 1;

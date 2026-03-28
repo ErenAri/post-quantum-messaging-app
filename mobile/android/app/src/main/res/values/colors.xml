@@ -5,6 +5,7 @@
     <color name="pq_surface_alt">#EBEFF3</color>
     <color name="pq_hero">#2D6CF6</color>
     <color name="pq_hero_accent">#DCE7FF</color>
+    <color name="pq_success_accent">#E4F3EE</color>
     <color name="pq_ink">#10181F</color>
     <color name="pq_ink_muted">#62727F</color>
     <color name="pq_line">#D9E1E7</color>

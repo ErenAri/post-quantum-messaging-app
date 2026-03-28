@@ -12,6 +12,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.snackbar.Snackbar
 import com.google.gson.Gson
 import kotlinx.coroutines.launch
 import uniffi.pqmsg_android.buildContactInviteCreateAuthHeaders
@@ -58,6 +59,10 @@ class ConversationsActivity : AppCompatActivity() {
     private var listTouchStartX = 0f
     private var listTouchStartY = 0f
     private var listTouchStartPosition = AdapterView.INVALID_POSITION
+    private var activeSwipeContent: View? = null
+    private var activeSwipeItem: InboxListItem? = null
+    private var swipeGestureActive = false
+    private val swipeActivationThresholdPx by lazy { resources.displayMetrics.density * 16f }
     private val archiveSwipeThresholdPx by lazy { resources.displayMetrics.density * 72f }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -135,45 +140,111 @@ class ConversationsActivity : AppCompatActivity() {
     private fun handleInboxSwipeGesture(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                resetSwipeTracking()
                 listTouchStartX = event.x
                 listTouchStartY = event.y
                 listTouchStartPosition = conversationsList.pointToPosition(event.x.toInt(), event.y.toInt())
-            }
-            MotionEvent.ACTION_UP -> {
-                val startPosition = listTouchStartPosition
-                listTouchStartPosition = AdapterView.INVALID_POSITION
-                if (startPosition == AdapterView.INVALID_POSITION) {
-                    return false
+                activeSwipeItem = currentInboxItems.getOrNull(listTouchStartPosition)?.takeIf {
+                    it.kind == InboxItemKind.DIRECT || it.kind == InboxItemKind.GROUP
                 }
+                activeSwipeContent = findSwipeContentView(listTouchStartPosition)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                activeSwipeItem ?: return false
+                val content = activeSwipeContent ?: return false
                 val deltaX = event.x - listTouchStartX
                 val deltaY = event.y - listTouchStartY
-                if (
-                    deltaX >= archiveSwipeThresholdPx &&
-                    abs(deltaX) > abs(deltaY) * 1.35f
-                ) {
-                    return handleSwipeArchiveForPosition(startPosition)
+                if (!swipeGestureActive) {
+                    if (deltaX <= 0f) {
+                        return false
+                    }
+                    if (abs(deltaY) > swipeActivationThresholdPx && abs(deltaY) > deltaX) {
+                        resetSwipeTracking()
+                        return false
+                    }
+                    if (deltaX < swipeActivationThresholdPx || deltaX <= abs(deltaY) * 1.2f) {
+                        return false
+                    }
+                    swipeGestureActive = true
+                    conversationsList.requestDisallowInterceptTouchEvent(true)
                 }
+                val maxTranslation = content.width * 0.86f
+                val translation = deltaX.coerceIn(0f, maxTranslation)
+                content.translationX = translation
+                content.alpha = 1f - (translation / maxTranslation) * 0.12f
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                val item = activeSwipeItem
+                val content = activeSwipeContent
+                if (swipeGestureActive && item != null && content != null) {
+                    val shouldArchive = content.translationX >= archiveSwipeThresholdPx
+                    val animatedContent = content
+                    resetSwipeTracking()
+                    if (shouldArchive) {
+                        animateSwipeCommit(animatedContent) {
+                            performSwipeArchive(item)
+                        }
+                    } else {
+                        animateSwipeReset(animatedContent)
+                    }
+                    return true
+                }
+                resetSwipeTracking()
             }
             MotionEvent.ACTION_CANCEL -> {
-                listTouchStartPosition = AdapterView.INVALID_POSITION
+                activeSwipeContent?.let(::animateSwipeReset)
+                resetSwipeTracking()
             }
         }
         return false
     }
 
-    private fun handleSwipeArchiveForPosition(position: Int): Boolean {
-        val item = currentInboxItems.getOrNull(position) ?: return false
-        return when (item.kind) {
-            InboxItemKind.DIRECT -> {
-                setDirectConversationArchived(item.id, item.archivedAtMillis == 0L)
-                true
-            }
-            InboxItemKind.GROUP -> {
-                setGroupConversationArchived(item.id, item.archivedAtMillis == 0L)
-                true
-            }
-            InboxItemKind.REQUEST -> false
+    private fun findSwipeContentView(position: Int): View? {
+        if (position == AdapterView.INVALID_POSITION) {
+            return null
         }
+        val childIndex = position - conversationsList.firstVisiblePosition
+        if (childIndex < 0 || childIndex >= conversationsList.childCount) {
+            return null
+        }
+        return conversationsList.getChildAt(childIndex)?.findViewById(R.id.conversationSwipeContent)
+    }
+
+    private fun animateSwipeReset(content: View) {
+        content.animate()
+            .translationX(0f)
+            .alpha(1f)
+            .setDuration(170L)
+            .start()
+    }
+
+    private fun animateSwipeCommit(content: View, onCommitted: () -> Unit) {
+        content.animate()
+            .translationX(content.width.toFloat())
+            .alpha(0.94f)
+            .setDuration(150L)
+            .withEndAction {
+                content.translationX = 0f
+                content.alpha = 1f
+                onCommitted()
+            }
+            .start()
+    }
+
+    private fun performSwipeArchive(item: InboxListItem) {
+        when (item.kind) {
+            InboxItemKind.DIRECT -> setDirectConversationArchived(item.id, item.archivedAtMillis == 0L)
+            InboxItemKind.GROUP -> setGroupConversationArchived(item.id, item.archivedAtMillis == 0L)
+            InboxItemKind.REQUEST -> Unit
+        }
+    }
+
+    private fun resetSwipeTracking() {
+        listTouchStartPosition = AdapterView.INVALID_POSITION
+        activeSwipeContent = null
+        activeSwipeItem = null
+        swipeGestureActive = false
     }
 
     private fun configureButtons() {
@@ -556,6 +627,14 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     private fun setDirectConversationArchived(peerUserId: String, archived: Boolean) {
+        applyDirectConversationArchived(peerUserId, archived, allowUndo = true)
+    }
+
+    private fun applyDirectConversationArchived(
+        peerUserId: String,
+        archived: Boolean,
+        allowUndo: Boolean,
+    ) {
         val setup = store.loadSetup()
         store.setConversationArchived(setup.userId, peerUserId, archived)
         if (!archived && showArchivedOnly) {
@@ -566,6 +645,11 @@ class ConversationsActivity : AppCompatActivity() {
         statusText.text = getString(
             if (archived) R.string.inbox_status_archived else R.string.inbox_status_unarchived,
         )
+        if (allowUndo) {
+            showArchiveUndoSnackbar(archived) {
+                applyDirectConversationArchived(peerUserId, !archived, allowUndo = false)
+            }
+        }
     }
 
     private fun setGroupConversationPinned(groupId: String, pinned: Boolean) {
@@ -576,6 +660,14 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     private fun setGroupConversationArchived(groupId: String, archived: Boolean) {
+        applyGroupConversationArchived(groupId, archived, allowUndo = true)
+    }
+
+    private fun applyGroupConversationArchived(
+        groupId: String,
+        archived: Boolean,
+        allowUndo: Boolean,
+    ) {
         val setup = store.loadSetup()
         store.setGroupArchived(setup.userId, groupId, archived)
         if (!archived && showArchivedOnly) {
@@ -586,6 +678,21 @@ class ConversationsActivity : AppCompatActivity() {
         statusText.text = getString(
             if (archived) R.string.inbox_status_archived else R.string.inbox_status_unarchived,
         )
+        if (allowUndo) {
+            showArchiveUndoSnackbar(archived) {
+                applyGroupConversationArchived(groupId, !archived, allowUndo = false)
+            }
+        }
+    }
+
+    private fun showArchiveUndoSnackbar(archived: Boolean, undoAction: () -> Unit) {
+        Snackbar.make(
+            findViewById(android.R.id.content),
+            getString(if (archived) R.string.inbox_status_archived else R.string.inbox_status_unarchived),
+            Snackbar.LENGTH_LONG,
+        ).setAction(R.string.action_undo) {
+            undoAction()
+        }.show()
     }
 
     private fun acceptMessageRequestQuick(peerUserId: String) {

@@ -199,6 +199,7 @@ let keys: GeneratedKeys | null = null;
 let realtimeInbox: RealtimeInbox | null = null;
 let activeChatPeer: string | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
+let activeToastAction: (() => void) | null = null;
 let disposeMessageSelectionShortcuts: (() => void) | null = null;
 let keyboardShortcutOverlay: HTMLElement | null = null;
 let sharedMediaOverlay: HTMLElement | null = null;
@@ -1769,6 +1770,20 @@ function toggleConversationPinned(kind: ConversationKind, threadId: string): Con
   });
 }
 
+function notifyArchiveChange(kind: ConversationKind, threadId: string, archived: boolean): void {
+  notify(
+    archived ? "Chat archived" : "Chat restored",
+    "success",
+    {
+      actionLabel: "Undo",
+      action: () => {
+        setConversationArchived(kind, threadId, !archived);
+        refreshConversationsIfVisible();
+      },
+    }
+  );
+}
+
 function readConversationUnreadCount(kind: ConversationKind, threadId: string): number {
   if (kind === "group") {
     return loadGroupConversations(setup.userId).find((item) => item.groupId === threadId)?.unreadCount ?? 0;
@@ -2800,8 +2815,9 @@ function showConversationActionMenu(anchor: HTMLElement, kind: ConversationKind,
     {
       label: meta.archivedAt ? "Unarchive" : "Archive",
       action: () => {
-        setConversationArchived(kind, threadId, !meta.archivedAt);
-        notify(meta.archivedAt ? "Chat restored" : "Chat archived", "success");
+        const archived = !meta.archivedAt;
+        setConversationArchived(kind, threadId, archived);
+        notifyArchiveChange(kind, threadId, archived);
         refreshConversationsIfVisible();
       },
     },
@@ -3531,7 +3547,7 @@ async function renderChat(peerId: string): Promise<void> {
   q("#detail-archive").addEventListener("click", () => {
     const archived = !meta.archivedAt;
     setConversationArchived("dm", peerId, archived);
-    notify(archived ? "Chat archived" : "Chat restored", "success");
+    notifyArchiveChange("dm", peerId, archived);
     navigateTo({ screen: "conversations" });
   });
   const requestAcceptBtn = document.getElementById("request-accept");
@@ -7962,10 +7978,33 @@ function showToast(n: AppNotification): void {
     toast.setAttribute("aria-live", "assertive");
     document.body.appendChild(toast);
   }
-  toast.textContent = n.text;
+  activeToastAction = n.action ?? null;
+  toast.innerHTML = "";
+  const text = document.createElement("span");
+  text.className = "toast-text";
+  text.textContent = n.text;
+  toast.appendChild(text);
+  if (n.actionLabel && n.action) {
+    const actionButton = document.createElement("button");
+    actionButton.type = "button";
+    actionButton.className = "toast-action";
+    actionButton.textContent = n.actionLabel;
+    actionButton.addEventListener("click", () => {
+      const action = activeToastAction;
+      activeToastAction = null;
+      toast!.classList.remove("toast-show");
+      if (toastTimer) {
+        clearTimeout(toastTimer);
+        toastTimer = null;
+      }
+      action?.();
+    });
+    toast.appendChild(actionButton);
+  }
   toast.className = `toast toast-${n.type} toast-show`;
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
+    activeToastAction = null;
     toast!.classList.remove("toast-show");
   }, 3500);
 }

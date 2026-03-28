@@ -37,6 +37,7 @@
     <string name="button_clear_attachment">Clear Attachment</string>
     <string name="button_cancel">Cancel</string>
     <string name="button_close">Close</string>
+    <string name="action_undo">Undo</string>
     <string name="button_send">Send</string>
     <string name="button_poll">Poll Inbox</string>
     <string name="button_back_setup">Back To Setup</string>

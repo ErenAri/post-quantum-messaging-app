@@ -6,6 +6,8 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 
@@ -52,6 +54,10 @@ class ConversationSummaryAdapter(
     override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
         val view = convertView ?: inflater.inflate(R.layout.item_conversation, parent, false)
         val item = getItem(position)
+        view.findViewById<View>(R.id.conversationSwipeContent).apply {
+            translationX = 0f
+            alpha = 1f
+        }
 
         view.findViewById<TextView>(R.id.textConversationPeer).text = item.title
         val previewText = view.findViewById<TextView>(R.id.textConversationPreview)
@@ -64,6 +70,22 @@ class ConversationSummaryAdapter(
             if (item.pinnedAtMillis > 0L) view.context.getString(R.string.conversation_state_pinned) else null,
         )
         bindBadge(view.findViewById(R.id.textConversationKindBadge), item.kindBadge)
+        bindBadge(
+            view.findViewById(R.id.textConversationSwipeAction),
+            when (item.kind) {
+                InboxItemKind.REQUEST -> null
+                InboxItemKind.GROUP,
+                InboxItemKind.DIRECT,
+                -> view.context.getString(
+                    if (item.archivedAtMillis > 0L) {
+                        R.string.inbox_action_unarchive_chat
+                    } else {
+                        R.string.inbox_action_archive_chat
+                    },
+                )
+            },
+        )
+        bindSwipeActionVisuals(view, item)
 
         val metaText = view.findViewById<TextView>(R.id.textConversationMeta)
         if (item.secondaryLabel.isNullOrBlank()) {
@@ -93,6 +115,37 @@ class ConversationSummaryAdapter(
             view.visibility = View.VISIBLE
             view.text = label
         }
+    }
+
+    private fun bindSwipeActionVisuals(view: View, item: InboxListItem) {
+        val background = view.findViewById<LinearLayout>(R.id.conversationSwipeBackground)
+        val icon = view.findViewById<ImageView>(R.id.imageConversationSwipeAction)
+        if (item.kind == InboxItemKind.REQUEST) {
+            icon.visibility = View.GONE
+            return
+        }
+        val isArchived = item.archivedAtMillis > 0L
+        val tint = ContextCompat.getColor(
+            view.context,
+            if (isArchived) R.color.pq_success else R.color.pq_hero,
+        )
+        background.setBackgroundResource(
+            if (isArchived) {
+                R.drawable.bg_swipe_action_restore
+            } else {
+                R.drawable.bg_swipe_action_archive
+            },
+        )
+        icon.setImageResource(
+            if (isArchived) {
+                R.drawable.ic_move_to_inbox_18
+            } else {
+                R.drawable.ic_archive_18
+            },
+        )
+        icon.setColorFilter(tint)
+        icon.visibility = View.VISIBLE
+        view.findViewById<TextView>(R.id.textConversationSwipeAction).setTextColor(tint)
     }
 
     private fun buildFreshness(updatedAtMillis: Long): String {
