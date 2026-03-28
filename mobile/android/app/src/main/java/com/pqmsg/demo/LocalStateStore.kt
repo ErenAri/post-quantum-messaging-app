@@ -57,6 +57,11 @@ data class ThreadMessage(
     val receiptStatus: String? = null,
     val replyToId: Long? = null,
     val reactions: Map<String, String>? = null,
+    val attachmentFileName: String? = null,
+    val attachmentMimeType: String? = null,
+    val attachmentNoteText: String? = null,
+    val attachmentDataBase64: String? = null,
+    val attachmentByteLength: Int? = null,
 )
 
 data class OutboxItem(
@@ -404,6 +409,79 @@ class LocalStateStore(context: Context) {
         removeLegacyKeys("${keyBase}_unread")
     }
 
+    fun readConversationPinnedAt(userId: String, peerUserId: String): Long {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return 0L
+        }
+        return getLong("conv_${userId}_${peerUserId}_pinned_at", 0L)
+    }
+
+    fun setConversationPinned(userId: String, peerUserId: String, pinned: Boolean) {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return
+        }
+        val key = "conv_${userId}_${peerUserId}_pinned_at"
+        if (pinned) {
+            prefs.edit().putLong(key, System.currentTimeMillis()).apply()
+        } else {
+            prefs.edit().remove(key).apply()
+        }
+        removeLegacyKeys(key)
+    }
+
+    fun readConversationArchivedAt(userId: String, peerUserId: String): Long {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return 0L
+        }
+        return getLong("conv_${userId}_${peerUserId}_archived_at", 0L)
+    }
+
+    fun setConversationArchived(userId: String, peerUserId: String, archived: Boolean) {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return
+        }
+        val key = "conv_${userId}_${peerUserId}_archived_at"
+        if (archived) {
+            prefs.edit().putLong(key, System.currentTimeMillis()).apply()
+        } else {
+            prefs.edit().remove(key).apply()
+        }
+        removeLegacyKeys(key)
+    }
+
+    fun readDirectThreadDraft(userId: String, peerUserId: String): String {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return ""
+        }
+        return getString("draft_dm_${userId}_$peerUserId", "")
+    }
+
+    fun readDirectThreadDraftUpdatedAt(userId: String, peerUserId: String): Long {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return 0L
+        }
+        return getLong("draft_dm_${userId}_${peerUserId}_updated_ms", 0L)
+    }
+
+    fun writeDirectThreadDraft(userId: String, peerUserId: String, draft: String) {
+        if (userId.isBlank() || peerUserId.isBlank()) {
+            return
+        }
+        val key = "draft_dm_${userId}_$peerUserId"
+        val updatedKey = "draft_dm_${userId}_${peerUserId}_updated_ms"
+        val normalized = draft.trimEnd()
+        if (normalized.isBlank()) {
+            prefs.edit().remove(key).remove(updatedKey).apply()
+        } else {
+            prefs.edit()
+                .putString(key, normalized)
+                .putLong(updatedKey, System.currentTimeMillis())
+                .apply()
+        }
+        removeLegacyKeys(key)
+        removeLegacyKeys(updatedKey)
+    }
+
     fun listConversations(userId: String): List<ConversationSummary> {
         if (userId.isBlank()) {
             return emptyList()
@@ -569,6 +647,7 @@ class LocalStateStore(context: Context) {
         transportMessageId: Long? = null,
         replyToId: Long? = null,
         reactions: Map<String, String>? = null,
+        attachmentEnvelope: MediaEnvelope? = null,
     ) {
         if (userId.isBlank() || peerUserId.isBlank()) {
             return
@@ -585,6 +664,11 @@ class LocalStateStore(context: Context) {
                 transportMessageId = transportMessageId,
                 replyToId = replyToId,
                 reactions = reactions,
+                attachmentFileName = attachmentEnvelope?.fileName,
+                attachmentMimeType = attachmentEnvelope?.mimeType,
+                attachmentNoteText = attachmentEnvelope?.noteText,
+                attachmentDataBase64 = attachmentEnvelope?.dataBase64,
+                attachmentByteLength = attachmentEnvelope?.byteLength,
             ),
         )
     }
@@ -661,6 +745,80 @@ class LocalStateStore(context: Context) {
     fun markGroupRead(userId: String, groupId: String) {
         if (userId.isBlank() || groupId.isBlank()) return
         prefs.edit().putInt("group_${userId}_${groupId}_unread", 0).apply()
+        removeLegacyKeys("group_${userId}_${groupId}_unread")
+    }
+
+    fun readGroupPinnedAt(userId: String, groupId: String): Long {
+        if (userId.isBlank() || groupId.isBlank()) return 0L
+        return getLong("group_${userId}_${groupId}_pinned_at", 0L)
+    }
+
+    fun setGroupPinned(userId: String, groupId: String, pinned: Boolean) {
+        if (userId.isBlank() || groupId.isBlank()) return
+        val key = "group_${userId}_${groupId}_pinned_at"
+        if (pinned) {
+            prefs.edit().putLong(key, System.currentTimeMillis()).apply()
+        } else {
+            prefs.edit().remove(key).apply()
+        }
+        removeLegacyKeys(key)
+    }
+
+    fun readGroupArchivedAt(userId: String, groupId: String): Long {
+        if (userId.isBlank() || groupId.isBlank()) return 0L
+        return getLong("group_${userId}_${groupId}_archived_at", 0L)
+    }
+
+    fun setGroupArchived(userId: String, groupId: String, archived: Boolean) {
+        if (userId.isBlank() || groupId.isBlank()) return
+        val key = "group_${userId}_${groupId}_archived_at"
+        if (archived) {
+            prefs.edit().putLong(key, System.currentTimeMillis()).apply()
+        } else {
+            prefs.edit().remove(key).apply()
+        }
+        removeLegacyKeys(key)
+    }
+
+    fun setGroupUnreadCount(userId: String, groupId: String, unreadCount: Int) {
+        if (userId.isBlank() || groupId.isBlank()) return
+        prefs.edit()
+            .putInt("group_${userId}_${groupId}_unread", unreadCount.coerceAtLeast(0))
+            .apply()
+        removeLegacyKeys("group_${userId}_${groupId}_unread")
+    }
+
+    fun readGroupThreadDraft(userId: String, groupId: String): String {
+        if (userId.isBlank() || groupId.isBlank()) {
+            return ""
+        }
+        return getString("draft_group_${userId}_$groupId", "")
+    }
+
+    fun readGroupThreadDraftUpdatedAt(userId: String, groupId: String): Long {
+        if (userId.isBlank() || groupId.isBlank()) {
+            return 0L
+        }
+        return getLong("draft_group_${userId}_${groupId}_updated_ms", 0L)
+    }
+
+    fun writeGroupThreadDraft(userId: String, groupId: String, draft: String) {
+        if (userId.isBlank() || groupId.isBlank()) {
+            return
+        }
+        val key = "draft_group_${userId}_$groupId"
+        val updatedKey = "draft_group_${userId}_${groupId}_updated_ms"
+        val normalized = draft.trimEnd()
+        if (normalized.isBlank()) {
+            prefs.edit().remove(key).remove(updatedKey).apply()
+        } else {
+            prefs.edit()
+                .putString(key, normalized)
+                .putLong(updatedKey, System.currentTimeMillis())
+                .apply()
+        }
+        removeLegacyKeys(key)
+        removeLegacyKeys(updatedKey)
     }
 
     fun listGroups(userId: String): List<GroupSummary> {
@@ -761,6 +919,7 @@ class LocalStateStore(context: Context) {
         transportMessageId: Long? = null,
         replyToId: Long? = null,
         reactions: Map<String, String>? = null,
+        attachmentEnvelope: MediaEnvelope? = null,
     ) {
         if (userId.isBlank() || groupId.isBlank()) return
         val direction = if (senderUserId == userId) "outbound" else "inbound"
@@ -776,6 +935,11 @@ class LocalStateStore(context: Context) {
                 transportMessageId = transportMessageId,
                 replyToId = replyToId,
                 reactions = reactions,
+                attachmentFileName = attachmentEnvelope?.fileName,
+                attachmentMimeType = attachmentEnvelope?.mimeType,
+                attachmentNoteText = attachmentEnvelope?.noteText,
+                attachmentDataBase64 = attachmentEnvelope?.dataBase64,
+                attachmentByteLength = attachmentEnvelope?.byteLength,
             ),
         )
     }

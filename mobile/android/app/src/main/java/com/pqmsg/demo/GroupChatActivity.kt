@@ -4,16 +4,22 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.view.View
+import android.widget.Button
 import android.widget.EditText
 import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.button.MaterialButton
 import com.google.gson.Gson
 import kotlinx.coroutines.launch
@@ -30,15 +36,19 @@ import uniffi.pqmsg_android.privateGroupExportJoinPackageForMember
 import uniffi.pqmsg_android.privateGroupPrepareAddMemberTransition
 import uniffi.pqmsg_android.privateGroupPrepareRemoveMemberTransition
 import uniffi.pqmsg_android.sealMessageWithSenderCert
+import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.Base64
 
 class GroupChatActivity : AppCompatActivity() {
     private val gson = Gson()
+    private val maxAttachmentBytes = 128 * 1024
     private lateinit var store: LocalStateStore
     private lateinit var titleText: TextView
     private lateinit var metaText: TextView
     private lateinit var messageInput: EditText
+    private lateinit var attachMediaButton: MaterialButton
+    private lateinit var clearAttachmentButton: MaterialButton
     private lateinit var sendButton: MaterialButton
     private lateinit var searchButton: MaterialButton
     private lateinit var syncButton: MaterialButton
@@ -62,6 +72,9 @@ class GroupChatActivity : AppCompatActivity() {
     private lateinit var replyPreviewLayout: View
     private lateinit var replyPreviewText: TextView
     private lateinit var clearReplyButton: MaterialButton
+    private lateinit var attachmentPreviewCard: View
+    private lateinit var attachmentTitle: TextView
+    private lateinit var attachmentInfo: TextView
     private lateinit var composerBar: View
     private var groupId = ""
     private var groupName = ""
@@ -69,12 +82,42 @@ class GroupChatActivity : AppCompatActivity() {
     private var privateGroupState: PrivateGroupState? = null
     private var privateGroupCredential: PrivateGroupMemberCredential? = null
     private var localStoreAvailable = true
+    private var pendingAttachment: PendingAttachment? = null
     private lateinit var threadAdapter: ThreadMessageAdapter
     private var currentThreadMessages: List<ThreadMessage> = emptyList()
     private var pendingReplyMessage: ThreadMessage? = null
     private val selectedMessageKeys = linkedSetOf<String>()
     private var searchResultKeys: List<String> = emptyList()
     private var activeSearchIndex = 0
+
+    private val pickAttachmentLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            handlePickedUri(uri, "Read attachment")
+        }
+
+    private val pickAudioAttachmentLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            handlePickedUri(uri, "Read audio")
+        }
+
+    private val pickDocumentAttachmentLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            handlePickedUri(uri, "Read document")
+        }
+
+    private val takePhotoAttachmentLauncher =
+        registerForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
+            if (bitmap == null) {
+                return@registerForActivityResult
+            }
+            runCatching {
+                pendingAttachment = readCameraAttachment(bitmap)
+                renderAttachmentInfo()
+            }.onFailure {
+                metaText.text = UiErrorMapper.fromThrowable(it, "Capture photo").headline
+            }
+            syncActions()
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -89,6 +132,8 @@ class GroupChatActivity : AppCompatActivity() {
         titleText = findViewById(R.id.textGroupTitle)
         metaText = findViewById(R.id.textGroupMeta)
         messageInput = findViewById(R.id.editGroupMessage)
+        attachMediaButton = findViewById(R.id.buttonAttachGroupMedia)
+        clearAttachmentButton = findViewById(R.id.buttonClearGroupAttachment)
         sendButton = findViewById(R.id.buttonSendGroup)
         searchButton = findViewById(R.id.buttonGroupThreadSearch)
         syncButton = findViewById(R.id.buttonSyncGroup)
@@ -112,6 +157,9 @@ class GroupChatActivity : AppCompatActivity() {
         replyPreviewLayout = findViewById(R.id.layoutGroupReplyPreview)
         replyPreviewText = findViewById(R.id.textGroupReplyPreview)
         clearReplyButton = findViewById(R.id.buttonClearGroupReply)
+        attachmentPreviewCard = findViewById(R.id.cardGroupAttachmentPreview)
+        attachmentTitle = findViewById(R.id.textGroupAttachmentPreviewTitle)
+        attachmentInfo = findViewById(R.id.textGroupAttachmentPreviewMeta)
         composerBar = findViewById(R.id.layoutGroupComposerBar)
         threadAdapter = ThreadMessageAdapter(
             this,
@@ -139,7 +187,12 @@ class GroupChatActivity : AppCompatActivity() {
 
         reloadPrivateGroupState()
         titleText.text = privateGroupState?.let { getPrivateGroupTitle(it, groupName) } ?: groupName
-        messageInput.doAfterTextChanged { syncActions() }
+        messageInput.doAfterTextChanged {
+            persistDraft()
+            syncActions()
+        }
+        configureAttachmentButtons()
+        renderAttachmentInfo()
         clearReplyButton.setOnClickListener {
             pendingReplyMessage = null
             renderReplyPreview()
@@ -165,6 +218,7 @@ class GroupChatActivity : AppCompatActivity() {
         renderReplyPreview()
         renderSelectionMode()
         refreshMeta()
+        restoreDraft()
         syncActions()
         maybeShowThreadTipsOnFirstOpen()
     }
@@ -184,8 +238,10 @@ class GroupChatActivity : AppCompatActivity() {
         selectedMessageKeys.clear()
         titleText.text = groupName
         messageInput.setText("")
+        pendingAttachment = null
         messageInput.hint = "Private-group state unavailable"
         messageInput.isEnabled = false
+        renderAttachmentInfo()
         sendButton.isEnabled = false
         syncButton.isEnabled = true
         threadAdapter.submitList(emptyList())
@@ -295,16 +351,116 @@ class GroupChatActivity : AppCompatActivity() {
         syncThreadSearch(scrollToActive = false)
     }
 
+    private fun restoreDraft() {
+        val setup = store.loadSetup()
+        val draft = store.readGroupThreadDraft(setup.userId, groupId)
+        if (draft.isNotEmpty() && messageInput.text.toString() != draft) {
+            messageInput.setText(draft)
+            messageInput.setSelection(draft.length)
+        }
+    }
+
+    private fun persistDraft() {
+        val setup = store.loadSetup()
+        store.writeGroupThreadDraft(setup.userId, groupId, messageInput.text.toString())
+    }
+
+    private fun configureAttachmentButtons() {
+        attachMediaButton.setOnClickListener {
+            showAttachmentSheet()
+        }
+        clearAttachmentButton.setOnClickListener {
+            pendingAttachment = null
+            renderAttachmentInfo()
+            syncActions()
+        }
+    }
+
+    private fun showAttachmentSheet() {
+        val dialog = BottomSheetDialog(this)
+        val content = layoutInflater.inflate(R.layout.view_attachment_sheet, null)
+        dialog.setContentView(content)
+        content.findViewById<Button>(R.id.buttonAttachmentCamera).setOnClickListener {
+            dialog.dismiss()
+            takePhotoAttachmentLauncher.launch(null)
+        }
+        content.findViewById<Button>(R.id.buttonAttachmentMedia).setOnClickListener {
+            dialog.dismiss()
+            pickAttachmentLauncher.launch(arrayOf("image/*", "video/*"))
+        }
+        content.findViewById<Button>(R.id.buttonAttachmentAudio).setOnClickListener {
+            dialog.dismiss()
+            pickAudioAttachmentLauncher.launch(arrayOf("audio/*"))
+        }
+        content.findViewById<Button>(R.id.buttonAttachmentDocument).setOnClickListener {
+            dialog.dismiss()
+            pickDocumentAttachmentLauncher.launch(arrayOf("*/*"))
+        }
+        content.findViewById<Button>(R.id.buttonAttachmentCancel).setOnClickListener {
+            dialog.dismiss()
+        }
+        dialog.show()
+    }
+
+    private fun handlePickedUri(uri: Uri?, action: String) {
+        if (uri == null) {
+            return
+        }
+        runCatching {
+            pendingAttachment = readAttachment(uri)
+            renderAttachmentInfo()
+        }.onFailure {
+            metaText.text = UiErrorMapper.fromThrowable(it, action).headline
+        }
+        syncActions()
+    }
+
     private fun syncActions() {
         if (isSelectionModeActive()) {
+            attachMediaButton.isEnabled = false
+            clearAttachmentButton.isEnabled = false
             sendButton.isEnabled = false
             syncButton.isEnabled = false
             return
         }
         val hasText = messageInput.text.toString().isNotBlank()
+        val hasAttachment = pendingAttachment != null
+        attachMediaButton.isEnabled = !syncInFlight && localStoreAvailable
+        clearAttachmentButton.isEnabled = hasAttachment && !syncInFlight
         sendButton.isEnabled =
-            hasText && !syncInFlight && localStoreAvailable && privateGroupState != null && privateGroupCredential != null
+            (hasText || hasAttachment) && !syncInFlight && localStoreAvailable && privateGroupState != null && privateGroupCredential != null
         syncButton.isEnabled = !syncInFlight && localStoreAvailable
+    }
+
+    private fun renderAttachmentInfo() {
+        if (isSelectionModeActive()) {
+            attachmentPreviewCard.visibility = View.GONE
+            return
+        }
+        val attachment = pendingAttachment
+        if (attachment == null) {
+            attachmentPreviewCard.visibility = View.GONE
+            attachmentTitle.text = getString(R.string.chat_attachment_none_title)
+            attachmentInfo.text = getString(R.string.chat_attachment_none)
+            messageInput.hint = getString(R.string.hint_message)
+            return
+        }
+        attachmentPreviewCard.visibility = View.VISIBLE
+        val attachmentType = when {
+            attachment.mimeType.startsWith("image/") -> "Photo"
+            attachment.mimeType.startsWith("video/") -> "Video"
+            attachment.mimeType.startsWith("audio/") -> "Audio"
+            attachment.mimeType.startsWith("text/") -> "Document"
+            else -> "File"
+        }
+        val attachmentSize = when {
+            attachment.byteLength >= 1024 * 1024 -> String.format("%.1f MB", attachment.byteLength / (1024f * 1024f))
+            attachment.byteLength >= 1024 -> String.format("%.1f KB", attachment.byteLength / 1024f)
+            else -> "${attachment.byteLength} B"
+        }
+        attachmentTitle.text = getString(R.string.chat_attachment_ready_title)
+        attachmentInfo.text = "${attachment.fileName}\n$attachmentType | $attachmentSize"
+        messageInput.hint = "Add a caption"
     }
 
     private fun renderReplyPreview() {
@@ -386,6 +542,7 @@ class GroupChatActivity : AppCompatActivity() {
         } else {
             renderReplyPreview()
         }
+        renderAttachmentInfo()
         syncActions()
     }
 
@@ -435,7 +592,9 @@ class GroupChatActivity : AppCompatActivity() {
             threadAdapter.setSearchState(emptySet(), null)
             return
         }
-        val matches = currentThreadMessages.filter { it.body.contains(query, ignoreCase = true) }
+        val matches = currentThreadMessages.filter {
+            threadMessageSearchText(it).contains(query, ignoreCase = true)
+        }
             .map { threadMessageKey(it) }
         searchResultKeys = matches
         if (matches.isEmpty()) {
@@ -586,7 +745,9 @@ class GroupChatActivity : AppCompatActivity() {
 
     private fun copyThreadMessage(message: ThreadMessage) {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("pqmsg-group-message", message.body))
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText("pqmsg-group-message", threadMessageTranscript(message)),
+        )
         Toast.makeText(this, R.string.thread_message_copied, Toast.LENGTH_SHORT).show()
     }
 
@@ -595,7 +756,7 @@ class GroupChatActivity : AppCompatActivity() {
             Intent.createChooser(
                 Intent(Intent.ACTION_SEND).apply {
                     type = "text/plain"
-                    putExtra(Intent.EXTRA_TEXT, message.body)
+                    putExtra(Intent.EXTRA_TEXT, threadMessageTranscript(message))
                 },
                 getString(R.string.thread_share_chooser_title),
             ),
@@ -639,7 +800,7 @@ class GroupChatActivity : AppCompatActivity() {
         clipboard.setPrimaryClip(
             ClipData.newPlainText(
                 "pqmsg-group-messages",
-                messages.joinToString("\n\n") { it.body },
+                messages.joinToString("\n\n") { threadMessageTranscript(it) },
             ),
         )
         Toast.makeText(this, R.string.thread_messages_copied, Toast.LENGTH_SHORT).show()
@@ -655,7 +816,7 @@ class GroupChatActivity : AppCompatActivity() {
             Intent.createChooser(
                 Intent(Intent.ACTION_SEND).apply {
                     type = "text/plain"
-                    putExtra(Intent.EXTRA_TEXT, messages.joinToString("\n\n") { it.body })
+                    putExtra(Intent.EXTRA_TEXT, messages.joinToString("\n\n") { threadMessageTranscript(it) })
                 },
                 getString(R.string.thread_share_chooser_multiple_title),
             ),
@@ -714,7 +875,7 @@ class GroupChatActivity : AppCompatActivity() {
         val credential = privateGroupCredential ?: error("Private-group credential is unavailable on this device.")
         val text = messageInput.text.toString().trim()
         val replyToId = pendingReplyMessage?.transportMessageId ?: pendingReplyMessage?.sentAtMillis
-        require(text.isNotBlank()) { "message is empty" }
+        require(text.isNotBlank() || pendingAttachment != null) { "message and attachment are both empty" }
 
         val context = MessagingCoordinator.ensureReady(
             store = store,
@@ -724,6 +885,7 @@ class GroupChatActivity : AppCompatActivity() {
             deviceId = setup.deviceId,
         )
         requirePrivateGroupMessagingEnabled(context)
+        val outbound = composeOutboundPayload(text)
         val keysJson = MessagingCoordinator.ensurePrekeysReplenished(
             store = store,
             api = context.api,
@@ -735,7 +897,7 @@ class GroupChatActivity : AppCompatActivity() {
             state = state,
             keysJson = keysJson,
             senderUserId = context.profile.userId,
-            body = text,
+            body = outbound.plaintext,
         )
         val publishResponse = context.api.publishPrivateGroupMessage(
             PublishPrivateGroupMessageRequest(
@@ -760,21 +922,25 @@ class GroupChatActivity : AppCompatActivity() {
             userId = context.profile.userId,
             groupId = groupId,
             senderUserId = context.profile.userId,
-            body = text,
+            body = outbound.preview,
             sentAtMillis = encryptedMessage.sent_at_unix_ms,
             transportMessageId = publishResponse.message_id,
             replyToId = replyToId,
+            attachmentEnvelope = MessageEnvelopeCodec.decodeMediaEnvelope(outbound.plaintext),
         )
         store.upsertGroupConversation(
             userId = context.profile.userId,
             groupId = groupId,
             displayName = getPrivateGroupTitle(state, groupName),
             memberCount = state.members.size,
-            lastPreview = "You: $text",
+            lastPreview = "You: ${outbound.preview}",
             incrementUnread = false,
         )
         messageInput.setText("")
+        store.writeGroupThreadDraft(context.profile.userId, groupId, "")
+        pendingAttachment = null
         pendingReplyMessage = null
+        renderAttachmentInfo()
         renderReplyPreview()
     }
 
@@ -838,11 +1004,18 @@ class GroupChatActivity : AppCompatActivity() {
             )
             .setMessage(groupInfoMessage)
             .setPositiveButton(android.R.string.ok, null)
+            .setNeutralButton(R.string.button_shared_media) { _, _ ->
+                ThreadSharedMediaBrowser.show(
+                    context = this,
+                    title = "${getPrivateGroupTitle(state, groupName)} shared media",
+                    messages = currentThreadMessages,
+                    emptyMessage = "No shared media saved in this group on this device yet.",
+                ) {
+                    metaText.text = UiErrorMapper.fromThrowable(it, "Open shared media").headline
+                }
+            }
             .apply {
                 if (canManage) {
-                    setNeutralButton(getString(R.string.button_add_member)) { _, _ ->
-                        showAddMemberDialog()
-                    }
                     setNegativeButton("Manage Members") { _, _ ->
                         showMemberManagementDialog()
                     }
@@ -994,6 +1167,9 @@ class GroupChatActivity : AppCompatActivity() {
             return
         }
         val actions = mutableListOf<Pair<String, suspend () -> Unit>>()
+        actions += "Add member..." to suspend {
+            showAddMemberDialog()
+        }
         state.members
             .filter { it.user_id != store.loadSetup().userId }
             .forEach { member ->
@@ -1234,6 +1410,78 @@ class GroupChatActivity : AppCompatActivity() {
         syncActions()
     }
 
+    private fun composeOutboundPayload(text: String): OutboundPayload {
+        val attachment = pendingAttachment
+        if (attachment == null) {
+            return OutboundPayload(plaintext = text, preview = text)
+        }
+        val envelope = MessageEnvelopeCodec.encodeMediaEnvelope(
+            fileName = attachment.fileName,
+            mimeType = attachment.mimeType,
+            noteText = text,
+            dataBase64 = attachment.dataBase64,
+        )
+        val mediaTag = "[media:${attachment.fileName} ${attachment.byteLength}B]"
+        val preview = if (text.isBlank()) mediaTag else "$mediaTag $text"
+        return OutboundPayload(plaintext = envelope, preview = preview)
+    }
+
+    private fun readCameraAttachment(bitmap: Bitmap): PendingAttachment {
+        val output = ByteArrayOutputStream()
+        check(bitmap.compress(Bitmap.CompressFormat.JPEG, 85, output)) {
+            "unable to encode camera photo"
+        }
+        val bytes = output.toByteArray()
+        require(bytes.size <= maxAttachmentBytes) {
+            "attachment exceeds ${maxAttachmentBytes} bytes"
+        }
+        return PendingAttachment(
+            fileName = "camera-${System.currentTimeMillis()}.jpg",
+            mimeType = "image/jpeg",
+            dataBase64 = Base64.getEncoder().encodeToString(bytes),
+            byteLength = bytes.size,
+        )
+    }
+
+    private fun readAttachment(uri: Uri): PendingAttachment {
+        val resolver = contentResolver
+        val mimeType = resolver.getType(uri) ?: "application/octet-stream"
+        val fileName = resolveFileName(uri) ?: "attachment.bin"
+        val bytes = resolver.openInputStream(uri)?.use { input ->
+            val output = ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            var total = 0
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) {
+                    break
+                }
+                total += read
+                if (total > maxAttachmentBytes) {
+                    error("attachment exceeds ${maxAttachmentBytes} bytes")
+                }
+                output.write(buffer, 0, read)
+            }
+            output.toByteArray()
+        } ?: error("unable to read attachment stream")
+        return PendingAttachment(
+            fileName = fileName,
+            mimeType = mimeType,
+            dataBase64 = Base64.getEncoder().encodeToString(bytes),
+            byteLength = bytes.size,
+        )
+    }
+
+    private fun resolveFileName(uri: Uri): String? {
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) {
+                return cursor.getString(index)
+            }
+        }
+        return uri.lastPathSegment
+    }
+
     private fun BundleResponse.toRustBundle(): ServerBundle {
         return ServerBundle(
             userId = user_id,
@@ -1250,4 +1498,16 @@ class GroupChatActivity : AppCompatActivity() {
             oneTimePrekeyMlkem768 = one_time_prekey_mlkem768,
         )
     }
+
+    private data class PendingAttachment(
+        val fileName: String,
+        val mimeType: String,
+        val dataBase64: String,
+        val byteLength: Int,
+    )
+
+    private data class OutboundPayload(
+        val plaintext: String,
+        val preview: String,
+    )
 }

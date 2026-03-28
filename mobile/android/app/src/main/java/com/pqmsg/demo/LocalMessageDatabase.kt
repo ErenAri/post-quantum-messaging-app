@@ -18,7 +18,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 private const val DATABASE_NAME = "pqmsg_local_messages.db"
-private const val DATABASE_VERSION = 2
+private const val DATABASE_VERSION = 4
 private const val DIRECT_THREAD_LIMIT = 300
 private const val GROUP_THREAD_LIMIT = 300
 private const val GCM_TAG_BITS = 128
@@ -114,6 +114,11 @@ class LocalMessageDatabase(
                 receipt_status TEXT,
                 reply_to_id INTEGER,
                 reactions_ciphertext TEXT,
+                attachment_file_name_ciphertext TEXT,
+                attachment_mime_type_ciphertext TEXT,
+                attachment_note_text_ciphertext TEXT,
+                attachment_data_base64_ciphertext TEXT,
+                attachment_byte_length INTEGER,
                 UNIQUE(user_id, peer_user_id, direction, transport_message_id) ON CONFLICT IGNORE
             )
             """.trimIndent(),
@@ -136,6 +141,11 @@ class LocalMessageDatabase(
                 transport_message_id INTEGER,
                 reply_to_id INTEGER,
                 reactions_ciphertext TEXT,
+                attachment_file_name_ciphertext TEXT,
+                attachment_mime_type_ciphertext TEXT,
+                attachment_note_text_ciphertext TEXT,
+                attachment_data_base64_ciphertext TEXT,
+                attachment_byte_length INTEGER,
                 UNIQUE(user_id, group_id, transport_message_id) ON CONFLICT IGNORE
             )
             """.trimIndent(),
@@ -178,6 +188,20 @@ class LocalMessageDatabase(
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE group_messages ADD COLUMN reply_to_id INTEGER")
             db.execSQL("ALTER TABLE group_messages ADD COLUMN reactions_ciphertext TEXT")
+        }
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE direct_messages ADD COLUMN attachment_file_name_ciphertext TEXT")
+            db.execSQL("ALTER TABLE direct_messages ADD COLUMN attachment_mime_type_ciphertext TEXT")
+            db.execSQL("ALTER TABLE direct_messages ADD COLUMN attachment_note_text_ciphertext TEXT")
+            db.execSQL("ALTER TABLE direct_messages ADD COLUMN attachment_data_base64_ciphertext TEXT")
+            db.execSQL("ALTER TABLE direct_messages ADD COLUMN attachment_byte_length INTEGER")
+        }
+        if (oldVersion < 4) {
+            db.execSQL("ALTER TABLE group_messages ADD COLUMN attachment_file_name_ciphertext TEXT")
+            db.execSQL("ALTER TABLE group_messages ADD COLUMN attachment_mime_type_ciphertext TEXT")
+            db.execSQL("ALTER TABLE group_messages ADD COLUMN attachment_note_text_ciphertext TEXT")
+            db.execSQL("ALTER TABLE group_messages ADD COLUMN attachment_data_base64_ciphertext TEXT")
+            db.execSQL("ALTER TABLE group_messages ADD COLUMN attachment_byte_length INTEGER")
         }
     }
 
@@ -248,6 +272,8 @@ class LocalMessageDatabase(
                         "body_ciphertext",
                         "sent_at_millis",
                         "transport_message_id",
+                        "reply_to_id",
+                        "reactions_ciphertext",
                     ),
                 )
                 migrateTable(
@@ -338,6 +364,11 @@ class LocalMessageDatabase(
                 "receipt_status",
                 "reply_to_id",
                 "reactions_ciphertext",
+                "attachment_file_name_ciphertext",
+                "attachment_mime_type_ciphertext",
+                "attachment_note_text_ciphertext",
+                "attachment_data_base64_ciphertext",
+                "attachment_byte_length",
             ),
             "user_id = ? AND peer_user_id = ?",
             arrayOf(userId, peerUserId),
@@ -360,6 +391,11 @@ class LocalMessageDatabase(
                         reactions = cursor.optionalString("reactions_ciphertext")?.let {
                             gson.fromJson<Map<String, String>>(decryptString(it), reactionsType)
                         },
+                        attachmentFileName = cursor.optionalString("attachment_file_name_ciphertext")?.let(::decryptString),
+                        attachmentMimeType = cursor.optionalString("attachment_mime_type_ciphertext")?.let(::decryptString),
+                        attachmentNoteText = cursor.optionalString("attachment_note_text_ciphertext")?.let(::decryptString),
+                        attachmentDataBase64 = cursor.optionalString("attachment_data_base64_ciphertext")?.let(::decryptString),
+                        attachmentByteLength = cursor.optionalInt("attachment_byte_length"),
                     ),
                 )
             }
@@ -390,6 +426,11 @@ class LocalMessageDatabase(
                         "reactions_ciphertext",
                         message.reactions?.let { encryptString(gson.toJson(it)) },
                     )
+                    put("attachment_file_name_ciphertext", message.attachmentFileName?.let(::encryptString))
+                    put("attachment_mime_type_ciphertext", message.attachmentMimeType?.let(::encryptString))
+                    put("attachment_note_text_ciphertext", message.attachmentNoteText?.let(::encryptString))
+                    put("attachment_data_base64_ciphertext", message.attachmentDataBase64?.let(::encryptString))
+                    put("attachment_byte_length", message.attachmentByteLength)
                 },
                 SqlCipherDatabase.CONFLICT_IGNORE,
             )
@@ -424,6 +465,11 @@ class LocalMessageDatabase(
                             "reactions_ciphertext",
                             message.reactions?.let { encryptString(gson.toJson(it)) },
                         )
+                        put("attachment_file_name_ciphertext", message.attachmentFileName?.let(::encryptString))
+                        put("attachment_mime_type_ciphertext", message.attachmentMimeType?.let(::encryptString))
+                        put("attachment_note_text_ciphertext", message.attachmentNoteText?.let(::encryptString))
+                        put("attachment_data_base64_ciphertext", message.attachmentDataBase64?.let(::encryptString))
+                        put("attachment_byte_length", message.attachmentByteLength)
                     },
                     SqlCipherDatabase.CONFLICT_IGNORE,
                 )
@@ -462,6 +508,11 @@ class LocalMessageDatabase(
                 "transport_message_id",
                 "reply_to_id",
                 "reactions_ciphertext",
+                "attachment_file_name_ciphertext",
+                "attachment_mime_type_ciphertext",
+                "attachment_note_text_ciphertext",
+                "attachment_data_base64_ciphertext",
+                "attachment_byte_length",
             ),
             "user_id = ? AND group_id = ?",
             arrayOf(userId, groupId),
@@ -481,6 +532,11 @@ class LocalMessageDatabase(
                         reactions = cursor.optionalString("reactions_ciphertext")?.let {
                             gson.fromJson<Map<String, String>>(decryptString(it), reactionsType)
                         },
+                        attachmentFileName = cursor.optionalString("attachment_file_name_ciphertext")?.let(::decryptString),
+                        attachmentMimeType = cursor.optionalString("attachment_mime_type_ciphertext")?.let(::decryptString),
+                        attachmentNoteText = cursor.optionalString("attachment_note_text_ciphertext")?.let(::decryptString),
+                        attachmentDataBase64 = cursor.optionalString("attachment_data_base64_ciphertext")?.let(::decryptString),
+                        attachmentByteLength = cursor.optionalInt("attachment_byte_length"),
                     ),
                 )
             }
@@ -508,6 +564,11 @@ class LocalMessageDatabase(
                         "reactions_ciphertext",
                         message.reactions?.let { encryptString(gson.toJson(it)) },
                     )
+                    put("attachment_file_name_ciphertext", message.attachmentFileName?.let(::encryptString))
+                    put("attachment_mime_type_ciphertext", message.attachmentMimeType?.let(::encryptString))
+                    put("attachment_note_text_ciphertext", message.attachmentNoteText?.let(::encryptString))
+                    put("attachment_data_base64_ciphertext", message.attachmentDataBase64?.let(::encryptString))
+                    put("attachment_byte_length", message.attachmentByteLength)
                 },
                 SqlCipherDatabase.CONFLICT_IGNORE,
             )
@@ -618,6 +679,16 @@ class LocalMessageDatabase(
                         put("body_ciphertext", encryptString(message.body))
                         put("sent_at_millis", message.sentAtMillis)
                         put("transport_message_id", message.transportMessageId)
+                        put("reply_to_id", message.replyToId)
+                        put(
+                            "reactions_ciphertext",
+                            message.reactions?.let { encryptString(gson.toJson(it)) },
+                        )
+                        put("attachment_file_name_ciphertext", message.attachmentFileName?.let(::encryptString))
+                        put("attachment_mime_type_ciphertext", message.attachmentMimeType?.let(::encryptString))
+                        put("attachment_note_text_ciphertext", message.attachmentNoteText?.let(::encryptString))
+                        put("attachment_data_base64_ciphertext", message.attachmentDataBase64?.let(::encryptString))
+                        put("attachment_byte_length", message.attachmentByteLength)
                     },
                     SqlCipherDatabase.CONFLICT_IGNORE,
                 )
@@ -784,6 +855,11 @@ private fun Cursor.requireLong(columnName: String): Long = getLong(getColumnInde
 private fun Cursor.optionalLong(columnName: String): Long? {
     val index = getColumnIndexOrThrow(columnName)
     return if (isNull(index)) null else getLong(index)
+}
+
+private fun Cursor.optionalInt(columnName: String): Int? {
+    val index = getColumnIndexOrThrow(columnName)
+    return if (isNull(index)) null else getInt(index)
 }
 
 private fun Cursor.requireInt(columnName: String): Int = getInt(getColumnIndexOrThrow(columnName))

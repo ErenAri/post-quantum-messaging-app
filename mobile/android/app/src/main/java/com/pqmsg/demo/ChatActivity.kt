@@ -220,6 +220,7 @@ class ChatActivity : AppCompatActivity() {
         renderSelectionMode()
         renderThreadHistory()
         refreshMeta()
+        restoreDraft()
         syncActionAvailability()
         maybeShowThreadTipsOnFirstOpen()
 
@@ -289,6 +290,7 @@ class ChatActivity : AppCompatActivity() {
 
     private fun configureInputObservers() {
         messageInput.doAfterTextChanged {
+            persistDraft()
             syncActionAvailability()
         }
     }
@@ -310,6 +312,20 @@ class ChatActivity : AppCompatActivity() {
             renderAttachmentInfo()
             syncActionAvailability()
         }
+    }
+
+    private fun restoreDraft() {
+        val setup = currentSetup()
+        val draft = store.readDirectThreadDraft(setup.userId, activePeerUserId)
+        if (draft.isNotEmpty() && messageInput.text.toString() != draft) {
+            messageInput.setText(draft)
+            messageInput.setSelection(draft.length)
+        }
+    }
+
+    private fun persistDraft() {
+        val setup = currentSetup()
+        store.writeDirectThreadDraft(setup.userId, activePeerUserId, messageInput.text.toString())
     }
 
     private fun configureThreadSearch() {
@@ -518,6 +534,7 @@ class ChatActivity : AppCompatActivity() {
             incrementUnread = false,
         )
         store.markConversationRead(context.profile.userId, activePeerUserId)
+        val outboundAttachment = MessageEnvelopeCodec.decodeMediaEnvelope(outbound.plaintext)
         store.appendThreadMessage(
             userId = context.profile.userId,
             peerUserId = activePeerUserId,
@@ -525,8 +542,10 @@ class ChatActivity : AppCompatActivity() {
             body = outbound.preview,
             transportMessageId = null,
             replyToId = replyToId,
+            attachmentEnvelope = outboundAttachment,
         )
         messageInput.setText("")
+        store.writeDirectThreadDraft(context.profile.userId, activePeerUserId, "")
         pendingAttachment = null
         pendingReplyMessage = null
         renderAttachmentInfo()
@@ -907,6 +926,16 @@ class ChatActivity : AppCompatActivity() {
                     }
                 }
             }
+            .setNegativeButton(R.string.button_shared_media) { _, _ ->
+                ThreadSharedMediaBrowser.show(
+                    context = this,
+                    title = "$activePeerUserId shared media",
+                    messages = currentThreadMessages,
+                    emptyMessage = "No shared media saved in this chat on this device yet.",
+                ) {
+                    renderError(UiErrorMapper.fromThrowable(it, "Open shared media"))
+                }
+            }
             .setPositiveButton(android.R.string.ok, null)
             .show()
     }
@@ -1003,7 +1032,9 @@ class ChatActivity : AppCompatActivity() {
             threadAdapter.setSearchState(emptySet(), null)
             return
         }
-        val matches = currentThreadMessages.filter { it.body.contains(query, ignoreCase = true) }
+        val matches = currentThreadMessages.filter {
+            threadMessageSearchText(it).contains(query, ignoreCase = true)
+        }
             .map { threadMessageKey(it) }
         searchResultKeys = matches
         if (matches.isEmpty()) {
@@ -1252,7 +1283,9 @@ class ChatActivity : AppCompatActivity() {
 
     private fun copyThreadMessage(message: ThreadMessage) {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("pqmsg-message", message.body))
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText("pqmsg-message", threadMessageTranscript(message)),
+        )
         Toast.makeText(this, R.string.thread_message_copied, Toast.LENGTH_SHORT).show()
     }
 
@@ -1261,7 +1294,7 @@ class ChatActivity : AppCompatActivity() {
             Intent.createChooser(
                 Intent(Intent.ACTION_SEND).apply {
                     type = "text/plain"
-                    putExtra(Intent.EXTRA_TEXT, message.body)
+                    putExtra(Intent.EXTRA_TEXT, threadMessageTranscript(message))
                 },
                 getString(R.string.thread_share_chooser_title),
             ),
@@ -1305,7 +1338,7 @@ class ChatActivity : AppCompatActivity() {
         clipboard.setPrimaryClip(
             ClipData.newPlainText(
                 "pqmsg-messages",
-                messages.joinToString("\n\n") { it.body },
+                messages.joinToString("\n\n") { threadMessageTranscript(it) },
             ),
         )
         Toast.makeText(this, R.string.thread_messages_copied, Toast.LENGTH_SHORT).show()
@@ -1321,7 +1354,7 @@ class ChatActivity : AppCompatActivity() {
             Intent.createChooser(
                 Intent(Intent.ACTION_SEND).apply {
                     type = "text/plain"
-                    putExtra(Intent.EXTRA_TEXT, messages.joinToString("\n\n") { it.body })
+                    putExtra(Intent.EXTRA_TEXT, messages.joinToString("\n\n") { threadMessageTranscript(it) })
                 },
                 getString(R.string.thread_share_chooser_multiple_title),
             ),

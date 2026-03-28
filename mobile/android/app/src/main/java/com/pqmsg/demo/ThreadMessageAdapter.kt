@@ -15,6 +15,7 @@ import android.widget.TextView
 import com.google.android.material.chip.Chip
 import com.google.android.material.chip.ChipGroup
 import java.text.DateFormat
+import java.util.Calendar
 import java.util.Date
 import kotlin.math.abs
 import kotlin.math.min
@@ -100,6 +101,7 @@ class ThreadMessageAdapter(
         val bubble = view.findViewById<LinearLayout>(R.id.threadMessageBubble)
         val body = view.findViewById<TextView>(R.id.textThreadMessageBody)
         val meta = view.findViewById<TextView>(R.id.textThreadMessageMeta)
+        val dayHeader = view.findViewById<TextView>(R.id.textThreadMessageDayHeader)
         val reactions = view.findViewById<ChipGroup>(R.id.threadMessageReactions)
         val replyThreadChip = view.findViewById<Chip>(R.id.chipThreadReplies)
         val reply = view.findViewById<TextView>(R.id.textThreadMessageReply)
@@ -133,6 +135,7 @@ class ThreadMessageAdapter(
 
         body.text = item.body
         meta.text = buildMeta(item)
+        bindDayHeader(dayHeader, position, item)
 
         val replyText = item.replyToId?.let { repliedId ->
             replyLookup[repliedId]?.body?.take(72) ?: "Replying to an earlier message"
@@ -310,5 +313,37 @@ class ThreadMessageAdapter(
             else -> null
         }
         return listOfNotNull(timeLabel, receiptLabel).joinToString("  ")
+    }
+
+    private fun bindDayHeader(header: TextView, position: Int, item: ThreadMessage) {
+        val previous = items.getOrNull(position - 1)
+        val shouldShow = previous == null || !isSameDay(previous.sentAtMillis, item.sentAtMillis)
+        if (!shouldShow) {
+            header.visibility = View.GONE
+            return
+        }
+        header.visibility = View.VISIBLE
+        header.text = buildDayHeader(item.sentAtMillis)
+    }
+
+    private fun buildDayHeader(timestamp: Long): String {
+        val now = System.currentTimeMillis()
+        val yesterday = Calendar.getInstance().apply {
+            timeInMillis = now
+            add(Calendar.DAY_OF_YEAR, -1)
+        }.timeInMillis
+        return when {
+            isSameDay(timestamp, now) -> appContext.getString(R.string.thread_day_today)
+            isSameDay(timestamp, yesterday) -> appContext.getString(R.string.thread_day_yesterday)
+            else -> DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(timestamp))
+        }
+    }
+
+    private fun isSameDay(lhs: Long, rhs: Long): Boolean {
+        val left = Calendar.getInstance().apply { timeInMillis = lhs }
+        val right = Calendar.getInstance().apply { timeInMillis = rhs }
+        return left.get(Calendar.ERA) == right.get(Calendar.ERA) &&
+            left.get(Calendar.YEAR) == right.get(Calendar.YEAR) &&
+            left.get(Calendar.DAY_OF_YEAR) == right.get(Calendar.DAY_OF_YEAR)
     }
 }

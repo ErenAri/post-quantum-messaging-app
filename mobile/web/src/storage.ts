@@ -109,6 +109,14 @@ export type ContactDiscoveryCheckpoint = {
   observed_at: string;
 };
 
+type ThreadDraftRow = {
+  userId: string;
+  kind: ConversationKind;
+  threadId: string;
+  text: string;
+  updatedAt: number;
+};
+
 const SETUP_KEY = "pqmsg.web.setup.v1";
 const CONVERSATIONS_KEY = "pqmsg.web.conversations.v1";
 const GROUP_CONVOS_KEY = "pqmsg.web.groupconvos.v1";
@@ -121,6 +129,7 @@ const PRIVATE_GROUP_CURSORS_KEY = "pqmsg.web.privategroupcursors.v1";
 const TRANSPARENCY_KEY = "pqmsg.web.transparency.v1";
 const CONTACT_DISCOVERY_KEY = "pqmsg.web.contactdiscovery.v1";
 const THREAD_TIPS_KEY = "pqmsg.web.threadtips.v1";
+const THREAD_DRAFTS_KEY = "pqmsg.web.threaddrafts.v1";
 const METADATA_KEYS = [
   SETUP_KEY,
   CONVERSATIONS_KEY,
@@ -134,6 +143,7 @@ const METADATA_KEYS = [
   TRANSPARENCY_KEY,
   CONTACT_DISCOVERY_KEY,
   THREAD_TIPS_KEY,
+  THREAD_DRAFTS_KEY,
 ] as const;
 const metadataCache = new Map<string, string | null>();
 const localKeyUsers = new Set<string>();
@@ -198,6 +208,41 @@ export function hasSeenThreadTips(): boolean {
 
 export function markThreadTipsSeen(): void {
   writeRecord(THREAD_TIPS_KEY, true);
+}
+
+export function readThreadDraft(userId: string, kind: ConversationKind, threadId: string): string {
+  const all = parseRecord<ThreadDraftRow[]>(THREAD_DRAFTS_KEY, []);
+  return all.find((item) => item.userId === userId && item.kind === kind && item.threadId === threadId)?.text ?? "";
+}
+
+export function readThreadDraftUpdatedAt(userId: string, kind: ConversationKind, threadId: string): number {
+  const all = parseRecord<ThreadDraftRow[]>(THREAD_DRAFTS_KEY, []);
+  return all.find((item) => item.userId === userId && item.kind === kind && item.threadId === threadId)?.updatedAt ?? 0;
+}
+
+export function writeThreadDraft(
+  userId: string,
+  kind: ConversationKind,
+  threadId: string,
+  text: string
+): void {
+  const all = parseRecord<ThreadDraftRow[]>(THREAD_DRAFTS_KEY, []);
+  const idx = all.findIndex((item) => item.userId === userId && item.kind === kind && item.threadId === threadId);
+  const normalized = text.trimEnd();
+  if (!normalized) {
+    if (idx >= 0) {
+      all.splice(idx, 1);
+      writeRecord(THREAD_DRAFTS_KEY, all);
+    }
+    return;
+  }
+  const row: ThreadDraftRow = { userId, kind, threadId, text: normalized, updatedAt: Date.now() };
+  if (idx >= 0) {
+    all[idx] = row;
+  } else {
+    all.push(row);
+  }
+  writeRecord(THREAD_DRAFTS_KEY, all);
 }
 
 export async function saveKeys(
@@ -289,10 +334,11 @@ export function upsertConversation(
   userId: string,
   peerUserId: string,
   preview: string,
-  incrementUnread: boolean
+  incrementUnread: boolean,
+  updatedAt = Date.now(),
 ): void {
   const all = parseRecord<ConversationRow[]>(CONVERSATIONS_KEY, []);
-  const now = Date.now();
+  const now = updatedAt;
   const normalizedPreview = preview.trim().slice(0, 160) || "No content";
   const idx = all.findIndex((item) => item.userId === userId && item.peerUserId === peerUserId);
   if (idx >= 0) {
@@ -319,6 +365,15 @@ export function markConversationRead(userId: string, peerUserId: string): void {
   const idx = all.findIndex((item) => item.userId === userId && item.peerUserId === peerUserId);
   if (idx >= 0) {
     all[idx].unreadCount = 0;
+    writeRecord(CONVERSATIONS_KEY, all);
+  }
+}
+
+export function setConversationUnreadCount(userId: string, peerUserId: string, unreadCount: number): void {
+  const all = parseRecord<ConversationRow[]>(CONVERSATIONS_KEY, []);
+  const idx = all.findIndex((item) => item.userId === userId && item.peerUserId === peerUserId);
+  if (idx >= 0) {
+    all[idx].unreadCount = Math.max(0, unreadCount);
     writeRecord(CONVERSATIONS_KEY, all);
   }
 }
@@ -581,10 +636,11 @@ export function upsertGroupConversation(
   groupId: string,
   ownerUserId: string,
   preview: string,
-  incrementUnread: boolean
+  incrementUnread: boolean,
+  updatedAt = Date.now(),
 ): void {
   const all = parseRecord<GroupConvoRow[]>(GROUP_CONVOS_KEY, []);
-  const now = Date.now();
+  const now = updatedAt;
   const normalizedPreview = preview.trim().slice(0, 160) || "No content";
   const idx = all.findIndex(item => item.userId === userId && item.groupId === groupId);
   if (idx >= 0) {
@@ -602,6 +658,15 @@ export function markGroupConversationRead(userId: string, groupId: string): void
   const idx = all.findIndex(item => item.userId === userId && item.groupId === groupId);
   if (idx >= 0) {
     all[idx].unreadCount = 0;
+    writeRecord(GROUP_CONVOS_KEY, all);
+  }
+}
+
+export function setGroupConversationUnreadCount(userId: string, groupId: string, unreadCount: number): void {
+  const all = parseRecord<GroupConvoRow[]>(GROUP_CONVOS_KEY, []);
+  const idx = all.findIndex(item => item.userId === userId && item.groupId === groupId);
+  if (idx >= 0) {
+    all[idx].unreadCount = Math.max(0, unreadCount);
     writeRecord(GROUP_CONVOS_KEY, all);
   }
 }

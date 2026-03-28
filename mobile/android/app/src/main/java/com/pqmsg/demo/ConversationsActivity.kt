@@ -3,6 +3,8 @@ package com.pqmsg.demo
 import android.content.Intent
 import android.os.Bundle
 import android.view.View
+import android.view.MotionEvent
+import android.widget.AdapterView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ListView
@@ -20,6 +22,7 @@ import uniffi.pqmsg_android.privateGroupOpenShareLinkInvite
 import uniffi.pqmsg_android.privateGroupPrepareBootstrapMaterial
 import uniffi.pqmsg_android.privateGroupRestoreJoinPackage
 import java.util.Base64
+import kotlin.math.abs
 
 class ConversationsActivity : AppCompatActivity() {
     private enum class InboxFilter {
@@ -33,6 +36,7 @@ class ConversationsActivity : AppCompatActivity() {
     private lateinit var store: LocalStateStore
     private lateinit var composeButton: Button
     private lateinit var refreshButton: Button
+    private lateinit var archivedButton: Button
     private lateinit var profileMenuButton: TextView
     private lateinit var filterAllButton: Button
     private lateinit var filterUnreadButton: Button
@@ -49,7 +53,12 @@ class ConversationsActivity : AppCompatActivity() {
     private var currentInboxItems: List<InboxListItem> = emptyList()
     private var currentContactsByPeer: Map<String, ContactListItem> = emptyMap()
     private var selectedFilter = InboxFilter.ALL
+    private var showArchivedOnly = false
     private var syncInFlight = false
+    private var listTouchStartX = 0f
+    private var listTouchStartY = 0f
+    private var listTouchStartPosition = AdapterView.INVALID_POSITION
+    private val archiveSwipeThresholdPx by lazy { resources.displayMetrics.density * 72f }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,6 +71,7 @@ class ConversationsActivity : AppCompatActivity() {
 
         composeButton = findViewById(R.id.buttonComposeConversation)
         refreshButton = findViewById(R.id.buttonRefreshConversations)
+        archivedButton = findViewById(R.id.buttonArchivedConversations)
         profileMenuButton = findViewById(R.id.textProfileMenu)
         filterAllButton = findViewById(R.id.buttonFilterAll)
         filterUnreadButton = findViewById(R.id.buttonFilterUnread)
@@ -104,6 +114,9 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     private fun configureListEvents() {
+        conversationsList.setOnTouchListener { _, event ->
+            handleInboxSwipeGesture(event)
+        }
         conversationsList.setOnItemClickListener { _, _, position, _ ->
             val item = currentInboxItems.getOrNull(position) ?: return@setOnItemClickListener
             when (item.kind) {
@@ -112,11 +125,61 @@ class ConversationsActivity : AppCompatActivity() {
                 InboxItemKind.REQUEST -> showMessageRequestDialog(item.id)
             }
         }
+        conversationsList.setOnItemLongClickListener { _, _, position, _ ->
+            val item = currentInboxItems.getOrNull(position) ?: return@setOnItemLongClickListener false
+            showInboxItemActions(item)
+            true
+        }
+    }
+
+    private fun handleInboxSwipeGesture(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                listTouchStartX = event.x
+                listTouchStartY = event.y
+                listTouchStartPosition = conversationsList.pointToPosition(event.x.toInt(), event.y.toInt())
+            }
+            MotionEvent.ACTION_UP -> {
+                val startPosition = listTouchStartPosition
+                listTouchStartPosition = AdapterView.INVALID_POSITION
+                if (startPosition == AdapterView.INVALID_POSITION) {
+                    return false
+                }
+                val deltaX = event.x - listTouchStartX
+                val deltaY = event.y - listTouchStartY
+                if (
+                    deltaX >= archiveSwipeThresholdPx &&
+                    abs(deltaX) > abs(deltaY) * 1.35f
+                ) {
+                    return handleSwipeArchiveForPosition(startPosition)
+                }
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                listTouchStartPosition = AdapterView.INVALID_POSITION
+            }
+        }
+        return false
+    }
+
+    private fun handleSwipeArchiveForPosition(position: Int): Boolean {
+        val item = currentInboxItems.getOrNull(position) ?: return false
+        return when (item.kind) {
+            InboxItemKind.DIRECT -> {
+                setDirectConversationArchived(item.id, item.archivedAtMillis == 0L)
+                true
+            }
+            InboxItemKind.GROUP -> {
+                setGroupConversationArchived(item.id, item.archivedAtMillis == 0L)
+                true
+            }
+            InboxItemKind.REQUEST -> false
+        }
     }
 
     private fun configureButtons() {
         composeButton.setOnClickListener { showComposeChooser() }
         refreshButton.setOnClickListener { syncInbox(forceStatus = true) }
+        archivedButton.setOnClickListener { toggleArchivedView() }
         profileMenuButton.setOnClickListener { showProfileMenu() }
         filterAllButton.setOnClickListener { selectFilter(InboxFilter.ALL) }
         filterUnreadButton.setOnClickListener { selectFilter(InboxFilter.UNREAD) }
@@ -148,6 +211,7 @@ class ConversationsActivity : AppCompatActivity() {
         currentRequests = store.listMessageRequests(user)
         currentInboxItems = buildInboxItems()
         adapter.submitList(currentInboxItems)
+        updateArchivedButton()
         updateFilterButtons()
         updateRequestsFilterButton()
         if (currentInboxItems.isEmpty()) {
@@ -194,17 +258,22 @@ class ConversationsActivity : AppCompatActivity() {
 
     private fun selectFilter(next: InboxFilter) {
         if (selectedFilter == next) {
+            if (showArchivedOnly) {
+                showArchivedOnly = false
+                refreshConversations()
+            }
             return
         }
+        showArchivedOnly = false
         selectedFilter = next
         refreshConversations()
     }
 
     private fun updateFilterButtons() {
-        updateFilterButton(filterAllButton, selectedFilter == InboxFilter.ALL)
-        updateFilterButton(filterUnreadButton, selectedFilter == InboxFilter.UNREAD)
-        updateFilterButton(filterGroupsButton, selectedFilter == InboxFilter.GROUPS)
-        updateFilterButton(filterRequestsButton, selectedFilter == InboxFilter.REQUESTS)
+        updateFilterButton(filterAllButton, !showArchivedOnly && selectedFilter == InboxFilter.ALL)
+        updateFilterButton(filterUnreadButton, !showArchivedOnly && selectedFilter == InboxFilter.UNREAD)
+        updateFilterButton(filterGroupsButton, !showArchivedOnly && selectedFilter == InboxFilter.GROUPS)
+        updateFilterButton(filterRequestsButton, !showArchivedOnly && selectedFilter == InboxFilter.REQUESTS)
     }
 
     private fun updateFilterButton(button: Button, active: Boolean) {
@@ -225,10 +294,26 @@ class ConversationsActivity : AppCompatActivity() {
         }
     }
 
+    private fun updateArchivedButton() {
+        val archivedCount = archivedConversationCount()
+        if (showArchivedOnly || archivedCount > 0) {
+            archivedButton.visibility = View.VISIBLE
+            archivedButton.text = if (showArchivedOnly) {
+                getString(R.string.button_back_to_inbox)
+            } else {
+                getString(R.string.conversations_archived_count, archivedCount)
+            }
+        } else {
+            archivedButton.visibility = View.GONE
+        }
+    }
+
     private fun statusSummary(): String {
         val requestCount = currentRequests.size
         val visibleCount = currentInboxItems.size
         return when {
+            showArchivedOnly ->
+                getString(R.string.conversations_status_archived, visibleCount)
             requestCount > 0 && selectedFilter != InboxFilter.REQUESTS ->
                 "$requestCount message request(s) waiting. $visibleCount conversation(s) visible."
             selectedFilter == InboxFilter.REQUESTS ->
@@ -239,6 +324,9 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     private fun emptyStateMessage(): String {
+        if (showArchivedOnly) {
+            return getString(R.string.conversations_empty_archived)
+        }
         return when (selectedFilter) {
             InboxFilter.ALL -> getString(R.string.conversations_empty)
             InboxFilter.UNREAD -> getString(R.string.conversations_empty_unread)
@@ -248,26 +336,47 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     private fun buildInboxItems(): List<InboxListItem> {
+        val userId = store.loadSetup().userId
         val directItems = currentConversations.map { conversation ->
+            val draft = store.readDirectThreadDraft(userId, conversation.peerUserId)
+            val draftUpdatedAt = store.readDirectThreadDraftUpdatedAt(userId, conversation.peerUserId)
             InboxListItem(
                 kind = InboxItemKind.DIRECT,
                 id = conversation.peerUserId,
                 title = resolvePeerPrimaryLabel(conversation.peerUserId),
                 secondaryLabel = resolvePeerSecondaryLabel(conversation.peerUserId)
                     ?: getString(R.string.conversation_secondary_direct),
-                preview = conversation.lastPreview,
-                updatedAtMillis = conversation.updatedAtMillis,
+                kindBadge = null,
+                pinnedAtMillis = store.readConversationPinnedAt(userId, conversation.peerUserId),
+                archivedAtMillis = store.readConversationArchivedAt(userId, conversation.peerUserId),
+                preview = if (draft.isNotBlank()) {
+                    getString(R.string.conversation_preview_draft, draft)
+                } else {
+                    conversation.lastPreview
+                },
+                previewIsDraft = draft.isNotBlank(),
+                updatedAtMillis = maxOf(conversation.updatedAtMillis, draftUpdatedAt),
                 unreadCount = conversation.unreadCount,
             )
         }
         val groupItems = currentGroups.map { group ->
+            val draft = store.readGroupThreadDraft(userId, group.groupId)
+            val draftUpdatedAt = store.readGroupThreadDraftUpdatedAt(userId, group.groupId)
             InboxListItem(
                 kind = InboxItemKind.GROUP,
                 id = group.groupId,
                 title = group.displayName,
                 secondaryLabel = getString(R.string.conversation_secondary_group, group.memberCount),
-                preview = group.lastPreview,
-                updatedAtMillis = group.updatedAtMillis,
+                kindBadge = getString(R.string.conversation_state_group),
+                pinnedAtMillis = store.readGroupPinnedAt(userId, group.groupId),
+                archivedAtMillis = store.readGroupArchivedAt(userId, group.groupId),
+                preview = if (draft.isNotBlank()) {
+                    getString(R.string.conversation_preview_draft, draft)
+                } else {
+                    group.lastPreview
+                },
+                previewIsDraft = draft.isNotBlank(),
+                updatedAtMillis = maxOf(group.updatedAtMillis, draftUpdatedAt),
                 unreadCount = group.unreadCount,
             )
         }
@@ -278,19 +387,48 @@ class ConversationsActivity : AppCompatActivity() {
                 title = resolvePeerPrimaryLabel(request.peerUserId),
                 secondaryLabel = resolvePeerSecondaryLabel(request.peerUserId)
                     ?: getString(R.string.conversation_secondary_request),
+                kindBadge = getString(R.string.conversation_state_request),
+                pinnedAtMillis = 0L,
+                archivedAtMillis = 0L,
                 preview = request.lastPreview,
+                previewIsDraft = false,
                 updatedAtMillis = request.updatedAtMillis,
                 unreadCount = request.unreadCount.coerceAtLeast(1),
             )
         }
 
-        val filtered = when (selectedFilter) {
-            InboxFilter.ALL -> directItems + groupItems
-            InboxFilter.UNREAD -> (directItems + groupItems).filter { it.unreadCount > 0 } + requestItems
-            InboxFilter.GROUPS -> groupItems
-            InboxFilter.REQUESTS -> requestItems
+        val inboxItems = directItems + groupItems
+        val filtered = when {
+            showArchivedOnly -> inboxItems.filter { it.archivedAtMillis > 0L }
+            selectedFilter == InboxFilter.ALL -> inboxItems.filter { it.archivedAtMillis == 0L }
+            selectedFilter == InboxFilter.UNREAD -> inboxItems.filter {
+                it.archivedAtMillis == 0L && it.unreadCount > 0
+            } + requestItems
+            selectedFilter == InboxFilter.GROUPS -> groupItems.filter { it.archivedAtMillis == 0L }
+            selectedFilter == InboxFilter.REQUESTS -> requestItems
+            else -> emptyList()
         }
-        return filtered.sortedByDescending { it.updatedAtMillis }
+        return filtered.sortedWith(
+            compareByDescending<InboxListItem> { it.pinnedAtMillis > 0L }
+                .thenByDescending { it.pinnedAtMillis }
+                .thenByDescending { it.updatedAtMillis },
+        )
+    }
+
+    private fun archivedConversationCount(): Int {
+        val userId = store.loadSetup().userId
+        val directArchived = currentConversations.count {
+            store.readConversationArchivedAt(userId, it.peerUserId) > 0L
+        }
+        val groupArchived = currentGroups.count {
+            store.readGroupArchivedAt(userId, it.groupId) > 0L
+        }
+        return directArchived + groupArchived
+    }
+
+    private fun toggleArchivedView() {
+        showArchivedOnly = !showArchivedOnly
+        refreshConversations()
     }
 
     private fun buildAvatarText(label: String): String {
@@ -327,6 +465,141 @@ class ConversationsActivity : AppCompatActivity() {
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    private fun showInboxItemActions(item: InboxListItem) {
+        val options = when (item.kind) {
+            InboxItemKind.DIRECT -> listOf(
+                getString(R.string.inbox_action_open_chat) to { openChat(item.id) },
+                if (item.archivedAtMillis > 0L) {
+                    getString(R.string.inbox_action_unarchive_chat) to { setDirectConversationArchived(item.id, false) }
+                } else {
+                    getString(R.string.inbox_action_archive_chat) to { setDirectConversationArchived(item.id, true) }
+                },
+                if (item.pinnedAtMillis > 0L) {
+                    getString(R.string.inbox_action_unpin_chat) to { setDirectConversationPinned(item.id, false) }
+                } else {
+                    getString(R.string.inbox_action_pin_chat) to { setDirectConversationPinned(item.id, true) }
+                },
+                if (item.unreadCount > 0) {
+                    getString(R.string.inbox_action_mark_read) to { markDirectConversationRead(item.id) }
+                } else {
+                    getString(R.string.inbox_action_mark_unread) to { markDirectConversationUnread(item.id) }
+                },
+            )
+            InboxItemKind.GROUP -> listOf(
+                getString(R.string.inbox_action_open_group) to { openGroup(item.id) },
+                if (item.archivedAtMillis > 0L) {
+                    getString(R.string.inbox_action_unarchive_chat) to { setGroupConversationArchived(item.id, false) }
+                } else {
+                    getString(R.string.inbox_action_archive_chat) to { setGroupConversationArchived(item.id, true) }
+                },
+                if (item.pinnedAtMillis > 0L) {
+                    getString(R.string.inbox_action_unpin_chat) to { setGroupConversationPinned(item.id, false) }
+                } else {
+                    getString(R.string.inbox_action_pin_chat) to { setGroupConversationPinned(item.id, true) }
+                },
+                if (item.unreadCount > 0) {
+                    getString(R.string.inbox_action_mark_read) to { markGroupConversationRead(item.id) }
+                } else {
+                    getString(R.string.inbox_action_mark_unread) to { markGroupConversationUnread(item.id) }
+                },
+            )
+            InboxItemKind.REQUEST -> listOf(
+                getString(R.string.inbox_action_review_request) to { showMessageRequestDialog(item.id) },
+                getString(R.string.inbox_action_accept_request) to { acceptMessageRequestQuick(item.id) },
+                getString(R.string.inbox_action_ignore_request) to { ignoreMessageRequestQuick(item.id) },
+            )
+        }
+        AlertDialog.Builder(this)
+            .setTitle(item.title)
+            .setItems(options.map { it.first }.toTypedArray()) { _, which ->
+                options[which].second.invoke()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun markDirectConversationRead(peerUserId: String) {
+        val setup = store.loadSetup()
+        store.markConversationRead(setup.userId, peerUserId)
+        renderHome()
+        statusText.text = getString(R.string.inbox_status_marked_read)
+    }
+
+    private fun markDirectConversationUnread(peerUserId: String) {
+        val setup = store.loadSetup()
+        store.setConversationUnreadCount(setup.userId, peerUserId, 1)
+        renderHome()
+        statusText.text = getString(R.string.inbox_status_marked_unread)
+    }
+
+    private fun markGroupConversationRead(groupId: String) {
+        val setup = store.loadSetup()
+        store.markGroupRead(setup.userId, groupId)
+        renderHome()
+        statusText.text = getString(R.string.inbox_status_marked_read)
+    }
+
+    private fun markGroupConversationUnread(groupId: String) {
+        val setup = store.loadSetup()
+        store.setGroupUnreadCount(setup.userId, groupId, 1)
+        renderHome()
+        statusText.text = getString(R.string.inbox_status_marked_unread)
+    }
+
+    private fun setDirectConversationPinned(peerUserId: String, pinned: Boolean) {
+        val setup = store.loadSetup()
+        store.setConversationPinned(setup.userId, peerUserId, pinned)
+        renderHome()
+        statusText.text = getString(if (pinned) R.string.inbox_status_pinned else R.string.inbox_status_unpinned)
+    }
+
+    private fun setDirectConversationArchived(peerUserId: String, archived: Boolean) {
+        val setup = store.loadSetup()
+        store.setConversationArchived(setup.userId, peerUserId, archived)
+        if (!archived && showArchivedOnly) {
+            refreshConversations()
+        } else {
+            renderHome()
+        }
+        statusText.text = getString(
+            if (archived) R.string.inbox_status_archived else R.string.inbox_status_unarchived,
+        )
+    }
+
+    private fun setGroupConversationPinned(groupId: String, pinned: Boolean) {
+        val setup = store.loadSetup()
+        store.setGroupPinned(setup.userId, groupId, pinned)
+        renderHome()
+        statusText.text = getString(if (pinned) R.string.inbox_status_pinned else R.string.inbox_status_unpinned)
+    }
+
+    private fun setGroupConversationArchived(groupId: String, archived: Boolean) {
+        val setup = store.loadSetup()
+        store.setGroupArchived(setup.userId, groupId, archived)
+        if (!archived && showArchivedOnly) {
+            refreshConversations()
+        } else {
+            renderHome()
+        }
+        statusText.text = getString(
+            if (archived) R.string.inbox_status_archived else R.string.inbox_status_unarchived,
+        )
+    }
+
+    private fun acceptMessageRequestQuick(peerUserId: String) {
+        val setup = store.loadSetup()
+        store.acceptMessageRequest(setup.userId, peerUserId)
+        renderHome()
+        statusText.text = getString(R.string.inbox_status_request_accepted)
+    }
+
+    private fun ignoreMessageRequestQuick(peerUserId: String) {
+        val setup = store.loadSetup()
+        store.dismissMessageRequest(setup.userId, peerUserId)
+        renderHome()
+        statusText.text = getString(R.string.inbox_status_request_ignored)
     }
 
     private fun syncInbox(forceStatus: Boolean = false) {

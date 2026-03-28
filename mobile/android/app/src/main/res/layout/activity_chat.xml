@@ -327,7 +327,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
         android:background="@drawable/bg_composer_surface"
-        android:gravity="center_vertical"
+        android:gravity="bottom"
         android:orientation="horizontal"
         android:padding="8dp">
 
@@ -360,6 +360,8 @@
                 android:layout_height="wrap_content"
                 android:gravity="top|start"
                 android:inputType="textMultiLine"
+                android:imeOptions="flagNoEnterAction"
+                android:maxHeight="144dp"
                 android:maxLines="5"
                 android:minLines="1" />
         </com.google.android.material.textfield.TextInputLayout>

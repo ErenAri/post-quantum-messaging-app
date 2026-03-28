@@ -7,6 +7,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
 import android.widget.TextView
+import androidx.core.content.ContextCompat
 
 enum class InboxItemKind {
     DIRECT,
@@ -19,7 +20,11 @@ data class InboxListItem(
     val id: String,
     val title: String,
     val secondaryLabel: String?,
+    val kindBadge: String?,
+    val pinnedAtMillis: Long,
+    val archivedAtMillis: Long,
     val preview: String,
+    val previewIsDraft: Boolean,
     val updatedAtMillis: Long,
     val unreadCount: Int,
 )
@@ -28,6 +33,8 @@ class ConversationSummaryAdapter(
     context: Context,
 ) : BaseAdapter() {
     private val inflater = LayoutInflater.from(context)
+    private val draftTint = ContextCompat.getColor(context, R.color.pq_hero)
+    private val defaultPreviewTint = ContextCompat.getColor(context, R.color.pq_ink_muted)
     private val items = mutableListOf<InboxListItem>()
 
     fun submitList(next: List<InboxListItem>) {
@@ -47,9 +54,16 @@ class ConversationSummaryAdapter(
         val item = getItem(position)
 
         view.findViewById<TextView>(R.id.textConversationPeer).text = item.title
-        view.findViewById<TextView>(R.id.textConversationPreview).text = item.preview
+        val previewText = view.findViewById<TextView>(R.id.textConversationPreview)
+        previewText.text = item.preview
+        previewText.setTextColor(if (item.previewIsDraft) draftTint else defaultPreviewTint)
         view.findViewById<TextView>(R.id.textConversationTime).text = buildFreshness(item.updatedAtMillis)
         view.findViewById<TextView>(R.id.textConversationAvatar).text = buildAvatarText(item.title, item.kind)
+        bindBadge(
+            view.findViewById(R.id.textConversationPinnedBadge),
+            if (item.pinnedAtMillis > 0L) view.context.getString(R.string.conversation_state_pinned) else null,
+        )
+        bindBadge(view.findViewById(R.id.textConversationKindBadge), item.kindBadge)
 
         val metaText = view.findViewById<TextView>(R.id.textConversationMeta)
         if (item.secondaryLabel.isNullOrBlank()) {
@@ -69,6 +83,16 @@ class ConversationSummaryAdapter(
             unreadText.text = ""
         }
         return view
+    }
+
+    private fun bindBadge(view: TextView, label: String?) {
+        if (label.isNullOrBlank()) {
+            view.visibility = View.GONE
+            view.text = ""
+        } else {
+            view.visibility = View.VISIBLE
+            view.text = label
+        }
     }
 
     private fun buildFreshness(updatedAtMillis: Long): String {

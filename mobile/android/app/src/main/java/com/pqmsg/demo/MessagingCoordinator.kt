@@ -484,19 +484,22 @@ object MessagingCoordinator {
                     privateGroupMessage.groupId,
                 ) ?: error("Private-group state is unavailable for ${privateGroupMessage.groupId}")
                 val state = parsePrivateGroupStateJson(localGroupState.stateJson)
+                val groupMediaEnvelope = MessageEnvelopeCodec.decodeMediaEnvelope(privateGroupMessage.body)
+                val renderedGroupBody = renderInboundPreview(privateGroupMessage.body)
                 store.appendGroupThreadMessage(
                     userId = context.profile.userId,
                     groupId = privateGroupMessage.groupId,
                     senderUserId = peer,
-                    body = privateGroupMessage.body,
+                    body = renderedGroupBody,
                     transportMessageId = item.message_id,
+                    attachmentEnvelope = groupMediaEnvelope,
                 )
                 store.upsertGroupConversation(
                     userId = context.profile.userId,
                     groupId = privateGroupMessage.groupId,
                     displayName = getPrivateGroupTitle(state),
                     memberCount = state.members.size,
-                    lastPreview = "${peer}: ${privateGroupMessage.body}",
+                    lastPreview = "${peer}: $renderedGroupBody",
                     incrementUnread = privateGroupMessage.groupId != activeGroupId,
                 )
                 if (privateGroupMessage.groupId == activeGroupId) {
@@ -504,6 +507,7 @@ object MessagingCoordinator {
                 }
                 deliveredMessages += 1
             } else if (!isWrappedPrivateGroup) {
+                val mediaEnvelope = MessageEnvelopeCodec.decodeMediaEnvelope(result.plaintextUtf8)
                 val rendered = renderInboundPreview(result.plaintextUtf8)
                 store.appendThreadMessage(
                     userId = context.profile.userId,
@@ -511,6 +515,7 @@ object MessagingCoordinator {
                     direction = "inbound",
                     body = rendered,
                     transportMessageId = item.message_id,
+                    attachmentEnvelope = mediaEnvelope,
                 )
                 val isAcceptedPeer =
                     peer == activePeerId ||
@@ -717,20 +722,23 @@ object MessagingCoordinator {
                     item = item,
                     keysJson = keysJson,
                 )
+                val openedMediaEnvelope = MessageEnvelopeCodec.decodeMediaEnvelope(opened.body)
+                val renderedOpenedBody = renderInboundPreview(opened.body)
                 store.appendGroupThreadMessage(
                     userId = context.profile.userId,
                     groupId = item.group_id,
                     senderUserId = opened.sender_user_id,
-                    body = opened.body,
+                    body = renderedOpenedBody,
                     sentAtMillis = item.sent_at_unix_ms,
                     transportMessageId = item.message_id,
+                    attachmentEnvelope = openedMediaEnvelope,
                 )
                 store.upsertGroupConversation(
                     userId = context.profile.userId,
                     groupId = item.group_id,
                     displayName = getPrivateGroupTitle(state),
                     memberCount = state.members.size,
-                    lastPreview = "${opened.sender_user_id}: ${opened.body}",
+                    lastPreview = "${opened.sender_user_id}: $renderedOpenedBody",
                     incrementUnread = item.group_id != activeGroupId && opened.sender_user_id != context.profile.userId,
                 )
                 if (item.group_id == activeGroupId) {

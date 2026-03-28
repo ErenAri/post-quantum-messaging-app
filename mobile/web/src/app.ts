@@ -85,11 +85,15 @@ import {
   readIdentityPin,
   readPrivateGroup,
   readPrivateGroupCursor,
+  readThreadDraft,
+  readThreadDraftUpdatedAt,
   loadKeys,
   loadSetup,
   markThreadTipsSeen,
   markConversationRead,
   markGroupConversationRead,
+  setConversationUnreadCount,
+  setGroupConversationUnreadCount,
   removePrivateGroup,
   updateConversationMeta,
   readCursor,
@@ -109,6 +113,7 @@ import {
   writeSealedCursor,
   writeIdentityPin,
   writePrivateGroupCursor,
+  writeThreadDraft,
   writeTransparencyCheckpoint,
   type ContactDiscoveryCheckpoint,
   type IdentityPin,
@@ -196,7 +201,25 @@ let activeChatPeer: string | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let disposeMessageSelectionShortcuts: (() => void) | null = null;
 let keyboardShortcutOverlay: HTMLElement | null = null;
+let sharedMediaOverlay: HTMLElement | null = null;
+let sharedMediaOverlayKeyHandler: ((event: KeyboardEvent) => void) | null = null;
 let keyboardShortcutLauncherInstalled = false;
+type ComposeField = HTMLInputElement | HTMLTextAreaElement;
+type SharedMediaFilter = "all" | "media" | "files" | "audio";
+type MediaEnvelope = {
+  fileName: string;
+  mimeType: string;
+  noteText: string;
+  dataBase64: string;
+  byteLength: number;
+};
+type GroupOutboundPayload = {
+  plaintext: string;
+  previewText: string;
+  storedText: string;
+  attachment?: MediaEnvelope;
+};
+const MEDIA_ENVELOPE_PREFIX = "pqmsg-media-v1";
 
 // Phase 2 state
 let presenceHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -581,7 +604,150 @@ async function createPrivateGroupInviteLinkFromJoinPackage(
   );
 }
 
-async function sendPrivateGroupMessage(groupId: string, body: string): Promise<void> {
+function encodeMediaEnvelope(
+  fileName: string,
+  mimeType: string,
+  noteText: string,
+  dataBase64: string,
+): string {
+  const encoder = new TextEncoder();
+  const fileNamePart = bytesToBase64(encoder.encode(fileName));
+  const mimeTypePart = bytesToBase64(encoder.encode(mimeType));
+  const notePart = bytesToBase64(encoder.encode(noteText));
+  return [MEDIA_ENVELOPE_PREFIX, fileNamePart, mimeTypePart, notePart, dataBase64].join("|");
+}
+
+function decodeMediaEnvelope(plaintext: string): MediaEnvelope | null {
+  const parts = plaintext.split("|", 5);
+  if (parts.length !== 5 || parts[0] !== MEDIA_ENVELOPE_PREFIX) {
+    return null;
+  }
+  const decoder = new TextDecoder();
+  try {
+    const fileName = decoder.decode(base64ToBytes(parts[1]));
+    const mimeType = decoder.decode(base64ToBytes(parts[2]));
+    const noteText = decoder.decode(base64ToBytes(parts[3]));
+    const dataBytes = base64ToBytes(parts[4]);
+    return {
+      fileName,
+      mimeType,
+      noteText,
+      dataBase64: parts[4],
+      byteLength: dataBytes.byteLength,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function attachmentConversationPreview(noteText: string, mimeType: string): string {
+  const trimmedNote = noteText.trim();
+  const kind = describeAttachmentKind(mimeType).toLowerCase();
+  return trimmedNote ? `Sent ${kind}: ${trimmedNote}` : `Sent ${kind}`;
+}
+
+function attachmentMetadataText(message: StoredMessage): string {
+  if (!hasStoredAttachment(message)) {
+    return "";
+  }
+  const kind = describeAttachmentKind(attachmentMimeType(message));
+  const name = attachmentDisplayName(message);
+  const size = message.attachmentByteLength ? ` (${formatFileSize(message.attachmentByteLength)})` : "";
+  return `${kind}: ${name}${size}`;
+}
+
+function messageTranscriptText(message: StoredMessage): string {
+  const parts = new Set<string>();
+  const body = message.text.trim();
+  if (body) {
+    parts.add(body);
+  }
+  const attachmentLine = attachmentMetadataText(message);
+  if (attachmentLine) {
+    parts.add(attachmentLine);
+  }
+  const noteText = message.attachmentNoteText?.trim() || "";
+  if (noteText && !body.toLowerCase().includes(noteText.toLowerCase())) {
+    parts.add(noteText);
+  }
+  return Array.from(parts).join("\n").trim();
+}
+
+function messageSearchText(message: StoredMessage): string {
+  const parts = new Set<string>();
+  const transcript = messageTranscriptText(message);
+  if (transcript) {
+    parts.add(transcript);
+  }
+  const replyPreview = message.replyPreview?.trim() || "";
+  if (replyPreview) {
+    parts.add(replyPreview);
+  }
+  const fileName = message.fileName?.trim() || "";
+  if (fileName) {
+    parts.add(fileName);
+  }
+  const mimeType = message.mimeType?.trim() || "";
+  if (mimeType) {
+    parts.add(mimeType);
+  }
+  const attachmentKind = hasStoredAttachment(message) ? describeAttachmentKind(attachmentMimeType(message)) : "";
+  if (attachmentKind) {
+    parts.add(attachmentKind);
+  }
+  return Array.from(parts).join("\n");
+}
+
+function inlineMessagePreview(message: StoredMessage, maxLength = 80): string {
+  return messageTranscriptText(message).replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+function directConversationPreview(message: StoredMessage): string {
+  const preview = inlineMessagePreview(message) || "No messages yet";
+  return message.sender === setup.userId ? `You: ${preview}` : preview;
+}
+
+function groupConversationPreview(message: StoredMessage): string {
+  return inlineMessagePreview(message) || "No messages yet";
+}
+
+async function buildGroupOutboundPayload(text: string, attachment: File | null): Promise<GroupOutboundPayload> {
+  const trimmedText = text.trim();
+  if (!attachment) {
+    return {
+      plaintext: trimmedText,
+      previewText: `You: ${trimmedText}`,
+      storedText: `You: ${trimmedText}`,
+    };
+  }
+  const mimeType = attachment.type || "application/octet-stream";
+  const dataBase64 = arrayBufferToBase64(await attachment.arrayBuffer());
+  const attachmentEnvelope: MediaEnvelope = {
+    fileName: attachment.name,
+    mimeType,
+    noteText: trimmedText,
+    dataBase64,
+    byteLength: attachment.size,
+  };
+  const preview = attachmentConversationPreview(trimmedText, mimeType);
+  return {
+    plaintext: encodeMediaEnvelope(
+      attachmentEnvelope.fileName,
+      attachmentEnvelope.mimeType,
+      attachmentEnvelope.noteText,
+      attachmentEnvelope.dataBase64,
+    ),
+    previewText: `You: ${preview}`,
+    storedText: `You: ${preview}`,
+    attachment: attachmentEnvelope,
+  };
+}
+
+function buildInboundGroupAttachmentPreview(senderLabel: string, envelope: MediaEnvelope): string {
+  return `${senderLabel}: ${attachmentConversationPreview(envelope.noteText, envelope.mimeType)}`;
+}
+
+async function sendPrivateGroupMessage(groupId: string, outbound: GroupOutboundPayload): Promise<void> {
   const state = getPrivateGroupState(groupId);
   if (!state) {
     throw new Error("Private-group state is not available on this device.");
@@ -599,7 +765,7 @@ async function sendPrivateGroupMessage(groupId: string, body: string): Promise<v
     setup.userId,
     k.identitySigSecret,
     k.identityPqSigSecret,
-    body,
+    outbound.plaintext,
     Date.now()
   );
   const response = await api.publishPrivateGroupMessage({
@@ -615,16 +781,21 @@ async function sendPrivateGroupMessage(groupId: string, body: string): Promise<v
   });
   writePrivateGroupCursor(setup.userId, groupId, response.message_id);
   const ownerUserId = getPrivateGroupOwnerUserId(state);
-  upsertGroupConversation(setup.userId, groupId, ownerUserId, `You: ${body}`, false);
+  upsertGroupConversation(setup.userId, groupId, ownerUserId, outbound.previewText, false);
   await saveMessage({
     id: `srv-group-${response.message_id}`,
     conversationId: `group:${groupId}`,
     sender: setup.userId,
     recipient: groupId,
-    text: `You: ${body}`,
+    text: outbound.storedText,
     timestamp: encrypted.sent_at_unix_ms,
     status: "sent",
     serverMessageId: response.message_id,
+    mimeType: outbound.attachment?.mimeType,
+    fileName: outbound.attachment?.fileName,
+    attachmentDataBase64: outbound.attachment?.dataBase64,
+    attachmentByteLength: outbound.attachment?.byteLength,
+    attachmentNoteText: outbound.attachment?.noteText,
   });
 }
 
@@ -737,20 +908,33 @@ async function syncPrivateGroupMessagesForGroup(groupId: string): Promise<boolea
       localKeys
     );
     const senderLabel = resolvePeerIdentity(opened.sender_user_id).primaryLabel;
+    const attachmentEnvelope = decodeMediaEnvelope(opened.body);
+    const senderPrefix = opened.sender_user_id === setup.userId ? "You" : senderLabel;
+    const storedText = attachmentEnvelope
+      ? buildInboundGroupAttachmentPreview(senderPrefix, attachmentEnvelope)
+      : `${senderPrefix}: ${opened.body}`;
+    const conversationPreview = attachmentEnvelope
+      ? attachmentConversationPreview(attachmentEnvelope.noteText, attachmentEnvelope.mimeType)
+      : opened.body;
     await saveMessage({
       id: `srv-group-${item.message_id}`,
       conversationId: `group:${groupId}`,
       sender: opened.sender_user_id,
       recipient: groupId,
-      text: opened.sender_user_id === setup.userId ? `You: ${opened.body}` : `${senderLabel}: ${opened.body}`,
+      text: storedText,
       timestamp: item.sent_at_unix_ms,
       status: "delivered",
       serverMessageId: item.message_id,
+      mimeType: attachmentEnvelope?.mimeType,
+      fileName: attachmentEnvelope?.fileName,
+      attachmentDataBase64: attachmentEnvelope?.dataBase64,
+      attachmentByteLength: attachmentEnvelope?.byteLength,
+      attachmentNoteText: attachmentEnvelope?.noteText,
     });
     noteIncomingGroupConversation(
       groupId,
       opened.sender_user_id,
-      opened.body,
+      conversationPreview,
       activeGroupId !== groupId && opened.sender_user_id !== setup.userId
     );
     void loadProfileNameBackground(opened.sender_user_id);
@@ -860,6 +1044,26 @@ function showKeyboardShortcutOverlay(): void {
           <div class="shortcut-row">
             <span>Show keyboard shortcuts</span>
             <span class="shortcut-keys"><kbd>Ctrl</kbd><kbd>/</kbd> <span class="shortcut-sep">or</span> <kbd>Cmd</kbd><kbd>/</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span>Focus composer</span>
+            <span class="shortcut-keys"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>T</kbd> <span class="shortcut-sep">or</span> <kbd>Cmd</kbd><kbd>Shift</kbd><kbd>T</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span>Insert a new line while composing</span>
+            <span class="shortcut-keys"><kbd>Shift</kbd><kbd>Enter</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span>Expand composer</span>
+            <span class="shortcut-keys"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>X</kbd> <span class="shortcut-sep">or</span> <kbd>Cmd</kbd><kbd>Shift</kbd><kbd>X</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span>Send from expanded composer</span>
+            <span class="shortcut-keys"><kbd>Ctrl</kbd><kbd>Enter</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span>Attach file in direct chat</span>
+            <span class="shortcut-keys"><kbd>Ctrl</kbd><kbd>U</kbd> <span class="shortcut-sep">or</span> <kbd>Cmd</kbd><kbd>U</kbd></span>
           </div>
           <div class="shortcut-row">
             <span>Search in conversation</span>
@@ -1349,6 +1553,7 @@ type UnifiedConversationRow = {
   updatedAt: number;
   unreadCount: number;
   lastPreview: string;
+  draftText: string | null;
   meta: ConversationMeta;
   primaryLabel: string;
   secondaryLabel: string;
@@ -1562,6 +1767,29 @@ function toggleConversationPinned(kind: ConversationKind, threadId: string): Con
   return updateConversationMeta(setup.userId, kind, threadId, {
     pinnedAt: meta.pinnedAt ? null : Date.now(),
   });
+}
+
+function readConversationUnreadCount(kind: ConversationKind, threadId: string): number {
+  if (kind === "group") {
+    return loadGroupConversations(setup.userId).find((item) => item.groupId === threadId)?.unreadCount ?? 0;
+  }
+  return loadConversations(setup.userId).find((item) => item.peerUserId === threadId)?.unreadCount ?? 0;
+}
+
+function setConversationUnread(kind: ConversationKind, threadId: string, unread: boolean): void {
+  if (kind === "group") {
+    if (unread) {
+      setGroupConversationUnreadCount(setup.userId, threadId, 1);
+    } else {
+      markGroupConversationRead(setup.userId, threadId);
+    }
+    return;
+  }
+  if (unread) {
+    setConversationUnreadCount(setup.userId, threadId, 1);
+  } else {
+    markConversationRead(setup.userId, threadId);
+  }
 }
 
 function setConversationSendDefaults(
@@ -2205,6 +2433,11 @@ function renderConversations(): void {
   const listHtml = visibleRows.length === 0
     ? renderEmptyState(activeInboxFilter)
     : visibleRows.map((row) => renderConversationRow(row)).join("");
+  const archiveToggle = activeInboxFilter === "archived"
+    ? `<button id="archived-toggle" class="summary-link-btn" type="button">Back to inbox</button>`
+    : counts.archived > 0
+      ? `<button id="archived-toggle" class="summary-link-btn" type="button">View archived</button>`
+      : "";
 
   app.innerHTML = `
     <div class="app-shell">
@@ -2235,6 +2468,7 @@ function renderConversations(): void {
       <div class="inbox-summary" role="status" aria-live="polite">
         <span class="inbox-pill">${counts.unread > 0 ? `${counts.unread} unread` : "Protected"}</span>
         <span class="inbox-caption">Post-quantum chats stay centered here while requests, groups, and archived threads stay one tap away.</span>
+        ${archiveToggle}
       </div>
       <div class="filter-chip-bar" role="tablist" aria-label="Inbox filters">
         ${renderInboxFilter("all", "All", counts.all)}
@@ -2277,6 +2511,10 @@ function renderConversations(): void {
   q("#conv-search").addEventListener("click", () => navigateTo({ screen: "search" }));
   q("#conv-shortcuts").addEventListener("click", () => showKeyboardShortcutOverlay());
   q("#conv-settings").addEventListener("click", () => navigateTo({ screen: "settings" }));
+  document.querySelector<HTMLButtonElement>("#archived-toggle")?.addEventListener("click", () => {
+    activeInboxFilter = activeInboxFilter === "archived" ? "all" : "archived";
+    renderConversations();
+  });
   for (const chip of document.querySelectorAll<HTMLButtonElement>("[data-inbox-filter]")) {
     chip.addEventListener("click", () => {
       const nextFilter = (chip.dataset.inboxFilter as InboxFilter) || "all";
@@ -2356,12 +2594,15 @@ function buildUnifiedConversationRows(
     const meta = getConversationMetaCached(metaLookup, "dm", summary.peerUserId);
     const label = resolvePeerIdentity(summary.peerUserId);
     const presence = peerPresenceCache[summary.peerUserId];
+    const draftText = readThreadDraft(setup.userId, "dm", summary.peerUserId).trim() || null;
+    const draftUpdatedAt = readThreadDraftUpdatedAt(setup.userId, "dm", summary.peerUserId);
     return {
       kind: "dm" as const,
       threadId: summary.peerUserId,
-      updatedAt: summary.updatedAt,
+      updatedAt: Math.max(summary.updatedAt, draftUpdatedAt),
       unreadCount: summary.unreadCount,
       lastPreview: summary.lastPreview,
+      draftText,
       meta,
       primaryLabel: label.primaryLabel,
       secondaryLabel: label.secondaryLabel,
@@ -2373,12 +2614,15 @@ function buildUnifiedConversationRows(
   const groupRows = groupConvos.map((summary) => {
     const meta = getConversationMetaCached(metaLookup, "group", summary.groupId);
     const label = resolveGroupIdentity(summary.groupId, summary.ownerUserId);
+    const draftText = readThreadDraft(setup.userId, "group", summary.groupId).trim() || null;
+    const draftUpdatedAt = readThreadDraftUpdatedAt(setup.userId, "group", summary.groupId);
     return {
       kind: "group" as const,
       threadId: summary.groupId,
-      updatedAt: summary.updatedAt,
+      updatedAt: Math.max(summary.updatedAt, draftUpdatedAt),
       unreadCount: summary.unreadCount,
       lastPreview: summary.lastPreview,
+      draftText,
       meta,
       primaryLabel: label.primaryLabel,
       secondaryLabel: label.secondaryLabel,
@@ -2477,6 +2721,8 @@ function renderConversationRow(row: UnifiedConversationRow): string {
     ? `<span class="presence-dot presence-${escHtml(row.presenceStatus)}"></span>`
     : "";
   const handle = row.secondaryLabel ? `<span class="conv-handle">${escHtml(row.secondaryLabel)}</span>` : "";
+  const draftPrefix = row.draftText ? `<span class="conv-preview-prefix">Draft</span>` : "";
+  const previewText = row.draftText || row.lastPreview;
   const verified = row.isVerified ? `<span class="verified-badge" title="Trusted identity">✓</span>` : "";
   const requestBadge = row.kind === "dm" && row.meta.requestState === "pending"
     ? `<span class="conv-state-badge">Request</span>`
@@ -2504,7 +2750,8 @@ function renderConversationRow(row: UnifiedConversationRow): string {
           <span class="conv-time">${time}</span>
         </div>
         <div class="conv-bottom">
-          <span class="conv-preview">${escHtml(row.lastPreview)}</span>
+          ${draftPrefix}
+          <span class="conv-preview${row.draftText ? " conv-preview-draft" : ""}">${escHtml(previewText)}</span>
           ${handle}
         </div>
       </div>
@@ -2531,11 +2778,22 @@ function renderConversationRow(row: UnifiedConversationRow): string {
 function showConversationActionMenu(anchor: HTMLElement, kind: ConversationKind, threadId: string): void {
   document.querySelector(".ctx-menu")?.remove();
   const meta = loadConversationMeta(setup.userId, kind, threadId);
+  const unreadCount = readConversationUnreadCount(kind, threadId);
   const items: Array<{ label: string; className?: string; action: () => void }> = [
+    {
+      label: unreadCount > 0 ? "Mark read" : "Mark unread",
+      action: () => {
+        const nextUnread = unreadCount === 0;
+        setConversationUnread(kind, threadId, nextUnread);
+        notify(nextUnread ? "Marked unread" : "Marked read", "success");
+        refreshConversationsIfVisible();
+      },
+    },
     {
       label: meta.pinnedAt ? "Unpin" : "Pin",
       action: () => {
         toggleConversationPinned(kind, threadId);
+        notify(meta.pinnedAt ? "Chat unpinned" : "Chat pinned", "success");
         refreshConversationsIfVisible();
       },
     },
@@ -2543,6 +2801,7 @@ function showConversationActionMenu(anchor: HTMLElement, kind: ConversationKind,
       label: meta.archivedAt ? "Unarchive" : "Archive",
       action: () => {
         setConversationArchived(kind, threadId, !meta.archivedAt);
+        notify(meta.archivedAt ? "Chat restored" : "Chat archived", "success");
         refreshConversationsIfVisible();
       },
     },
@@ -2781,7 +3040,12 @@ async function renderChat(peerId: string): Promise<void> {
             <span>Disappearing messages</span>
             <strong>Unavailable</strong>
           </div>
+          <div class="chat-details-row">
+            <span>Shared media</span>
+            <strong id="detail-shared-media-count">0 items</strong>
+          </div>
           <div class="chat-details-actions">
+            <button id="detail-shared-media" class="btn-secondary">Shared media</button>
             <button id="detail-verify-safety" class="btn-secondary" ${identityPin ? "" : "disabled"}>${verifySafetyLabel}</button>
             <button id="detail-pin" class="btn-secondary">${meta.pinnedAt ? "Unpin Chat" : "Pin Chat"}</button>
             <button id="detail-archive" class="btn-secondary">${meta.archivedAt ? "Unarchive" : "Archive"}</button>
@@ -2806,7 +3070,12 @@ async function renderChat(peerId: string): Promise<void> {
             <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
           </svg>
         </button>
-        <input id="chat-input" type="text" placeholder="Write a message" autocomplete="off" aria-label="Message" />
+        <button id="chat-expand-compose" class="icon-btn attach-btn" title="Expand composer" aria-label="Expand composer">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>
+          </svg>
+        </button>
+        <textarea id="chat-input" class="chat-compose-input" rows="1" placeholder="Write a message" aria-label="Message"></textarea>
         <button id="chat-send" class="send-btn" disabled aria-label="Send message">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
@@ -2885,6 +3154,25 @@ async function renderChat(peerId: string): Promise<void> {
           </div>
         </div>
       </div>
+      <div id="chat-expanded-compose" class="expanded-compose-sheet hidden" aria-hidden="true">
+        <div class="expanded-compose-card" role="dialog" aria-modal="true" aria-labelledby="chat-expanded-title">
+          <div class="expanded-compose-head">
+            <div>
+              <h3 id="chat-expanded-title">Expanded composer</h3>
+              <p>Use Shift+Enter for a new line and Ctrl+Enter to send.</p>
+            </div>
+            <button id="chat-expanded-close" class="icon-btn" aria-label="Close expanded composer">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                <path d="M18 6L6 18M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
+          <textarea id="chat-expanded-input" class="expanded-compose-input" rows="6" placeholder="Write a message"></textarea>
+          <div class="expanded-compose-actions">
+            <button id="chat-expanded-send" class="btn-primary">Send</button>
+          </div>
+        </div>
+      </div>
     </div>
   `;
 
@@ -2892,7 +3180,7 @@ async function renderChat(peerId: string): Promise<void> {
   const container = q("#messages-container");
   const conversationId = convId(setup.userId, peerId);
   msgList.dataset.conversationId = conversationId;
-  const input = q<HTMLInputElement>("#chat-input");
+  const input = q<HTMLTextAreaElement>("#chat-input");
   const sendBtn = q<HTMLButtonElement>("#chat-send");
   const selectionBar = q<HTMLElement>("#message-selection-bar");
   const selectionCount = q<HTMLElement>("#message-selection-count");
@@ -2909,16 +3197,30 @@ async function renderChat(peerId: string): Promise<void> {
   const threadSearchClose = q<HTMLButtonElement>("#thread-search-close");
   const emojiBtn = q<HTMLButtonElement>("#chat-emoji");
   const attachBtn = q<HTMLButtonElement>("#chat-attach");
+  const expandComposeBtn = q<HTMLButtonElement>("#chat-expand-compose");
   const fileInput = q<HTMLInputElement>("#file-input");
   const detailsSheet = q("#chat-details-sheet");
   const inlineDetailsBtn = q<HTMLButtonElement>("#chat-open-details-inline");
+  const detailSharedMediaBtn = q<HTMLButtonElement>("#detail-shared-media");
+  const detailSharedMediaCount = q<HTMLElement>("#detail-shared-media-count");
   const attachmentSheet = q("#attachment-sheet");
   const attachmentPreview = q("#attachment-preview");
   const emojiTray = q("#chat-emoji-tray");
+  const expandedComposeSheet = q<HTMLElement>("#chat-expanded-compose");
+  const expandedComposeInput = q<HTMLTextAreaElement>("#chat-expanded-input");
+  const expandedComposeClose = q<HTMLButtonElement>("#chat-expanded-close");
+  const expandedComposeSend = q<HTMLButtonElement>("#chat-expanded-send");
   let sendInFlight = false;
   const useSealed = true;
   let pendingAttachmentFile: File | null = null;
   let pendingAttachmentPreviewUrl: string | null = null;
+  const initialDraft = readThreadDraft(setup.userId, "dm", peerId);
+  if (initialDraft) {
+    input.value = initialDraft;
+    expandedComposeInput.value = initialDraft;
+    autoResizeComposeField(input);
+    autoResizeComposeField(expandedComposeInput);
+  }
   const syncSelection = async (): Promise<void> => {
     await syncMessageSelectionUi(
       conversationId,
@@ -2931,9 +3233,79 @@ async function renderChat(peerId: string): Promise<void> {
   };
   const syncSendAvailability = (): void => {
     const busy = sendInFlight;
-    sendBtn.disabled = !directMessagingReady || (!input.value.trim() && !pendingAttachmentFile) || busy;
+    const allowEmptyEdit = Boolean(editContext?.allowEmptyText);
+    sendBtn.disabled = !directMessagingReady || (!input.value.trim() && !pendingAttachmentFile && !allowEmptyEdit) || busy;
     attachBtn.disabled = busy;
     emojiBtn.disabled = busy;
+    expandComposeBtn.disabled = busy;
+    expandedComposeSend.disabled = sendBtn.disabled;
+  };
+  const syncComposeValue = (value: string, persist = true): void => {
+    if (input.value !== value) {
+      input.value = value;
+    }
+    if (expandedComposeInput.value !== value) {
+      expandedComposeInput.value = value;
+    }
+    autoResizeComposeField(input);
+    autoResizeComposeField(expandedComposeInput);
+    syncSendAvailability();
+    if (persist) {
+      writeThreadDraft(setup.userId, "dm", peerId, value);
+    }
+  };
+  const resetSendButton = (): void => {
+    sendBtn.textContent = "";
+    sendBtn.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>`;
+  };
+  const refreshDirectConversationAfterLocalDelete = (history: StoredMessage[]): void => {
+    const latest = history.at(-1);
+    const existing = loadConversations(setup.userId).find((item) => item.peerUserId === peerId);
+    upsertConversation(
+      setup.userId,
+      peerId,
+      latest ? directConversationPreview(latest) : "No messages yet",
+      false,
+      latest?.timestamp ?? existing?.updatedAt ?? Date.now(),
+    );
+    refreshConversationsIfVisible();
+  };
+  const deleteMessagesFromDevice = async (ids: string[]): Promise<void> => {
+    if (ids.length === 0) {
+      return;
+    }
+    await deleteMessages(ids);
+    if (replyContext && ids.includes(replyContext.msgId)) {
+      replyContext = null;
+      document.querySelector(".reply-compose-bar")?.remove();
+    }
+    if (editContext && ids.includes(editContext.msgId)) {
+      editContext = null;
+      resetSendButton();
+      syncComposeValue("");
+    }
+    clearMessageSelection(conversationId);
+    const history = await getMessages(conversationId);
+    renderMessageList(msgList, history);
+    refreshDirectConversationAfterLocalDelete(history);
+    syncThreadSearch(false);
+    await syncSelection();
+  };
+  const openExpandedComposer = (): void => {
+    expandedComposeSheet.classList.remove("hidden");
+    expandedComposeSheet.setAttribute("aria-hidden", "false");
+    syncComposeValue(input.value, false);
+    expandedComposeInput.focus();
+    const pos = expandedComposeInput.value.length;
+    expandedComposeInput.setSelectionRange(pos, pos);
+  };
+  const closeExpandedComposer = (focusComposer = true): void => {
+    syncComposeValue(expandedComposeInput.value);
+    expandedComposeSheet.classList.add("hidden");
+    expandedComposeSheet.setAttribute("aria-hidden", "true");
+    if (focusComposer) {
+      input.focus();
+    }
   };
   let threadSearchIndex = 0;
   const syncThreadSearch = (scrollToActive = true): void => {
@@ -3074,13 +3446,14 @@ async function renderChat(peerId: string): Promise<void> {
     void syncSelection();
   };
   const insertQuickEmoji = (emoji: string): void => {
-    const start = input.selectionStart ?? input.value.length;
-    const end = input.selectionEnd ?? start;
-    input.value = `${input.value.slice(0, start)}${emoji}${input.value.slice(end)}`;
+    const activeField = !expandedComposeSheet.classList.contains("hidden") ? expandedComposeInput : input;
+    const start = activeField.selectionStart ?? activeField.value.length;
+    const end = activeField.selectionEnd ?? start;
+    const nextValue = `${activeField.value.slice(0, start)}${emoji}${activeField.value.slice(end)}`;
+    syncComposeValue(nextValue);
     const nextPos = start + emoji.length;
-    input.focus();
-    input.setSelectionRange(nextPos, nextPos);
-    syncSendAvailability();
+    activeField.focus();
+    activeField.setSelectionRange(nextPos, nextPos);
   };
   emojiTray.innerHTML = ["😀", "❤️", "👍", "🎉", "🔥", "😮", "😭", "🙏"]
     .map((emoji) => `<button type="button" class="emoji-chip" data-emoji="${emoji}" aria-label="Insert ${emoji}">${emoji}</button>`)
@@ -3108,6 +3481,14 @@ async function renderChat(peerId: string): Promise<void> {
   });
   q("#chat-details-close").addEventListener("click", () => {
     detailsSheet.classList.add("hidden");
+  });
+  detailSharedMediaBtn.addEventListener("click", () => {
+    detailsSheet.classList.add("hidden");
+    void showSharedMediaSheet({
+      title: `${displayName} shared media`,
+      conversationId,
+      emptyMessage: "No shared media in this chat yet.",
+    });
   });
   threadSearchInput.addEventListener("input", () => {
     threadSearchIndex = 0;
@@ -3170,13 +3551,30 @@ async function renderChat(peerId: string): Promise<void> {
   emojiBtn.addEventListener("click", () => {
     emojiTray.classList.toggle("hidden");
   });
+  expandComposeBtn.addEventListener("click", () => {
+    openExpandedComposer();
+  });
+  expandedComposeClose.addEventListener("click", () => closeExpandedComposer());
+  expandedComposeSend.addEventListener("click", () => {
+    syncComposeValue(expandedComposeInput.value);
+    sendBtn.click();
+  });
+  expandedComposeSheet.addEventListener("click", (event) => {
+    if (event.target === expandedComposeSheet) {
+      closeExpandedComposer();
+    }
+  });
   for (const button of emojiTray.querySelectorAll<HTMLButtonElement>("[data-emoji]")) {
     button.addEventListener("click", () => insertQuickEmoji(button.dataset.emoji || ""));
   }
 
   // Enable send when input has content
   input.addEventListener("input", () => {
-    syncSendAvailability();
+    syncComposeValue(input.value);
+    sendTypingIndicator(peerId, true);
+  });
+  expandedComposeInput.addEventListener("input", () => {
+    syncComposeValue(expandedComposeInput.value);
     sendTypingIndicator(peerId, true);
   });
   input.addEventListener("focus", () => {
@@ -3184,20 +3582,34 @@ async function renderChat(peerId: string): Promise<void> {
   });
 
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.repeat && !sendBtn.disabled && !sendInFlight) {
+    if (e.key === "Enter" && !e.shiftKey && !e.repeat && !sendBtn.disabled && !sendInFlight) {
       e.preventDefault();
       sendBtn.click();
+    }
+  });
+  expandedComposeInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.ctrlKey && !expandedComposeSend.disabled && !sendInFlight) {
+      event.preventDefault();
+      expandedComposeSend.click();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeExpandedComposer(false);
     }
   });
 
   syncSendAvailability();
   updateInputPlaceholder();
+  autoResizeComposeField(input);
+  autoResizeComposeField(expandedComposeInput);
 
   // Send message with optimistic UI
   sendBtn.addEventListener("click", async () => {
     const text = input.value.trim();
     const attachment = pendingAttachmentFile;
-    if ((!text && !attachment) || sendInFlight) return;
+    const canSubmitEmptyEdit = Boolean(editContext?.allowEmptyText);
+    if ((!text && !attachment && !canSubmitEmptyEdit) || sendInFlight) return;
     if (!(await ensureWebMessagingAllowed("direct"))) return;
     if (editContext && attachment) {
       notify("Finish editing before adding media", "info");
@@ -3210,21 +3622,25 @@ async function renderChat(peerId: string): Promise<void> {
       if (editContext) {
         const { msgId } = editContext;
         editContext = null;
-        sendBtn.textContent = "";
-        sendBtn.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>`;
+        resetSendButton();
         const updated = await editStoredMessage(msgId, text);
         if (updated) {
-          const bubble = document.getElementById(`msg-${msgId}`);
-          if (bubble) {
-            const btEl = bubble.querySelector(".bubble-text");
-            if (btEl) btEl.textContent = text;
-            const timeEl = bubble.querySelector(".bubble-time");
-            if (timeEl && !timeEl.querySelector(".edit-indicator")) {
-              timeEl.insertAdjacentHTML("beforeend", ' <span class="edit-indicator">(edited)</span>');
-            }
+          const history = await getMessages(conversationId);
+          renderMessageList(msgList, history);
+          const latest = history.at(-1);
+          if (latest) {
+            upsertConversation(
+              setup.userId,
+              peerId,
+              directConversationPreview(latest),
+              false,
+              latest.timestamp,
+            );
+            refreshConversationsIfVisible();
           }
         }
         input.value = "";
+        syncComposeValue("");
         return;
       }
 
@@ -3263,6 +3679,8 @@ async function renderChat(peerId: string): Promise<void> {
             fileId: res.file_id,
             mimeType,
             fileName: attachment.name,
+            attachmentByteLength: attachment.size,
+            attachmentNoteText: text,
             replyToId: replyMeta?.msgId,
             replyPreview: replyMeta?.preview,
             contentType: replyMeta ? "reply" : "text",
@@ -3275,7 +3693,7 @@ async function renderChat(peerId: string): Promise<void> {
           upsertConversation(setup.userId, peerId, conversationPreview, false);
           markConversationRead(setup.userId, peerId);
           refreshConversationsIfVisible();
-          input.value = "";
+          syncComposeValue("");
           clearPendingAttachment();
         } catch (e) {
           notify(`Upload failed: ${errorMsg(e)}`, "error");
@@ -3297,7 +3715,7 @@ async function renderChat(peerId: string): Promise<void> {
         contentType: replyMeta ? "reply" : "text",
       };
 
-      input.value = "";
+      syncComposeValue("");
       await saveMessage(msg);
       upsertConversation(setup.userId, peerId, `You: ${text}`, false);
       markConversationRead(setup.userId, peerId);
@@ -3431,6 +3849,14 @@ async function renderChat(peerId: string): Promise<void> {
       sendBtn,
       peerId,
       () => { void syncSelection(); },
+      {
+        allowEdit: true,
+        allowServerDelete: true,
+        onLocalDelete: async (targetMsgId) => {
+          await deleteMessagesFromDevice([targetMsgId]);
+          notify("Message deleted from this device", "success");
+        },
+      },
     );
   });
 
@@ -3443,7 +3869,7 @@ async function renderChat(peerId: string): Promise<void> {
     const selected = (await getMessages(conversationId)).filter((message) =>
       messageSelectionState?.selectedIds.has(message.id),
     );
-    await navigator.clipboard.writeText(selected.map((message) => message.text).join("\n\n"));
+    await navigator.clipboard.writeText(selected.map((message) => messageTranscriptText(message)).join("\n\n"));
     notify("Messages copied", "success");
   });
   selectionShareBtn.addEventListener("click", async () => {
@@ -3451,7 +3877,7 @@ async function renderChat(peerId: string): Promise<void> {
     const selected = (await getMessages(conversationId)).filter((message) =>
       messageSelectionState?.selectedIds.has(message.id),
     );
-    const payload = selected.map((message) => message.text).join("\n\n");
+    const payload = selected.map((message) => messageTranscriptText(message)).join("\n\n");
     if (navigator.share) {
       try {
         await navigator.share({ text: payload });
@@ -3467,11 +3893,7 @@ async function renderChat(peerId: string): Promise<void> {
     if (!isMessageSelectionActive(conversationId)) return;
     const ids = Array.from(messageSelectionState?.selectedIds ?? []);
     if (ids.length === 0) return;
-    await deleteMessages(ids);
-    clearMessageSelection(conversationId);
-    const history = await getMessages(conversationId);
-    renderMessageList(msgList, history);
-    await syncSelection();
+    await deleteMessagesFromDevice(ids);
     notify("Messages deleted from this device", "success");
   });
 
@@ -3500,18 +3922,31 @@ async function renderChat(peerId: string): Promise<void> {
       sendBtn,
       peerId,
       () => { void syncSelection(); },
+      {
+        allowEdit: true,
+        allowServerDelete: true,
+        onLocalDelete: async (targetMsgId) => {
+          await deleteMessagesFromDevice([targetMsgId]);
+          notify("Message deleted from this device", "success");
+        },
+      },
     );
   };
   const replyToSelectedMessage = (): void => {
     const bubble = selectedBubble();
     if (!bubble) return;
     const msgId = bubble.id.replace("msg-", "");
-    const text = bubble.querySelector(".bubble-text")?.textContent || "";
     clearMessageSelection(conversationId);
     void syncSelection();
-    replyContext = { msgId, preview: text.slice(0, 60) };
-    showReplyBar(input);
-    input.focus();
+    void (async () => {
+      const stored = await getMessage(msgId);
+      const preview = (
+        stored ? messageTranscriptText(stored) : bubble.querySelector(".bubble-text")?.textContent || ""
+      ).replace(/\s+/g, " ").trim();
+      replyContext = { msgId, preview: preview.slice(0, 60) };
+      showReplyBar(input);
+      input.focus();
+    })();
   };
   const reactToSelectedMessage = (): void => {
     const bubble = selectedBubble();
@@ -3533,9 +3968,33 @@ async function renderChat(peerId: string): Promise<void> {
       openThreadSearch();
       return;
     }
+    if (withModifier && event.shiftKey && key === "t") {
+      event.preventDefault();
+      input.focus();
+      return;
+    }
+    if (withModifier && event.shiftKey && key === "x") {
+      event.preventDefault();
+      if (expandedComposeSheet.classList.contains("hidden")) {
+        openExpandedComposer();
+      } else {
+        closeExpandedComposer(false);
+      }
+      return;
+    }
+    if (withModifier && !event.shiftKey && key === "u") {
+      event.preventDefault();
+      attachBtn.click();
+      return;
+    }
     if (event.key === "Escape" && !threadSearchBar.classList.contains("hidden")) {
       event.preventDefault();
       closeThreadSearch(false);
+      return;
+    }
+    if (event.key === "Escape" && !expandedComposeSheet.classList.contains("hidden")) {
+      event.preventDefault();
+      closeExpandedComposer(false);
       return;
     }
     if (!isMessageSelectionActive(conversationId)) {
@@ -3576,6 +4035,9 @@ async function renderChat(peerId: string): Promise<void> {
   // Load history from IndexedDB
   const cid = conversationId;
   const history = await getMessages(cid);
+  const sharedMediaCount = history.filter((message) => hasStoredAttachment(message)).length;
+  detailSharedMediaCount.textContent = sharedMediaCount === 1 ? "1 item" : `${sharedMediaCount} items`;
+  detailSharedMediaBtn.textContent = sharedMediaCount > 0 ? `Shared media (${sharedMediaCount})` : "Shared media";
   renderMessageList(msgList, history);
   await syncSelection();
   syncThreadSearch(false);
@@ -3647,13 +4109,88 @@ function appendBubble(container: HTMLElement, msg: StoredMessage, scrollContaine
 // Blob URL cache for downloaded file previews
 const mediaBlobCache = new Map<string, string>();
 
+function hasStoredAttachment(msg: StoredMessage): boolean {
+  return Boolean(msg.fileId || msg.attachmentDataBase64);
+}
+
+function attachmentDisplayName(msg: StoredMessage): string {
+  return msg.fileName || msg.fileId || "attachment";
+}
+
+function attachmentMimeType(msg: StoredMessage): string {
+  return msg.mimeType || "application/octet-stream";
+}
+
+function attachmentCaptionText(msg: StoredMessage): string {
+  return msg.attachmentNoteText ?? msg.text;
+}
+
+function inlineAttachmentCacheKey(msg: StoredMessage): string {
+  return `inline:${msg.id}`;
+}
+
+function buildInlineAttachmentBlob(msg: StoredMessage): Blob | null {
+  const dataBase64 = msg.attachmentDataBase64?.trim();
+  if (!dataBase64) {
+    return null;
+  }
+  try {
+    const bytes = Uint8Array.from(atob(dataBase64), (c) => c.charCodeAt(0));
+    return new Blob([bytes], { type: attachmentMimeType(msg) });
+  } catch {
+    return null;
+  }
+}
+
+function getStoredAttachmentUrl(msg: StoredMessage): string | null {
+  if (msg.fileId) {
+    return mediaBlobCache.get(msg.fileId) ?? null;
+  }
+  const cacheKey = inlineAttachmentCacheKey(msg);
+  const cached = mediaBlobCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const blob = buildInlineAttachmentBlob(msg);
+  if (!blob) {
+    return null;
+  }
+  const url = URL.createObjectURL(blob);
+  mediaBlobCache.set(cacheKey, url);
+  return url;
+}
+
+function openInlineAttachment(msg: StoredMessage): void {
+  const blob = buildInlineAttachmentBlob(msg);
+  if (!blob) {
+    notify("Attachment is not available on this device", "error");
+    return;
+  }
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = attachmentDisplayName(msg);
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+async function openStoredAttachment(msg: StoredMessage): Promise<void> {
+  if (msg.fileId) {
+    await downloadAndOpenFile(msg.fileId);
+    return;
+  }
+  openInlineAttachment(msg);
+}
+
 function renderMediaContent(msg: StoredMessage): string {
-  if (!msg.fileId) return `<div class="bubble-text">${escHtml(msg.text)}</div>`;
-  const mime = msg.mimeType || "application/octet-stream";
-  const name = msg.fileName || msg.fileId;
-  const blobUrl = mediaBlobCache.get(msg.fileId);
+  if (!hasStoredAttachment(msg)) {
+    return `<div class="bubble-text">${escHtml(msg.text)}</div>`;
+  }
+  const mime = attachmentMimeType(msg);
+  const name = attachmentDisplayName(msg);
+  const blobUrl = getStoredAttachmentUrl(msg);
   if (mime.startsWith("image/") && blobUrl) {
-    return `<img src="${blobUrl}" alt="${escHtml(name)}" class="media-img" loading="lazy" data-file-id="${escHtml(msg.fileId)}" />`;
+    return `<img src="${blobUrl}" alt="${escHtml(name)}" class="media-img" loading="lazy" />`;
   }
   if (mime.startsWith("audio/") && blobUrl) {
     return `<audio controls src="${blobUrl}" class="media-audio"></audio>`;
@@ -3662,18 +4199,19 @@ function renderMediaContent(msg: StoredMessage): string {
     return `<video controls src="${blobUrl}" class="media-video"></video>`;
   }
   // Show loading placeholder or download link
-  if (mime.startsWith("image/") || mime.startsWith("audio/") || mime.startsWith("video/")) {
+  if (msg.fileId && (mime.startsWith("image/") || mime.startsWith("audio/") || mime.startsWith("video/"))) {
     return `<div class="media-loading" data-file-id="${escHtml(msg.fileId)}">Loading media…</div>`;
   }
-  return `<a class="media-file-link" href="#" data-file-id="${escHtml(msg.fileId)}">📎 ${escHtml(name)}</a>`;
+  return `<button type="button" class="media-file-link">📎 ${escHtml(name)}</button>`;
 }
 
 function renderBubbleBody(msg: StoredMessage): string {
-  if (!msg.fileId) {
+  if (!hasStoredAttachment(msg)) {
     return `<div class="bubble-text">${escHtml(msg.text)}</div>`;
   }
-  const caption = msg.text
-    ? `<div class="bubble-text bubble-media-caption">${escHtml(msg.text)}</div>`
+  const captionText = attachmentCaptionText(msg).trim();
+  const caption = captionText
+    ? `<div class="bubble-text bubble-media-caption">${escHtml(captionText)}</div>`
     : "";
   return `${renderMediaContent(msg)}${caption}`;
 }
@@ -3714,6 +4252,8 @@ function appendBubbleElement(container: HTMLElement, msg: StoredMessage): void {
   if (msg.serverMessageId) {
     bubble.setAttribute("data-server-mid", String(msg.serverMessageId));
   }
+  bubble.dataset.hasAttachment = hasStoredAttachment(msg) ? "1" : "";
+  bubble.dataset.searchText = messageSearchText(msg).toLowerCase();
 
   const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const statusIcon = isMine ? statusSvg(msg.status) : "";
@@ -3741,11 +4281,11 @@ function appendBubbleElement(container: HTMLElement, msg: StoredMessage): void {
   if (img) img.addEventListener("click", () => showLightbox(img.src));
 
   // Download link for non-previewable files
-  const fileLink = bubble.querySelector<HTMLAnchorElement>(".media-file-link");
+  const fileLink = bubble.querySelector<HTMLButtonElement>(".media-file-link");
   if (fileLink) {
     fileLink.addEventListener("click", (e) => {
       e.preventDefault();
-      void downloadAndOpenFile(fileLink.dataset.fileId!);
+      void openStoredAttachment(msg);
     });
   }
 
@@ -3818,7 +4358,7 @@ function refreshThreadSearchDecorations(container: HTMLElement): string[] {
   const matches: string[] = [];
   for (const bubble of bubbles) {
     const bubbleId = bubble.id.replace("msg-", "");
-    const bubbleText = bubble.querySelector(".bubble-text")?.textContent?.toLowerCase() || "";
+    const bubbleText = bubble.dataset.searchText || "";
     const isMatch = !!query && bubbleText.includes(query);
     if (isMatch) {
       matches.push(bubbleId);
@@ -4238,15 +4778,110 @@ async function renderGroupChat(groupId: string): Promise<void> {
       <div class="messages-container" id="messages-container">
         <div class="messages" id="messages-list" role="log" aria-live="polite"></div>
       </div>
+      <div id="group-attachment-preview" class="attachment-preview hidden" aria-live="polite"></div>
       <div id="group-input-bar" class="chat-input-bar">
-        <input id="gc-input" type="text" placeholder="Message ${escHtml(groupTitle)}" autocomplete="off" aria-label="Group message" />
+        <button id="gc-attach" class="icon-btn attach-btn" title="Attach file" aria-label="Attach file">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21.44 11.05l-8.49 8.49a5 5 0 1 1-7.07-7.07l8.49-8.49a3.5 3.5 0 1 1 4.95 4.95l-8.5 8.49a2 2 0 0 1-2.82-2.83l7.78-7.78"/>
+          </svg>
+        </button>
+        <button id="gc-expand-compose" class="icon-btn attach-btn" title="Expand composer" aria-label="Expand composer">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>
+          </svg>
+        </button>
+        <textarea id="gc-input" class="chat-compose-input" rows="1" placeholder="Message ${escHtml(groupTitle)}" aria-label="Group message"></textarea>
         <button id="gc-send" class="send-btn" aria-label="Send group message">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
           </svg>
         </button>
       </div>
+      <input id="group-file-input" type="file" class="hidden" />
       <p id="gc-status" class="text-secondary"></p>
+      <div id="group-attachment-sheet" class="attachment-sheet hidden" aria-hidden="true">
+        <div class="attachment-sheet-card" role="dialog" aria-modal="true" aria-labelledby="group-attachment-sheet-title">
+          <div class="attachment-sheet-head">
+            <div>
+              <h3 id="group-attachment-sheet-title">Share something</h3>
+              <p>Send photos, videos, audio, or files in this private group.</p>
+            </div>
+            <button id="group-attachment-sheet-close" class="icon-btn" aria-label="Close attachment options">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                <path d="M18 6L6 18M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
+          <div class="attachment-sheet-grid">
+            <button class="attachment-option" data-group-attach-kind="camera">
+              <span class="attachment-option-icon camera">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M4 7h3l2-2h6l2 2h3v12H4z"/><circle cx="12" cy="13" r="4"/>
+                </svg>
+              </span>
+              <span class="attachment-option-copy">
+                <strong>Camera</strong>
+                <span>Capture a photo or video</span>
+              </span>
+            </button>
+            <button class="attachment-option" data-group-attach-kind="media">
+              <span class="attachment-option-icon media">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>
+                </svg>
+              </span>
+              <span class="attachment-option-copy">
+                <strong>Media</strong>
+                <span>Choose from your library</span>
+              </span>
+            </button>
+            <button class="attachment-option" data-group-attach-kind="audio">
+              <span class="attachment-option-icon audio">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
+                </svg>
+              </span>
+              <span class="attachment-option-copy">
+                <strong>Audio</strong>
+                <span>Share voice notes or audio files</span>
+              </span>
+            </button>
+            <button class="attachment-option" data-group-attach-kind="document">
+              <span class="attachment-option-icon document">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>
+                </svg>
+              </span>
+              <span class="attachment-option-copy">
+                <strong>Document</strong>
+                <span>Share PDFs and other files</span>
+              </span>
+            </button>
+          </div>
+          <div class="attachment-sheet-actions">
+            <button id="group-attachment-sheet-cancel" class="btn-secondary">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <div id="gc-expanded-compose" class="expanded-compose-sheet hidden" aria-hidden="true">
+        <div class="expanded-compose-card" role="dialog" aria-modal="true" aria-labelledby="gc-expanded-title">
+          <div class="expanded-compose-head">
+            <div>
+              <h3 id="gc-expanded-title">Expanded composer</h3>
+              <p>Use Shift+Enter for a new line and Ctrl+Enter to send.</p>
+            </div>
+            <button id="gc-expanded-close" class="icon-btn" aria-label="Close expanded composer">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                <path d="M18 6L6 18M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
+          <textarea id="gc-expanded-input" class="expanded-compose-input" rows="6" placeholder="Message ${escHtml(groupTitle)}"></textarea>
+          <div class="expanded-compose-actions">
+            <button id="gc-expanded-send" class="btn-primary">Send</button>
+          </div>
+        </div>
+      </div>
     </div>
   `;
 
@@ -4254,9 +4889,14 @@ async function renderGroupChat(groupId: string): Promise<void> {
   const container = q("#messages-container");
   const conversationId = `group:${groupId}`;
   msgList.dataset.conversationId = conversationId;
-  const input = q<HTMLInputElement>("#gc-input");
+  const input = q<HTMLTextAreaElement>("#gc-input");
   const sendButton = q<HTMLButtonElement>("#gc-send");
+  const attachBtn = q<HTMLButtonElement>("#gc-attach");
+  const expandComposeBtn = q<HTMLButtonElement>("#gc-expand-compose");
+  const fileInput = q<HTMLInputElement>("#group-file-input");
   const statusEl = q<HTMLElement>("#gc-status");
+  const attachmentPreview = q<HTMLElement>("#group-attachment-preview");
+  const attachmentSheet = q<HTMLElement>("#group-attachment-sheet");
   const selectionBar = q<HTMLElement>("#message-selection-bar");
   const selectionCount = q<HTMLElement>("#message-selection-count");
   const selectionCopyBtn = q<HTMLButtonElement>("#message-selection-copy");
@@ -4270,6 +4910,148 @@ async function renderGroupChat(groupId: string): Promise<void> {
   const threadSearchPrev = q<HTMLButtonElement>("#thread-search-prev");
   const threadSearchNext = q<HTMLButtonElement>("#thread-search-next");
   const threadSearchClose = q<HTMLButtonElement>("#thread-search-close");
+  const expandedComposeSheet = q<HTMLElement>("#gc-expanded-compose");
+  const expandedComposeInput = q<HTMLTextAreaElement>("#gc-expanded-input");
+  const expandedComposeClose = q<HTMLButtonElement>("#gc-expanded-close");
+  const expandedComposeSend = q<HTMLButtonElement>("#gc-expanded-send");
+  let sendInFlight = false;
+  let pendingAttachmentFile: File | null = null;
+  let pendingAttachmentPreviewUrl: string | null = null;
+  const initialDraft = readThreadDraft(setup.userId, "group", groupId);
+  if (initialDraft) {
+    input.value = initialDraft;
+    expandedComposeInput.value = initialDraft;
+    autoResizeComposeField(input);
+    autoResizeComposeField(expandedComposeInput);
+  }
+  const syncSendAvailability = (): void => {
+    const busy = sendInFlight;
+    const hasMessage = Boolean(input.value.trim() || pendingAttachmentFile);
+    sendButton.disabled = busy || !hasMessage;
+    attachBtn.disabled = busy;
+    expandComposeBtn.disabled = busy;
+    expandedComposeSend.disabled = busy || !hasMessage;
+  };
+  const syncComposeValue = (value: string, persist = true): void => {
+    if (input.value !== value) {
+      input.value = value;
+    }
+    if (expandedComposeInput.value !== value) {
+      expandedComposeInput.value = value;
+    }
+    autoResizeComposeField(input);
+    autoResizeComposeField(expandedComposeInput);
+    syncSendAvailability();
+    if (persist) {
+      writeThreadDraft(setup.userId, "group", groupId, value);
+    }
+  };
+  const refreshGroupConversationAfterLocalDelete = (history: StoredMessage[]): void => {
+    const latest = history.at(-1);
+    const existing = loadGroupConversations(setup.userId).find((item) => item.groupId === groupId);
+    upsertGroupConversation(
+      setup.userId,
+      groupId,
+      existing?.ownerUserId ?? getPrivateGroupOwnerUserId(privateGroup),
+      latest ? groupConversationPreview(latest) : "No messages yet",
+      false,
+      latest?.timestamp ?? existing?.updatedAt ?? Date.now(),
+    );
+    refreshConversationsIfVisible();
+  };
+  const deleteGroupMessagesFromDevice = async (ids: string[]): Promise<void> => {
+    if (ids.length === 0) {
+      return;
+    }
+    await deleteMessages(ids);
+    if (replyContext && ids.includes(replyContext.msgId)) {
+      replyContext = null;
+      document.querySelector(".reply-compose-bar")?.remove();
+    }
+    clearMessageSelection(conversationId);
+    const history = await getMessages(conversationId);
+    renderMessageList(msgList, history);
+    refreshGroupConversationAfterLocalDelete(history);
+    syncThreadSearch(false);
+    await syncSelection();
+  };
+  const updateInputPlaceholder = (): void => {
+    input.placeholder = pendingAttachmentFile ? `Add a caption for ${groupTitle}` : `Message ${groupTitle}`;
+  };
+  const clearPendingAttachment = (): void => {
+    if (pendingAttachmentPreviewUrl) {
+      URL.revokeObjectURL(pendingAttachmentPreviewUrl);
+      pendingAttachmentPreviewUrl = null;
+    }
+    pendingAttachmentFile = null;
+    attachmentPreview.classList.add("hidden");
+    attachmentPreview.innerHTML = "";
+    updateInputPlaceholder();
+    syncSendAvailability();
+    void syncSelection();
+  };
+  const renderAttachmentPreview = (): void => {
+    if (!pendingAttachmentFile) {
+      attachmentPreview.classList.add("hidden");
+      attachmentPreview.innerHTML = "";
+      updateInputPlaceholder();
+      syncSendAvailability();
+      void syncSelection();
+      return;
+    }
+    if (pendingAttachmentPreviewUrl) {
+      URL.revokeObjectURL(pendingAttachmentPreviewUrl);
+      pendingAttachmentPreviewUrl = null;
+    }
+    const file = pendingAttachmentFile;
+    const mime = file.type || "application/octet-stream";
+    const kindLabel = describeAttachmentKind(mime);
+    if (mime.startsWith("image/") || mime.startsWith("video/") || mime.startsWith("audio/")) {
+      pendingAttachmentPreviewUrl = URL.createObjectURL(file);
+    }
+    const mediaPreview = mime.startsWith("image/") && pendingAttachmentPreviewUrl
+      ? `<img src="${pendingAttachmentPreviewUrl}" alt="${escHtml(file.name)}" class="attachment-preview-thumb" />`
+      : mime.startsWith("video/") && pendingAttachmentPreviewUrl
+        ? `<video class="attachment-preview-thumb" src="${pendingAttachmentPreviewUrl}" muted playsinline></video>`
+        : mime.startsWith("audio/") && pendingAttachmentPreviewUrl
+          ? `<audio class="attachment-preview-audio" controls src="${pendingAttachmentPreviewUrl}"></audio>`
+          : `<div class="attachment-preview-icon">${escHtml(kindLabel.slice(0, 1))}</div>`;
+    attachmentPreview.classList.remove("hidden");
+    attachmentPreview.innerHTML = `
+      <div class="attachment-preview-card">
+        ${mediaPreview}
+        <div class="attachment-preview-copy">
+          <strong>${escHtml(file.name)}</strong>
+          <span>${escHtml(kindLabel)} - ${formatFileSize(file.size)}</span>
+        </div>
+        <button id="group-attachment-preview-clear" class="icon-btn" type="button" aria-label="Remove attachment">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+            <path d="M18 6L6 18M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+    `;
+    q("#group-attachment-preview-clear").addEventListener("click", clearPendingAttachment);
+    updateInputPlaceholder();
+    syncSendAvailability();
+    void syncSelection();
+  };
+  const openExpandedComposer = (): void => {
+    expandedComposeSheet.classList.remove("hidden");
+    expandedComposeSheet.setAttribute("aria-hidden", "false");
+    syncComposeValue(input.value, false);
+    expandedComposeInput.focus();
+    const pos = expandedComposeInput.value.length;
+    expandedComposeInput.setSelectionRange(pos, pos);
+  };
+  const closeExpandedComposer = (focusComposer = true): void => {
+    syncComposeValue(expandedComposeInput.value);
+    expandedComposeSheet.classList.add("hidden");
+    expandedComposeSheet.setAttribute("aria-hidden", "true");
+    if (focusComposer) {
+      input.focus();
+    }
+  };
   const syncSelection = async (): Promise<void> => {
     await syncMessageSelectionUi(
       conversationId,
@@ -4277,6 +5059,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
       selectionBar,
       selectionCount,
       inputBar,
+      attachmentPreview,
     );
   };
   let threadSearchIndex = 0;
@@ -4359,6 +5142,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
 
   q("#gc-back").addEventListener("click", () => {
     clearMessageSelection(conversationId);
+    clearPendingAttachment();
     activeGroupId = null;
     navigateTo({ screen: "conversations" });
   });
@@ -4368,6 +5152,84 @@ async function renderGroupChat(groupId: string): Promise<void> {
   });
   q("#gc-search").addEventListener("click", () => {
     openThreadSearch();
+  });
+  const openAttachmentSheet = (): void => {
+    attachmentSheet.classList.remove("hidden");
+    attachmentSheet.setAttribute("aria-hidden", "false");
+    q<HTMLButtonElement>("[data-group-attach-kind='camera']").focus();
+  };
+  const closeAttachmentSheet = (): void => {
+    attachmentSheet.classList.add("hidden");
+    attachmentSheet.setAttribute("aria-hidden", "true");
+    attachBtn.focus();
+  };
+  const attachmentPickerOptions: Record<string, { accept?: string; capture?: string }> = {
+    camera: { accept: "image/*,video/*", capture: "environment" },
+    media: { accept: "image/*,video/*" },
+    audio: { accept: "audio/*" },
+    document: {},
+  };
+  const openAttachmentPicker = (kind: string): void => {
+    const option = attachmentPickerOptions[kind] ?? attachmentPickerOptions.document;
+    if (option.accept) {
+      fileInput.setAttribute("accept", option.accept);
+    } else {
+      fileInput.removeAttribute("accept");
+    }
+    if (option.capture) {
+      fileInput.setAttribute("capture", option.capture);
+    } else {
+      fileInput.removeAttribute("capture");
+    }
+    attachmentSheet.classList.add("hidden");
+    attachmentSheet.setAttribute("aria-hidden", "true");
+    fileInput.click();
+  };
+  attachBtn.addEventListener("click", () => {
+    openAttachmentSheet();
+  });
+  q("#group-attachment-sheet-close").addEventListener("click", closeAttachmentSheet);
+  q("#group-attachment-sheet-cancel").addEventListener("click", closeAttachmentSheet);
+  attachmentSheet.addEventListener("click", (event) => {
+    if (event.target === attachmentSheet) {
+      closeAttachmentSheet();
+    }
+  });
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-group-attach-kind]")) {
+    button.addEventListener("click", () => openAttachmentPicker(button.dataset.groupAttachKind || "document"));
+  }
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files?.[0];
+    if (!file) {
+      return;
+    }
+    if (file.size > 1_000_000) {
+      notify("File too large (max 1 MB)", "error");
+      fileInput.removeAttribute("accept");
+      fileInput.removeAttribute("capture");
+      fileInput.value = "";
+      return;
+    }
+    pendingAttachmentFile = file;
+    renderAttachmentPreview();
+    syncSendAvailability();
+    fileInput.removeAttribute("accept");
+    fileInput.removeAttribute("capture");
+    fileInput.value = "";
+    input.focus();
+  });
+  expandComposeBtn.addEventListener("click", () => {
+    openExpandedComposer();
+  });
+  expandedComposeClose.addEventListener("click", () => closeExpandedComposer());
+  expandedComposeSend.addEventListener("click", () => {
+    syncComposeValue(expandedComposeInput.value);
+    sendButton.click();
+  });
+  expandedComposeSheet.addEventListener("click", (event) => {
+    if (event.target === expandedComposeSheet) {
+      closeExpandedComposer();
+    }
   });
   q("#gc-shortcuts").addEventListener("click", () => {
     showKeyboardShortcutOverlay();
@@ -4437,6 +5299,14 @@ async function renderGroupChat(groupId: string): Promise<void> {
       sendButton,
       undefined,
       () => { void syncSelection(); },
+      {
+        allowEdit: false,
+        allowServerDelete: false,
+        onLocalDelete: async (targetMsgId) => {
+          await deleteGroupMessagesFromDevice([targetMsgId]);
+          notify("Message deleted from this device", "success");
+        },
+      },
     );
   });
 
@@ -4449,7 +5319,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
     const selected = (await getMessages(conversationId)).filter((message) =>
       messageSelectionState?.selectedIds.has(message.id),
     );
-    await navigator.clipboard.writeText(selected.map((message) => message.text).join("\n\n"));
+    await navigator.clipboard.writeText(selected.map((message) => messageTranscriptText(message)).join("\n\n"));
     notify("Messages copied", "success");
   });
   selectionShareBtn.addEventListener("click", async () => {
@@ -4457,7 +5327,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
     const selected = (await getMessages(conversationId)).filter((message) =>
       messageSelectionState?.selectedIds.has(message.id),
     );
-    const payload = selected.map((message) => message.text).join("\n\n");
+    const payload = selected.map((message) => messageTranscriptText(message)).join("\n\n");
     if (navigator.share) {
       try {
         await navigator.share({ text: payload });
@@ -4473,11 +5343,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
     if (!isMessageSelectionActive(conversationId)) return;
     const ids = Array.from(messageSelectionState?.selectedIds ?? []);
     if (ids.length === 0) return;
-    await deleteMessages(ids);
-    clearMessageSelection(conversationId);
-    const nextHistory = await getMessages(conversationId);
-    renderMessageList(msgList, nextHistory);
-    await syncSelection();
+    await deleteGroupMessagesFromDevice(ids);
     notify("Messages deleted from this device", "success");
   });
 
@@ -4506,18 +5372,31 @@ async function renderGroupChat(groupId: string): Promise<void> {
       sendButton,
       undefined,
       () => { void syncSelection(); },
+      {
+        allowEdit: false,
+        allowServerDelete: false,
+        onLocalDelete: async (targetMsgId) => {
+          await deleteGroupMessagesFromDevice([targetMsgId]);
+          notify("Message deleted from this device", "success");
+        },
+      },
     );
   };
   const replyToSelectedMessage = (): void => {
     const bubble = selectedBubble();
     if (!bubble) return;
     const msgId = bubble.id.replace("msg-", "");
-    const text = bubble.querySelector(".bubble-text")?.textContent || "";
     clearMessageSelection(conversationId);
     void syncSelection();
-    replyContext = { msgId, preview: text.slice(0, 60) };
-    showReplyBar(input);
-    input.focus();
+    void (async () => {
+      const stored = await getMessage(msgId);
+      const preview = (
+        stored ? messageTranscriptText(stored) : bubble.querySelector(".bubble-text")?.textContent || ""
+      ).replace(/\s+/g, " ").trim();
+      replyContext = { msgId, preview: preview.slice(0, 60) };
+      showReplyBar(input);
+      input.focus();
+    })();
   };
   const reactToSelectedMessage = (): void => {
     const bubble = selectedBubble();
@@ -4538,9 +5417,28 @@ async function renderGroupChat(groupId: string): Promise<void> {
       openThreadSearch();
       return;
     }
+    if (withModifier && event.shiftKey && key === "t") {
+      event.preventDefault();
+      input.focus();
+      return;
+    }
+    if (withModifier && event.shiftKey && key === "x") {
+      event.preventDefault();
+      if (expandedComposeSheet.classList.contains("hidden")) {
+        openExpandedComposer();
+      } else {
+        closeExpandedComposer(false);
+      }
+      return;
+    }
     if (event.key === "Escape" && !threadSearchBar.classList.contains("hidden")) {
       event.preventDefault();
       closeThreadSearch(false);
+      return;
+    }
+    if (event.key === "Escape" && !expandedComposeSheet.classList.contains("hidden")) {
+      event.preventDefault();
+      closeExpandedComposer(false);
       return;
     }
     if (!isMessageSelectionActive(conversationId)) {
@@ -4580,27 +5478,51 @@ async function renderGroupChat(groupId: string): Promise<void> {
 
   // Load members count
   void loadGroupMembersCount(groupId);
+  input.addEventListener("input", () => {
+    syncComposeValue(input.value);
+  });
+  expandedComposeInput.addEventListener("input", () => {
+    syncComposeValue(expandedComposeInput.value);
+  });
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key === "Enter" && !event.shiftKey && !sendButton.disabled && !sendInFlight) {
       event.preventDefault();
       sendButton.click();
     }
   });
+  expandedComposeInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.ctrlKey && !expandedComposeSend.disabled && !sendInFlight) {
+      event.preventDefault();
+      expandedComposeSend.click();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeExpandedComposer(false);
+    }
+  });
+  syncComposeValue(input.value, false);
+  updateInputPlaceholder();
+  syncSendAvailability();
   sendButton.addEventListener("click", () => {
     void (async () => {
       const text = input.value.trim();
-      if (!text) {
+      const attachment = pendingAttachmentFile;
+      if (!text && !attachment) {
         return;
       }
-      sendButton.disabled = true;
+      sendInFlight = true;
+      syncSendAvailability();
       statusEl.classList.remove("error-text");
       statusEl.textContent = "Sending...";
       try {
         if (!(await ensureWebMessagingAllowed("group"))) {
           throw new Error("Private-group messaging is disabled for this web profile.");
         }
-        await sendPrivateGroupMessage(groupId, text);
-        input.value = "";
+        const outbound = await buildGroupOutboundPayload(text, attachment);
+        await sendPrivateGroupMessage(groupId, outbound);
+        syncComposeValue("");
+        clearPendingAttachment();
         statusEl.textContent = "Sent.";
         const updatedHistory = await getMessages(`group:${groupId}`);
         renderMessageList(msgList, updatedHistory);
@@ -4610,7 +5532,8 @@ async function renderGroupChat(groupId: string): Promise<void> {
         statusEl.textContent = errorMsg(error);
         statusEl.classList.add("error-text");
       } finally {
-        sendButton.disabled = false;
+        sendInFlight = false;
+        syncComposeValue(input.value, false);
       }
     })();
   });
@@ -4668,6 +5591,8 @@ async function renderGroupInfo(groupId: string): Promise<void> {
   const groupTitle = state.attributes.title || groupId;
   const ownerUserId = state.members.find((member) => member.role === "Owner")?.user_id || setup.userId;
   const yourRole = state.members.find((member) => member.user_id === setup.userId)?.role || "Member";
+  const groupHistory = await getMessages(`group:${groupId}`);
+  const groupSharedMediaCount = groupHistory.filter((message) => hasStoredAttachment(message)).length;
   const membersHtml = state.members.map((member) => {
     const identity = resolvePeerIdentity(member.user_id);
     const trust = describePrivateGroupMemberTrust(member.user_id);
@@ -4714,6 +5639,11 @@ async function renderGroupInfo(groupId: string): Promise<void> {
           </div>
           <div id="gi-members">${membersHtml}</div>
         </div>
+        <div class="settings-section">
+          <h3 class="section-label">Shared Media</h3>
+          <p class="text-secondary">${groupSharedMediaCount === 1 ? "1 attachment" : `${groupSharedMediaCount} attachments`} saved in this group on this device.</p>
+          <button id="gi-shared-media" class="btn-secondary">Open Shared Media</button>
+        </div>
         ${canManage ? `
           <div class="settings-section">
             <h3 class="section-label">Add Member</h3>
@@ -4734,6 +5664,13 @@ async function renderGroupInfo(groupId: string): Promise<void> {
   `;
 
   q("#gi-back").addEventListener("click", () => navigateTo({ screen: "group-chat", groupId }));
+  q<HTMLButtonElement>("#gi-shared-media").addEventListener("click", () => {
+    void showSharedMediaSheet({
+      title: `${groupTitle} shared media`,
+      conversationId: `group:${groupId}`,
+      emptyMessage: "No shared media in this group yet.",
+    });
+  });
   const statusEl = q<HTMLElement>("#gi-status");
   const setStatus = (message: string, isError = false): void => {
     statusEl.textContent = message;
@@ -6391,7 +7328,7 @@ const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
 // State for reply compose
 let replyContext: { msgId: string; preview: string } | null = null;
 // State for edit compose
-let editContext: { msgId: string; originalText: string } | null = null;
+let editContext: { msgId: string; originalText: string; allowEmptyText: boolean } | null = null;
 const replyThreadFocusByConversation = new Map<string, string | null>();
 let messageSelectionState: { conversationId: string; selectedIds: Set<string> } | null = null;
 
@@ -6401,10 +7338,15 @@ function showBubbleContextMenu(
   isMine: boolean,
   serverMid: number | null,
   bubble: HTMLElement,
-  inputEl: HTMLInputElement,
+  inputEl: ComposeField,
   sendBtnEl: HTMLButtonElement,
   peerId?: string,
   onSelectionChange?: () => void,
+  options?: {
+    allowEdit?: boolean;
+    allowServerDelete?: boolean;
+    onLocalDelete?: (msgId: string) => Promise<void> | void;
+  },
 ): void {
   // Remove any existing context menu
   document.querySelector(".ctx-menu")?.remove();
@@ -6414,11 +7356,22 @@ function showBubbleContextMenu(
   menu.style.top = `${e.clientY}px`;
   menu.style.left = `${e.clientX}px`;
 
+  const allowEdit = options?.allowEdit ?? false;
+  const allowServerDelete = options?.allowServerDelete ?? false;
+  const hasAttachment = bubble.dataset.hasAttachment === "1";
   let items = `<div class="ctx-item" data-action="reply">↩️ Reply</div>
     <div class="ctx-item" data-action="react">😀 React</div>`;
-  if (isMine) {
+  if (hasAttachment) {
+    items += `<div class="ctx-item" data-action="open">📎 Open attachment</div>`;
+  }
+  items += `<div class="ctx-item" data-action="copy">Copy</div>
+    <div class="ctx-item" data-action="share">Share</div>
+    <div class="ctx-item ctx-danger" data-action="delete-local">Delete from this device</div>`;
+  if (isMine && allowEdit) {
     items += `<div class="ctx-item" data-action="edit">✏️ Edit</div>`;
-    if (serverMid) items += `<div class="ctx-item ctx-danger" data-action="delete">🗑️ Delete</div>`;
+  }
+  if (isMine && allowServerDelete && serverMid) {
+    items += `<div class="ctx-item ctx-danger" data-action="delete">🗑️ Delete</div>`;
   }
   items += `<div class="ctx-item" data-action="select">Select messages</div>`;
   menu.innerHTML = items;
@@ -6433,8 +7386,11 @@ function showBubbleContextMenu(
     if (!action) return;
 
     if (action === "reply") {
-      const text = bubble.querySelector(".bubble-text")?.textContent || "";
-      replyContext = { msgId, preview: text.slice(0, 60) };
+      const stored = await getMessage(msgId);
+      const preview = (
+        stored ? messageTranscriptText(stored) : bubble.querySelector(".bubble-text")?.textContent || ""
+      ).replace(/\s+/g, " ").trim();
+      replyContext = { msgId, preview: preview.slice(0, 60) };
       showReplyBar(inputEl);
       inputEl.focus();
     }
@@ -6443,10 +7399,63 @@ function showBubbleContextMenu(
       showReactionPicker(e.clientX, e.clientY, msgId, bubble, peerId);
     }
 
+    if (action === "open") {
+      const stored = await getMessage(msgId);
+      if (stored && hasStoredAttachment(stored)) {
+        void openStoredAttachment(stored);
+      }
+    }
+
+    if (action === "copy") {
+      const stored = await getMessage(msgId);
+      const transcript = (
+        stored ? messageTranscriptText(stored) : bubble.querySelector(".bubble-text")?.textContent || ""
+      ).trim();
+      if (transcript) {
+        await navigator.clipboard.writeText(transcript);
+        notify("Message copied", "success");
+      }
+    }
+
+    if (action === "share") {
+      const stored = await getMessage(msgId);
+      const transcript = (
+        stored ? messageTranscriptText(stored) : bubble.querySelector(".bubble-text")?.textContent || ""
+      ).trim();
+      if (!transcript) {
+        return;
+      }
+      if (navigator.share) {
+        try {
+          await navigator.share({ text: transcript });
+        } catch {
+          await navigator.clipboard.writeText(transcript);
+        }
+      } else {
+        await navigator.clipboard.writeText(transcript);
+      }
+      notify("Message ready to share", "success");
+    }
+
+    if (action === "delete-local") {
+      await options?.onLocalDelete?.(msgId);
+    }
+
     if (action === "edit") {
-      const text = bubble.querySelector(".bubble-text")?.textContent || "";
-      editContext = { msgId, originalText: text };
+      const stored = await getMessage(msgId);
+      if (!stored) {
+        return;
+      }
+      const text = hasStoredAttachment(stored)
+        ? (stored.attachmentNoteText ?? stored.text).trim()
+        : stored.text.trim();
+      editContext = {
+        msgId,
+        originalText: text,
+        allowEmptyText: hasStoredAttachment(stored),
+      };
       inputEl.value = text;
+      autoResizeComposeField(inputEl);
       sendBtnEl.disabled = false;
       sendBtnEl.textContent = "Save";
       inputEl.focus();
@@ -6465,7 +7474,7 @@ function showBubbleContextMenu(
   });
 }
 
-function showReplyBar(inputEl: HTMLInputElement): void {
+function showReplyBar(inputEl: ComposeField): void {
   // Remove existing reply bar
   document.querySelector(".reply-compose-bar")?.remove();
 
@@ -6479,6 +7488,14 @@ function showReplyBar(inputEl: HTMLInputElement): void {
     bar.remove();
   });
   inputEl.parentElement!.insertBefore(bar, inputEl.parentElement!.firstChild);
+}
+
+function autoResizeComposeField(field: ComposeField): void {
+  if (!(field instanceof HTMLTextAreaElement)) {
+    return;
+  }
+  field.style.height = "0px";
+  field.style.height = `${Math.min(field.scrollHeight, 144)}px`;
 }
 
 function showReactionPicker(x: number, y: number, msgId: string, bubble: HTMLElement, peerId?: string): void {
@@ -6592,6 +7609,209 @@ async function downloadAndOpenFile(fileId: string): Promise<void> {
   }
 }
 
+function hideSharedMediaOverlay(): void {
+  sharedMediaOverlay?.remove();
+  sharedMediaOverlay = null;
+  if (sharedMediaOverlayKeyHandler) {
+    document.removeEventListener("keydown", sharedMediaOverlayKeyHandler);
+    sharedMediaOverlayKeyHandler = null;
+  }
+}
+
+function classifySharedMediaFilter(message: StoredMessage): SharedMediaFilter | null {
+  if (!hasStoredAttachment(message)) {
+    return null;
+  }
+  const mimeType = attachmentMimeType(message);
+  if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) {
+    return "media";
+  }
+  if (mimeType.startsWith("audio/")) {
+    return "audio";
+  }
+  return "files";
+}
+
+function sharedMediaFilterLabel(filter: SharedMediaFilter): string {
+  switch (filter) {
+    case "media":
+      return "Media";
+    case "files":
+      return "Files";
+    case "audio":
+      return "Audio";
+    default:
+      return "All";
+  }
+}
+
+function renderSharedMediaPreview(message: StoredMessage): string {
+  if (!hasStoredAttachment(message)) {
+    return `<div class="shared-media-empty">No preview available</div>`;
+  }
+  const fileId = message.fileId;
+  const mimeType = attachmentMimeType(message);
+  const fileName = attachmentDisplayName(message);
+  const blobUrl = getStoredAttachmentUrl(message);
+  if (mimeType.startsWith("image/") && blobUrl) {
+    return `<img src="${blobUrl}" alt="${escHtml(fileName)}" class="media-img" loading="lazy" />`;
+  }
+  if (mimeType.startsWith("audio/") && blobUrl) {
+    return `<audio controls src="${blobUrl}" class="media-audio"></audio>`;
+  }
+  if (mimeType.startsWith("video/") && blobUrl) {
+    return `<video controls src="${blobUrl}" class="media-video"></video>`;
+  }
+  if (fileId && (mimeType.startsWith("image/") || mimeType.startsWith("audio/") || mimeType.startsWith("video/"))) {
+    return `<div class="shared-media-loading" data-file-id="${escHtml(fileId)}">Loading preview…</div>`;
+  }
+  const kindLabel = describeAttachmentKind(mimeType);
+  return `
+    <div class="shared-media-file-tile">
+      <span class="shared-media-file-glyph">${escHtml(kindLabel.slice(0, 1))}</span>
+      <span class="shared-media-file-name">${escHtml(fileName)}</span>
+    </div>
+  `;
+}
+
+function formatSharedMediaSubtitle(message: StoredMessage): string {
+  const parts = [describeAttachmentKind(attachmentMimeType(message))];
+  if (message.conversationId.startsWith("group:")) {
+    parts.push(message.sender === setup.userId ? "You" : resolvePeerIdentity(message.sender).primaryLabel);
+  }
+  parts.push(new Date(message.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }));
+  return parts.join(" · ");
+}
+
+async function showSharedMediaSheet(options: {
+  title: string;
+  conversationId: string;
+  emptyMessage: string;
+}): Promise<void> {
+  const messages = (await getMessages(options.conversationId))
+    .filter((message) => hasStoredAttachment(message))
+    .sort((left, right) => right.timestamp - left.timestamp);
+  if (messages.length === 0) {
+    notify(options.emptyMessage, "info");
+    return;
+  }
+
+  hideSharedMediaOverlay();
+  let activeFilter: SharedMediaFilter = "all";
+  const counts: Record<SharedMediaFilter, number> = {
+    all: messages.length,
+    media: messages.filter((message) => classifySharedMediaFilter(message) === "media").length,
+    files: messages.filter((message) => classifySharedMediaFilter(message) === "files").length,
+    audio: messages.filter((message) => classifySharedMediaFilter(message) === "audio").length,
+  };
+
+  const overlay = document.createElement("div");
+  overlay.className = "shared-media-sheet";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-labelledby", "shared-media-title");
+  overlay.innerHTML = `
+    <div class="shared-media-card">
+      <div class="shared-media-head">
+        <div>
+          <h3 id="shared-media-title">${escHtml(options.title)}</h3>
+          <p>Browse the attachments saved in this conversation on this device.</p>
+        </div>
+        <button id="shared-media-close" class="icon-btn" aria-label="Close shared media">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+            <path d="M18 6L6 18M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+      <div class="shared-media-tabs">
+        ${(["all", "media", "files", "audio"] as SharedMediaFilter[])
+          .map((filter) => `
+            <button type="button" class="shared-media-tab" data-shared-media-filter="${filter}">
+              ${sharedMediaFilterLabel(filter)} <span>${counts[filter]}</span>
+            </button>
+          `)
+          .join("")}
+      </div>
+      <div id="shared-media-grid" class="shared-media-grid"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  sharedMediaOverlay = overlay;
+
+  const grid = overlay.querySelector<HTMLElement>("#shared-media-grid")!;
+  const tabButtons = Array.from(overlay.querySelectorAll<HTMLButtonElement>("[data-shared-media-filter]"));
+  const render = (): void => {
+    tabButtons.forEach((button) => {
+      button.classList.toggle("active", button.dataset.sharedMediaFilter === activeFilter);
+    });
+    const filtered = messages.filter((message) => activeFilter === "all" || classifySharedMediaFilter(message) === activeFilter);
+    if (filtered.length === 0) {
+      grid.innerHTML = `<div class="shared-media-empty">No ${sharedMediaFilterLabel(activeFilter).toLowerCase()} in this conversation yet.</div>`;
+      return;
+    }
+    grid.innerHTML = filtered
+      .map((message) => `
+        <article class="shared-media-item">
+          <div class="shared-media-preview">
+            ${renderSharedMediaPreview(message)}
+          </div>
+          <div class="shared-media-copy">
+            <div class="shared-media-item-title">${escHtml(attachmentDisplayName(message))}</div>
+            <div class="shared-media-item-meta">${escHtml(formatSharedMediaSubtitle(message))}</div>
+            ${attachmentCaptionText(message).trim() ? `<div class="shared-media-item-note">${escHtml(attachmentCaptionText(message).trim())}</div>` : ""}
+          </div>
+          <div class="shared-media-actions">
+            <button type="button" class="btn-secondary shared-media-open" data-message-id="${escHtml(message.id)}">Open</button>
+          </div>
+        </article>
+      `)
+      .join("");
+
+    grid.querySelectorAll<HTMLButtonElement>(".shared-media-open").forEach((button) => {
+      button.addEventListener("click", () => {
+        const messageId = button.dataset.messageId;
+        const targetMessage = filtered.find((message) => message.id === messageId);
+        if (targetMessage) {
+          void openStoredAttachment(targetMessage);
+        }
+      });
+    });
+    grid.querySelectorAll<HTMLImageElement>(".shared-media-preview .media-img").forEach((img) => {
+      img.addEventListener("click", () => showLightbox(img.src));
+    });
+    filtered.forEach((message) => {
+      if (!message.fileId) {
+        return;
+      }
+      const previewHost = grid.querySelector<HTMLElement>(`.shared-media-item .shared-media-preview [data-file-id="${CSS.escape(message.fileId)}"]`)?.closest(".shared-media-preview") as HTMLElement | null;
+      if (previewHost && !mediaBlobCache.has(message.fileId) && classifySharedMediaFilter(message) !== "files") {
+        void loadMediaBlob(message.fileId, previewHost);
+      }
+    });
+  };
+
+  tabButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      activeFilter = (button.dataset.sharedMediaFilter as SharedMediaFilter) || "all";
+      render();
+    });
+  });
+  overlay.querySelector<HTMLElement>("#shared-media-close")?.addEventListener("click", hideSharedMediaOverlay);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      hideSharedMediaOverlay();
+    }
+  });
+  sharedMediaOverlayKeyHandler = (event: KeyboardEvent) => {
+    if (event.key === "Escape" && sharedMediaOverlay) {
+      event.preventDefault();
+      hideSharedMediaOverlay();
+    }
+  };
+  document.addEventListener("keydown", sharedMediaOverlayKeyHandler);
+  render();
+}
+
 // ---------------------------------------------------------------------------
 // Search
 // ---------------------------------------------------------------------------
@@ -6637,7 +7857,8 @@ function renderSearch(): void {
         const isGroup = m.conversationId.startsWith("group:");
         const peer = isGroup ? m.conversationId.replace("group:", "") : (m.sender === setup.userId ? m.recipient : m.sender);
         const time = new Date(m.timestamp).toLocaleDateString([], { month: "short", day: "numeric" });
-        const preview = m.text.length > 80 ? m.text.slice(0, 80) + "…" : m.text;
+        const transcript = messageTranscriptText(m);
+        const preview = transcript.length > 80 ? transcript.slice(0, 80) + "…" : transcript;
         return `<div class="search-result-item" role="listitem" data-search-peer="${escHtml(peer)}" data-search-group="${isGroup ? "1" : ""}">
           <div class="avatar avatar-sm">${peer.slice(0, 2).toUpperCase()}</div>
           <div class="search-result-body">

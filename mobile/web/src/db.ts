@@ -16,6 +16,9 @@ export type StoredMessage = {
   fileId?: string;
   mimeType?: string;
   fileName?: string;
+  attachmentDataBase64?: string;
+  attachmentByteLength?: number;
+  attachmentNoteText?: string;
   // B2: Rich interactions
   replyToId?: string;
   replyPreview?: string;
@@ -62,6 +65,39 @@ type StoredKeyRecord = {
   sealedKeys: string;
   updatedAt: number;
 };
+
+function searchableMessageText(message: StoredMessage): string {
+  const parts = new Set<string>();
+  const body = message.text.trim();
+  if (body) {
+    parts.add(body);
+  }
+  const fileName = message.fileName?.trim() || "";
+  const mimeType = message.mimeType?.trim() || "";
+  const noteText = message.attachmentNoteText?.trim() || "";
+  if (fileName) {
+    parts.add(fileName);
+  }
+  if (mimeType) {
+    parts.add(mimeType);
+    if (mimeType.startsWith("image/")) parts.add("photo");
+    if (mimeType.startsWith("video/")) parts.add("video");
+    if (mimeType.startsWith("audio/")) parts.add("audio");
+    if (mimeType === "application/pdf") parts.add("pdf");
+    if (
+      !mimeType.startsWith("image/") &&
+      !mimeType.startsWith("video/") &&
+      !mimeType.startsWith("audio/") &&
+      mimeType !== "application/pdf"
+    ) {
+      parts.add("document");
+    }
+  }
+  if (noteText) {
+    parts.add(noteText);
+  }
+  return Array.from(parts).join("\n");
+}
 
 let dbInstance: IDBDatabase | null = null;
 
@@ -204,7 +240,7 @@ export async function searchMessages(query: string): Promise<StoredMessage[]> {
       const cursor = request.result;
       if (cursor) {
         const msg = cursor.value as StoredMessage;
-        if (msg.text.toLowerCase().includes(lower)) {
+        if (searchableMessageText(msg).toLowerCase().includes(lower)) {
           results.push(msg);
         }
         cursor.continue();
@@ -471,6 +507,9 @@ export async function editStoredMessage(messageId: string, newText: string): Pro
       const msg = req.result as StoredMessage | undefined;
       if (!msg) { resolve(null); return; }
       msg.text = newText;
+      if (msg.fileId || msg.attachmentDataBase64) {
+        msg.attachmentNoteText = newText;
+      }
       msg.editedAt = Date.now();
       store.put(msg);
       tx.oncomplete = () => resolve(msg);

@@ -1,64 +1,84 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    android:id="@+id/threadMessageRow"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:paddingHorizontal="12dp"
-    android:paddingVertical="4dp">
+    android:orientation="vertical">
 
-    <LinearLayout
-        android:id="@+id/threadMessageBubble"
+    <TextView
+        android:id="@+id/textThreadMessageDayHeader"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="start"
-        android:layout_marginEnd="56dp"
-        android:orientation="vertical"
-        android:paddingHorizontal="14dp"
-        android:paddingTop="10dp"
-        android:paddingBottom="8dp">
+        android:layout_gravity="center_horizontal"
+        android:layout_marginTop="12dp"
+        android:layout_marginBottom="6dp"
+        android:background="@drawable/bg_detail_panel"
+        android:paddingHorizontal="12dp"
+        android:paddingVertical="6dp"
+        android:textAppearance="@style/TextAppearance.MaterialComponents.Caption"
+        android:textColor="@color/pq_ink_muted"
+        android:visibility="gone" />
 
-        <TextView
-            android:id="@+id/textThreadMessageReply"
+    <FrameLayout
+        android:id="@+id/threadMessageRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingHorizontal="12dp"
+        android:paddingVertical="4dp">
+
+        <LinearLayout
+            android:id="@+id/threadMessageBubble"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="6dp"
-            android:maxWidth="280dp"
-            android:textAppearance="@style/TextAppearance.MaterialComponents.Caption"
-            android:textColor="@color/pq_ink_muted"
-            android:visibility="gone" />
+            android:layout_gravity="start"
+            android:layout_marginEnd="56dp"
+            android:orientation="vertical"
+            android:paddingHorizontal="14dp"
+            android:paddingTop="10dp"
+            android:paddingBottom="8dp">
 
-        <TextView
-            android:id="@+id/textThreadMessageBody"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:maxWidth="280dp"
-            android:textAppearance="@style/TextAppearance.MaterialComponents.Body1" />
+            <TextView
+                android:id="@+id/textThreadMessageReply"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="6dp"
+                android:maxWidth="280dp"
+                android:textAppearance="@style/TextAppearance.MaterialComponents.Caption"
+                android:textColor="@color/pq_ink_muted"
+                android:visibility="gone" />
 
-        <com.google.android.material.chip.ChipGroup
-            android:id="@+id/threadMessageReactions"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:visibility="gone"
-            app:chipSpacingHorizontal="6dp"
-            app:chipSpacingVertical="6dp"
-            app:singleLine="false" />
+            <TextView
+                android:id="@+id/textThreadMessageBody"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:maxWidth="280dp"
+                android:textAppearance="@style/TextAppearance.MaterialComponents.Body1" />
 
-        <com.google.android.material.chip.Chip
-            android:id="@+id/chipThreadReplies"
-            style="@style/Widget.PQMsg.Chip.Reaction"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:visibility="gone"
-            app:ensureMinTouchTargetSize="false" />
+            <com.google.android.material.chip.ChipGroup
+                android:id="@+id/threadMessageReactions"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:visibility="gone"
+                app:chipSpacingHorizontal="6dp"
+                app:chipSpacingVertical="6dp"
+                app:singleLine="false" />
 
-        <TextView
-            android:id="@+id/textThreadMessageMeta"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:textAppearance="@style/TextAppearance.MaterialComponents.Caption" />
-    </LinearLayout>
-</FrameLayout>
+            <com.google.android.material.chip.Chip
+                android:id="@+id/chipThreadReplies"
+                style="@style/Widget.PQMsg.Chip.Reaction"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:visibility="gone"
+                app:ensureMinTouchTargetSize="false" />
+
+            <TextView
+                android:id="@+id/textThreadMessageMeta"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:textAppearance="@style/TextAppearance.MaterialComponents.Caption" />
+        </LinearLayout>
+    </FrameLayout>
+</LinearLayout>

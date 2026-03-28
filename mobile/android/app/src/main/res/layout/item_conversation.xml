@@ -43,6 +43,32 @@
                 android:textStyle="bold" />
 
             <TextView
+                android:id="@+id/textConversationPinnedBadge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_badge_subtle"
+                android:gravity="center"
+                android:paddingHorizontal="8dp"
+                android:paddingVertical="3dp"
+                android:textAppearance="@style/TextAppearance.PQMsg.CaptionStrong"
+                android:textColor="@color/pq_hero"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/textConversationKindBadge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:background="@drawable/bg_badge_subtle"
+                android:gravity="center"
+                android:paddingHorizontal="8dp"
+                android:paddingVertical="3dp"
+                android:textAppearance="@style/TextAppearance.PQMsg.CaptionStrong"
+                android:textColor="@color/pq_ink_muted"
+                android:visibility="gone" />
+
+            <TextView
                 android:id="@+id/textConversationTime"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

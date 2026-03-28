@@ -169,4 +169,13 @@
                 android:listSelector="?attr/colorControlHighlight" />
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/buttonArchivedConversations"
+        style="@style/Widget.PQMsg.Button.Compact"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="@string/button_open_archived_conversations"
+        android:visibility="gone" />
 </LinearLayout>
