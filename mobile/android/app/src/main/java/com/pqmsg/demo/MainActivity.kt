@@ -214,16 +214,13 @@ class MainActivity : AppCompatActivity() {
     private fun refreshSummary() {
         val user = userInput.text.toString().trim()
         val server = serverInput.text.toString().trim()
-        val pushToken = pushTokenInput.text.toString().trim()
         setupSummaryText.text = when {
             user.isBlank() ->
-                "Choose a username, create a secure profile, or import a linked-device package. Cloud backup restore is disabled for local secure state."
+                "Choose a username to create this device profile, or import a linked-device package from another trusted device."
             server.isBlank() ->
-                "Enter the relay address for $user before creating the secure profile."
-            pushToken.isBlank() ->
-                "Create a secure profile for $user. Push can be added later from Advanced. Recovery uses linked-device reprovisioning, not cloud backup."
+                "Enter the relay address before creating @$user on this phone."
             else ->
-                "Create a secure profile for $user with background registration and push setup. Recovery uses linked-device reprovisioning, not cloud backup."
+                "Create a secure local profile for @$user on this phone. Advanced relay, device, and push options stay available below if you need them."
         }
     }
 

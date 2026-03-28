@@ -203,6 +203,7 @@ let activeToastAction: (() => void) | null = null;
 let disposeMessageSelectionShortcuts: (() => void) | null = null;
 let keyboardShortcutOverlay: HTMLElement | null = null;
 let sharedMediaOverlay: HTMLElement | null = null;
+let sharedMediaOverlayHost: HTMLElement | null = null;
 let sharedMediaOverlayKeyHandler: ((event: KeyboardEvent) => void) | null = null;
 let keyboardShortcutLauncherInstalled = false;
 type ComposeField = HTMLInputElement | HTMLTextAreaElement;
@@ -2098,9 +2099,28 @@ function renderOnboarding(): void {
     <div class="onboarding">
       <div class="onboarding-card">
         ${ONBOARDING_LOGO}
+        <div class="onboarding-copy">
+          <p class="onboarding-lede">
+            Pick a username, protect this browser with a passphrase, and start private messaging without wading through advanced setup first.
+          </p>
+          <div class="onboarding-points" aria-label="Onboarding overview">
+            <div class="onboarding-point">
+              <strong>Username first</strong>
+              <span>Your account starts from a simple @name instead of a long utility form.</span>
+            </div>
+            <div class="onboarding-point">
+              <strong>Local passphrase</strong>
+              <span>Your keys stay on this browser and are unlocked only with the passphrase you choose.</span>
+            </div>
+            <div class="onboarding-point">
+              <strong>Advanced stays hidden</strong>
+              <span>Relay and transport details are still available, but they no longer dominate first run.</span>
+            </div>
+          </div>
+        </div>
         <div class="onboarding-actions">
           <button id="onb-create" class="btn-primary">Create Account</button>
-          <button id="onb-signin" class="btn-secondary">I Have an Account</button>
+          <button id="onb-signin" class="btn-secondary">Unlock This Browser</button>
         </div>
         <details class="onb-advanced">
           <summary>Advanced</summary>
@@ -2114,7 +2134,7 @@ function renderOnboarding(): void {
           <strong>Current beta scope</strong>
           <p>${escHtml(WEB_BETA_SCOPE_SUMMARY)}</p>
         </div>
-        <p class="onboarding-note">Your keys are generated locally and never leave this device.</p>
+        <p class="onboarding-note">Your keys are generated locally and never leave this browser profile.</p>
       </div>
     </div>
   `;
@@ -2140,33 +2160,43 @@ function renderOnboarding(): void {
 }
 
 function renderCreateAccount(): void {
+  const localAccounts = listLocalKeyUsers();
   app.innerHTML = `
     <div class="onboarding">
       <div class="onboarding-card">
         ${ONBOARDING_LOGO}
         <div class="onboarding-form">
+          <div class="onboarding-copy onboarding-copy-tight">
+            <h2 class="onboarding-section-title">Create your profile</h2>
+            <p class="onboarding-note">Choose a username for this browser. Your display name is optional and can be changed later.</p>
+          </div>
           <label class="field">
-            <span>Display Name</span>
-            <input id="onb-name" type="text" placeholder="Your name" autocomplete="off" />
+            <span>Username</span>
+            <input id="onb-user" type="text" placeholder="e.g. alice" autocomplete="off" />
+            <small class="field-help">This becomes your account ID on this relay.</small>
           </label>
           <label class="field">
-            <span>Password</span>
-            <input id="onb-pass" type="password" placeholder="Protects your keys on this device" />
+            <span>Display Name (optional)</span>
+            <input id="onb-name" type="text" placeholder="How people should see you" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Passphrase</span>
+            <input id="onb-pass" type="password" placeholder="Protects your keys on this browser" />
             <div id="onb-strength" class="password-strength"></div>
           </label>
           <label class="field">
-            <span>Confirm Password</span>
-            <input id="onb-pass2" type="password" placeholder="Re-enter password" />
+            <span>Confirm Passphrase</span>
+            <input id="onb-pass2" type="password" placeholder="Re-enter passphrase" />
           </label>
           <button id="onb-go" class="btn-primary">Create Account</button>
-          <button id="onb-back" class="btn-link">← Back</button>
+          <button id="onb-back" class="btn-link">&larr; Back</button>
         </div>
         <div id="onb-progress" class="progress-bar hidden"><div class="progress-fill"></div></div>
         ${
           localAccounts.length > 0
             ? `
           <div class="contacts-section">
-            <h3 class="section-label">Accounts on this browser</h3>
+            <h3 class="section-label">Profiles already on this browser</h3>
             <div class="contacts-list">
               ${localAccounts
                 .map(
@@ -2175,7 +2205,7 @@ function renderCreateAccount(): void {
                   <div class="avatar avatar-sm">${escHtml(accountId.slice(0, 2).toUpperCase())}</div>
                   <div class="contact-info">
                     <span class="contact-name">${escHtml(accountId)}</span>
-                    <span class="contact-id">Tap to fill account ID</span>
+                    <span class="contact-id">Already saved locally in this browser</span>
                   </div>
                 </button>
               `
@@ -2184,13 +2214,14 @@ function renderCreateAccount(): void {
             </div>
           </div>
         `
-            : `<p class="onboarding-note">Only accounts created in this browser can sign in here.</p>`
+            : `<p class="onboarding-note">Profiles created here stay bound to this browser origin unless you export or link another device.</p>`
         }
         <p id="onb-status" class="onboarding-status"></p>
       </div>
     </div>
   `;
 
+  const userInput = q<HTMLInputElement>("#onb-user");
   const nameInput = q<HTMLInputElement>("#onb-name");
   const passInput = q<HTMLInputElement>("#onb-pass");
   const pass2Input = q<HTMLInputElement>("#onb-pass2");
@@ -2220,23 +2251,45 @@ function renderCreateAccount(): void {
   q("#onb-back").addEventListener("click", () => navigateTo({ screen: "onboarding" }));
 
   goBtn.addEventListener("click", async () => {
-    const name = nameInput.value.trim();
+    const requestedUserId = normalizeBrowserUserId(userInput.value);
+    const providedName = nameInput.value.trim();
     const pass = passInput.value;
     const pass2 = pass2Input.value;
-    if (!name) { nameInput.focus(); return; }
-    if (!pass) { passInput.focus(); return; }
+    if (!userInput.value.trim()) {
+      status.textContent = "Choose a username for this browser profile.";
+      status.classList.add("error-text");
+      userInput.focus();
+      return;
+    }
+    if (!requestedUserId) {
+      status.textContent = "That username cannot be used after normalization. Try letters, numbers, dashes, or underscores.";
+      status.classList.add("error-text");
+      userInput.focus();
+      return;
+    }
+    if (!pass) {
+      status.textContent = "Enter a passphrase to protect your local keys.";
+      status.classList.add("error-text");
+      passInput.focus();
+      return;
+    }
     if (pass !== pass2) {
-      status.textContent = "Passwords do not match";
+      status.textContent = "Passphrases do not match";
       status.classList.add("error-text");
       pass2Input.focus();
       return;
     }
     if (pass.length < 6) {
-      status.textContent = "Password must be at least 6 characters";
+      status.textContent = "Passphrase must be at least 6 characters";
       status.classList.add("error-text");
       passInput.focus();
       return;
     }
+
+    const userId = requestedUserId;
+    const displayName = providedName || userId;
+    userInput.value = userId;
+    nameInput.value = providedName;
 
     goBtn.disabled = true;
     status.classList.remove("error-text");
@@ -2249,7 +2302,6 @@ function renderCreateAccount(): void {
 
       status.textContent = "Generating keys…";
       setProgress(progress, 20);
-      const userId = name.toLowerCase().replace(/[^a-z0-9_-]/g, "-").slice(0, 64) || `user-${Date.now()}`;
       const deviceId = `${userId}-web-1`;
       const genKeys = generateIdentityKeys(userId, deviceId, "ml-kem-768", 16);
       await saveKeys(userId, pass, genKeys);
@@ -2272,10 +2324,10 @@ function renderCreateAccount(): void {
       await api.publishPrekeys(genKeys.userId, payload, headers);
 
       try {
-        const profileHeaders = buildProfileUpsertAuthHeaders(genKeys, name, "", false, "", "");
+        const profileHeaders = buildProfileUpsertAuthHeaders(genKeys, displayName, "", false, "", "");
         await api.upsertProfile(
           genKeys.userId,
-          { display_name: name, username_lookup_enabled: false },
+          { display_name: displayName, username_lookup_enabled: false },
           profileHeaders
         );
       } catch {
@@ -2288,19 +2340,19 @@ function renderCreateAccount(): void {
         deviceId: deviceId,
         suiteLabel: "ml-kem-768",
         peerUserId: "",
-        displayName: name,
+        displayName: displayName,
         username: "",
         usernameLookupEnabled: false,
       };
       saveSetup(setup);
       sessionStorage.setItem("pqmsg.passphrase", pass);
       keys = genKeys;
-      cachedProfileNames[userId] = name;
-      writeProfileDisplayName(userId, userId, name);
+      cachedProfileNames[userId] = displayName;
+      writeProfileDisplayName(userId, userId, displayName);
 
       setProgress(progress, 100);
       status.textContent = "Ready!";
-      notify(`Your account ID is @${userId}. Claim a shareable @username in Settings.`, "info");
+      notify(`Your profile is ready as @${userId}.`, "info");
       setTimeout(() => navigateTo({ screen: "conversations" }), 600);
     } catch (e) {
       status.textContent = `Error: ${errorMsg(e)}`;
@@ -2318,11 +2370,15 @@ function renderSignIn(): void {
       <div class="onboarding-card">
         ${ONBOARDING_LOGO}
         <div class="onboarding-form">
+          <div class="onboarding-copy onboarding-copy-tight">
+            <h2 class="onboarding-section-title">Unlock this browser</h2>
+            <p class="onboarding-note">Use the username and passphrase for a profile that was already created on this browser origin.</p>
+          </div>
           ${
             localAccounts.length > 0
               ? `
             <div class="contacts-section">
-              <h3 class="section-label">Accounts on this browser</h3>
+              <h3 class="section-label">Profiles on this browser</h3>
               <div class="contacts-list">
                 ${localAccounts
                   .map(
@@ -2331,7 +2387,7 @@ function renderSignIn(): void {
                     <div class="avatar avatar-sm">${escHtml(accountId.slice(0, 2).toUpperCase())}</div>
                     <div class="contact-info">
                       <span class="contact-name">${escHtml(accountId)}</span>
-                      <span class="contact-id">Tap to fill account ID</span>
+                      <span class="contact-id">Tap to fill username</span>
                     </div>
                   </button>
                 ` 
@@ -2340,18 +2396,18 @@ function renderSignIn(): void {
               </div>
             </div>
           `
-              : `<p class="onboarding-note">Only accounts created in this browser origin (${escHtml(location.origin)}) can be unlocked here.</p>`
+              : `<p class="onboarding-note">Only profiles created in this browser origin (${escHtml(location.origin)}) can be unlocked here.</p>`
           }
           <label class="field">
-            <span>User ID</span>
-            <input id="onb-uid" type="text" placeholder="e.g. alice-smith" autocomplete="off" />
+            <span>Username</span>
+            <input id="onb-uid" type="text" placeholder="e.g. alice" autocomplete="off" />
           </label>
           <label class="field">
-            <span>Password</span>
-            <input id="onb-pass" type="password" placeholder="Your device password" />
+            <span>Passphrase</span>
+            <input id="onb-pass" type="password" placeholder="The passphrase protecting your local keys" />
           </label>
-          <button id="onb-go" class="btn-primary">Sign In</button>
-          <button id="onb-back" class="btn-link">← Back</button>
+          <button id="onb-go" class="btn-primary">Unlock</button>
+          <button id="onb-back" class="btn-link">&larr; Back</button>
         </div>
         <p id="onb-status" class="onboarding-status"></p>
       </div>
@@ -2378,13 +2434,13 @@ function renderSignIn(): void {
     const uid = normalizeBrowserUserId(uidInput.value);
     const pass = passInput.value;
     if (!uidInput.value.trim()) {
-      status.textContent = "Enter the account ID for an account saved in this browser.";
+      status.textContent = "Enter the username for a profile saved in this browser.";
       status.classList.add("error-text");
       uidInput.focus();
       return;
     }
     if (!passInput.value) {
-      status.textContent = "Enter the password used when creating this local account.";
+      status.textContent = "Enter the passphrase used when creating this local profile.";
       status.classList.add("error-text");
       passInput.focus();
       return;
@@ -2399,11 +2455,12 @@ function renderSignIn(): void {
       await ensureWebPqRuntime();
 
       if (!hasLocalKeys(uid)) {
-        throw new Error("No keys found for this User ID on this device");
+        throw new Error("No local profile found for that username on this browser");
       }
 
       status.textContent = "Unlocking keys…";
       const loadedKeys = await loadKeys(uid, pass);
+      const localDisplayName = readProfileDisplayName(uid, uid)?.trim() || uid;
 
       setup = {
         serverUrl: setup.serverUrl,
@@ -2411,7 +2468,9 @@ function renderSignIn(): void {
         deviceId: loadedKeys.deviceId,
         suiteLabel: loadedKeys.suite,
         peerUserId: "",
-        displayName: uid,
+        displayName: localDisplayName,
+        username: "",
+        usernameLookupEnabled: false,
       };
       saveSetup(setup);
       sessionStorage.setItem("pqmsg.passphrase", pass);
@@ -2434,152 +2493,49 @@ function renderSignIn(): void {
 // ---------------------------------------------------------------------------
 
 function renderConversations(): void {
-  cachedProfileNames = {
-    ...Object.fromEntries(loadProfileDisplayNames(setup.userId).map((item) => [item.targetUserId, item.displayName])),
-    ...cachedProfileNames,
-  };
-  const convos = setup.userId ? loadConversations(setup.userId) : [];
-  const groupConvos = setup.userId ? loadGroupConversations(setup.userId) : [];
-
-  const metaLookup = buildConversationMetaLookup();
-  const rows = buildUnifiedConversationRows(convos, groupConvos, metaLookup);
-  const visibleRows = filterConversationRows(rows, activeInboxFilter);
-  const counts = computeInboxCounts(rows);
-  const listHtml = visibleRows.length === 0
-    ? renderEmptyState(activeInboxFilter)
-    : visibleRows.map((row) => renderConversationRow(row)).join("");
-  const archiveToggle = activeInboxFilter === "archived"
-    ? `<button id="archived-toggle" class="summary-link-btn" type="button">Back to inbox</button>`
-    : counts.archived > 0
-      ? `<button id="archived-toggle" class="summary-link-btn" type="button">View archived</button>`
-      : "";
+  const { rows, counts, visibleRows } = getWorkspaceInboxState();
 
   app.innerHTML = `
-    <div class="app-shell">
-      <header class="topbar">
-        <div class="topbar-copy">
-          <h1 class="topbar-title">Chats</h1>
-          <p class="topbar-sub">${escHtml(setup.displayName || setup.userId)} <span class="mono">@${escHtml(setup.userId)}</span></p>
+    <div class="desktop-shell desktop-home-shell">
+      ${renderWorkspaceSidebar(visibleRows, counts)}
+      <section class="workspace-preview-pane">
+        <div class="workspace-preview-card">
+          <span class="workspace-kicker">Signal-style desktop direction</span>
+          <h2>Select a conversation</h2>
+          <p class="workspace-preview-copy">Keep the inbox pinned on the left, and let the active thread or setup surface take over the main pane instead of bouncing between disconnected full-screen tools.</p>
+          <div class="workspace-stat-grid">
+            <div class="workspace-stat-card">
+              <strong>${counts.unread}</strong>
+              <span>Unread</span>
+            </div>
+            <div class="workspace-stat-card">
+              <strong>${counts.groups}</strong>
+              <span>Groups</span>
+            </div>
+            <div class="workspace-stat-card">
+              <strong>${counts.requests}</strong>
+              <span>Requests</span>
+            </div>
+            <div class="workspace-stat-card">
+              <strong>${counts.archived}</strong>
+              <span>Archived</span>
+            </div>
+          </div>
+          <div class="workspace-preview-actions">
+            <button id="workspace-preview-search" class="btn-primary">Search messages</button>
+            <button id="workspace-preview-settings" class="btn-secondary">Open settings</button>
+          </div>
+          <div class="beta-banner beta-banner-warning">
+            <strong>Web beta policy</strong>
+            <p>${escHtml(WEB_BETA_SCOPE_SUMMARY)}</p>
+          </div>
         </div>
-        <div class="topbar-actions">
-          <button id="conv-shortcuts" class="icon-btn" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="3" y="6" width="18" height="12" rx="2"/>
-              <path d="M7 10h.01M10 10h.01M13 10h.01M16 10h.01M7 14h10"/>
-            </svg>
-          </button>
-          <button id="conv-search" class="icon-btn" title="Search messages" aria-label="Search messages">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
-            </svg>
-          </button>
-          <button id="conv-settings" class="icon-btn" title="Settings" aria-label="Settings">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
-            </svg>
-          </button>
-        </div>
-      </header>
-      <div class="inbox-summary" role="status" aria-live="polite">
-        <span class="inbox-pill">${counts.unread > 0 ? `${counts.unread} unread` : "Protected"}</span>
-        <span class="inbox-caption">Post-quantum chats stay centered here while requests, groups, and archived threads stay one tap away.</span>
-        ${archiveToggle}
-      </div>
-      <div class="filter-chip-bar" role="tablist" aria-label="Inbox filters">
-        ${renderInboxFilter("all", "All", counts.all)}
-        ${renderInboxFilter("unread", "Unread", counts.unread)}
-        ${renderInboxFilter("groups", "Groups", counts.groups)}
-        ${renderInboxFilter("requests", "Requests", counts.requests)}
-        ${renderInboxFilter("archived", "Archived", counts.archived)}
-      </div>
-      <div class="conversation-list" id="conv-list" role="list">
-        ${listHtml}
-      </div>
-      <button id="fab-new" class="fab" title="New chat" aria-label="New chat">
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
-        </svg>
-      </button>
+      </section>
     </div>
   `;
-
-  q("#fab-new").addEventListener("click", () => {
-    const existing = document.querySelector(".fab-menu");
-    if (existing) { existing.remove(); return; }
-    const menu = document.createElement("div");
-    menu.className = "fab-menu";
-    menu.innerHTML = `
-      <button class="fab-menu-item" id="fab-new-chat">New Chat</button>
-      <button class="fab-menu-item" id="fab-new-group">New Group</button>
-    `;
-    document.body.appendChild(menu);
-    q("#fab-new-chat").addEventListener("click", () => { menu.remove(); navigateTo({ screen: "new-chat" }); });
-    q("#fab-new-group").addEventListener("click", () => { menu.remove(); navigateTo({ screen: "create-group" }); });
-    // Close on outside click
-    setTimeout(() => document.addEventListener("click", function close(e) {
-      if (!(e.target as HTMLElement).closest(".fab-menu") && !(e.target as HTMLElement).closest("#fab-new")) {
-        menu.remove();
-        document.removeEventListener("click", close);
-      }
-    }), 0);
-  });
-  q("#conv-search").addEventListener("click", () => navigateTo({ screen: "search" }));
-  q("#conv-shortcuts").addEventListener("click", () => showKeyboardShortcutOverlay());
-  q("#conv-settings").addEventListener("click", () => navigateTo({ screen: "settings" }));
-  document.querySelector<HTMLButtonElement>("#archived-toggle")?.addEventListener("click", () => {
-    activeInboxFilter = activeInboxFilter === "archived" ? "all" : "archived";
-    renderConversations();
-  });
-  for (const chip of document.querySelectorAll<HTMLButtonElement>("[data-inbox-filter]")) {
-    chip.addEventListener("click", () => {
-      const nextFilter = (chip.dataset.inboxFilter as InboxFilter) || "all";
-      if (nextFilter !== activeInboxFilter) {
-        activeInboxFilter = nextFilter;
-        renderConversations();
-      }
-    });
-  }
-
-  // Bind conversation row clicks
-  for (const row of document.querySelectorAll<HTMLElement>("[data-peer]")) {
-    row.addEventListener("click", () => {
-      const peerId = row.dataset.peer!;
-      markConversationRead(setup.userId, peerId);
-      navigateTo({ screen: "chat", peerId });
-    });
-    row.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        row.click();
-      }
-    });
-  }
-
-  // Bind group conversation row clicks
-  for (const row of document.querySelectorAll<HTMLElement>("[data-group]")) {
-    row.addEventListener("click", () => {
-      const groupId = row.dataset.group!;
-      markGroupConversationRead(setup.userId, groupId);
-      navigateTo({ screen: "group-chat", groupId });
-    });
-    row.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        row.click();
-      }
-    });
-  }
-
-  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-thread-menu]")) {
-    button.addEventListener("click", (e) => {
-      e.stopPropagation();
-      showConversationActionMenu(
-        button,
-        (button.dataset.threadKind as ConversationKind) || "dm",
-        button.dataset.threadId || ""
-      );
-    });
-  }
+  bindWorkspaceSidebarInteractions();
+  document.querySelector<HTMLButtonElement>("#workspace-preview-search")?.addEventListener("click", () => navigateTo({ screen: "search" }));
+  document.querySelector<HTMLButtonElement>("#workspace-preview-settings")?.addEventListener("click", () => navigateTo({ screen: "settings" }));
 
   // Start realtime delivery on the active inbox path.
   void connectRealtime();
@@ -2690,6 +2646,269 @@ function computeInboxCounts(rows: UnifiedConversationRow[]): Record<InboxFilter,
   };
 }
 
+type ActiveWorkspaceThread = { kind: ConversationKind; threadId: string } | null;
+
+function getWorkspaceInboxState(activeThread: ActiveWorkspaceThread = null): {
+  rows: UnifiedConversationRow[];
+  counts: Record<InboxFilter, number>;
+  visibleRows: UnifiedConversationRow[];
+} {
+  cachedProfileNames = {
+    ...Object.fromEntries(loadProfileDisplayNames(setup.userId).map((item) => [item.targetUserId, item.displayName])),
+    ...cachedProfileNames,
+  };
+  const convos = setup.userId ? loadConversations(setup.userId) : [];
+  const groupConvos = setup.userId ? loadGroupConversations(setup.userId) : [];
+  const metaLookup = buildConversationMetaLookup();
+  const rows = buildUnifiedConversationRows(convos, groupConvos, metaLookup);
+  const counts = computeInboxCounts(rows);
+  let visibleRows = filterConversationRows(rows, activeInboxFilter);
+  if (activeThread) {
+    const hasActiveVisible = visibleRows.some(
+      (row) => row.kind === activeThread.kind && row.threadId === activeThread.threadId
+    );
+    if (!hasActiveVisible) {
+      const activeRow = rows.find(
+        (row) => row.kind === activeThread.kind && row.threadId === activeThread.threadId
+      );
+      if (activeRow) {
+        visibleRows = [activeRow, ...visibleRows];
+      }
+    }
+  }
+  return { rows, counts, visibleRows };
+}
+
+function renderWorkspaceSidebar(
+  visibleRows: UnifiedConversationRow[],
+  counts: Record<InboxFilter, number>,
+  activeThread: ActiveWorkspaceThread = null
+): string {
+  const archiveToggle = activeInboxFilter === "archived"
+    ? `<button id="workspace-archived-toggle" class="summary-link-btn" type="button">Back to inbox</button>`
+    : counts.archived > 0
+      ? `<button id="workspace-archived-toggle" class="summary-link-btn" type="button">Archived</button>`
+      : "";
+  const listHtml = visibleRows.length === 0
+    ? renderEmptyState(activeInboxFilter)
+    : visibleRows.map((row) => renderConversationRow(row, activeThread)).join("");
+  const profileLabel = setup.displayName || setup.userId;
+  const profileAvatar = profileLabel.slice(0, 2).toUpperCase();
+  return `
+    <aside class="workspace-sidebar">
+      <div class="workspace-sidebar-head">
+        <div class="workspace-profile-card">
+          <div class="avatar workspace-profile-avatar">${escHtml(profileAvatar)}</div>
+          <div class="workspace-profile-copy">
+            <span class="workspace-kicker">Desktop beta</span>
+            <strong>${escHtml(profileLabel)}</strong>
+            <span class="mono">@${escHtml(setup.userId)}</span>
+          </div>
+          <span class="inbox-pill workspace-profile-pill">${counts.unread > 0 ? `${counts.unread} unread` : "Protected"}</span>
+        </div>
+        <div class="workspace-toolbar">
+          <button id="workspace-shortcuts" class="icon-btn" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="6" width="18" height="12" rx="2"/>
+              <path d="M7 10h.01M10 10h.01M13 10h.01M16 10h.01M7 14h10"/>
+            </svg>
+          </button>
+          <button id="workspace-search" class="icon-btn" title="Search messages" aria-label="Search messages">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+            </svg>
+          </button>
+          <button id="workspace-settings" class="icon-btn" title="Settings" aria-label="Settings">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+            </svg>
+          </button>
+        </div>
+        <div class="workspace-compose-row">
+          <button id="workspace-new-chat" class="btn-primary">New chat</button>
+          <button id="workspace-new-group" class="btn-secondary">New group</button>
+        </div>
+        <div class="workspace-summary-card" role="status" aria-live="polite">
+          <span class="workspace-summary-title">Secure conversations stay in one workspace.</span>
+          <p class="workspace-summary-copy">Requests, groups, drafts, and archived chats stay visible on the left while the active thread takes the main pane.</p>
+          ${archiveToggle}
+        </div>
+        <div class="filter-chip-bar workspace-filter-bar" role="tablist" aria-label="Inbox filters">
+          ${renderInboxFilter("all", "All", counts.all)}
+          ${renderInboxFilter("unread", "Unread", counts.unread)}
+          ${renderInboxFilter("groups", "Groups", counts.groups)}
+          ${renderInboxFilter("requests", "Requests", counts.requests)}
+          ${renderInboxFilter("archived", "Archived", counts.archived)}
+        </div>
+      </div>
+      <div class="conversation-list workspace-conversation-list" id="conv-list" role="list">
+        ${listHtml}
+      </div>
+    </aside>
+  `;
+}
+
+function bindWorkspaceSidebarInteractions(): void {
+  document.querySelector<HTMLButtonElement>("#workspace-new-chat")?.addEventListener("click", () => navigateTo({ screen: "new-chat" }));
+  document.querySelector<HTMLButtonElement>("#workspace-new-group")?.addEventListener("click", () => navigateTo({ screen: "create-group" }));
+  document.querySelector<HTMLButtonElement>("#workspace-search")?.addEventListener("click", () => navigateTo({ screen: "search" }));
+  document.querySelector<HTMLButtonElement>("#workspace-shortcuts")?.addEventListener("click", () => showKeyboardShortcutOverlay());
+  document.querySelector<HTMLButtonElement>("#workspace-settings")?.addEventListener("click", () => navigateTo({ screen: "settings" }));
+  document.querySelector<HTMLButtonElement>("#workspace-archived-toggle")?.addEventListener("click", () => {
+    activeInboxFilter = activeInboxFilter === "archived" ? "all" : "archived";
+    refreshActiveWorkspaceView();
+  });
+
+  for (const chip of document.querySelectorAll<HTMLButtonElement>("[data-inbox-filter]")) {
+    chip.addEventListener("click", () => {
+      const nextFilter = (chip.dataset.inboxFilter as InboxFilter) || "all";
+      if (nextFilter !== activeInboxFilter) {
+        activeInboxFilter = nextFilter;
+        refreshActiveWorkspaceView();
+      }
+    });
+  }
+
+  for (const row of document.querySelectorAll<HTMLElement>("[data-peer]")) {
+    row.addEventListener("click", () => {
+      const peerId = row.dataset.peer!;
+      markConversationRead(setup.userId, peerId);
+      navigateTo({ screen: "chat", peerId });
+    });
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        row.click();
+      }
+    });
+  }
+
+  for (const row of document.querySelectorAll<HTMLElement>("[data-group]")) {
+    row.addEventListener("click", () => {
+      const groupId = row.dataset.group!;
+      markGroupConversationRead(setup.userId, groupId);
+      navigateTo({ screen: "group-chat", groupId });
+    });
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        row.click();
+      }
+    });
+  }
+
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-thread-menu]")) {
+    button.addEventListener("click", (e) => {
+      e.stopPropagation();
+      showConversationActionMenu(
+        button,
+        (button.dataset.threadKind as ConversationKind) || "dm",
+        button.dataset.threadId || ""
+      );
+    });
+  }
+}
+
+function renderWorkspacePage(
+  content: string,
+  options: { activeThread?: ActiveWorkspaceThread } = {}
+): void {
+  const { counts, visibleRows } = getWorkspaceInboxState(options.activeThread ?? null);
+  app.innerHTML = `
+    <div class="desktop-shell desktop-page-shell">
+      ${renderWorkspaceSidebar(visibleRows, counts, options.activeThread ?? null)}
+      <section class="workspace-page-pane">
+        ${content}
+      </section>
+    </div>
+  `;
+  bindWorkspaceSidebarInteractions();
+}
+
+function wrapCurrentAppShellInWorkspace(
+  options: { activeThread?: ActiveWorkspaceThread } = {}
+): void {
+  const existingShell = app.firstElementChild;
+  if (!(existingShell instanceof HTMLElement)) {
+    return;
+  }
+  if (existingShell.classList.contains("desktop-shell")) {
+    bindWorkspaceSidebarInteractions();
+    return;
+  }
+  existingShell.classList.add("workspace-legacy-page-card");
+  const activeThread = options.activeThread ?? null;
+  const { counts, visibleRows } = getWorkspaceInboxState(activeThread);
+  const frame = document.createElement("div");
+  frame.className = "desktop-shell desktop-page-shell";
+  frame.innerHTML = `
+    ${renderWorkspaceSidebar(visibleRows, counts, activeThread)}
+    <section class="workspace-page-pane"></section>
+  `;
+  const pagePane = frame.querySelector<HTMLElement>(".workspace-page-pane");
+  if (!pagePane) {
+    return;
+  }
+  app.innerHTML = "";
+  pagePane.appendChild(existingShell);
+  app.appendChild(frame);
+  bindWorkspaceSidebarInteractions();
+}
+
+function isDesktopWorkspaceLayout(): boolean {
+  return window.matchMedia("(min-width: 980px)").matches;
+}
+
+function getDesktopSidePanelHost(): HTMLElement | null {
+  if (!isDesktopWorkspaceLayout()) {
+    return null;
+  }
+  return (
+    document.querySelector<HTMLElement>(".desktop-thread-pane") ||
+    document.querySelector<HTMLElement>(".workspace-page-pane")
+  );
+}
+
+function syncWorkspaceSidePanelHost(host: HTMLElement | null): void {
+  if (!host) {
+    return;
+  }
+  const hasOpenPanel = Boolean(
+    host.querySelector(".chat-details-sheet:not(.hidden), .shared-media-sheet"),
+  );
+  host.classList.toggle("has-side-panel", hasOpenPanel);
+}
+
+function renderWorkspacePageHeader(
+  title: string,
+  subtitleHtml: string,
+  options: {
+    eyebrow?: string;
+    actionsHtml?: string;
+    backButtonId?: string;
+    backButtonLabel?: string;
+  } = {}
+): string {
+  const actions = [
+    options.backButtonId && options.backButtonLabel
+      ? `<button id="${escHtml(options.backButtonId)}" class="btn-secondary" type="button">${escHtml(options.backButtonLabel)}</button>`
+      : "",
+    options.actionsHtml ?? "",
+  ]
+    .filter(Boolean)
+    .join("");
+  return `
+    <header class="workspace-page-header">
+      <div class="workspace-page-copy">
+        <span class="workspace-kicker">${escHtml(options.eyebrow ?? "Desktop beta")}</span>
+        <h1 class="workspace-page-title">${escHtml(title)}</h1>
+        ${subtitleHtml ? `<p class="workspace-page-subtitle">${subtitleHtml}</p>` : ""}
+      </div>
+      ${actions ? `<div class="workspace-page-actions">${actions}</div>` : ""}
+    </header>
+  `;
+}
+
 function renderInboxFilter(filter: InboxFilter, label: string, count: number): string {
   const activeClass = activeInboxFilter === filter ? " active" : "";
   const badge = count > 0 ? `<span class="filter-chip-count">${count}</span>` : "";
@@ -2724,12 +2943,14 @@ function renderEmptyState(filter: InboxFilter): string {
   `;
 }
 
-function renderConversationRow(row: UnifiedConversationRow): string {
+function renderConversationRow(row: UnifiedConversationRow, activeThread: ActiveWorkspaceThread = null): string {
   const unread = row.unreadCount > 0 ? `<span class="badge">${row.unreadCount > 99 ? "99+" : row.unreadCount}</span>` : "";
+  const isActive = Boolean(activeThread && row.kind === activeThread.kind && row.threadId === activeThread.threadId);
   const stateClass = [
     row.unreadCount > 0 ? " unread" : "",
     row.meta.pinnedAt ? " pinned" : "",
     row.kind === "dm" && row.meta.requestState === "pending" ? " pending-request" : "",
+    isActive ? " active" : "",
   ].join("");
   const time = relativeTime(row.updatedAt);
   const presenceDot = row.kind === "dm" && row.presenceStatus && row.presenceStatus !== "offline"
@@ -2801,7 +3022,7 @@ function showConversationActionMenu(anchor: HTMLElement, kind: ConversationKind,
         const nextUnread = unreadCount === 0;
         setConversationUnread(kind, threadId, nextUnread);
         notify(nextUnread ? "Marked unread" : "Marked read", "success");
-        refreshConversationsIfVisible();
+        refreshActiveWorkspaceView();
       },
     },
     {
@@ -2809,7 +3030,7 @@ function showConversationActionMenu(anchor: HTMLElement, kind: ConversationKind,
       action: () => {
         toggleConversationPinned(kind, threadId);
         notify(meta.pinnedAt ? "Chat unpinned" : "Chat pinned", "success");
-        refreshConversationsIfVisible();
+        refreshActiveWorkspaceView();
       },
     },
     {
@@ -2818,7 +3039,7 @@ function showConversationActionMenu(anchor: HTMLElement, kind: ConversationKind,
         const archived = !meta.archivedAt;
         setConversationArchived(kind, threadId, archived);
         notifyArchiveChange(kind, threadId, archived);
-        refreshConversationsIfVisible();
+        refreshActiveWorkspaceView();
       },
     },
   ];
@@ -2828,7 +3049,7 @@ function showConversationActionMenu(anchor: HTMLElement, kind: ConversationKind,
         label: "Accept",
         action: () => {
           markConversationAccepted(threadId);
-          refreshConversationsIfVisible();
+          refreshActiveWorkspaceView();
         },
       },
       {
@@ -2836,7 +3057,7 @@ function showConversationActionMenu(anchor: HTMLElement, kind: ConversationKind,
         className: "ctx-danger",
         action: () => {
           markConversationDismissed(threadId);
-          refreshConversationsIfVisible();
+          refreshActiveWorkspaceView();
         },
       }
     );
@@ -2948,8 +3169,12 @@ async function renderChat(peerId: string): Promise<void> {
       </div>
     `
     : "";
+  const { counts, visibleRows } = getWorkspaceInboxState({ kind: "dm", threadId: peerId });
 
   app.innerHTML = `
+    <div class="desktop-shell desktop-thread-shell">
+      ${renderWorkspaceSidebar(visibleRows, counts, { kind: "dm", threadId: peerId })}
+      <div class="desktop-thread-pane">
     <div class="chat-shell">
       <header class="chat-header">
         <button id="chat-back" class="icon-btn" aria-label="Back to conversations">
@@ -3190,8 +3415,11 @@ async function renderChat(peerId: string): Promise<void> {
         </div>
       </div>
     </div>
+      </div>
+    </div>
   `;
 
+  bindWorkspaceSidebarInteractions();
   const msgList = q("#messages-list");
   const container = q("#messages-container");
   const conversationId = convId(setup.userId, peerId);
@@ -3216,6 +3444,7 @@ async function renderChat(peerId: string): Promise<void> {
   const expandComposeBtn = q<HTMLButtonElement>("#chat-expand-compose");
   const fileInput = q<HTMLInputElement>("#file-input");
   const detailsSheet = q("#chat-details-sheet");
+  const threadPane = document.querySelector<HTMLElement>(".desktop-thread-pane");
   const inlineDetailsBtn = q<HTMLButtonElement>("#chat-open-details-inline");
   const detailSharedMediaBtn = q<HTMLButtonElement>("#detail-shared-media");
   const detailSharedMediaCount = q<HTMLElement>("#detail-shared-media-count");
@@ -3226,6 +3455,11 @@ async function renderChat(peerId: string): Promise<void> {
   const expandedComposeInput = q<HTMLTextAreaElement>("#chat-expanded-input");
   const expandedComposeClose = q<HTMLButtonElement>("#chat-expanded-close");
   const expandedComposeSend = q<HTMLButtonElement>("#chat-expanded-send");
+  if (threadPane && isDesktopWorkspaceLayout()) {
+    detailsSheet.classList.add("desktop-side-panel");
+    threadPane.appendChild(detailsSheet);
+    syncWorkspaceSidePanelHost(threadPane);
+  }
   let sendInFlight = false;
   const useSealed = true;
   let pendingAttachmentFile: File | null = null;
@@ -3483,8 +3717,26 @@ async function renderChat(peerId: string): Promise<void> {
     navigateTo({ screen: "conversations" });
   });
 
-  q("#chat-details-toggle").addEventListener("click", () => {
+  const closeDetailsPanel = (): void => {
+    detailsSheet.classList.add("hidden");
+    syncWorkspaceSidePanelHost(threadPane);
+  };
+  const openDetailsPanel = (): void => {
+    hideSharedMediaOverlay();
     detailsSheet.classList.remove("hidden");
+    syncWorkspaceSidePanelHost(threadPane);
+  };
+  const openSharedMediaPanel = (): void => {
+    closeDetailsPanel();
+    void showSharedMediaSheet({
+      title: `${displayName} shared media`,
+      conversationId,
+      emptyMessage: "No shared media in this chat yet.",
+    });
+  };
+
+  q("#chat-details-toggle").addEventListener("click", () => {
+    openDetailsPanel();
   });
   q("#chat-search").addEventListener("click", () => {
     openThreadSearch();
@@ -3493,18 +3745,13 @@ async function renderChat(peerId: string): Promise<void> {
     showKeyboardShortcutOverlay();
   });
   inlineDetailsBtn.addEventListener("click", () => {
-    detailsSheet.classList.remove("hidden");
+    openDetailsPanel();
   });
   q("#chat-details-close").addEventListener("click", () => {
-    detailsSheet.classList.add("hidden");
+    closeDetailsPanel();
   });
   detailSharedMediaBtn.addEventListener("click", () => {
-    detailsSheet.classList.add("hidden");
-    void showSharedMediaSheet({
-      title: `${displayName} shared media`,
-      conversationId,
-      emptyMessage: "No shared media in this chat yet.",
-    });
+    openSharedMediaPanel();
   });
   threadSearchInput.addEventListener("input", () => {
     threadSearchIndex = 0;
@@ -3526,7 +3773,7 @@ async function renderChat(peerId: string): Promise<void> {
   threadSearchClose.addEventListener("click", () => closeThreadSearch());
   detailsSheet.addEventListener("click", (e) => {
     if (e.target === detailsSheet) {
-      detailsSheet.classList.add("hidden");
+      closeDetailsPanel();
     }
   });
   q("#detail-pin").addEventListener("click", () => {
@@ -3984,6 +4231,11 @@ async function renderChat(peerId: string): Promise<void> {
       openThreadSearch();
       return;
     }
+    if (withModifier && event.shiftKey && key === "m") {
+      event.preventDefault();
+      openSharedMediaPanel();
+      return;
+    }
     if (withModifier && event.shiftKey && key === "t") {
       event.preventDefault();
       input.focus();
@@ -4011,6 +4263,11 @@ async function renderChat(peerId: string): Promise<void> {
     if (event.key === "Escape" && !expandedComposeSheet.classList.contains("hidden")) {
       event.preventDefault();
       closeExpandedComposer(false);
+      return;
+    }
+    if (event.key === "Escape" && !detailsSheet.classList.contains("hidden")) {
+      event.preventDefault();
+      closeDetailsPanel();
       return;
     }
     if (!isMessageSelectionActive(conversationId)) {
@@ -4559,19 +4816,15 @@ function renderNewChat(): void {
     `;
   }).join("");
 
-  app.innerHTML = `
-    <div class="app-shell">
-      <header class="topbar">
-        <button id="nc-back" class="icon-btn" aria-label="Back">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <div class="topbar-copy">
-          <h1 class="topbar-title">Start Chat</h1>
-          <p class="topbar-sub">Choose a contact or enter a username.</p>
-        </div>
-      </header>
+  renderWorkspacePage(`
+    <section class="workspace-page-card">
+      ${renderWorkspacePageHeader(
+        "Start chat",
+        "Choose a contact or enter a shareable <span class=\"mono\">@username</span> or invite link.",
+        {
+          eyebrow: "New message",
+        },
+      )}
       <div class="new-chat-body">
         ${cachedContacts.length > 0 ? `
           <div class="contacts-section">
@@ -4590,10 +4843,8 @@ function renderNewChat(): void {
           <button id="nc-invite" class="btn-secondary">Copy Invite Link</button>
         </div>
       </div>
-    </div>
-  `;
-
-  q("#nc-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
+    </section>
+  `);
   const peerInput = q<HTMLInputElement>("#nc-peer");
   const startBtn = q<HTMLButtonElement>("#nc-start");
   const statusEl = q("#nc-status");
@@ -4716,6 +4967,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
         </div>
       </div>
     `;
+    wrapCurrentAppShellInWorkspace({ activeThread: { kind: "group", threadId: groupId } });
     q("#gc-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
     return;
   }
@@ -4724,7 +4976,11 @@ async function renderGroupChat(groupId: string): Promise<void> {
     localCredential && privateGroupDescribeMemberCredential(localCredential).publish_key_base64,
   );
   const groupTitle = privateGroup.attributes.title || groupId;
+  const { counts, visibleRows } = getWorkspaceInboxState({ kind: "group", threadId: groupId });
   app.innerHTML = `
+    <div class="desktop-shell desktop-thread-shell">
+      ${renderWorkspaceSidebar(visibleRows, counts, { kind: "group", threadId: groupId })}
+      <div class="desktop-thread-pane">
     <div class="chat-shell">
       <header class="chat-header">
         <button id="gc-back" class="icon-btn" aria-label="Back to conversations">
@@ -4899,8 +5155,11 @@ async function renderGroupChat(groupId: string): Promise<void> {
         </div>
       </div>
     </div>
+      </div>
+    </div>
   `;
 
+  bindWorkspaceSidebarInteractions();
   const msgList = q("#messages-list");
   const container = q("#messages-container");
   const conversationId = `group:${groupId}`;
@@ -5169,6 +5428,13 @@ async function renderGroupChat(groupId: string): Promise<void> {
   q("#gc-search").addEventListener("click", () => {
     openThreadSearch();
   });
+  const openGroupSharedMediaPanel = (): void => {
+    void showSharedMediaSheet({
+      title: `${groupTitle} shared media`,
+      conversationId,
+      emptyMessage: "No shared media in this group yet.",
+    });
+  };
   const openAttachmentSheet = (): void => {
     attachmentSheet.classList.remove("hidden");
     attachmentSheet.setAttribute("aria-hidden", "false");
@@ -5433,6 +5699,11 @@ async function renderGroupChat(groupId: string): Promise<void> {
       openThreadSearch();
       return;
     }
+    if (withModifier && event.shiftKey && key === "m") {
+      event.preventDefault();
+      openGroupSharedMediaPanel();
+      return;
+    }
     if (withModifier && event.shiftKey && key === "t") {
       event.preventDefault();
       input.focus();
@@ -5577,28 +5848,32 @@ async function renderGroupInfo(groupId: string): Promise<void> {
   const state = getPrivateGroupState(groupId);
   const credential = getPrivateGroupCredential(groupId);
   if (!state || !credential) {
-    app.innerHTML = `
-      <div class="app-shell">
-        <header class="topbar">
-          <button id="gi-back" class="icon-btn" aria-label="Back to conversations">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M19 12H5M12 19l-7-7 7-7"/>
-            </svg>
-          </button>
-          <h1 class="topbar-title">Group Info</h1>
-        </header>
-        <div class="settings-body">
-          <div class="settings-section">
-            <h3>${escHtml(getPrivateGroupTitle(groupId))}</h3>
-            <div class="beta-banner beta-banner-warning">
-              <strong>Private-group state is unavailable</strong>
-              <p>This device does not have the local opaque state needed to manage this group.</p>
+    renderWorkspacePage(
+      `
+        <section class="workspace-page-card">
+          ${renderWorkspacePageHeader(
+            "Group info",
+            "Review membership, trust, and local state for this private group.",
+            {
+              eyebrow: "Private groups",
+              backButtonId: "gi-back",
+              backButtonLabel: "Back to chat",
+            },
+          )}
+          <div class="settings-body">
+            <div class="settings-section">
+              <h3>${escHtml(getPrivateGroupTitle(groupId))}</h3>
+              <div class="beta-banner beta-banner-warning">
+                <strong>Private-group state is unavailable</strong>
+                <p>This device does not have the local opaque state needed to manage this group.</p>
+              </div>
             </div>
           </div>
-        </div>
-      </div>
-    `;
-    q("#gi-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
+        </section>
+      `,
+      { activeThread: { kind: "group", threadId: groupId } },
+    );
+    q("#gi-back").addEventListener("click", () => navigateTo({ screen: "group-chat", groupId }));
     return;
   }
 
@@ -5634,50 +5909,53 @@ async function renderGroupInfo(groupId: string): Promise<void> {
     `;
   }).join("");
 
-  app.innerHTML = `
-    <div class="app-shell">
-      <header class="topbar">
-        <button id="gi-back" class="icon-btn" aria-label="Back to group chat">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <h1 class="topbar-title">Group Info</h1>
-      </header>
-      <div class="settings-body">
-        <div class="settings-section">
-          <h3>${escHtml(groupTitle)}</h3>
-          <p class="text-secondary">Epoch ${state.epoch} | ${state.members.length} members | Your role ${escHtml(yourRole)} | Owner ${escHtml(resolvePeerIdentity(ownerUserId).primaryLabel)}</p>
-          <div class="beta-banner beta-banner-warning">
-            <strong>Opaque private-group state</strong>
-            <p>${canManage ? "This device can rotate membership and issue member invites." : "This device can read the current private-group state but cannot rotate membership."}</p>
-            <p>Member trust uses the same local safety-number, identity-pin, and transparency checkpoints as direct chats.</p>
-          </div>
-          <div id="gi-members">${membersHtml}</div>
-        </div>
-        <div class="settings-section">
-          <h3 class="section-label">Shared Media</h3>
-          <p class="text-secondary">${groupSharedMediaCount === 1 ? "1 attachment" : `${groupSharedMediaCount} attachments`} saved in this group on this device.</p>
-          <button id="gi-shared-media" class="btn-secondary">Open Shared Media</button>
-        </div>
-        ${canManage ? `
+  renderWorkspacePage(
+    `
+      <section class="workspace-page-card">
+        ${renderWorkspacePageHeader(
+          "Group info",
+          `Epoch ${state.epoch} · ${state.members.length} members · Your role ${escHtml(yourRole)} · Owner ${escHtml(resolvePeerIdentity(ownerUserId).primaryLabel)}`,
+          {
+            eyebrow: "Private groups",
+            backButtonId: "gi-back",
+            backButtonLabel: "Back to chat",
+          },
+        )}
+        <div class="settings-body">
           <div class="settings-section">
-            <h3 class="section-label">Add Member</h3>
-            <label class="field">
-              <span>User</span>
-              <input id="gi-add-member" type="text" placeholder="@username, user ID, or invite link" autocomplete="off" />
-            </label>
-            <button id="gi-add-member-btn" class="btn-primary">Rotate Epoch And Create Invite</button>
+            <h3>${escHtml(groupTitle)}</h3>
+            <div class="beta-banner beta-banner-warning">
+              <strong>Opaque private-group state</strong>
+              <p>${canManage ? "This device can rotate membership and issue member invites." : "This device can read the current private-group state but cannot rotate membership."}</p>
+              <p>Member trust uses the same local safety-number, identity-pin, and transparency checkpoints as direct chats.</p>
+            </div>
+            <div id="gi-members">${membersHtml}</div>
           </div>
-        ` : `
           <div class="settings-section">
-            <p class="text-secondary">Membership changes require an owner/admin credential for the current epoch.</p>
+            <h3 class="section-label">Shared Media</h3>
+            <p class="text-secondary">${groupSharedMediaCount === 1 ? "1 attachment" : `${groupSharedMediaCount} attachments`} saved in this group on this device.</p>
+            <button id="gi-shared-media" class="btn-secondary">Open Shared Media</button>
           </div>
-        `}
-        <p id="gi-status" class="text-secondary"></p>
-      </div>
-    </div>
-  `;
+          ${canManage ? `
+            <div class="settings-section">
+              <h3 class="section-label">Add Member</h3>
+              <label class="field">
+                <span>User</span>
+                <input id="gi-add-member" type="text" placeholder="@username, user ID, or invite link" autocomplete="off" />
+              </label>
+              <button id="gi-add-member-btn" class="btn-primary">Rotate Epoch And Create Invite</button>
+            </div>
+          ` : `
+            <div class="settings-section">
+              <p class="text-secondary">Membership changes require an owner/admin credential for the current epoch.</p>
+            </div>
+          `}
+          <p id="gi-status" class="text-secondary"></p>
+        </div>
+      </section>
+    `,
+    { activeThread: { kind: "group", threadId: groupId } },
+  );
 
   q("#gi-back").addEventListener("click", () => navigateTo({ screen: "group-chat", groupId }));
   q<HTMLButtonElement>("#gi-shared-media").addEventListener("click", () => {
@@ -5948,7 +6226,7 @@ function renderCreateGroup(): void {
       </div>
     </div>
   `;
-
+  wrapCurrentAppShellInWorkspace();
   q("#cg-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
   const statusEl = q<HTMLElement>("#cg-status");
   const nameInput = q<HTMLInputElement>("#cg-name");
@@ -6452,16 +6730,69 @@ async function renderSettings(): Promise<void> {
         : "Unavailable";
     }
   }
-  app.innerHTML = `
-    <div class="app-shell">
-      <header class="topbar">
-        <button id="set-back" class="icon-btn" aria-label="Back to conversations">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <h1 class="topbar-title">Settings</h1>
-      </header>
+  const trustedContactsCount = cachedContacts.length;
+  const settingsSummaryCards = `
+    <div class="settings-summary-grid">
+      <article class="settings-summary-card">
+        <span class="settings-summary-kicker">People</span>
+        <strong>${trustedContactsCount}</strong>
+        <span>${trustedContactsCount === 1 ? "trusted contact" : "trusted contacts"}</span>
+        <p>${escHtml(
+          contactDiscoveryMode === "private_service"
+            ? "Manual contacts stay primary. Discovery is available as an advanced privacy surface."
+            : "Add people by exact username or invite link."
+        )}</p>
+      </article>
+      <article class="settings-summary-card">
+        <span class="settings-summary-kicker">Privacy</span>
+        <strong>${escHtml(contactDiscoveryMode === "private_service" ? "Hardened" : "Manual")}</strong>
+        <span>${escHtml(contactDiscoveryMode === "private_service" ? contactDiscoveryContinuityStatus : "Invite-first discovery")}</span>
+        <p>${escHtml(
+          contactDiscoveryMode === "private_service"
+            ? "Manifest continuity and attestation are checked before future private lookups."
+            : "Share usernames and private invites instead of raw-hash discovery."
+        )}</p>
+      </article>
+      <article class="settings-summary-card">
+        <span class="settings-summary-kicker">Devices</span>
+        <strong>${escHtml(setup.deviceId)}</strong>
+        <span>current browser profile</span>
+        <p>Manage linked devices, revoke old browsers, and keep this local profile protected.</p>
+      </article>
+      <article class="settings-summary-card">
+        <span class="settings-summary-kicker">Web scope</span>
+        <strong>${escHtml(webHoldback.title)}</strong>
+        <span>${escHtml(capabilities?.web_client_policy || "local beta")}</span>
+        <p>${escHtml(webHoldback.detail)}</p>
+      </article>
+    </div>
+  `;
+  const advancedDiscoveryTechnicalDetails =
+    contactDiscoveryMode === "private_service"
+      ? `
+        <details class="settings-inline-details">
+          <summary>Technical contract</summary>
+          <div class="settings-inline-details-body">
+            <div class="settings-row"><span>Service Origin</span><span class="mono">${escHtml(capabilities?.contact_discovery_service_origin || "not configured")}</span></div>
+            <div class="settings-row"><span>Lookup Protocol</span><span>${escHtml(contactDiscoveryManifest?.lookup_protocol || "unknown")}</span></div>
+            <div class="settings-row"><span>Evaluation Proof</span><span>${escHtml(contactDiscoveryManifest?.evaluation_proof_mode || "unknown")}</span></div>
+            <div class="settings-row"><span>Attestation Verifier</span><span class="mono">${escHtml(contactDiscoveryManifest?.attestation_verifier || "not advertised")}</span></div>
+            <div class="settings-row"><span>Enclave Measurement</span><span class="mono">${escHtml(contactDiscoveryManifest?.enclave_measurement_hex || "not advertised")}</span></div>
+            <div class="settings-row"><span>Attestation PCRs</span><span class="mono">${escHtml(formatContactDiscoveryPcrs(contactDiscoveryManifest?.attestation_pcrs_sha384))}</span></div>
+            <div class="settings-row"><span>Attestation Max Age</span><span>${escHtml(capabilities?.contact_discovery_attestation_max_age_seconds ? `${capabilities.contact_discovery_attestation_max_age_seconds}s` : "not advertised")}</span></div>
+          </div>
+        </details>
+      `
+      : "";
+  renderWorkspacePage(`
+    <section class="workspace-page-card">
+      ${renderWorkspacePageHeader(
+        "Settings",
+        "Manage your profile, linked devices, privacy posture, and local trust state.",
+        {
+          eyebrow: "Your account",
+        },
+      )}
       <div class="settings-body">
         <div class="settings-hero">
           <div>
@@ -6475,8 +6806,9 @@ async function renderSettings(): Promise<void> {
           </div>
           <button data-open-devices="1" class="btn-secondary">Manage Devices</button>
         </div>
+        ${settingsSummaryCards}
         <div class="settings-section">
-          <h3>Beta Scope</h3>
+          <h3>Current web scope</h3>
           <div class="beta-banner beta-banner-${webHoldback.tone}">
             <strong>${escHtml(webHoldback.title)}</strong>
             <p>${escHtml(webHoldback.detail)}</p>
@@ -6511,9 +6843,14 @@ async function renderSettings(): Promise<void> {
           <h3>People</h3>
           <p class="text-secondary settings-desc">${
             contactDiscoveryMode === "private_service"
-              ? "Manual contacts remain the active flow here. This server is prepared for a separate private discovery service, but the blinded lookup client flow is not shipped yet."
-              : "Manual contacts only. Add people by exact @username or invite link. Private discovery stays unavailable in this privacy profile."
+              ? "Add people by username or invite link first. Contact discovery stays secondary and experimental on web."
+              : "Add people by exact @username or invite link. Manual contacts stay primary in this privacy profile."
           }</p>
+          <div class="settings-section-actions">
+            <button id="set-discovery-top" class="btn-secondary" ${contactDiscoverySupported ? "" : "disabled"}>${
+              contactDiscoverySupported ? "Open Contact Discovery" : "Discovery Unavailable"
+            }</button>
+          </div>
           <div id="contacts-manage">
             ${cachedContacts.length === 0 ? '<p class="text-secondary">No contacts yet</p>' :
               cachedContacts.map(c => {
@@ -6557,22 +6894,15 @@ async function renderSettings(): Promise<void> {
           <h3>Advanced Discovery</h3>
           <p class="text-secondary settings-desc">${
             contactDiscoverySupported
-              ? "Let contacts find you by phone or email hash."
+              ? "Use discovery only when you need the experimental hashed-handle path. Username and invite links stay easier and primary."
               : contactDiscoveryMode === "private_service"
-                ? "Raw-hash contact discovery stays disabled. The discovery manifest is checked here before any future private-lookup flow is allowed."
-                : "Raw-hash contact discovery is disabled. Share your @username or a private invite link and manage contacts manually."
+                ? "Raw-hash discovery stays disabled. This screen only verifies the separate service contract before any future private lookup is allowed."
+                : "Raw-hash discovery is disabled. Share your @username or a private invite link and manage contacts manually."
           }</p>
           ${
             contactDiscoveryMode === "private_service"
               ? `<div class="settings-row"><span>Manifest</span><span>${escHtml(contactDiscoveryManifestStatus)}</span></div>
-          <div class="settings-row"><span>Manifest Continuity</span><span>${escHtml(contactDiscoveryContinuityStatus)}</span></div>
-          <div class="settings-row"><span>Service Origin</span><span class="mono">${escHtml(capabilities?.contact_discovery_service_origin || "not configured")}</span></div>
-          <div class="settings-row"><span>Lookup Protocol</span><span>${escHtml(contactDiscoveryManifest?.lookup_protocol || "unknown")}</span></div>
-          <div class="settings-row"><span>Evaluation Proof</span><span>${escHtml(contactDiscoveryManifest?.evaluation_proof_mode || "unknown")}</span></div>
-          <div class="settings-row"><span>Attestation Verifier</span><span class="mono">${escHtml(contactDiscoveryManifest?.attestation_verifier || "not advertised")}</span></div>
-          <div class="settings-row"><span>Enclave Measurement</span><span class="mono">${escHtml(contactDiscoveryManifest?.enclave_measurement_hex || "not advertised")}</span></div>
-          <div class="settings-row"><span>Attestation PCRs</span><span class="mono">${escHtml(formatContactDiscoveryPcrs(contactDiscoveryManifest?.attestation_pcrs_sha384))}</span></div>
-          <div class="settings-row"><span>Attestation Max Age</span><span>${escHtml(capabilities?.contact_discovery_attestation_max_age_seconds ? `${capabilities.contact_discovery_attestation_max_age_seconds}s` : "not advertised")}</span></div>`
+          <div class="settings-row"><span>Manifest Continuity</span><span>${escHtml(contactDiscoveryContinuityStatus)}</span></div>`
               : ""
           }
           <div class="settings-row">
@@ -6580,6 +6910,7 @@ async function renderSettings(): Promise<void> {
               contactDiscoverySupported ? "Contact Discovery" : "Unavailable"
             }</button>
           </div>
+          ${advancedDiscoveryTechnicalDetails}
         </div>
         <div class="settings-section">
           <h3>Advanced Push</h3>
@@ -6613,10 +6944,8 @@ async function renderSettings(): Promise<void> {
           <button id="set-reset" class="btn-danger">Delete Account & Data</button>
         </div>
       </div>
-    </div>
-  `;
-
-  q("#set-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
+    </section>
+  `);
 
   // Save profile
   q<HTMLInputElement>("#set-username").addEventListener("input", () => {
@@ -6716,9 +7045,10 @@ async function renderSettings(): Promise<void> {
   q("#set-identity-log").addEventListener("click", () => navigateTo({ screen: "identity-log" }));
 
   // Discovery navigation
-  const discoveryButton = document.getElementById("set-discovery") as HTMLButtonElement | null;
-  if (discoveryButton && !discoveryButton.disabled) {
-    discoveryButton.addEventListener("click", () => navigateTo({ screen: "discovery" }));
+  for (const discoveryButton of document.querySelectorAll<HTMLButtonElement>("#set-discovery, #set-discovery-top")) {
+    if (!discoveryButton.disabled) {
+      discoveryButton.addEventListener("click", () => navigateTo({ screen: "discovery" }));
+    }
   }
 
   // Server info navigation
@@ -6851,6 +7181,7 @@ async function renderDevices(): Promise<void> {
       </div>
     </div>
   `;
+  wrapCurrentAppShellInWorkspace();
   q("#dev-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
   q("#dev-link").addEventListener("click", () => navigateTo({ screen: "link-device" }));
 
@@ -6927,7 +7258,7 @@ function renderLinkDevice(): void {
       </div>
     </div>
   `;
-
+  wrapCurrentAppShellInWorkspace();
   q("#ld-back").addEventListener("click", () => navigateTo({ screen: "devices" }));
   q("#ld-submit").addEventListener("click", async () => {
     const newDeviceId = q<HTMLInputElement>("#ld-device-id").value.trim();
@@ -7626,12 +7957,15 @@ async function downloadAndOpenFile(fileId: string): Promise<void> {
 }
 
 function hideSharedMediaOverlay(): void {
+  const host = sharedMediaOverlayHost;
   sharedMediaOverlay?.remove();
   sharedMediaOverlay = null;
+  sharedMediaOverlayHost = null;
   if (sharedMediaOverlayKeyHandler) {
     document.removeEventListener("keydown", sharedMediaOverlayKeyHandler);
     sharedMediaOverlayKeyHandler = null;
   }
+  syncWorkspaceSidePanelHost(host);
 }
 
 function classifySharedMediaFilter(message: StoredMessage): SharedMediaFilter | null {
@@ -7751,7 +8085,16 @@ async function showSharedMediaSheet(options: {
       <div id="shared-media-grid" class="shared-media-grid"></div>
     </div>
   `;
-  document.body.appendChild(overlay);
+  const desktopHost = getDesktopSidePanelHost();
+  if (desktopHost) {
+    overlay.classList.add("desktop-side-panel");
+    desktopHost.appendChild(overlay);
+    sharedMediaOverlayHost = desktopHost;
+    syncWorkspaceSidePanelHost(desktopHost);
+  } else {
+    document.body.appendChild(overlay);
+    sharedMediaOverlayHost = null;
+  }
   sharedMediaOverlay = overlay;
 
   const grid = overlay.querySelector<HTMLElement>("#shared-media-grid")!;
@@ -7850,7 +8193,7 @@ function renderSearch(): void {
       </div>
     </div>
   `;
-
+  wrapCurrentAppShellInWorkspace();
   const input = q<HTMLInputElement>("#search-input");
   const results = q("#search-results");
 
@@ -8185,7 +8528,7 @@ async function renderIdentityLog(): Promise<void> {
       </div>
     </div>
   `;
-
+  wrapCurrentAppShellInWorkspace();
   q("#idlog-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
 
   try {
@@ -8406,9 +8749,55 @@ async function renderDiscovery(): Promise<void> {
         </div>
       </div>
     `;
+    wrapCurrentAppShellInWorkspace();
     q("#disc-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
     return;
   }
+  const discoveryOverviewCards = `
+    <div class="settings-summary-grid settings-summary-grid-compact">
+      <article class="settings-summary-card">
+        <span class="settings-summary-kicker">Primary path</span>
+        <strong>Usernames</strong>
+        <span>and invite links</span>
+        <p>Keep manual contacts as the default. Discovery stays secondary and advanced on web.</p>
+      </article>
+      <article class="settings-summary-card">
+        <span class="settings-summary-kicker">Mode</span>
+        <strong>${escHtml(contactDiscoveryMode === "private_service" ? "Separate service" : "Hash lookup")}</strong>
+        <span>${escHtml(contactDiscoveryMode === "private_service" ? "short-lived tickets" : "manual hashes")}</span>
+        <p>${escHtml(
+          contactDiscoveryMode === "private_service"
+            ? "The app server issues tickets, while the separate service evaluates blinded handle material."
+            : "Discovery is limited to raw-hash entry and manual lookup."
+        )}</p>
+      </article>
+      <article class="settings-summary-card">
+        <span class="settings-summary-kicker">Matches</span>
+        <strong>${escHtml(contactDiscoveryMode === "private_service" ? "Opaque invites" : "Hash results")}</strong>
+        <span>not contact profiles</span>
+        <p>${escHtml(
+          contactDiscoveryMode === "private_service"
+            ? "Matches return opaque invite bootstraps instead of stable account IDs."
+            : "Any discovered handles still need manual confirmation and contact acceptance."
+        )}</p>
+      </article>
+    </div>
+  `;
+  const discoveryTechnicalDetails = contactDiscoveryMode === "private_service"
+    ? `
+      <details class="settings-inline-details">
+        <summary>Technical contract</summary>
+        <div class="settings-inline-details-body">
+          <div class="settings-row"><span>Service Origin</span><span class="mono">${escHtml(contactDiscoveryServiceOrigin || "not configured")}</span></div>
+          <div class="settings-row"><span>Backend</span><span>${escHtml(capabilities?.contact_discovery_directory_backend || "not advertised")}</span></div>
+          <div class="settings-row"><span>Host Release</span><span class="mono">${escHtml(capabilities?.contact_discovery_host_release_id || "not advertised")}</span></div>
+          <div class="settings-row"><span>Enclave Release</span><span class="mono">${escHtml(capabilities?.contact_discovery_enclave_release_id || "not advertised")}</span></div>
+          <div class="settings-row"><span>Manifest Contract</span><span class="mono">${escHtml(capabilities?.contact_discovery_expected_manifest_contract_sha256 || "not advertised")}</span></div>
+          <div class="settings-row"><span>Attestation Verifier</span><span class="mono">${escHtml(capabilities?.contact_discovery_attestation_verifier || "not advertised")}</span></div>
+        </div>
+      </details>
+    `
+    : "";
 
   app.innerHTML = `
     <div class="app-shell">
@@ -8422,10 +8811,16 @@ async function renderDiscovery(): Promise<void> {
       </header>
       <div class="settings-body">
         <div class="settings-section">
+          <h3>How to use this</h3>
+          <p class="text-secondary settings-desc">Treat contact discovery as an advanced privacy workflow. Usernames and invite links stay simpler and primary.</p>
+          ${discoveryOverviewCards}
+          ${discoveryTechnicalDetails}
+        </div>
+        <div class="settings-section">
           <h3>Upload Your Handles</h3>
           <p class="text-secondary settings-desc">${
             contactDiscoveryMode === "private_service"
-              ? "Upload SHA-256 handle hashes to the separate discovery service using a short-lived ticket from the app server. This is a service-boundary-only development privacy mode, not full private contact discovery. Matches return opaque invite bootstraps, not stable account IDs."
+              ? "Upload SHA-256 handle hashes to the separate service using a short-lived ticket from the app server."
               : "Share hashed phone/email so contacts can find you."
           }</p>
           <label class="field">
@@ -8443,7 +8838,7 @@ async function renderDiscovery(): Promise<void> {
           <h3>Find Contacts</h3>
           <p class="text-secondary settings-desc">${
             contactDiscoveryMode === "private_service"
-              ? "Blind-evaluate local handle hashes against the separate discovery service with a short-lived ticket. Matches only return opaque bootstrap invites for the same finalized tokens."
+              ? "Blind-evaluate local handle hashes against the separate service. Matches return opaque invite bootstraps for the same finalized tokens."
               : "Enter hashes to check who's registered."
           }</p>
           <label class="field">
@@ -8456,6 +8851,7 @@ async function renderDiscovery(): Promise<void> {
       </div>
     </div>
   `;
+  wrapCurrentAppShellInWorkspace();
 
   q("#disc-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
 
@@ -8674,7 +9070,7 @@ async function renderServerInfo(): Promise<void> {
       </div>
     </div>
   `;
-
+  wrapCurrentAppShellInWorkspace();
   q("#sinfo-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
 
   const body = document.getElementById("sinfo-body")!;
@@ -8787,6 +9183,17 @@ function stopAllTimers(): void {
 function refreshConversationsIfVisible(): void {
   if (getCurrentView().screen === "conversations") {
     renderConversations();
+  }
+}
+
+function refreshActiveWorkspaceView(): void {
+  const view = getCurrentView();
+  if (view.screen === "conversations") {
+    renderConversations();
+  } else if (view.screen === "chat") {
+    void renderChat(view.peerId);
+  } else if (view.screen === "group-chat") {
+    void renderGroupChat(view.groupId);
   }
 }
 
