@@ -12,7 +12,7 @@
 
 **Do not open public issues for security vulnerabilities.**
 
-To report a vulnerability, please email **security@pqmsg.example.com** with:
+To report a vulnerability, please email **erenari27@gmail.com** with:
 
 1. A description of the vulnerability and its potential impact.
 2. Steps to reproduce or a proof-of-concept (if available).

@@ -2909,6 +2909,37 @@ function renderWorkspacePageHeader(
   `;
 }
 
+function renderWorkspaceEmptyState(
+  title: string,
+  body: string,
+  options: {
+    eyebrow?: string;
+    actionsHtml?: string;
+    iconSvg?: string;
+    compact?: boolean;
+  } = {}
+): string {
+  const iconSvg =
+    options.iconSvg ??
+    `
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v7A2.5 2.5 0 0 1 17.5 17h-6l-3.5 2.5V17h-1.5A2.5 2.5 0 0 1 4 14.5z"/>
+        <path d="M8 9h8M8 12.5h5"/>
+      </svg>
+    `;
+  return `
+    <div class="workspace-empty-state${options.compact ? " compact" : ""}">
+      <div class="workspace-empty-state-icon" aria-hidden="true">${iconSvg}</div>
+      <div class="workspace-empty-state-copy">
+        <span class="workspace-kicker">${escHtml(options.eyebrow ?? "Desktop beta")}</span>
+        <h2>${escHtml(title)}</h2>
+        <p>${escHtml(body)}</p>
+      </div>
+      ${options.actionsHtml ? `<div class="workspace-empty-state-actions">${options.actionsHtml}</div>` : ""}
+    </div>
+  `;
+}
+
 function renderInboxFilter(filter: InboxFilter, label: string, count: number): string {
   const activeClass = activeInboxFilter === filter ? " active" : "";
   const badge = count > 0 ? `<span class="filter-chip-count">${count}</span>` : "";
@@ -7165,23 +7196,49 @@ async function renderSettings(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function renderDevices(): Promise<void> {
-  app.innerHTML = `
-    <div class="app-shell">
-      <header class="topbar">
-        <button id="dev-back" class="icon-btn" aria-label="Back to settings">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <h1 class="topbar-title">Devices</h1>
-      </header>
+  renderWorkspacePage(`
+    <section class="workspace-page-card">
+      ${renderWorkspacePageHeader(
+        "Devices",
+        "Manage this browser profile, review linked sessions, and revoke any device you no longer trust.",
+        {
+          eyebrow: "Linked devices",
+          backButtonId: "dev-back",
+          backButtonLabel: "Back to settings",
+          actionsHtml: `<button id="dev-link" class="btn-primary" type="button">Link New Device</button>`,
+        },
+      )}
       <div class="settings-body">
-        <div id="device-list"><p class="text-secondary">Loading devices…</p></div>
-        <button id="dev-link" class="btn-primary" style="margin-top:1rem;">+ Link New Device</button>
+        <div class="settings-summary-grid settings-summary-grid-compact" id="device-summary">
+          <article class="settings-summary-card">
+            <span class="settings-summary-kicker">Current device</span>
+            <strong>${escHtml(setup.deviceId)}</strong>
+            <span>this browser profile</span>
+            <p>Your local encrypted keys stay tied to this device ID.</p>
+          </article>
+          <article class="settings-summary-card">
+            <span class="settings-summary-kicker">Linked sessions</span>
+            <strong>Loading</strong>
+            <span>checking account devices</span>
+            <p>Review every browser or device currently linked to this account.</p>
+          </article>
+          <article class="settings-summary-card">
+            <span class="settings-summary-kicker">Safety</span>
+            <strong>Review regularly</strong>
+            <span>revoke what you do not recognize</span>
+            <p>Revoking a device signs it out permanently and removes future access.</p>
+          </article>
+        </div>
+        <div class="settings-section">
+          <h3>Linked sessions</h3>
+          <p class="text-secondary settings-desc">Keep only the devices you recognize. Remove old browsers or test devices as soon as you are done with them.</p>
+          <div id="device-list" class="utility-list">
+            ${renderWorkspaceEmptyState("Loading devices", "Checking linked sessions for this account.", { eyebrow: "Devices", compact: true })}
+          </div>
+        </div>
       </div>
-    </div>
-  `;
-  wrapCurrentAppShellInWorkspace();
+    </section>
+  `);
   q("#dev-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
   q("#dev-link").addEventListener("click", () => navigateTo({ screen: "link-device" }));
 
@@ -7190,28 +7247,72 @@ async function renderDevices(): Promise<void> {
     const api = new PqmsgApi(setup.serverUrl);
     const headers = buildListDevicesAuthHeaders(k);
     const resp = await api.listDevices(k.userId, headers);
+    const activeCount = resp.devices.filter((device) => device.active).length;
+    const revokedCount = resp.devices.filter((device) => !device.active).length;
+    q("#device-summary").innerHTML = `
+      <article class="settings-summary-card">
+        <span class="settings-summary-kicker">Current device</span>
+        <strong>${escHtml(setup.deviceId)}</strong>
+        <span>this browser profile</span>
+        <p>Your local encrypted keys stay tied to this device ID.</p>
+      </article>
+      <article class="settings-summary-card">
+        <span class="settings-summary-kicker">Linked sessions</span>
+        <strong>${resp.devices.length}</strong>
+        <span>${activeCount} active${revokedCount ? ` · ${revokedCount} revoked` : ""}</span>
+        <p>Review old browsers and remove anything you do not recognize.</p>
+      </article>
+      <article class="settings-summary-card">
+        <span class="settings-summary-kicker">Safety</span>
+        <strong>${activeCount === 1 ? "Tight" : "Shared"}</strong>
+        <span>${activeCount === 1 ? "single active session" : "multiple active sessions"}</span>
+        <p>${escHtml(activeCount === 1 ? "Only this device currently has active access." : "Multiple devices can receive updates for this account.")}</p>
+      </article>
+    `;
     const listEl = q("#device-list");
     if (resp.devices.length === 0) {
-      listEl.innerHTML = `<p class="text-secondary">No devices found.</p>`;
+      listEl.innerHTML = renderWorkspaceEmptyState(
+        "No linked devices yet",
+        "This browser is your only active session right now.",
+        {
+          eyebrow: "Devices",
+          compact: true,
+          actionsHtml: `<button id="dev-empty-link" class="btn-secondary" type="button">Link another device</button>`,
+        },
+      );
+      q("#dev-empty-link").addEventListener("click", () => navigateTo({ screen: "link-device" }));
       return;
     }
     listEl.innerHTML = resp.devices.map(d => {
       const isCurrent = d.device_id === setup.deviceId;
       const statusLabel = d.active ? (isCurrent ? "This device" : "Active") : "Revoked";
-      const statusClass = d.active ? (isCurrent ? "text-success" : "") : "text-danger";
+      const statusClass = d.active ? (isCurrent ? "success" : "neutral") : "danger";
       const linked = new Date(d.linked_at).toLocaleDateString();
       const revokeBtn = d.active && !isCurrent
         ? `<button class="btn-sm btn-danger-sm" data-revoke-device="${escHtml(d.device_id)}">Revoke</button>`
         : "";
       return `
-        <div class="device-row">
-          <div class="device-info">
-            <span class="mono">${escHtml(d.device_id)}</span>
-            <span class="${statusClass}">${statusLabel}</span>
-            <span class="text-secondary">Linked ${linked}</span>
-            ${d.revoked_at ? `<span class="text-secondary">Revoked ${new Date(d.revoked_at).toLocaleDateString()}</span>` : ""}
+        <div class="device-row utility-list-item">
+          <div class="device-info utility-list-body">
+            <div class="utility-list-title">
+              <span class="mono">${escHtml(d.device_id)}</span>
+              <span class="utility-status-pill ${statusClass}">${statusLabel}</span>
+            </div>
+            <div class="utility-list-meta">
+              <span>Linked ${linked}</span>
+              ${d.revoked_at ? `<span>Revoked ${new Date(d.revoked_at).toLocaleDateString()}</span>` : ""}
+            </div>
+            <p class="utility-list-note">${escHtml(
+              isCurrent
+                ? "This browser holds your current local profile."
+                : d.active
+                  ? "This linked device can still receive updates until it is revoked."
+                  : "This device has already been removed from active access."
+            )}</p>
           </div>
-          ${revokeBtn}
+          <div class="utility-list-actions">
+            ${revokeBtn}
+          </div>
         </div>
       `;
     }).join("");
@@ -7225,52 +7326,86 @@ async function renderDevices(): Promise<void> {
           const rHeaders = buildRevokeDeviceAuthHeaders(rk, targetDeviceId);
           await api.revokeDevice(rk.userId, targetDeviceId, rHeaders);
           notify(`Device ${targetDeviceId} revoked`, "success");
-          renderDevices();
+          void renderDevices();
         } catch (err) {
           notify(`Revoke failed: ${errorMsg(err)}`, "error");
         }
       });
     });
   } catch (e) {
-    q("#device-list").innerHTML = `<p class="text-danger">Failed to load devices: ${escHtml(errorMsg(e))}</p>`;
+    q("#device-list").innerHTML = renderWorkspaceEmptyState(
+      "Could not load devices",
+      `We could not fetch your linked sessions: ${errorMsg(e)}`,
+      {
+        eyebrow: "Devices",
+        compact: true,
+        actionsHtml: `<button id="dev-retry" class="btn-secondary" type="button">Try again</button>`,
+      },
+    );
+    q("#dev-retry").addEventListener("click", () => void renderDevices());
   }
 }
 
 function renderLinkDevice(): void {
-  app.innerHTML = `
-    <div class="app-shell">
-      <header class="topbar">
-        <button id="ld-back" class="icon-btn" aria-label="Back to devices">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <h1 class="topbar-title">Link New Device</h1>
-      </header>
+  renderWorkspacePage(`
+    <section class="workspace-page-card">
+      ${renderWorkspacePageHeader(
+        "Link device",
+        "Create another device entry for this account while keeping your current browser signed in.",
+        {
+          eyebrow: "Linked devices",
+          backButtonId: "ld-back",
+          backButtonLabel: "Back to devices",
+        },
+      )}
       <div class="settings-body">
-        <p class="text-secondary">Enter a device ID for the new device. Keys will be generated and linked to your account.</p>
-        <label class="field">
-          <span>New Device ID</span>
-          <input id="ld-device-id" type="text" placeholder="e.g. my-phone-1" />
-        </label>
-        <button id="ld-submit" class="btn-primary">Link Device</button>
-        <div id="ld-status"></div>
+        <div class="settings-summary-grid settings-summary-grid-compact">
+          <article class="settings-summary-card">
+            <span class="settings-summary-kicker">What this does</span>
+            <strong>Adds a session</strong>
+            <span>for the same account</span>
+            <p>The new device receives its own device ID while staying part of your account.</p>
+          </article>
+          <article class="settings-summary-card">
+            <span class="settings-summary-kicker">Best use</span>
+            <strong>Secondary browser</strong>
+            <span>or test device</span>
+            <p>Use clear names so you can revoke old sessions quickly later.</p>
+          </article>
+          <article class="settings-summary-card">
+            <span class="settings-summary-kicker">Recommendation</span>
+            <strong>Keep names obvious</strong>
+            <span>for example <span class="mono">work-laptop</span></span>
+            <p>Readable device IDs make future cleanup and audits much easier.</p>
+          </article>
+        </div>
+        <div class="settings-section">
+          <h3>New device</h3>
+          <p class="text-secondary settings-desc">Enter a short device label. This browser will ask the server to provision a new linked session for the same account.</p>
+          <label class="field">
+            <span>New Device ID</span>
+            <input id="ld-device-id" type="text" placeholder="e.g. work-laptop" />
+          </label>
+          <div class="settings-section-actions">
+            <button id="ld-submit" class="btn-primary" type="button">Link Device</button>
+          </div>
+          <div id="ld-status"></div>
+        </div>
       </div>
-    </div>
-  `;
-  wrapCurrentAppShellInWorkspace();
+    </section>
+  `);
   q("#ld-back").addEventListener("click", () => navigateTo({ screen: "devices" }));
   q("#ld-submit").addEventListener("click", async () => {
     const newDeviceId = q<HTMLInputElement>("#ld-device-id").value.trim();
     if (!newDeviceId) { q<HTMLInputElement>("#ld-device-id").focus(); return; }
     const statusEl = q("#ld-status");
-    statusEl.textContent = "Linking device…";
+    statusEl.innerHTML = `<p class="text-secondary">Linking device...</p>`;
     try {
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
       const headers = buildLinkDeviceAuthHeaders(k, newDeviceId);
       const result = await api.linkDevice(k.userId, newDeviceId, headers);
-      statusEl.innerHTML = `<p class="text-success">✓ Device "${escHtml(result.linked_device_id)}" linked at ${new Date(result.linked_at).toLocaleString()}</p>`;
+      statusEl.innerHTML = `<p class="text-success">Device "${escHtml(result.linked_device_id)}" linked at ${new Date(result.linked_at).toLocaleString()}</p>`;
       notify(`Device ${result.linked_device_id} linked`, "success");
     } catch (e) {
       statusEl.innerHTML = `<p class="text-danger">Link failed: ${escHtml(errorMsg(e))}</p>`;
@@ -8178,69 +8313,174 @@ async function showSharedMediaSheet(options: {
 let searchDebounce: ReturnType<typeof setTimeout> | null = null;
 
 function renderSearch(): void {
-  app.innerHTML = `
-    <div class="app-shell">
-      <header class="topbar">
-        <button id="search-back" class="icon-btn" aria-label="Back to conversations">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <input id="search-input" type="text" class="search-input" placeholder="Search messages…" autocomplete="off" aria-label="Search messages" />
-      </header>
-      <div class="search-results" id="search-results" role="list">
-        <p class="empty-state">Type to search your messages</p>
+  const renderBlankState = (): string =>
+    renderWorkspaceEmptyState(
+      "Search your messages",
+      "Type a name, message phrase, or attachment filename to search this browser profile.",
+      {
+        eyebrow: "Search",
+        compact: true,
+        actionsHtml: `
+          <button id="search-empty-new-chat" class="btn-primary" type="button">Start new chat</button>
+          <button id="search-empty-settings" class="btn-secondary" type="button">Open settings</button>
+        `,
+      },
+    );
+
+  const renderNoResultsState = (query: string): string =>
+    renderWorkspaceEmptyState(
+      `No results for "${query}"`,
+      "Try a different name, a broader phrase, or part of an attachment filename.",
+      {
+        eyebrow: "Search",
+        compact: true,
+        actionsHtml: `
+          <button id="search-clear" class="btn-secondary" type="button">Clear search</button>
+          <button id="search-no-results-new-chat" class="btn-primary" type="button">Start new chat</button>
+        `,
+      },
+    );
+
+  renderWorkspacePage(`
+    <section class="workspace-page-card">
+      ${renderWorkspacePageHeader(
+        "Search",
+        "Find messages, names, and attachment details stored on this browser profile.",
+        {
+          eyebrow: "Search",
+          backButtonId: "search-back",
+          backButtonLabel: "Back to inbox",
+          actionsHtml: `
+            <label class="workspace-search-field" aria-label="Search messages">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <circle cx="11" cy="11" r="8"></circle>
+                <path d="M21 21l-4.35-4.35"></path>
+              </svg>
+              <input id="search-input" type="text" class="search-input" placeholder="Search messages..." autocomplete="off" aria-label="Search messages" />
+            </label>
+          `,
+        },
+      )}
+      <div class="search-results utility-search-results" id="search-results" role="list">
+        ${renderBlankState()}
       </div>
-    </div>
-  `;
-  wrapCurrentAppShellInWorkspace();
+    </section>
+  `);
   const input = q<HTMLInputElement>("#search-input");
-  const results = q("#search-results");
+  const results = q<HTMLElement>("#search-results");
+  const groupConversationOwnerLookup = new Map(
+    loadGroupConversations(setup.userId).map((item) => [item.groupId, item.ownerUserId]),
+  );
+
+  const bindSearchStateActions = (): void => {
+    results.querySelector<HTMLButtonElement>("#search-empty-new-chat")?.addEventListener("click", () => {
+      navigateTo({ screen: "new-chat" });
+    });
+    results.querySelector<HTMLButtonElement>("#search-empty-settings")?.addEventListener("click", () => {
+      navigateTo({ screen: "settings" });
+    });
+    results.querySelector<HTMLButtonElement>("#search-clear")?.addEventListener("click", () => {
+      input.value = "";
+      results.innerHTML = renderBlankState();
+      bindSearchStateActions();
+      input.focus();
+    });
+    results.querySelector<HTMLButtonElement>("#search-no-results-new-chat")?.addEventListener("click", () => {
+      navigateTo({ screen: "new-chat" });
+    });
+  };
+
+  const bindSearchRows = (): void => {
+    for (const row of results.querySelectorAll<HTMLElement>(".search-result-item")) {
+      const activate = (): void => {
+        const threadId = row.dataset.searchThreadId!;
+        const threadKind = row.dataset.searchThreadKind === "group" ? "group" : "dm";
+        if (threadKind === "group") {
+          navigateTo({ screen: "group-chat", groupId: threadId });
+          return;
+        }
+        navigateTo({ screen: "chat", peerId: threadId });
+      };
+      row.addEventListener("click", activate);
+      row.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          activate();
+        }
+      });
+    }
+  };
+
+  const renderResultRow = (message: StoredMessage): string => {
+    const isGroup = message.conversationId.startsWith("group:");
+    const threadId = isGroup
+      ? message.conversationId.replace("group:", "")
+      : (message.sender === setup.userId ? message.recipient : message.sender);
+    const time = new Date(message.timestamp).toLocaleDateString([], { month: "short", day: "numeric" });
+    const transcript = messageTranscriptText(message).replace(/\s+/g, " ").trim();
+    const preview = transcript.length > 96 ? `${transcript.slice(0, 96)}...` : transcript;
+    if (isGroup) {
+      const state = getPrivateGroupState(threadId);
+      const ownerUserId = state
+        ? getPrivateGroupOwnerUserId(state)
+        : (groupConversationOwnerLookup.get(threadId) || setup.userId);
+      const identity = resolveGroupIdentity(threadId, ownerUserId);
+      return `
+        <div class="search-result-item" tabindex="0" role="listitem" data-search-thread-id="${escHtml(threadId)}" data-search-thread-kind="group">
+          <div class="avatar avatar-sm">${escHtml(identity.avatarText)}</div>
+          <div class="search-result-body">
+            <div class="search-result-header">
+              <span class="search-result-name">
+                ${escHtml(identity.primaryLabel)}
+                <span class="utility-status-pill subtle">Group</span>
+              </span>
+              <span class="search-result-time">${escHtml(time)}</span>
+            </div>
+            <div class="search-result-meta">${escHtml(identity.secondaryLabel || "Private group")}</div>
+            <div class="search-result-preview">${escHtml(preview || "Open the thread to review this message.")}</div>
+          </div>
+        </div>
+      `;
+    }
+    const identity = resolvePeerIdentity(threadId);
+    return `
+      <div class="search-result-item" tabindex="0" role="listitem" data-search-thread-id="${escHtml(threadId)}" data-search-thread-kind="dm">
+        <div class="avatar avatar-sm">${escHtml(identity.avatarText)}</div>
+        <div class="search-result-body">
+          <div class="search-result-header">
+            <span class="search-result-name">
+              ${escHtml(identity.primaryLabel)}
+              <span class="utility-status-pill subtle">Direct</span>
+            </span>
+            <span class="search-result-time">${escHtml(time)}</span>
+          </div>
+          <div class="search-result-meta">${escHtml(identity.secondaryLabel || (identity.isVerified ? "Verified contact" : "Direct conversation"))}</div>
+          <div class="search-result-preview">${escHtml(preview || "Open the thread to review this message.")}</div>
+        </div>
+      </div>
+    `;
+  };
 
   q("#search-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
+  bindSearchStateActions();
 
   input.addEventListener("input", () => {
     if (searchDebounce) clearTimeout(searchDebounce);
     const query = input.value.trim();
     if (!query) {
-      results.innerHTML = `<p class="empty-state">Type to search your messages</p>`;
+      results.innerHTML = renderBlankState();
+      bindSearchStateActions();
       return;
     }
     searchDebounce = setTimeout(async () => {
       const msgs = await searchMessages(query);
       if (msgs.length === 0) {
-        results.innerHTML = `<p class="empty-state">No results for "${escHtml(query)}"</p>`;
+        results.innerHTML = renderNoResultsState(query);
+        bindSearchStateActions();
         return;
       }
-      results.innerHTML = msgs.slice(0, 50).map(m => {
-        const isGroup = m.conversationId.startsWith("group:");
-        const peer = isGroup ? m.conversationId.replace("group:", "") : (m.sender === setup.userId ? m.recipient : m.sender);
-        const time = new Date(m.timestamp).toLocaleDateString([], { month: "short", day: "numeric" });
-        const transcript = messageTranscriptText(m);
-        const preview = transcript.length > 80 ? transcript.slice(0, 80) + "…" : transcript;
-        return `<div class="search-result-item" role="listitem" data-search-peer="${escHtml(peer)}" data-search-group="${isGroup ? "1" : ""}">
-          <div class="avatar avatar-sm">${peer.slice(0, 2).toUpperCase()}</div>
-          <div class="search-result-body">
-            <div class="search-result-header">
-              <span class="search-result-name">${escHtml(peer)}</span>
-              <span class="search-result-time">${time}</span>
-            </div>
-            <div class="search-result-preview">${escHtml(preview)}</div>
-          </div>
-        </div>`;
-      }).join("");
-
-      for (const row of results.querySelectorAll(".search-result-item")) {
-        row.addEventListener("click", () => {
-          const peer = (row as HTMLElement).dataset.searchPeer!;
-          const isGroup = (row as HTMLElement).dataset.searchGroup === "1";
-          if (isGroup) {
-            navigateTo({ screen: "group-chat", groupId: peer });
-          } else {
-            navigateTo({ screen: "chat", peerId: peer });
-          }
-        });
-      }
+      results.innerHTML = msgs.slice(0, 50).map((message) => renderResultRow(message)).join("");
+      bindSearchRows();
     }, 300);
   });
 
@@ -8513,22 +8753,22 @@ async function loadContactsBackground(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function renderIdentityLog(): Promise<void> {
-  app.innerHTML = `
-    <div class="app-shell">
-      <header class="topbar">
-        <button id="idlog-back" class="icon-btn" aria-label="Back to settings">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <h1 class="topbar-title">Identity Log</h1>
-      </header>
+  renderWorkspacePage(`
+    <section class="workspace-page-card">
+      ${renderWorkspacePageHeader(
+        "Identity log",
+        "Review local identity history, key rotations, and the latest transparency verification state for this account.",
+        {
+          eyebrow: "Trust history",
+          backButtonId: "idlog-back",
+          backButtonLabel: "Back to settings",
+        },
+      )}
       <div class="settings-body" id="idlog-body">
-        <p class="text-secondary">Loading identity events…</p>
+        ${renderWorkspaceEmptyState("Loading identity history", "Checking saved key events and any available transparency proof.", { eyebrow: "Identity log", compact: true })}
       </div>
-    </div>
-  `;
-  wrapCurrentAppShellInWorkspace();
+    </section>
+  `);
   q("#idlog-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
 
   try {
@@ -8581,7 +8821,7 @@ async function renderIdentityLog(): Promise<void> {
       }
     }
     if (res.events.length === 0) {
-      body.innerHTML = `${transparencySummary}<p class="text-secondary">No identity events recorded.</p>`;
+      body.innerHTML = `${transparencySummary}${renderWorkspaceEmptyState("No identity events recorded", "Rotate or reprovision this account later to see its local identity history here.", { eyebrow: "Identity log", compact: true })}`;
       return;
     }
     body.innerHTML = `
@@ -8605,7 +8845,7 @@ async function renderIdentityLog(): Promise<void> {
     `;
   } catch (e) {
     document.getElementById("idlog-body")!.innerHTML =
-      `<p class="text-danger">Failed to load identity log: ${escHtml(errorMsg(e))}</p>`;
+      renderWorkspaceEmptyState("Could not load identity history", `We could not fetch the identity log: ${errorMsg(e)}`, { eyebrow: "Identity log", compact: true });
   }
 }
 
@@ -9055,22 +9295,22 @@ async function renderDiscovery(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function renderServerInfo(): Promise<void> {
-  app.innerHTML = `
-    <div class="app-shell">
-      <header class="topbar">
-        <button id="sinfo-back" class="icon-btn" aria-label="Back to settings">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <h1 class="topbar-title">Server Info</h1>
-      </header>
+  renderWorkspacePage(`
+    <section class="workspace-page-card">
+      ${renderWorkspacePageHeader(
+        "Server info",
+        "Check the connected server, beta policy, and advanced capability surface for this browser session.",
+        {
+          eyebrow: "Connected server",
+          backButtonId: "sinfo-back",
+          backButtonLabel: "Back to settings",
+        },
+      )}
       <div class="settings-body" id="sinfo-body">
-        <p class="text-secondary">Loading server status…</p>
+        ${renderWorkspaceEmptyState("Loading server status", "Fetching health, capability, and runtime profile information from the current server.", { eyebrow: "Server info", compact: true })}
       </div>
-    </div>
-  `;
-  wrapCurrentAppShellInWorkspace();
+    </section>
+  `);
   q("#sinfo-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
 
   const body = document.getElementById("sinfo-body")!;
@@ -9154,12 +9394,16 @@ async function renderServerInfo(): Promise<void> {
     }
 
     if (!health && !caps) {
-      html = '<p class="text-danger">Could not reach server.</p>';
+      html = renderWorkspaceEmptyState(
+        "Could not reach the server",
+        "Check your server URL, make sure the backend is running, and try again.",
+        { eyebrow: "Server info", compact: true },
+      );
     }
 
     body.innerHTML = html;
   } catch (e) {
-    body.innerHTML = `<p class="text-danger">Error: ${escHtml(errorMsg(e))}</p>`;
+    body.innerHTML = renderWorkspaceEmptyState("Server status failed", `We could not load server info: ${errorMsg(e)}`, { eyebrow: "Server info", compact: true });
   }
 }
 
