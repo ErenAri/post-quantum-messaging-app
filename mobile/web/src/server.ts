@@ -949,6 +949,15 @@ export class PqmsgApi {
     return this.request<RegisterUserResponse>("POST", "/v1/users/register", payload, {});
   }
 
+  async resetDevUserIdentity(userId: string): Promise<void> {
+    await this.request<void>(
+      "POST",
+      `/v1/dev/users/${encodeURIComponent(userId)}/reset`,
+      undefined,
+      {}
+    );
+  }
+
   async publishPrekeys(
     userId: string,
     payload: PublishPrekeysRequest,

@@ -1775,6 +1775,11 @@ html, body {
   .settings-summary-grid-compact {
     grid-template-columns: 1fr;
   }
+  .settings-section-grid,
+  .settings-kv-grid,
+  .settings-status-grid {
+    grid-template-columns: 1fr;
+  }
   .workspace-empty-state,
   .workspace-empty-state.compact {
     align-items: center;
@@ -1956,17 +1961,18 @@ html, body {
 .settings-body {
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  padding: 20px 24px 24px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 18px;
 }
 .settings-section {
   margin-bottom: 0;
   border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 16px 18px;
-  background: rgba(255,255,255,.025);
+  border-radius: 20px;
+  padding: 18px 20px;
+  background: rgba(255,255,255,.05);
+  box-shadow: 0 14px 28px rgba(15,23,42,.04);
 }
 .settings-section h3 {
   font-size: 13px;
@@ -1975,6 +1981,18 @@ html, body {
   letter-spacing: .5px;
   margin-bottom: 12px;
   font-weight: 600;
+}
+.settings-section-intro {
+  margin: -2px 0 14px;
+  max-width: 68ch;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.58;
+}
+.settings-section-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
 }
 .settings-hero {
   display: flex;
@@ -2072,6 +2090,12 @@ html, body {
   flex-direction: column;
   gap: 10px;
 }
+.settings-status-note {
+  margin: 12px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
 .settings-foldout {
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -2119,6 +2143,95 @@ html, body {
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
+}
+.settings-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.settings-kv-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.settings-kv-card {
+  border: 1px solid rgba(16,24,31,.08);
+  border-radius: 18px;
+  background: rgba(248,250,252,.72);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.settings-kv-card .settings-summary-kicker {
+  margin-bottom: 2px;
+}
+.settings-kv-card strong {
+  font-size: 22px;
+  line-height: 1.08;
+  color: var(--text);
+}
+.settings-kv-card p {
+  margin: 2px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.settings-code-block {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(15,23,42,.04);
+  border: 1px solid rgba(16,24,31,.08);
+  overflow-x: auto;
+}
+.settings-card-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.settings-callout {
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(45,108,246,.12);
+  background: linear-gradient(180deg, rgba(45,108,246,.06), rgba(255,255,255,.04));
+}
+.settings-callout strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+.settings-callout p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.settings-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.settings-status-card {
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(16,24,31,.08);
+  background: rgba(248,250,252,.78);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.settings-status-card strong {
+  font-size: 18px;
+  color: var(--text);
+}
+.settings-status-card span,
+.settings-status-card p {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0;
+}
+.settings-utility-list {
+  margin-top: 4px;
 }
 .mono { font-family: "SF Mono", "Cascadia Code", monospace; font-size: 13px; }
 .fingerprint { word-break: break-all; color: var(--text-secondary); font-size: 11px; }
@@ -2251,6 +2364,14 @@ html, body {
   border-radius: var(--radius-sm);
   overflow: hidden;
 }
+.contact-row-item {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  padding: 0 0 0 0;
+}
+.contact-row-item:last-child { border-bottom: none; }
 .contact-row {
   display: flex;
   align-items: center;
@@ -2258,10 +2379,27 @@ html, body {
   padding: 10px 12px;
   cursor: pointer;
   transition: background .1s;
-  border-bottom: 1px solid var(--border);
+  border-bottom: none;
 }
 .contact-row:hover { background: rgba(255,255,255,.04); }
-.contact-row:last-child { border-bottom: none; }
+.contact-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+}
+.contact-row-static {
+  flex: 1 1 auto;
+  min-width: 0;
+  cursor: default;
+}
+.contact-row-forget {
+  align-self: center;
+  margin-right: 12px;
+  padding: 8px 12px;
+  flex: 0 0 auto;
+}
 .contact-info { display: flex; flex-direction: column; min-width: 0; }
 .contact-name {
   font-size: 15px;
@@ -2321,6 +2459,17 @@ html, body {
   margin-bottom: 8px;
 }
 .profile-edit-row .field { flex: 1; margin-bottom: 0; }
+.settings-inline-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.settings-inline-form .field {
+  flex: 1 1 220px;
+  margin-bottom: 0;
+}
 .btn-sm {
   padding: 8px 16px;
   border: none;
@@ -2338,13 +2487,23 @@ html, body {
 /* === Phase 2: Settings - Contact management === */
 .contact-manage-row {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border);
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid rgba(16,24,31,.09);
+  border-radius: 18px;
+  background: rgba(248,250,252,.72);
   font-size: 14px;
 }
 .contact-manage-row span:first-child { flex: 1; }
+.contact-manage-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 
 /* === Phase 3: Group avatar === */
 .avatar-group {
@@ -2626,6 +2785,7 @@ html, body {
   gap: 8px;
   margin-top: 12px;
   align-items: center;
+  flex-wrap: wrap;
 }
 .input-sm {
   padding: 8px 10px;

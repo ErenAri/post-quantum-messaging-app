@@ -30,6 +30,9 @@ vi.mock("./crypto-wasm", () => ({
   initiateSessionAndEncrypt: vi.fn(),
   encryptWithSession: vi.fn(),
   decryptDirectMessage: vi.fn(),
+  verifyTransparencyProof: vi.fn(() => {
+    throw new Error("WASM PQ runtime is required to verify transparency proofs");
+  }),
 }));
 
 import {
@@ -73,6 +76,7 @@ import {
   decodeWireEnvelopeBase64,
   computeSafetyNumber,
   identityFingerprint,
+  verifyTransparencyProof,
   finalizeContactDiscoveryTokens,
   prepareContactDiscoveryBlindRequest,
   contactDiscoveryManifestContractSha256,
@@ -87,6 +91,51 @@ import { base64ToBytes, bytesToBase64, bytesToHex, concatBytes, utf8ToBytes } fr
 // Helper: generate a test keyset
 function testKeys(): GeneratedKeys {
   return generateIdentityKeys("alice", "device1", "ml-kem-768", 2);
+}
+
+function u32ToBeBytes(value: number): Uint8Array {
+  return new Uint8Array([
+    (value >>> 24) & 0xff,
+    (value >>> 16) & 0xff,
+    (value >>> 8) & 0xff,
+    value & 0xff,
+  ]);
+}
+
+function u64ToBeBytes(value: number): Uint8Array {
+  let remaining = BigInt(value);
+  const out = new Uint8Array(8);
+  for (let index = 7; index >= 0; index -= 1) {
+    out[index] = Number(remaining & 0xffn);
+    remaining >>= 8n;
+  }
+  return out;
+}
+
+function lenPrefixed(bytes: Uint8Array): Uint8Array {
+  return concatBytes([u32ToBeBytes(bytes.length), bytes]);
+}
+
+function transparencyLeafHash(leaf: {
+  user_id: string;
+  version: number;
+  identity_x25519_pub: string;
+  identity_sig_pub: string;
+  identity_pq_sig_pub: string | null;
+  timestamp: number;
+}): Uint8Array {
+  const parts = [
+    new Uint8Array([0x00]),
+    lenPrefixed(utf8ToBytes(leaf.user_id)),
+    u64ToBeBytes(leaf.version),
+    base64ToBytes(leaf.identity_x25519_pub),
+    lenPrefixed(base64ToBytes(leaf.identity_sig_pub)),
+    leaf.identity_pq_sig_pub
+      ? concatBytes([new Uint8Array([0x01]), lenPrefixed(base64ToBytes(leaf.identity_pq_sig_pub))])
+      : new Uint8Array([0x00]),
+    u64ToBeBytes(leaf.timestamp),
+  ];
+  return sha256(concatBytes(parts));
 }
 
 describe("generateIdentityKeys", () => {
@@ -155,6 +204,59 @@ describe("buildPublishPrekeysPayload", () => {
     const payload = buildPublishPrekeysPayload(keys);
     expect(base64ToBytes(payload.sig_over_spk).length).toBe(64);
     expect(base64ToBytes(payload.sig_over_pqspk).length).toBe(64);
+  });
+});
+
+describe("verifyTransparencyProof", () => {
+  it("falls back to the TypeScript verifier when the WASM verifier is unavailable", () => {
+    const serverSecret = new Uint8Array(32).fill(31);
+    const serverPub = ed25519.getPublicKey(serverSecret);
+    const identitySigSecret = new Uint8Array(32).fill(17);
+    const leaf = {
+      user_id: "bob",
+      version: 1,
+      identity_x25519_pub: bytesToBase64(new Uint8Array(32).fill(9)),
+      identity_sig_pub: bytesToBase64(ed25519.getPublicKey(identitySigSecret)),
+      identity_pq_sig_pub: bytesToBase64(new Uint8Array(1952).fill(5)),
+      timestamp: 1_717_171_717,
+    };
+    const rootHash = transparencyLeafHash(leaf);
+    const signedTreeHead = {
+      epoch: 1,
+      tree_size: 1,
+      root_hash: bytesToBase64(rootHash),
+      signature: bytesToBase64(
+        ed25519.sign(
+          concatBytes([u64ToBeBytes(1), u64ToBeBytes(1), rootHash]),
+          serverSecret,
+        ),
+      ),
+    };
+    const proof = {
+      user_id: "bob",
+      leaf,
+      inclusion_proof: {
+        leaf_index: 0,
+        path: [],
+      },
+      signed_tree_head: signedTreeHead,
+      consistency_proof: null,
+    };
+
+    expect(
+      verifyTransparencyProof(
+        JSON.stringify(proof),
+        bytesToBase64(serverPub),
+        null,
+      ),
+    ).toEqual({
+      verified: true,
+      consistencyVerified: false,
+      leafUserId: "bob",
+      leafVersion: 1,
+      treeSize: 1,
+      epoch: 1,
+    });
   });
 });
 

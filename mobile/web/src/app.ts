@@ -1464,6 +1464,25 @@ function transparencyProofMatchesPin(
   );
 }
 
+function isTransparencyCheckpointOutOfRangeMessage(message: string): boolean {
+  return message.includes("previous_tree_size must be in 1..=current tree size");
+}
+
+async function getTransparencyProofWithCheckpointRetry(
+  api: PqmsgApi,
+  userId: string,
+  checkpoint: ReturnType<typeof readTransparencyCheckpoint>,
+): Promise<TransparencyProofResponse> {
+  try {
+    return await api.getTransparencyProof(userId, checkpoint?.tree_size);
+  } catch (error) {
+    if (!checkpoint || !isTransparencyCheckpointOutOfRangeMessage(errorMsg(error))) {
+      throw error;
+    }
+    return await api.getTransparencyProof(userId);
+  }
+}
+
 async function ensurePeerTransparencyVerified(
   peerUserId: string,
   api: PqmsgApi,
@@ -1474,7 +1493,7 @@ async function ensurePeerTransparencyVerified(
     ? identityPin
     : await ensurePeerIdentityPinForTrust(peerUserId, api);
   const checkpoint = readTransparencyCheckpoint(setup.serverUrl, peerUserId);
-  const proof = await api.getTransparencyProof(peerUserId, checkpoint?.tree_size);
+  const proof = await getTransparencyProofWithCheckpointRetry(api, peerUserId, checkpoint);
   const verification = verifyTransparencyProof(
     JSON.stringify(proof),
     capabilities.transparency_log_issuer_ed25519_pub,
@@ -2201,13 +2220,16 @@ function renderCreateAccount(): void {
               ${localAccounts
                 .map(
                   (accountId) => `
-                <button type="button" class="contact-row" data-local-account="${escHtml(accountId)}">
-                  <div class="avatar avatar-sm">${escHtml(accountId.slice(0, 2).toUpperCase())}</div>
-                  <div class="contact-info">
-                    <span class="contact-name">${escHtml(accountId)}</span>
-                    <span class="contact-id">Already saved locally in this browser</span>
+                <div class="contact-row-item">
+                  <div class="contact-row contact-row-static">
+                    <div class="avatar avatar-sm">${escHtml(accountId.slice(0, 2).toUpperCase())}</div>
+                    <div class="contact-info">
+                      <span class="contact-name">${escHtml(accountId)}</span>
+                      <span class="contact-id">Already saved locally in this browser</span>
+                    </div>
                   </div>
-                </button>
+                  <button type="button" class="btn-secondary contact-row-forget" data-local-account-forget="${escHtml(accountId)}">Forget</button>
+                </div>
               `
                 )
                 .join("")}
@@ -2250,6 +2272,25 @@ function renderCreateAccount(): void {
 
   q("#onb-back").addEventListener("click", () => navigateTo({ screen: "onboarding" }));
 
+  for (const button of document.querySelectorAll<HTMLElement>("[data-local-account-forget]")) {
+    button.addEventListener("click", async () => {
+      const accountId = button.dataset.localAccountForget || "";
+      if (!accountId) {
+        return;
+      }
+      if (!confirm(`Forget the saved local profile for @${accountId} on this browser?`)) {
+        return;
+      }
+      await wipeLocalState(accountId);
+      if (setup.userId === accountId) {
+        setup = { ...DEFAULT_SETUP, serverUrl: setup.serverUrl, suiteLabel: setup.suiteLabel };
+        saveSetup(setup);
+      }
+      notify(`Forgot local profile for @${accountId}`, "info");
+      renderCreateAccount();
+    });
+  }
+
   goBtn.addEventListener("click", async () => {
     const requestedUserId = normalizeBrowserUserId(userInput.value);
     const providedName = nameInput.value.trim();
@@ -2263,6 +2304,12 @@ function renderCreateAccount(): void {
     }
     if (!requestedUserId) {
       status.textContent = "That username cannot be used after normalization. Try letters, numbers, dashes, or underscores.";
+      status.classList.add("error-text");
+      userInput.focus();
+      return;
+    }
+    if (hasLocalKeys(requestedUserId)) {
+      status.textContent = `This browser already has saved local keys for @${requestedUserId}. Sign in with that profile or forget it first.`;
       status.classList.add("error-text");
       userInput.focus();
       return;
@@ -2304,11 +2351,39 @@ function renderCreateAccount(): void {
       setProgress(progress, 20);
       const deviceId = `${userId}-web-1`;
       const genKeys = generateIdentityKeys(userId, deviceId, "ml-kem-768", 16);
-      await saveKeys(userId, pass, genKeys);
+      const repairApi = new PqmsgApi(setup.serverUrl);
+      let provisionedOnRelay = false;
+      status.textContent = "Preparing relay accountâ€¦";
+      setProgress(progress, 50);
+      try {
+        await registerBrowserIdentityOnRelay(repairApi, genKeys, displayName);
+        provisionedOnRelay = true;
+      } catch (error) {
+        const message = errorMsg(error);
+        const capabilities = await loadServerCapabilitiesCached();
+        if (!isImmutableIdentityConflictMessage(message) || !canUseDevelopmentRelayReset(capabilities)) {
+          throw error;
+        }
+        if (
+          !confirm(
+            `@${userId} is already registered on this development relay. Reset that relay identity and continue with this browser's @${userId}?`
+          )
+        ) {
+          throw new Error(`Registration stopped because @${userId} is already registered on this relay.`);
+        }
+        status.textContent = `Resetting @${userId} on the development relayâ€¦`;
+        setProgress(progress, 65);
+        await repairApi.resetDevUserIdentity(userId);
+        status.textContent = "Re-publishing this browser's keysâ€¦";
+        setProgress(progress, 80);
+        await registerBrowserIdentityOnRelay(repairApi, genKeys, displayName);
+        provisionedOnRelay = true;
+      }
 
       status.textContent = "Registering…";
       setProgress(progress, 50);
       const api = new PqmsgApi(setup.serverUrl);
+      if (!provisionedOnRelay) {
       await api.registerUser({
         user_id: genKeys.userId,
         identity_x25519_pub: genKeys.identityX25519Pub,
@@ -2333,6 +2408,12 @@ function renderCreateAccount(): void {
       } catch {
         notify("Account created, but profile name could not be synced yet", "info");
       }
+
+      }
+
+      status.textContent = "Saving encrypted keysâ€¦";
+      setProgress(progress, 90);
+      await saveKeys(userId, pass, genKeys);
 
       setup = {
         serverUrl: setup.serverUrl,
@@ -2383,13 +2464,16 @@ function renderSignIn(): void {
                 ${localAccounts
                   .map(
                     (accountId) => `
-                  <button type="button" class="contact-row" data-local-account="${escHtml(accountId)}">
-                    <div class="avatar avatar-sm">${escHtml(accountId.slice(0, 2).toUpperCase())}</div>
-                    <div class="contact-info">
-                      <span class="contact-name">${escHtml(accountId)}</span>
-                      <span class="contact-id">Tap to fill username</span>
-                    </div>
-                  </button>
+                  <div class="contact-row-item">
+                    <button type="button" class="contact-row contact-row-main" data-local-account-fill="${escHtml(accountId)}">
+                      <div class="avatar avatar-sm">${escHtml(accountId.slice(0, 2).toUpperCase())}</div>
+                      <div class="contact-info">
+                        <span class="contact-name">${escHtml(accountId)}</span>
+                        <span class="contact-id">Tap to fill username</span>
+                      </div>
+                    </button>
+                    <button type="button" class="btn-secondary contact-row-forget" data-local-account-forget="${escHtml(accountId)}">Forget</button>
+                  </div>
                 ` 
                   )
                   .join("")}
@@ -2421,12 +2505,31 @@ function renderSignIn(): void {
 
   q("#onb-back").addEventListener("click", () => navigateTo({ screen: "onboarding" }));
 
-  for (const button of document.querySelectorAll<HTMLElement>("[data-local-account]")) {
+  for (const button of document.querySelectorAll<HTMLElement>("[data-local-account-fill]")) {
     button.addEventListener("click", () => {
-      uidInput.value = button.dataset.localAccount || "";
+      uidInput.value = button.dataset.localAccountFill || "";
       passInput.focus();
       status.textContent = "";
       status.classList.remove("error-text");
+    });
+  }
+
+  for (const button of document.querySelectorAll<HTMLElement>("[data-local-account-forget]")) {
+    button.addEventListener("click", async () => {
+      const accountId = button.dataset.localAccountForget || "";
+      if (!accountId) {
+        return;
+      }
+      if (!confirm(`Forget the saved local profile for @${accountId} on this browser?`)) {
+        return;
+      }
+      await wipeLocalState(accountId);
+      if (setup.userId === accountId) {
+        setup = { ...DEFAULT_SETUP, serverUrl: setup.serverUrl, suiteLabel: setup.suiteLabel };
+        saveSetup(setup);
+      }
+      notify(`Forgot local profile for @${accountId}`, "info");
+      renderSignIn();
     });
   }
 
@@ -2459,8 +2562,33 @@ function renderSignIn(): void {
       }
 
       status.textContent = "Unlocking keys…";
-      const loadedKeys = await loadKeys(uid, pass);
+      let loadedKeys = await loadKeys(uid, pass);
       const localDisplayName = readProfileDisplayName(uid, uid)?.trim() || uid;
+      const api = new PqmsgApi(setup.serverUrl);
+      status.textContent = "Verifying account…";
+      try {
+        await api.getSenderCertificate(uid, buildSenderCertificateAuthHeaders(loadedKeys));
+      } catch (error) {
+        const message = errorMsg(error);
+        if (isAuthSignatureFailureMessage(message)) {
+          const capabilities = await loadServerCapabilitiesCached();
+          if (
+            canUseDevelopmentRelayReset(capabilities)
+            && confirm(
+              `Saved local keys for @${uid} do not match the current server record. Repair @${uid} on this development relay using the keys already saved in this browser?`
+            )
+          ) {
+            status.textContent = `Repairing @${uid} on the development relayâ€¦`;
+            loadedKeys = await repairIdentityOnDevelopmentRelay(loadedKeys, localDisplayName, pass);
+            status.textContent = "Verifying repaired accountâ€¦";
+            await api.getSenderCertificate(uid, buildSenderCertificateAuthHeaders(loadedKeys));
+          } else {
+            throw new Error(explainLocalIdentityMismatch(uid));
+          }
+        } else {
+          throw error;
+        }
+      }
 
       setup = {
         serverUrl: setup.serverUrl,
@@ -4033,7 +4161,32 @@ async function renderChat(peerId: string): Promise<void> {
       } catch (e) {
         await updateMessageStatus(tempId, "failed");
         updateBubbleStatus(tempId, "failed");
-        notify(`Send failed: ${errorMsg(e)}`, "error");
+        const message = errorMsg(e);
+        if (isAuthSignatureFailureMessage(message) && canUseDevelopmentRelayReset(cachedCapabilities)) {
+          notify(`Send failed: ${explainLocalIdentityMismatch(setup.userId)}`, "error", {
+            actionLabel: "Repair account",
+            action: () => {
+              void (async () => {
+                try {
+                  await repairIdentityOnDevelopmentRelay(
+                    await ensureKeys(),
+                    setup.displayName || setup.userId,
+                    getPassphrase(),
+                  );
+                  await bootstrapIdentityData();
+                  notify(`Repaired @${setup.userId} on this development relay. Send again.`, "success");
+                } catch (repairError) {
+                  notify(`Repair failed: ${errorMsg(repairError)}`, "error");
+                }
+              })();
+            },
+          });
+        } else {
+          notify(
+            `Send failed: ${isAuthSignatureFailureMessage(message) ? explainLocalIdentityMismatch(setup.userId) : message}`,
+            "error",
+          );
+        }
       }
     } finally {
       sendInFlight = false;
@@ -6455,7 +6608,7 @@ function showDeleteConfirm(bubble: HTMLElement, serverMessageId: number): void {
     popup.remove();
     try {
       const k = await ensureKeys();
-      const api = new PqmsgApi(setup.serverUrl);
+      const fallbackApi = new PqmsgApi(setup.serverUrl);
       const headers = buildInboxDeleteAuthHeaders(k, [serverMessageId]);
       await api.deleteInboxMessages(k.userId, { message_ids: [serverMessageId] }, headers);
       const messageList = bubble.parentElement;
@@ -6840,6 +6993,7 @@ async function renderSettings(): Promise<void> {
         ${settingsSummaryCards}
         <div class="settings-section">
           <h3>Current web scope</h3>
+          <p class="settings-section-intro">This browser follows the server’s published web policy. Treat the web client as a companion surface and keep your primary trust decisions on a protected device.</p>
           <div class="beta-banner beta-banner-${webHoldback.tone}">
             <strong>${escHtml(webHoldback.title)}</strong>
             <p>${escHtml(webHoldback.detail)}</p>
@@ -6847,6 +7001,7 @@ async function renderSettings(): Promise<void> {
         </div>
         <div class="settings-section">
           <h3>Account</h3>
+          <p class="settings-section-intro">Keep your everyday identity simple here: display name, shareable username, and this browser profile.</p>
           <div class="profile-edit-row">
             <label class="field">
               <span>Display Name</span>
@@ -6867,12 +7022,12 @@ async function renderSettings(): Promise<void> {
         </div>
         <div class="settings-section">
           <h3>Session</h3>
-          <p class="text-secondary settings-desc">Sign out of this browser while keeping your encrypted local keys available for a later sign-in.</p>
+          <p class="settings-section-intro">Sign out of this browser while keeping your encrypted local keys available for a later sign-in.</p>
           <button id="set-logout" class="btn-secondary">Log Out</button>
         </div>
         <div class="settings-section">
           <h3>People</h3>
-          <p class="text-secondary settings-desc">${
+          <p class="settings-section-intro">${
             contactDiscoveryMode === "private_service"
               ? "Add people by username or invite link first. Contact discovery stays secondary and experimental on web."
               : "Add people by exact @username or invite link. Manual contacts stay primary in this privacy profile."
@@ -6882,28 +7037,60 @@ async function renderSettings(): Promise<void> {
               contactDiscoverySupported ? "Open Contact Discovery" : "Discovery Unavailable"
             }</button>
           </div>
-          <div id="contacts-manage">
-            ${cachedContacts.length === 0 ? '<p class="text-secondary">No contacts yet</p>' :
-              cachedContacts.map(c => {
+          <div id="contacts-manage" class="settings-utility-list">
+            ${cachedContacts.length === 0
+              ? renderWorkspaceEmptyState(
+                "No contacts yet",
+                "Add someone by exact @username or paste a private invite link to start building this browser’s trusted people list.",
+                {
+                  eyebrow: "People",
+                  compact: true,
+                  actionsHtml: `<button id="set-empty-new-chat" class="btn-secondary" type="button">Start new chat</button>`,
+                },
+              )
+              : `<div class="utility-list">${cachedContacts.map((c) => {
                 const identity = resolvePeerIdentity(c.contact_user_id);
+                const alias = c.alias?.trim() || "";
                 return `
-                <div class="contact-manage-row">
-                  <span>${escHtml(identity.primaryLabel)}</span>
-                  ${identity.secondaryLabel ? `<span class="mono text-secondary">${escHtml(identity.secondaryLabel)}</span>` : ""}
-                  <button class="btn-sm btn-danger-sm" data-remove-contact="${escHtml(c.contact_user_id)}">Remove</button>
-                </div>
-              `;
-              }).join("")
+                  <div class="utility-list-item">
+                    <div class="utility-list-body">
+                      <div class="utility-list-title">
+                        <span>${escHtml(identity.primaryLabel)}</span>
+                        ${identity.isVerified ? '<span class="utility-status-pill success">Verified</span>' : '<span class="utility-status-pill subtle">Manual</span>'}
+                      </div>
+                      <div class="utility-list-meta">
+                        ${identity.secondaryLabel ? `<span class="mono">${escHtml(identity.secondaryLabel)}</span>` : ""}
+                        ${alias && alias !== identity.primaryLabel ? `<span>Alias ${escHtml(alias)}</span>` : ""}
+                      </div>
+                      <p class="utility-list-note">${escHtml(
+                        identity.isVerified
+                          ? "This contact has a local trust checkpoint on this browser."
+                          : "This contact is saved locally, but not yet safety-number verified here."
+                      )}</p>
+                    </div>
+                    <div class="utility-list-actions">
+                      <button class="btn-sm btn-danger-sm" data-remove-contact="${escHtml(c.contact_user_id)}">Remove</button>
+                    </div>
+                  </div>
+                `;
+              }).join("")}</div>`
             }
           </div>
-          <div class="add-contact-row">
-            <input id="set-add-contact-id" type="text" placeholder="@username or invite link" class="input-sm" />
-            <input id="set-add-contact-alias" type="text" placeholder="Alias (optional)" class="input-sm" />
+          <div class="settings-inline-form">
+            <label class="field">
+              <span>@username or invite link</span>
+              <input id="set-add-contact-id" type="text" placeholder="@username or invite link" class="input-sm" />
+            </label>
+            <label class="field">
+              <span>Alias (optional)</span>
+              <input id="set-add-contact-alias" type="text" placeholder="Alias (optional)" class="input-sm" />
+            </label>
             <button id="set-add-contact" class="btn-sm">Add</button>
           </div>
         </div>
         <div class="settings-section">
           <h3>Privacy & Trust</h3>
+          <p class="settings-section-intro">Review the active identity fingerprint, current server, and local trust state for this browser profile.</p>
           <div class="settings-row"><span>Encryption</span><span>Post-quantum (ML-KEM-768)</span></div>
           <div class="settings-row"><span>Mode</span><span>Mandatory WASM PQ runtime</span></div>
           <div class="settings-row column"><span>Identity Fingerprint</span><span class="mono fingerprint">${escHtml(fingerprint)}</span></div>
@@ -7023,6 +7210,8 @@ async function renderSettings(): Promise<void> {
       notify(`Profile update failed: ${errorMsg(e)}`, "error");
     }
   });
+
+  q("#set-empty-new-chat")?.addEventListener("click", () => navigateTo({ screen: "new-chat" }));
 
   // Add contact
   q("#set-add-contact").addEventListener("click", async () => {
@@ -8782,7 +8971,7 @@ async function renderIdentityLog(): Promise<void> {
     if (capabilities?.key_transparency_supported && capabilities.transparency_log_issuer_ed25519_pub) {
       try {
         const checkpoint = readTransparencyCheckpoint(setup.serverUrl, k.userId);
-        const proof = await api.getTransparencyProof(k.userId, checkpoint?.tree_size);
+        const proof = await getTransparencyProofWithCheckpointRetry(api, k.userId, checkpoint);
         const verification = verifyTransparencyProof(
           JSON.stringify(proof),
           capabilities.transparency_log_issuer_ed25519_pub,
@@ -8970,27 +9159,36 @@ async function renderDiscovery(): Promise<void> {
   const contactDiscoveryServiceOrigin =
     capabilities?.contact_discovery_service_origin?.trim() ?? "";
   if (!capabilities?.contact_discovery_supported) {
-    app.innerHTML = `
-      <div class="app-shell">
-        <header class="topbar">
-          <button id="disc-back" class="icon-btn" aria-label="Back to settings">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M19 12H5M12 19l-7-7 7-7"/>
-            </svg>
-          </button>
-          <h1 class="topbar-title">Contact Discovery</h1>
-        </header>
+    renderWorkspacePage(`
+      <section class="workspace-page-card">
+        ${renderWorkspacePageHeader(
+          "Contact discovery",
+          "Use usernames and invite links first. This advanced discovery surface is not available on the current server policy.",
+          {
+            eyebrow: "People",
+            backButtonId: "disc-back",
+            backButtonLabel: "Back to settings",
+          },
+        )}
         <div class="settings-body">
-          <div class="settings-section">
-            <h3>Unavailable</h3>
-            <p class="text-secondary settings-desc">Raw-hash contact discovery is disabled pending a private discovery design.</p>
-            <p class="text-secondary settings-desc">Share your @username or a private invite link and add contacts from Settings instead.</p>
-          </div>
+          ${renderWorkspaceEmptyState(
+            "Discovery is unavailable",
+            "This server does not allow web contact discovery right now. Share your @username or a private invite link from Settings instead.",
+            {
+              eyebrow: "People",
+              compact: true,
+              actionsHtml: `
+                <button id="disc-open-settings" class="btn-primary" type="button">Open settings</button>
+                <button id="disc-new-chat" class="btn-secondary" type="button">Start new chat</button>
+              `,
+            },
+          )}
         </div>
-      </div>
-    `;
-    wrapCurrentAppShellInWorkspace();
+      </section>
+    `);
     q("#disc-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
+    q("#disc-open-settings")?.addEventListener("click", () => navigateTo({ screen: "settings" }));
+    q("#disc-new-chat")?.addEventListener("click", () => navigateTo({ screen: "new-chat" }));
     return;
   }
   const discoveryOverviewCards = `
@@ -9038,60 +9236,65 @@ async function renderDiscovery(): Promise<void> {
       </details>
     `
     : "";
-
-  app.innerHTML = `
-    <div class="app-shell">
-      <header class="topbar">
-        <button id="disc-back" class="icon-btn" aria-label="Back to settings">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <h1 class="topbar-title">Contact Discovery</h1>
-      </header>
+  renderWorkspacePage(`
+    <section class="workspace-page-card">
+      ${renderWorkspacePageHeader(
+        "Contact discovery",
+        "Keep usernames and invite links as the primary path. Use discovery only when you need the advanced hashed-handle workflow.",
+        {
+          eyebrow: "People",
+          backButtonId: "disc-back",
+          backButtonLabel: "Back to settings",
+        },
+      )}
       <div class="settings-body">
+        <div class="settings-callout">
+          <strong>Use this as a secondary privacy tool</strong>
+          <p>Discovery helps when both sides already know hashed handles. It is intentionally less prominent than usernames and private invites in the web client.</p>
+        </div>
         <div class="settings-section">
-          <h3>How to use this</h3>
-          <p class="text-secondary settings-desc">Treat contact discovery as an advanced privacy workflow. Usernames and invite links stay simpler and primary.</p>
+          <h3>How it works</h3>
+          <p class="settings-section-intro">This web flow keeps discovery separate from your main contact list. Review the mode, then upload handles or search when you specifically need it.</p>
           ${discoveryOverviewCards}
           ${discoveryTechnicalDetails}
         </div>
-        <div class="settings-section">
-          <h3>Upload Your Handles</h3>
-          <p class="text-secondary settings-desc">${
-            contactDiscoveryMode === "private_service"
-              ? "Upload SHA-256 handle hashes to the separate service using a short-lived ticket from the app server."
-              : "Share hashed phone/email so contacts can find you."
-          }</p>
-          <label class="field">
-            <span>Phone hashes (one per line, SHA-256 hex)</span>
-            <textarea id="disc-phones" rows="3" class="input-sm disc-textarea" placeholder="e.g. a1b2c3d4…"></textarea>
-          </label>
-          <label class="field">
-            <span>Email hashes (one per line, SHA-256 hex)</span>
-            <textarea id="disc-emails" rows="3" class="input-sm disc-textarea" placeholder="e.g. f5e6d7c8…"></textarea>
-          </label>
-          <button id="disc-upload" class="btn-sm">Upload Handles</button>
-          <div id="disc-upload-status"></div>
-        </div>
-        <div class="settings-section">
-          <h3>Find Contacts</h3>
-          <p class="text-secondary settings-desc">${
-            contactDiscoveryMode === "private_service"
-              ? "Blind-evaluate local handle hashes against the separate service. Matches return opaque invite bootstraps for the same finalized tokens."
-              : "Enter hashes to check who's registered."
-          }</p>
-          <label class="field">
-            <span>Query hashes (one per line, SHA-256 hex)</span>
-            <textarea id="disc-query" rows="3" class="input-sm disc-textarea" placeholder="e.g. a1b2c3d4…"></textarea>
-          </label>
-          <button id="disc-match" class="btn-sm">🔍 Search</button>
-          <div id="disc-results"></div>
+        <div class="settings-section-grid">
+          <section class="settings-section">
+            <h3>Upload handles</h3>
+            <p class="settings-section-intro">${
+              contactDiscoveryMode === "private_service"
+                ? "Upload SHA-256 phone or email hashes through the separate service using a short-lived ticket from the app server."
+                : "Share hashed phone or email handles so existing contacts can look them up."
+            }</p>
+            <label class="field">
+              <span>Phone hashes (one per line, SHA-256 hex)</span>
+              <textarea id="disc-phones" rows="3" class="input-sm disc-textarea" placeholder="e.g. a1b2c3d4..."></textarea>
+            </label>
+            <label class="field">
+              <span>Email hashes (one per line, SHA-256 hex)</span>
+              <textarea id="disc-emails" rows="3" class="input-sm disc-textarea" placeholder="e.g. f5e6d7c8..."></textarea>
+            </label>
+            <button id="disc-upload" class="btn-sm">Upload handles</button>
+            <div id="disc-upload-status" class="settings-status-note"></div>
+          </section>
+          <section class="settings-section">
+            <h3>Find contacts</h3>
+            <p class="settings-section-intro">${
+              contactDiscoveryMode === "private_service"
+                ? "Search with local hashes. Matching entries return opaque invite bundles instead of plain contact profiles."
+                : "Enter hashes to check whether someone is registered on this server."
+            }</p>
+            <label class="field">
+              <span>Query hashes (one per line, SHA-256 hex)</span>
+              <textarea id="disc-query" rows="3" class="input-sm disc-textarea" placeholder="e.g. a1b2c3d4..."></textarea>
+            </label>
+            <button id="disc-match" class="btn-sm">Search</button>
+            <div id="disc-results" class="settings-card-stack"></div>
+          </section>
         </div>
       </div>
-    </div>
-  `;
-  wrapCurrentAppShellInWorkspace();
+    </section>
+  `);
 
   q("#disc-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
 
@@ -9210,7 +9413,11 @@ async function renderDiscovery(): Promise<void> {
     const resultsEl = document.getElementById("disc-results")!;
     const hashes = q<HTMLTextAreaElement>("#disc-query").value.split("\n").map(l => l.trim()).filter(Boolean);
     if (hashes.length === 0) { notify("Enter at least one hash", "error"); return; }
-    resultsEl.innerHTML = '<p class="text-secondary">Searching…</p>';
+    resultsEl.innerHTML = renderWorkspaceEmptyState(
+      "Searching discovery handles",
+      "Blind-evaluating your local hashes against the configured discovery service.",
+      { eyebrow: "Discovery", compact: true },
+    );
     try {
       const k = await ensureKeys();
       const api = new PqmsgApi(setup.serverUrl);
@@ -9251,23 +9458,34 @@ async function renderDiscovery(): Promise<void> {
       );
       requireContactDiscoveryTicketNonce(ticketNonce, res.ticket_nonce, "match");
       if (res.matches.length === 0) {
-        resultsEl.innerHTML = '<p class="text-secondary">No matches found.</p>';
+        resultsEl.innerHTML = renderWorkspaceEmptyState(
+          "No matches found",
+          "No uploaded discovery handles matched the hashes you searched for.",
+          { eyebrow: "Discovery", compact: true },
+        );
         return;
       }
       resultsEl.innerHTML = `
-        <table class="idlog-table">
-          <thead><tr><th>Hash</th><th>Bootstrap</th><th>Type</th><th></th></tr></thead>
-          <tbody>
-            ${res.matches.map((m: PrivateDiscoveryMatchItem) => `
-              <tr>
-                <td class="mono fingerprint">${escHtml(hashByToken.get(m.token_sha256) || m.token_sha256)}</td>
-                <td class="mono">invite:${escHtml(m.contact_invite_token.slice(-8))}</td>
-                <td><span class="badge-info">${escHtml(m.handle_kind)}</span></td>
-                <td><button class="btn-sm" data-add-discovered="${escHtml(m.contact_invite_token)}">Add</button></td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
+        <div class="utility-list">
+          ${res.matches.map((m: PrivateDiscoveryMatchItem) => `
+            <div class="utility-list-item">
+              <div class="utility-list-body">
+                <div class="utility-list-title">
+                  <span class="mono">${escHtml(hashByToken.get(m.token_sha256) || m.token_sha256)}</span>
+                  <span class="utility-status-pill subtle">${escHtml(m.handle_kind)}</span>
+                </div>
+                <div class="utility-list-meta">
+                  <span class="mono">invite:${escHtml(m.contact_invite_token.slice(-8))}</span>
+                  <span>opaque bootstrap</span>
+                </div>
+                <p class="utility-list-note">Resolve this invite locally and add the discovered person to your saved contacts list on this browser.</p>
+              </div>
+              <div class="utility-list-actions">
+                <button class="btn-sm" data-add-discovered="${escHtml(m.contact_invite_token)}">Add</button>
+              </div>
+            </div>
+          `).join("")}
+        </div>
       `;
       for (const btn of document.querySelectorAll("[data-add-discovered]")) {
         btn.addEventListener("click", async () => {
@@ -9285,7 +9503,11 @@ async function renderDiscovery(): Promise<void> {
         });
       }
     } catch (e) {
-      resultsEl.innerHTML = `<span class="text-danger">Search failed: ${escHtml(errorMsg(e))}</span>`;
+      resultsEl.innerHTML = renderWorkspaceEmptyState(
+        "Discovery search failed",
+        `We could not complete the search: ${errorMsg(e)}`,
+        { eyebrow: "Discovery", compact: true },
+      );
     }
   });
 }
@@ -9323,74 +9545,168 @@ async function renderServerInfo(): Promise<void> {
 
     let html = "";
 
-    if (health) {
-      const statusClass = health.status === "ok" ? "text-success" : "text-danger";
+    if (health || caps) {
       html += `
-        <div class="settings-section">
-          <h3>Health</h3>
-          <div class="settings-row"><span>Status</span><span class="${statusClass}">${escHtml(health.status)}</span></div>
-          <div class="settings-row"><span>DB Backend</span><span class="mono">${escHtml(health.db_backend)}</span></div>
-          <div class="settings-row"><span>DB Ready</span><span>${health.db_ready ? "✓" : "✗"}</span></div>
-          <div class="settings-row"><span>Pool</span><span>${health.db_pool_idle} idle / ${health.db_pool_size} total</span></div>
-          <div class="settings-row"><span>Push</span><span>${health.push_enabled ? health.push_providers.join(", ") : "disabled"}</span></div>
-          <div class="settings-row"><span>TLS</span><span>${health.tls_enabled ? "enabled" : "disabled"}</span></div>
-          <div class="settings-row"><span>Rate Limiter</span><span class="mono">${escHtml(health.rate_limiter_mode)}</span></div>
-          <div class="settings-row"><span>Replay Cache</span><span class="mono">${escHtml(health.replay_cache_mode)}</span></div>
-          <div class="settings-row"><span>Realtime</span><span class="mono">${escHtml(health.realtime_mode)}</span></div>
-          <div class="settings-row"><span>Security Profile</span><span class="mono">${escHtml(health.security_profile)}</span></div>
-          <div class="settings-row"><span>Deployment</span><span class="mono">${escHtml(health.deployment_mode)}</span></div>
-          <div class="settings-row"><span>PoW Bits</span><span>${health.registration_pow_bits}</span></div>
-        </div>
+        <div class="settings-card-stack">
+          <div class="settings-summary-grid settings-summary-grid-compact">
+            <article class="settings-summary-card">
+              <span class="settings-summary-kicker">Health</span>
+              <strong>${escHtml(health ? (health.status === "ok" ? "Healthy" : health.status) : "Unavailable")}</strong>
+              <span>${escHtml(health ? health.deployment_mode : "no health response")}</span>
+              <p>${escHtml(
+                health
+                  ? `Security profile ${health.security_profile} with ${health.db_backend} storage.`
+                  : "The browser could not read a live health response from this server."
+              )}</p>
+            </article>
+            <article class="settings-summary-card">
+              <span class="settings-summary-kicker">Web policy</span>
+              <strong>${escHtml(caps?.web_client_policy || "unknown")}</strong>
+              <span>${escHtml(caps?.supported_beta_clients.join(", ") || "no beta clients advertised")}</span>
+              <p>${escHtml(
+                caps
+                  ? "This controls how much of the messenger surface the current web client is allowed to use."
+                  : "Capability policy is unavailable until the server advertises it."
+              )}</p>
+            </article>
+            <article class="settings-summary-card">
+              <span class="settings-summary-kicker">Discovery</span>
+              <strong>${escHtml(
+                caps
+                  ? (caps.contact_discovery_mode === "private_service"
+                    ? "Separate service"
+                    : (caps.contact_discovery_supported ? "Manual lookup" : "Disabled"))
+                  : "Unavailable"
+              )}</strong>
+              <span>${escHtml(caps?.contact_discovery_ticket_supported ? "ticketed flow" : "no discovery tickets")}</span>
+              <p>${escHtml(
+                caps
+                  ? "Discovery stays advanced on web, with the contract available below when you need to inspect it."
+                  : "The current server did not advertise discovery policy."
+              )}</p>
+            </article>
+          </div>
       `;
-    }
-
-    if (caps) {
-      const cp = caps.runtime_crypto_profile;
-      html += `
-        <div class="settings-section">
-          <h3>Capabilities</h3>
-          <div class="settings-row"><span>Schema</span><span>v${caps.capability_schema_version}</span></div>
-          <div class="settings-row"><span>Suites</span><span class="mono">${caps.supported_suite_ids.join(", ")}</span></div>
-          <div class="settings-row"><span>Supported Beta Clients</span><span class="mono">${escHtml(caps.supported_beta_clients.join(", ") || "none")}</span></div>
-          <div class="settings-row"><span>Web Policy</span><span class="mono">${escHtml(caps.web_client_policy)}</span></div>
-          <div class="settings-row"><span>PQ Ratchet</span><span>${caps.pq_ratchet_interval === 1 ? "every message" : `every ${caps.pq_ratchet_interval} msgs`}</span></div>
-          <div class="settings-row"><span>Presence</span><span>${caps.presence_supported ? "Enabled" : "Disabled"}</span></div>
-          <div class="settings-row"><span>Typing</span><span>${caps.typing_indicators_supported ? "Enabled" : "Disabled"}</span></div>
-          <div class="settings-row"><span>Read Receipts</span><span>${caps.read_receipts_supported ? "Enabled" : "Disabled"}</span></div>
-          <div class="settings-row"><span>Calling</span><span>${caps.calling_supported ? "Enabled" : "Disabled"}</span></div>
-          <div class="settings-row"><span>Stories</span><span>${caps.stories_supported ? "Enabled" : "Disabled"}</span></div>
-          <div class="settings-row"><span>Channels</span><span>${caps.channels_supported ? "Enabled" : "Disabled"}</span></div>
-          <div class="settings-row"><span>Group Messaging</span><span>${caps.group_messaging_supported ? "Enabled" : "Disabled"}</span></div>
-          <div class="settings-row"><span>Private Groups</span><span>${caps.private_group_messaging_supported ? "Enabled" : "Disabled"}</span></div>
-          <div class="settings-row"><span>Sealed Sender</span><span>${caps.sealed_sender_required ? "Required" : "Optional"}</span></div>
-          <div class="settings-row"><span>Sender Certs</span><span>${caps.sender_certificate_supported ? "Required" : "Disabled"}</span></div>
-          <div class="settings-row"><span>Ephemeral DM</span><span>${caps.ephemeral_messaging_supported ? "Enabled" : "Disabled"}</span></div>
-          <div class="settings-row"><span>Contact Discovery</span><span>${caps.contact_discovery_mode === "private_service" ? "Private service" : (caps.contact_discovery_supported ? "Enabled" : "Manual only")}</span></div>
-          <div class="settings-row"><span>Discovery Tickets</span><span>${caps.contact_discovery_ticket_supported ? "Available" : "Unavailable"}</span></div>
-          <div class="settings-row"><span>Discovery Ticket Issuer</span><span class="mono">${escHtml(caps.contact_discovery_ticket_issuer_ed25519_pub)}</span></div>
-          <div class="settings-row"><span>Discovery Manifest Issuer</span><span class="mono">${escHtml(caps.contact_discovery_manifest_issuer_ed25519_pub || "not advertised")}</span></div>
-          <div class="settings-row"><span>Discovery Backend</span><span>${escHtml(caps.contact_discovery_directory_backend || "not advertised")}</span></div>
-          <div class="settings-row"><span>Host/Enclave Protocol</span><span>${escHtml(caps.contact_discovery_host_enclave_protocol_version ? `${caps.contact_discovery_host_enclave_protocol_version}` : "not advertised")}</span></div>
-          <div class="settings-row"><span>Host Release</span><span class="mono">${escHtml(caps.contact_discovery_host_release_id || "not advertised")}</span></div>
-          <div class="settings-row"><span>Enclave Release</span><span class="mono">${escHtml(caps.contact_discovery_enclave_release_id || "not advertised")}</span></div>
-          <div class="settings-row"><span>Manifest Contract</span><span class="mono">${escHtml(caps.contact_discovery_expected_manifest_contract_sha256 || "not advertised")}</span></div>
-          <div class="settings-row"><span>Discovery Attestation Verifier</span><span class="mono">${escHtml(caps.contact_discovery_attestation_verifier || "not advertised")}</span></div>
-          <div class="settings-row"><span>Discovery Enclave Measurement</span><span class="mono">${escHtml(caps.contact_discovery_expected_measurement_hex || "not advertised")}</span></div>
-          <div class="settings-row"><span>Discovery Attestation PCRs</span><span class="mono">${escHtml(formatContactDiscoveryPcrs(caps.contact_discovery_expected_pcrs_sha384))}</span></div>
-          <div class="settings-row"><span>Discovery Attestation Max Age</span><span>${escHtml(caps.contact_discovery_attestation_max_age_seconds ? `${caps.contact_discovery_attestation_max_age_seconds}s` : "not advertised")}</span></div>
-          <div class="settings-row"><span>Prod Baseline</span><span>${caps.production_baseline_met ? "✓ Met" : "✗ Not met"}</span></div>
-        </div>
-        <div class="settings-section">
-          <h3>Crypto Profile</h3>
-          <div class="settings-row"><span>KEM</span><span class="mono">${escHtml(cp.kem)}</span></div>
-          <div class="settings-row"><span>DH</span><span class="mono">${escHtml(cp.dh)}</span></div>
-          <div class="settings-row"><span>KDF</span><span class="mono">${escHtml(cp.kdf)}</span></div>
-          <div class="settings-row"><span>AEAD</span><span class="mono">${escHtml(cp.aead)}</span></div>
-          <div class="settings-row"><span>Signature</span><span class="mono">${escHtml(cp.signature)}</span></div>
-          <div class="settings-row"><span>FIPS Mode</span><span>${cp.fips_mode ? "Yes" : "No"}</span></div>
-          <div class="settings-row"><span>PQ OQS</span><span>${cp.pq_oqs_enabled ? "Yes" : "No"}</span></div>
-        </div>
-      `;
+      if (health) {
+        html += `
+          <div class="settings-section">
+            <h3>Runtime snapshot</h3>
+            <p class="settings-section-intro">A high-level view of transport, storage, and server hardening for the backend this browser is talking to right now.</p>
+            <div class="settings-kv-grid">
+              <article class="settings-kv-card">
+                <span class="settings-summary-kicker">Database</span>
+                <strong>${escHtml(health.db_backend)}</strong>
+                <p>${health.db_ready ? "Ready for requests." : "Not ready for requests."} Pool: ${health.db_pool_idle} idle / ${health.db_pool_size} total.</p>
+              </article>
+              <article class="settings-kv-card">
+                <span class="settings-summary-kicker">Delivery</span>
+                <strong>${escHtml(health.realtime_mode)}</strong>
+                <p>Push ${health.push_enabled ? health.push_providers.join(", ") : "disabled"} · TLS ${health.tls_enabled ? "enabled" : "disabled"}.</p>
+              </article>
+              <article class="settings-kv-card">
+                <span class="settings-summary-kicker">Protection</span>
+                <strong>${escHtml(health.rate_limiter_mode)}</strong>
+                <p>Replay cache ${health.replay_cache_mode} · registration proof-of-work ${health.registration_pow_bits} bits.</p>
+              </article>
+              <article class="settings-kv-card">
+                <span class="settings-summary-kicker">Deployment</span>
+                <strong>${escHtml(health.security_profile)}</strong>
+                <p>${escHtml(health.deployment_mode)} deployment with ${health.status === "ok" ? "healthy" : "degraded"} status.</p>
+              </article>
+            </div>
+          </div>
+        `;
+      }
+      if (caps) {
+        const cp = caps.runtime_crypto_profile;
+        html += `
+          <div class="settings-section">
+            <h3>Messenger features</h3>
+            <p class="settings-section-intro">These are the user-facing features and product boundaries this server currently publishes to the web client.</p>
+            <div class="settings-status-grid">
+              <article class="settings-status-card">
+                <strong>${caps.group_messaging_supported ? "Groups on" : "Groups off"}</strong>
+                <span>${caps.private_group_messaging_supported ? "Private groups available" : "No private groups"}</span>
+                <p>Standard and private group surfaces depend on this capability set.</p>
+              </article>
+              <article class="settings-status-card">
+                <strong>${caps.contact_discovery_supported ? "Discovery on" : "Discovery off"}</strong>
+                <span>${escHtml(caps.contact_discovery_mode === "private_service" ? "Separate service" : "Manual lookup")}</span>
+                <p>Discovery remains secondary on web even when the server supports it.</p>
+              </article>
+              <article class="settings-status-card">
+                <strong>${caps.sealed_sender_required ? "Sealed sender" : "Sender visible"}</strong>
+                <span>${caps.sender_certificate_supported ? "Certificates enabled" : "Certificates disabled"}</span>
+                <p>Sender protection and certificate policy shape message delivery behavior.</p>
+              </article>
+              <article class="settings-status-card">
+                <strong>${caps.presence_supported ? "Presence on" : "Presence off"}</strong>
+                <span>${caps.typing_indicators_supported ? "Typing on" : "Typing off"}</span>
+                <p>Conversation awareness signals available to this browser client.</p>
+              </article>
+              <article class="settings-status-card">
+                <strong>${caps.read_receipts_supported ? "Receipts on" : "Receipts off"}</strong>
+                <span>${caps.ephemeral_messaging_supported ? "Ephemeral DM on" : "Ephemeral DM off"}</span>
+                <p>Receipt and expiry features depend on the server’s beta policy.</p>
+              </article>
+              <article class="settings-status-card">
+                <strong>${caps.calling_supported ? "Calling on" : "Calling off"}</strong>
+                <span>${caps.channels_supported ? "Channels on" : "Channels off"}</span>
+                <p>Calling and broadcast-style surfaces stay outside the supported web beta today.</p>
+              </article>
+            </div>
+          </div>
+          <div class="settings-section">
+            <h3>Crypto profile</h3>
+            <p class="settings-section-intro">The hybrid cryptographic runtime the server advertises to this client for this session.</p>
+            <div class="settings-kv-grid">
+              <article class="settings-kv-card">
+                <span class="settings-summary-kicker">KEM</span>
+                <strong class="mono">${escHtml(cp.kem)}</strong>
+                <p>Key exchange material advertised for hybrid sessions.</p>
+              </article>
+              <article class="settings-kv-card">
+                <span class="settings-summary-kicker">Signature</span>
+                <strong class="mono">${escHtml(cp.signature)}</strong>
+                <p>Identity signatures paired with ${escHtml(cp.dh)} and ${escHtml(cp.kdf)}.</p>
+              </article>
+              <article class="settings-kv-card">
+                <span class="settings-summary-kicker">AEAD</span>
+                <strong class="mono">${escHtml(cp.aead)}</strong>
+                <p>Transport confidentiality with ${escHtml(cp.kdf)} key derivation.</p>
+              </article>
+              <article class="settings-kv-card">
+                <span class="settings-summary-kicker">Compliance</span>
+                <strong>${cp.fips_mode ? "FIPS mode" : "Standard mode"}</strong>
+                <p>PQ OQS runtime ${cp.pq_oqs_enabled ? "enabled" : "disabled"} for this server profile.</p>
+              </article>
+            </div>
+          </div>
+          <details class="settings-inline-details">
+            <summary>Advanced capability contract</summary>
+            <div class="settings-inline-details-body">
+              <div class="settings-row"><span>Schema</span><span>v${caps.capability_schema_version}</span></div>
+              <div class="settings-row"><span>Suites</span><span class="mono">${caps.supported_suite_ids.join(", ")}</span></div>
+              <div class="settings-row"><span>PQ Ratchet</span><span>${caps.pq_ratchet_interval === 1 ? "every message" : `every ${caps.pq_ratchet_interval} msgs`}</span></div>
+              <div class="settings-row"><span>Stories</span><span>${caps.stories_supported ? "Enabled" : "Disabled"}</span></div>
+              <div class="settings-row"><span>Discovery Tickets</span><span>${caps.contact_discovery_ticket_supported ? "Available" : "Unavailable"}</span></div>
+              <div class="settings-row"><span>Discovery Ticket Issuer</span><span class="mono">${escHtml(caps.contact_discovery_ticket_issuer_ed25519_pub)}</span></div>
+              <div class="settings-row"><span>Discovery Manifest Issuer</span><span class="mono">${escHtml(caps.contact_discovery_manifest_issuer_ed25519_pub || "not advertised")}</span></div>
+              <div class="settings-row"><span>Discovery Backend</span><span>${escHtml(caps.contact_discovery_directory_backend || "not advertised")}</span></div>
+              <div class="settings-row"><span>Host/Enclave Protocol</span><span>${escHtml(caps.contact_discovery_host_enclave_protocol_version ? `${caps.contact_discovery_host_enclave_protocol_version}` : "not advertised")}</span></div>
+              <div class="settings-row"><span>Host Release</span><span class="mono">${escHtml(caps.contact_discovery_host_release_id || "not advertised")}</span></div>
+              <div class="settings-row"><span>Enclave Release</span><span class="mono">${escHtml(caps.contact_discovery_enclave_release_id || "not advertised")}</span></div>
+              <div class="settings-row"><span>Manifest Contract</span><span class="mono">${escHtml(caps.contact_discovery_expected_manifest_contract_sha256 || "not advertised")}</span></div>
+              <div class="settings-row"><span>Attestation Verifier</span><span class="mono">${escHtml(caps.contact_discovery_attestation_verifier || "not advertised")}</span></div>
+              <div class="settings-row"><span>Expected Measurement</span><span class="mono">${escHtml(caps.contact_discovery_expected_measurement_hex || "not advertised")}</span></div>
+              <div class="settings-row"><span>Attestation PCRs</span><span class="mono">${escHtml(formatContactDiscoveryPcrs(caps.contact_discovery_expected_pcrs_sha384))}</span></div>
+              <div class="settings-row"><span>Attestation Max Age</span><span>${escHtml(caps.contact_discovery_attestation_max_age_seconds ? `${caps.contact_discovery_attestation_max_age_seconds}s` : "not advertised")}</span></div>
+              <div class="settings-row"><span>Prod Baseline</span><span>${caps.production_baseline_met ? "Met" : "Not met"}</span></div>
+            </div>
+          </details>
+        `;
+      }
+      html += `</div>`;
     }
 
     if (!health && !caps) {
@@ -9711,6 +10027,86 @@ function escHtml(s: string): string {
 
 function errorMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+function isAuthSignatureFailureMessage(message: string): boolean {
+  return message.includes("x-pqmsg-auth-signature verification failed");
+}
+
+function isImmutableIdentityConflictMessage(message: string): boolean {
+  return message.includes("immutable identity");
+}
+
+function canUseDevelopmentRelayReset(
+  capabilities: ServerCapabilitiesResponse | null | undefined
+): boolean {
+  return capabilities?.security_profile === "research" && capabilities?.deployment_mode === "development";
+}
+
+async function registerBrowserIdentityOnRelay(
+  api: PqmsgApi,
+  relayKeys: GeneratedKeys,
+  displayName: string
+): Promise<void> {
+  await api.registerUser({
+    user_id: relayKeys.userId,
+    identity_x25519_pub: relayKeys.identityX25519Pub,
+    identity_sig_pub: relayKeys.identitySigPub,
+    identity_pq_sig_pub: relayKeys.identityPqSigPub,
+    device_id: relayKeys.deviceId,
+  });
+
+  const payload = buildPublishPrekeysPayload(relayKeys);
+  const headers = buildPrekeysAuthHeaders(relayKeys, payload);
+  await api.publishPrekeys(relayKeys.userId, payload, headers);
+
+  try {
+    const profileHeaders = buildProfileUpsertAuthHeaders(relayKeys, displayName, "", false, "", "");
+    await api.upsertProfile(
+      relayKeys.userId,
+      { display_name: displayName, username_lookup_enabled: false },
+      profileHeaders
+    );
+  } catch {
+    notify("Your account is ready, but the display name could not be synced yet.", "info");
+  }
+}
+
+async function repairIdentityOnDevelopmentRelay(
+  activeKeys: GeneratedKeys,
+  displayName: string,
+  passphrase: string
+): Promise<GeneratedKeys> {
+  const capabilities = await loadServerCapabilitiesCached();
+  if (!canUseDevelopmentRelayReset(capabilities)) {
+    throw new Error("This relay does not allow same-username repair.");
+  }
+  await ensureWebPqRuntime();
+  const api = new PqmsgApi(setup.serverUrl);
+  const repairedKeys = regeneratePublishedPrekeys(activeKeys);
+  await api.resetDevUserIdentity(activeKeys.userId);
+  await registerBrowserIdentityOnRelay(api, repairedKeys, displayName);
+  await saveKeys(activeKeys.userId, passphrase, repairedKeys);
+  sessionStorage.setItem("pqmsg.passphrase", passphrase);
+  keys = repairedKeys;
+  setup = {
+    ...setup,
+    userId: repairedKeys.userId,
+    deviceId: repairedKeys.deviceId,
+    suiteLabel: repairedKeys.suite,
+    displayName,
+  };
+  saveSetup(setup);
+  cachedProfileNames[repairedKeys.userId] = displayName;
+  writeProfileDisplayName(repairedKeys.userId, repairedKeys.userId, displayName);
+  return repairedKeys;
+}
+
+function explainLocalIdentityMismatch(userId: string): string {
+  if (canUseDevelopmentRelayReset(cachedCapabilities)) {
+    return `Saved local keys for @${userId} do not match the server record. Use Repair account to reset @${userId} on this development relay and re-publish this browser's saved keys.`;
+  }
+  return `Saved local keys for @${userId} do not match the server record. This usually happens after an earlier failed registration left stale browser keys behind. Use Forget next to @${userId} on the sign-in screen and create the account again.`;
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer): string {

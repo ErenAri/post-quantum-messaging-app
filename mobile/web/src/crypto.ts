@@ -16,6 +16,8 @@ import type {
   BundleResponse,
   ContactDiscoveryAttestationResponse,
   ContactDiscoveryManifestResponse,
+  TransparencyProofResponse,
+  TransparencySignedTreeHeadResponse,
 } from "./server";
 
 const AUTH_TAG_ENDPOINT = criticalType(0x3201);
@@ -172,6 +174,9 @@ export type TransparencyVerificationResult = {
   treeSize: number;
   epoch: number;
 };
+
+const TRANSPARENCY_LEAF_PREFIX = 0x00;
+const TRANSPARENCY_NODE_PREFIX = 0x01;
 
 export function generateIdentityKeys(
   userId: string,
@@ -1149,24 +1154,299 @@ export function computeSafetyNumber(
   );
 }
 
+function u32ToBeBytes(value: number): Uint8Array {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
+    throw new Error("Transparency field length overflow");
+  }
+  return new Uint8Array([
+    (value >>> 24) & 0xff,
+    (value >>> 16) & 0xff,
+    (value >>> 8) & 0xff,
+    value & 0xff,
+  ]);
+}
+
+function u64ToBeBytes(value: number): Uint8Array {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("Transparency integer overflow");
+  }
+  let remaining = BigInt(value);
+  const out = new Uint8Array(8);
+  for (let index = 7; index >= 0; index -= 1) {
+    out[index] = Number(remaining & 0xffn);
+    remaining >>= 8n;
+  }
+  return out;
+}
+
+function decodeFixedLengthBase64(field: string, value: string, expectedLength: number): Uint8Array {
+  const bytes = base64ToBytes(value);
+  if (bytes.length !== expectedLength) {
+    throw new Error(`${field} must be ${expectedLength} bytes`);
+  }
+  return bytes;
+}
+
+function updateLenPrefixed(parts: Uint8Array[], bytes: Uint8Array): void {
+  parts.push(u32ToBeBytes(bytes.length));
+  parts.push(bytes);
+}
+
+function hashTransparencyLeaf(leaf: TransparencyProofResponse["leaf"]): Uint8Array {
+  const identityX25519Pub = decodeFixedLengthBase64(
+    "transparency.leaf.identity_x25519_pub",
+    leaf.identity_x25519_pub,
+    32,
+  );
+  const identitySigPub = base64ToBytes(leaf.identity_sig_pub);
+  const parts: Uint8Array[] = [new Uint8Array([TRANSPARENCY_LEAF_PREFIX])];
+  updateLenPrefixed(parts, utf8ToBytes(leaf.user_id));
+  parts.push(u64ToBeBytes(leaf.version));
+  parts.push(identityX25519Pub);
+  updateLenPrefixed(parts, identitySigPub);
+  if (leaf.identity_pq_sig_pub) {
+    parts.push(new Uint8Array([0x01]));
+    updateLenPrefixed(parts, base64ToBytes(leaf.identity_pq_sig_pub));
+  } else {
+    parts.push(new Uint8Array([0x00]));
+  }
+  parts.push(u64ToBeBytes(leaf.timestamp));
+  return sha256(concatBytes(parts));
+}
+
+function hashTransparencyNode(left: Uint8Array, right: Uint8Array): Uint8Array {
+  return sha256(concatBytes([new Uint8Array([TRANSPARENCY_NODE_PREFIX]), left, right]));
+}
+
+function verifyTransparencySignedTreeHead(
+  sth: TransparencySignedTreeHeadResponse,
+  serverPubKeyB64: string,
+): void {
+  const rootHash = decodeFixedLengthBase64(
+    "transparency.signed_tree_head.root_hash",
+    sth.root_hash,
+    32,
+  );
+  const signature = base64ToBytes(sth.signature);
+  const publicKey = decodeFixedLengthBase64("transparency.server_pub_key", serverPubKeyB64, 32);
+  const body = concatBytes([u64ToBeBytes(sth.epoch), u64ToBeBytes(sth.tree_size), rootHash]);
+  if (!ed25519.verify(signature, body, publicKey)) {
+    throw new Error("Transparency signed tree head signature verification failed");
+  }
+}
+
+function verifyTransparencyInclusionProof(
+  proof: TransparencyProofResponse,
+  serverPubKeyB64: string,
+): void {
+  verifyTransparencySignedTreeHead(proof.signed_tree_head, serverPubKeyB64);
+  let current = hashTransparencyLeaf(proof.leaf);
+  for (const item of proof.inclusion_proof.path) {
+    const sibling = decodeFixedLengthBase64(
+      "transparency.inclusion_proof.path.hash",
+      item.hash,
+      32,
+    );
+    current = item.is_left
+      ? hashTransparencyNode(sibling, current)
+      : hashTransparencyNode(current, sibling);
+  }
+  const rootHash = decodeFixedLengthBase64(
+    "transparency.signed_tree_head.root_hash",
+    proof.signed_tree_head.root_hash,
+    32,
+  );
+  if (bytesToHex(current) !== bytesToHex(rootHash)) {
+    throw new Error("Transparency inclusion proof is invalid");
+  }
+}
+
+function evaluateTransparencyConsistencyProof(
+  oldSize: number,
+  newSize: number,
+  oldRootHash: Uint8Array,
+  proofHashes: Uint8Array[],
+): { oldRoot: Uint8Array; newRoot: Uint8Array } {
+  if (oldSize === 0 || oldSize > newSize || proofHashes.length === 0) {
+    throw new Error("Transparency consistency proof parameters are invalid");
+  }
+  if (oldSize === newSize) {
+    throw new Error("Transparency consistency proof parameters are invalid");
+  }
+
+  let fn = oldSize - 1;
+  let sn = newSize - 1;
+  while ((fn & 1) === 1) {
+    fn >>= 1;
+    sn >>= 1;
+  }
+
+  let proofIndex = 0;
+  let oldNode: Uint8Array;
+  let newNode: Uint8Array;
+  if ((oldSize & (oldSize - 1)) === 0) {
+    oldNode = oldRootHash;
+    newNode = oldRootHash;
+  } else {
+    oldNode = proofHashes[0];
+    newNode = proofHashes[0];
+    proofIndex = 1;
+  }
+
+  while (proofIndex < proofHashes.length) {
+    const hash = proofHashes[proofIndex];
+    proofIndex += 1;
+
+    if (sn === 0) {
+      throw new Error("Transparency consistency proof parameters are invalid");
+    }
+
+    if ((fn & 1) === 1 || fn === sn) {
+      oldNode = hashTransparencyNode(hash, oldNode);
+      newNode = hashTransparencyNode(hash, newNode);
+      while (fn !== 0 && (fn & 1) === 0) {
+        fn >>= 1;
+        sn >>= 1;
+      }
+    } else {
+      newNode = hashTransparencyNode(newNode, hash);
+    }
+
+    fn >>= 1;
+    sn >>= 1;
+  }
+
+  if (sn !== 0) {
+    throw new Error("Transparency consistency proof parameters are invalid");
+  }
+
+  return { oldRoot: oldNode, newRoot: newNode };
+}
+
+function verifyTransparencyConsistencyProof(
+  proof: TransparencyProofResponse,
+  serverPubKeyB64: string,
+  previousSth: TransparencySignedTreeHeadResponse,
+): boolean {
+  verifyTransparencySignedTreeHead(previousSth, serverPubKeyB64);
+  verifyTransparencySignedTreeHead(proof.signed_tree_head, serverPubKeyB64);
+
+  if (proof.signed_tree_head.epoch < previousSth.epoch) {
+    throw new Error("Transparency epoch regressed");
+  }
+  if (proof.signed_tree_head.tree_size < previousSth.tree_size) {
+    throw new Error("Transparency tree shrank");
+  }
+
+  const consistency = proof.consistency_proof;
+  if (!consistency) {
+    return false;
+  }
+  if (
+    consistency.old_size !== previousSth.tree_size
+    || consistency.new_size !== proof.signed_tree_head.tree_size
+  ) {
+    throw new Error("Transparency consistency proof size mismatch");
+  }
+
+  const oldRootHash = decodeFixedLengthBase64(
+    "transparency.previous_sth.root_hash",
+    previousSth.root_hash,
+    32,
+  );
+  const newRootHash = decodeFixedLengthBase64(
+    "transparency.signed_tree_head.root_hash",
+    proof.signed_tree_head.root_hash,
+    32,
+  );
+
+  if (previousSth.tree_size === proof.signed_tree_head.tree_size) {
+    if (bytesToHex(oldRootHash) !== bytesToHex(newRootHash)) {
+      throw new Error("Transparency root hash mismatch");
+    }
+    return true;
+  }
+
+  const proofHashes = consistency.proof_hashes.map((hash) =>
+    decodeFixedLengthBase64("transparency.consistency_proof.hash", hash, 32),
+  );
+  const { oldRoot, newRoot } = evaluateTransparencyConsistencyProof(
+    previousSth.tree_size,
+    proof.signed_tree_head.tree_size,
+    oldRootHash,
+    proofHashes,
+  );
+
+  if (bytesToHex(oldRoot) !== bytesToHex(oldRootHash)) {
+    throw new Error("Transparency old root mismatch");
+  }
+  if (bytesToHex(newRoot) !== bytesToHex(newRootHash)) {
+    throw new Error("Transparency new root mismatch");
+  }
+  return true;
+}
+
+function shouldUseJsTransparencyFallback(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return (
+    message.includes("WASM PQ runtime is required to verify transparency proofs")
+    || message.includes("wasm_verify_transparency_proof")
+    || message.includes("verifyTransparencyProof is not a function")
+  );
+}
+
+function verifyTransparencyProofFallback(
+  proofJson: string,
+  serverPubKeyB64: string,
+  previousSthJson?: string | null,
+): TransparencyVerificationResult {
+  const proof = JSON.parse(proofJson) as TransparencyProofResponse;
+  verifyTransparencyInclusionProof(proof, serverPubKeyB64);
+  const consistencyVerified = previousSthJson
+    ? verifyTransparencyConsistencyProof(
+        proof,
+        serverPubKeyB64,
+        JSON.parse(previousSthJson) as TransparencySignedTreeHeadResponse,
+      )
+    : false;
+  return {
+    verified: true,
+    consistencyVerified,
+    leafUserId: proof.leaf.user_id,
+    leafVersion: proof.leaf.version,
+    treeSize: proof.signed_tree_head.tree_size,
+    epoch: proof.signed_tree_head.epoch,
+  };
+}
+
 export function verifyTransparencyProof(
   proofJson: string,
   serverPubKeyB64: string,
   previousSthJson?: string | null,
 ): TransparencyVerificationResult {
-  const result = wasmCrypto.verifyTransparencyProof(
-    proofJson,
-    serverPubKeyB64,
-    previousSthJson ?? null,
-  );
-  return {
-    verified: result.verified,
-    consistencyVerified: result.consistency_verified,
-    leafUserId: result.leaf_user_id,
-    leafVersion: result.leaf_version,
-    treeSize: result.tree_size,
-    epoch: result.epoch,
-  };
+  if (typeof wasmCrypto.verifyTransparencyProof === "function") {
+    try {
+      const result = wasmCrypto.verifyTransparencyProof(
+        proofJson,
+        serverPubKeyB64,
+        previousSthJson ?? null,
+      );
+      return {
+        verified: result.verified,
+        consistencyVerified: result.consistency_verified,
+        leafUserId: result.leaf_user_id,
+        leafVersion: result.leaf_version,
+        treeSize: result.tree_size,
+        epoch: result.epoch,
+      };
+    } catch (error) {
+      if (!shouldUseJsTransparencyFallback(error)) {
+        throw error;
+      }
+    }
+  }
+
+  return verifyTransparencyProofFallback(proofJson, serverPubKeyB64, previousSthJson);
 }
 
 export function verifyContactDiscoveryManifest(

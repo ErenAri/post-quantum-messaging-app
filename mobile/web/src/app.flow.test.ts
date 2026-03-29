@@ -24,6 +24,7 @@ type MockKeys = {
 type BootOptions = {
   existingUsers?: string[];
   bundleUsers?: string[];
+  identityMismatchUsers?: string[];
   capabilities?: {
     web_client_policy?: string;
     contact_discovery_supported?: boolean;
@@ -230,9 +231,11 @@ async function bootApp(options: BootOptions = {}) {
   const apiState = {
     existingUsers: new Set(options.existingUsers ?? ["test1", "test2"]),
     bundleUsers: new Set(options.bundleUsers ?? options.existingUsers ?? ["test1", "test2"]),
+    identityMismatchUsers: new Set(options.identityMismatchUsers ?? []),
     usernames: new Map<string, string>((options.existingUsers ?? ["test1", "test2"]).map((userId) => [userId, userId] as const)),
     usernameLookupEnabledByUser: new Map<string, boolean>((options.existingUsers ?? ["test1", "test2"]).map((userId) => [userId, true] as const)),
     contacts: new Set<string>(),
+    resetCalls: [] as string[],
     relays: [] as Array<{ peerId: string; body: string }>,
     presenceCalls: 0,
     typingCalls: 0,
@@ -664,6 +667,44 @@ async function bootApp(options: BootOptions = {}) {
         return apiState.capabilities;
       }
 
+      async registerUser(payload: { user_id: string; device_id: string }) {
+        apiState.existingUsers.add(payload.user_id);
+        apiState.bundleUsers.add(payload.user_id);
+        apiState.usernames.set(payload.user_id, payload.user_id);
+        apiState.usernameLookupEnabledByUser.set(payload.user_id, false);
+        return {
+          user_id: payload.user_id,
+          device_id: payload.device_id,
+          registered_at: "2026-03-11T00:00:00Z",
+        };
+      }
+
+      async resetDevUserIdentity(userId: string) {
+        apiState.resetCalls.push(userId);
+        apiState.identityMismatchUsers.delete(userId);
+        apiState.existingUsers.delete(userId);
+        apiState.bundleUsers.delete(userId);
+        for (const [username, owner] of [...apiState.usernames.entries()]) {
+          if (owner === userId) {
+            apiState.usernames.delete(username);
+          }
+        }
+      }
+
+      async publishPrekeys(userId: string) {
+        return {
+          user_id: userId,
+          device_id: `${userId}-device`,
+          uploaded_one_time_prekeys_x25519: 16,
+          uploaded_one_time_prekeys_mlkem768: 16,
+          remaining_one_time_prekeys_x25519: 16,
+          remaining_one_time_prekeys_mlkem768: 16,
+          low_one_time_prekeys: false,
+          minimum_recommended_one_time_prekeys: 16,
+          updated_at: "2026-03-11T00:00:00Z",
+        };
+      }
+
       async listContacts() {
         return {
           contacts: Array.from(apiState.contacts.values()).map((contact_user_id) => ({
@@ -853,6 +894,9 @@ async function bootApp(options: BootOptions = {}) {
       }
 
       async getSenderCertificate(userId: string) {
+        if (apiState.identityMismatchUsers.has(userId)) {
+          throw new Error("HTTP 400: x-pqmsg-auth-signature verification failed");
+        }
         return {
           user_id: userId,
           device_id: `${userId}-device`,
@@ -958,7 +1002,7 @@ describe("web app flow coverage", () => {
     router.navigateTo({ screen: "sign-in" });
     await flushPromises();
 
-    const quickFill = document.querySelector<HTMLElement>("[data-local-account='test1']");
+    const quickFill = document.querySelector<HTMLElement>("[data-local-account-fill='test1']");
     expect(quickFill).not.toBeNull();
     quickFill?.click();
 
@@ -976,6 +1020,33 @@ describe("web app flow coverage", () => {
 
     expect(router.getCurrentView()).toEqual({ screen: "conversations" });
     expect(document.body.textContent).toContain("No conversations yet");
+  }, 10000);
+
+  it("repairs a mismatched local identity on a development relay during sign-in", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const { router, apiState } = await bootApp({
+      existingUsers: ["test6"],
+      identityMismatchUsers: ["test6"],
+      prepare: async (storage) => {
+        await storage.saveKeys("test6", "pass-6", makeKeys("test6"));
+      },
+    });
+
+    router.navigateTo({ screen: "sign-in" });
+    await flushPromises();
+
+    document.querySelector<HTMLElement>("[data-local-account-fill='test6']")?.click();
+    const passInput = document.querySelector<HTMLInputElement>("#onb-pass");
+    passInput!.value = "pass-6";
+    document.querySelector<HTMLButtonElement>("#onb-go")!.click();
+
+    await eventually(() => {
+      expect(document.querySelector("#onb-status")?.textContent).toContain("Signed in!");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 450));
+
+    expect(apiState.resetCalls).toEqual(["test6"]);
+    expect(router.getCurrentView()).toEqual({ screen: "conversations" });
   }, 10000);
 
   it("rejects a nonexistent new-chat target and keeps local conversations unchanged", async () => {

@@ -2473,6 +2473,53 @@ async fn identity_registration_is_immutable() {
 }
 
 #[tokio::test]
+async fn development_reset_allows_reusing_same_username_with_new_identity() {
+    let app = test_app().await;
+    let key_a = signing_key(13);
+    let key_b = signing_key(14);
+
+    let first = register_payload("reset-bob", "reset-bob-dev-1", [1u8; 32], &key_a);
+    let (status_first, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", first).await;
+    assert_eq!(status_first, StatusCode::OK);
+
+    let (status_reset, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/dev/users/reset-bob/reset",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_reset, StatusCode::NO_CONTENT);
+
+    let second = register_payload("reset-bob", "reset-bob-dev-1", [2u8; 32], &key_b);
+    let (status_second, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", second).await;
+    assert_eq!(status_second, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn development_reset_is_forbidden_outside_research_development_mode() {
+    let app = test_app_with_profile(SecurityProfile::HighAssurance).await;
+    let key = signing_key(15);
+
+    let register = register_payload("locked-bob", "locked-bob-dev-1", [9u8; 32], &key);
+    let (status_register, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", register).await;
+    assert_eq!(status_register, StatusCode::OK);
+
+    let (status_reset, body_reset) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/dev/users/locked-bob/reset",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_reset, StatusCode::FORBIDDEN);
+    assert_eq!(body_reset["status"].as_u64(), Some(403));
+}
+
+#[tokio::test]
 async fn publish_prekeys_rejects_invalid_signature() {
     let app = test_app().await;
     let bob_sig = signing_key(7);

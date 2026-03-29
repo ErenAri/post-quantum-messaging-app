@@ -92,6 +92,15 @@ describe("PqmsgApi methods", () => {
     expect(opts.method).toBe("POST");
   });
 
+  it("resetDevUserIdentity sends POST to the development reset path", async () => {
+    mockFetch.mockResolvedValueOnce(emptyResponse(204));
+    await api.resetDevUserIdentity("alice@example");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("http://localhost:8080/v1/dev/users/alice%40example/reset");
+    expect(opts.method).toBe("POST");
+    expect(opts.headers.get("x-pqmsg-auth-user")).toBeNull();
+  });
+
   it("getBundle sends GET with URL-encoded userId", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ user_id: "bob" }));
     await api.getBundle("bob@example");

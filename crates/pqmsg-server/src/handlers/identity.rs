@@ -1,7 +1,9 @@
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::http::HeaderMap;
 use axum::Json;
 use chrono::Utc;
+use pqmsg_core::alg::SecurityProfile;
 use sqlx::Row;
 
 use super::util::*;
@@ -10,7 +12,7 @@ use crate::db::*;
 use crate::error::AppError;
 use crate::types::*;
 use crate::validation::*;
-use crate::{AppState, PQ_SIG_PUB_KEY_LEN, SIG_PUB_KEY_LEN, X25519_KEY_LEN};
+use crate::{AppState, DeploymentMode, PQ_SIG_PUB_KEY_LEN, SIG_PUB_KEY_LEN, X25519_KEY_LEN};
 
 pub(crate) async fn register_user(
     State(state): State<AppState>,
@@ -184,6 +186,95 @@ pub(crate) async fn register_user(
         device_id: request.device_id,
         registered_at: now,
     }))
+}
+
+pub(crate) async fn reset_dev_user_identity(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    check_rate_limit(&state, &format!("dev-reset:{user_id}"))?;
+    validate_id("user_id", &user_id)?;
+
+    if !matches!(state.deployment_mode(), DeploymentMode::Development)
+        || !matches!(state.security_profile(), SecurityProfile::Research)
+    {
+        return Err(AppError::forbidden(
+            "development-only user reset is disabled outside research development mode",
+        ));
+    }
+
+    let mut tx = state.pool.begin().await?;
+
+    for query in [
+        "DELETE FROM ws_inbox_tickets WHERE user_id = $1",
+        "DELETE FROM message_expiry_meta
+         WHERE message_id IN (
+            SELECT message_id
+            FROM relay_messages
+            WHERE recipient_user_id = $1 OR sender_user_id = $1
+         )",
+        "DELETE FROM message_receipts
+         WHERE recipient_user_id = $1
+            OR message_id IN (
+                SELECT message_id
+                FROM relay_messages
+                WHERE recipient_user_id = $1 OR sender_user_id = $1
+            )",
+        "DELETE FROM sealed_relay_messages WHERE sender_user_id = $1",
+        "DELETE FROM call_signals
+         WHERE from_user_id = $1
+            OR call_id IN (
+                SELECT call_id
+                FROM call_sessions
+                WHERE caller_user_id = $1 OR callee_user_id = $1
+            )",
+        "DELETE FROM call_sessions WHERE caller_user_id = $1 OR callee_user_id = $1",
+        "DELETE FROM story_views
+         WHERE viewer_user_id = $1
+            OR story_id IN (
+                SELECT story_id
+                FROM stories
+                WHERE author_user_id = $1
+            )",
+        "DELETE FROM stories WHERE author_user_id = $1",
+        "DELETE FROM channel_subscribers
+         WHERE user_id = $1
+            OR channel_id IN (
+                SELECT channel_id
+                FROM channels
+                WHERE owner_user_id = $1
+            )",
+        "DELETE FROM channel_messages
+         WHERE channel_id IN (
+            SELECT channel_id
+            FROM channels
+            WHERE owner_user_id = $1
+         )",
+        "DELETE FROM channels WHERE owner_user_id = $1",
+    ] {
+        sqlx::query(query).bind(&user_id).execute(&mut *tx).await?;
+    }
+
+    sqlx::query("DELETE FROM users WHERE user_id = $1")
+        .bind(&user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    let _ = state.ephemeral_state().clear_presence(&user_id);
+
+    record_security_event(
+        &state,
+        "dev_user_identity_reset",
+        "success",
+        None,
+        Some(&user_id),
+        None,
+        None,
+    );
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn list_devices(
