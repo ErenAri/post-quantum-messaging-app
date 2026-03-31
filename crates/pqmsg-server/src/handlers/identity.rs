@@ -207,6 +207,8 @@ pub(crate) async fn reset_dev_user_identity(
 
     for query in [
         "DELETE FROM ws_inbox_tickets WHERE user_id = $1",
+        "DELETE FROM inbox_cursors WHERE user_id = $1",
+        "DELETE FROM sealed_inbox_cursors WHERE user_id = $1",
         "DELETE FROM message_expiry_meta
          WHERE message_id IN (
             SELECT message_id

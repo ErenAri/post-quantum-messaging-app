@@ -398,22 +398,22 @@ html, body {
 }
 .workspace-summary-card {
   margin-top: 12px;
-  padding: 12px 13px;
-  border-radius: 16px;
-  border: 1px solid rgba(45,108,246,.12);
-  background: linear-gradient(180deg, rgba(45,108,246,.05), rgba(255,255,255,.82));
+  padding: 11px 12px;
+  border-radius: 15px;
+  border: 1px solid rgba(16,24,31,.08);
+  background: rgba(247,250,252,.88);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 .workspace-summary-title {
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 700;
   color: var(--text);
 }
 .workspace-summary-copy {
-  font-size: 12.5px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.4;
   color: var(--text-secondary);
 }
 .workspace-filter-bar {
@@ -435,15 +435,15 @@ html, body {
 }
 .workspace-preview-card {
   width: min(860px, 100%);
-  padding: 28px;
-  border-radius: 28px;
+  padding: 26px;
+  border-radius: 24px;
   border: 1px solid rgba(16,24,31,.08);
-  background: rgba(255,255,255,.90);
-  box-shadow: 0 22px 56px rgba(15,23,42,.08);
+  background: rgba(255,255,255,.93);
+  box-shadow: 0 14px 34px rgba(15,23,42,.06);
   backdrop-filter: blur(12px);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 .workspace-preview-card h2 {
   margin: 0;
@@ -509,10 +509,10 @@ html, body {
   width: min(960px, 100%);
   min-height: 100%;
   margin: 0 auto;
-  border-radius: 28px;
+  border-radius: 24px;
   border: 1px solid rgba(16,24,31,.08);
-  background: rgba(255,255,255,.90);
-  box-shadow: 0 22px 56px rgba(15,23,42,.08);
+  background: rgba(255,255,255,.94);
+  box-shadow: 0 16px 38px rgba(15,23,42,.06);
   backdrop-filter: blur(12px);
   display: flex;
   flex-direction: column;
@@ -1039,7 +1039,7 @@ html, body {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: linear-gradient(180deg, rgba(252,253,255,.92), rgba(246,249,252,.90));
+  background: linear-gradient(180deg, rgba(252,253,255,.94), rgba(245,248,252,.92));
   flex: 1;
   min-width: 0;
   transition: padding-right .22s ease;
@@ -1087,7 +1087,7 @@ html, body {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 8px 16px 10px;
+  padding: 6px 16px 9px;
   background: linear-gradient(180deg, rgba(255,255,255,.94), rgba(248,250,252,.94));
   border-bottom: 1px solid rgba(16,24,31,.06);
 }
@@ -1526,7 +1526,7 @@ html, body {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 14px 0 18px;
+  padding: 10px 0 18px;
   background: linear-gradient(180deg, rgba(251,252,255,.96), rgba(244,248,252,.94));
   /* Subtle pattern */
   background-image: radial-gradient(circle at 20% 40%, rgba(45,108,246,.035) 0%, transparent 46%),
@@ -1534,9 +1534,78 @@ html, body {
 }
 
 .messages {
-  max-width: 760px;
+  max-width: 720px;
   margin: 0 auto;
-  padding: 0 18px 18px;
+  padding: 0 20px 20px;
+}
+
+.thread-intro-card {
+  max-width: 470px;
+  margin: 4px auto 14px;
+  padding: 18px 18px 16px;
+  border-radius: 22px;
+  border: 1px solid rgba(16,24,31,.08);
+  background: rgba(255,255,255,.84);
+  box-shadow: 0 12px 28px rgba(15,23,42,.05);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.thread-intro-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #8aa9ff, #2d6cf6);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 17px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.thread-intro-copy h2 {
+  margin: 4px 0 2px;
+  font-size: 22px;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+.thread-intro-subtitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.thread-intro-body {
+  margin: 8px 0 0;
+  font-size: 13.5px;
+  line-height: 1.52;
+  color: var(--text-secondary);
+  max-width: 46ch;
+}
+
+.thread-intro-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.thread-intro-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(16,24,31,.08);
+  background: rgba(248,250,252,.92);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 /* Date separator */
@@ -1562,8 +1631,8 @@ html, body {
 /* Bubbles */
 .bubble {
   max-width: 68%;
-  padding: 8px 10px 6px;
-  margin-bottom: 6px;
+  padding: 9px 11px 7px;
+  margin-bottom: 8px;
   border-radius: var(--radius);
   position: relative;
   word-wrap: break-word;
@@ -1592,8 +1661,8 @@ html, body {
 }
 
 .bubble-text {
-  font-size: 14.5px;
-  line-height: 1.35;
+  font-size: 14px;
+  line-height: 1.42;
   color: var(--text-bubble);
   padding: 2px 4px;
 }
@@ -1973,8 +2042,8 @@ html, body {
   border: 1px solid var(--border);
   border-radius: 18px;
   padding: 16px 18px;
-  background: rgba(255,255,255,.72);
-  box-shadow: 0 10px 24px rgba(15,23,42,.035);
+  background: rgba(255,255,255,.78);
+  box-shadow: none;
 }
 .settings-section h3 {
   font-size: 13px;
@@ -2004,7 +2073,7 @@ html, body {
   padding: 16px;
   border-radius: 18px;
   border: 1px solid var(--border);
-  background: linear-gradient(135deg, rgba(45,108,246,.08), rgba(255,255,255,.82));
+  background: linear-gradient(180deg, rgba(248,250,252,.96), rgba(255,255,255,.9));
 }
 .settings-eyebrow {
   display: inline-block;
@@ -2032,10 +2101,10 @@ html, body {
   margin-top: 10px;
 }
 .settings-summary-card {
-  padding: 14px;
-  border-radius: 16px;
+  padding: 13px 14px;
+  border-radius: 15px;
   border: 1px solid rgba(16,24,31,.08);
-  background: rgba(255,255,255,.84);
+  background: rgba(255,255,255,.92);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -2048,18 +2117,18 @@ html, body {
   color: var(--accent);
 }
 .settings-summary-card strong {
-  font-size: 17px;
+  font-size: 16px;
   line-height: 1.15;
   color: var(--text);
 }
 .settings-summary-card span {
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 .settings-summary-card p {
   margin: 4px 0 0;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 12.5px;
   line-height: 1.45;
 }
 .settings-section-actions {

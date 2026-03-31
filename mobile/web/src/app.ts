@@ -1526,7 +1526,7 @@ async function loadPeerSealedDeliveryToken(
   let profile = await api.getProfile(peerUserId, headers);
   let sealedDeliveryToken = profile.sealed_delivery_token?.trim() || "";
   if (!sealedDeliveryToken) {
-    const contactHeaders = buildContactsUpsertAuthHeaders(k, peerUserId, peerUserId, false, "");
+    const contactHeaders = buildContactsUpsertAuthHeaders(k, peerUserId, "", false, "");
     await api.upsertContact(k.userId, { contact_user_id: peerUserId }, contactHeaders);
     markConversationAccepted(peerUserId);
     void loadContactsBackground();
@@ -2630,7 +2630,7 @@ function renderConversations(): void {
         <div class="workspace-preview-card">
           <span class="workspace-kicker">Messages</span>
           <h2>Choose a conversation</h2>
-          <p class="workspace-preview-copy">Your inbox stays on the left. Open the current chat, group, or setup page here without losing the rest of your conversations.</p>
+          <p class="workspace-preview-copy">Keep the inbox anchored on the left while chats, groups, and settings open in the main workspace.</p>
           <div class="workspace-stat-grid">
             <div class="workspace-stat-card">
               <strong>${counts.unread}</strong>
@@ -2857,8 +2857,8 @@ function renderWorkspaceSidebar(
           <button id="workspace-new-group" class="btn-secondary">New group</button>
         </div>
         <div class="workspace-summary-card" role="status" aria-live="polite">
-          <span class="workspace-summary-title">Keep the inbox in view.</span>
-          <p class="workspace-summary-copy">Chats, groups, drafts, and archived conversations stay nearby while the current view opens on the right.</p>
+          <span class="workspace-summary-title">Stay anchored.</span>
+          <p class="workspace-summary-copy">Chats, groups, drafts, and archived threads stay nearby while the active view opens on the right.</p>
           ${archiveToggle}
         </div>
         <div class="filter-chip-bar workspace-filter-bar" role="tablist" aria-label="Inbox filters">
@@ -3102,6 +3102,33 @@ function renderEmptyState(filter: InboxFilter): string {
   `;
 }
 
+function renderThreadIntroCard(options: {
+  eyebrow: string;
+  avatarText: string;
+  title: string;
+  subtitle?: string;
+  body: string;
+  pills?: string[];
+  group?: boolean;
+}): string {
+  const pills = (options.pills ?? [])
+    .filter(Boolean)
+    .map((pill) => `<span class="thread-intro-pill">${escHtml(pill)}</span>`)
+    .join("");
+  return `
+    <section class="thread-intro-card" aria-label="${escHtml(options.title)} overview">
+      <div class="thread-intro-avatar${options.group ? " avatar-group" : ""}">${escHtml(options.avatarText)}</div>
+      <div class="thread-intro-copy">
+        <span class="workspace-kicker">${escHtml(options.eyebrow)}</span>
+        <h2>${escHtml(options.title)}</h2>
+        ${options.subtitle ? `<p class="thread-intro-subtitle">${escHtml(options.subtitle)}</p>` : ""}
+        <p class="thread-intro-body">${escHtml(options.body)}</p>
+      </div>
+      ${pills ? `<div class="thread-intro-pills">${pills}</div>` : ""}
+    </section>
+  `;
+}
+
 function renderConversationRow(row: UnifiedConversationRow, activeThread: ActiveWorkspaceThread = null): string {
   const unread = row.unreadCount > 0 ? `<span class="badge">${row.unreadCount > 99 ? "99+" : row.unreadCount}</span>` : "";
   const isActive = Boolean(activeThread && row.kind === activeThread.kind && row.threadId === activeThread.threadId);
@@ -3316,6 +3343,14 @@ async function renderChat(peerId: string): Promise<void> {
   const directMessagingBlockedReason = directMessagingReady
     ? ""
     : "Web post-quantum runtime is unavailable in this build, so direct messages cannot be sent yet.";
+  const threadIntroHtml = renderThreadIntroCard({
+    eyebrow: "Direct chat",
+    avatarText: identity.avatarText,
+    title: displayName,
+    subtitle: handleLabel || "Secure chat",
+    body: "This is the start of your conversation on this browser. Open Details when you need safety, shared media, or archive controls.",
+    pills: [trustSummary, transparencySummary],
+  });
   const requestBanner = meta.requestState === "pending"
     ? `
       <div class="request-banner">
@@ -3698,7 +3733,7 @@ async function renderChat(peerId: string): Promise<void> {
     }
     clearMessageSelection(conversationId);
     const history = await getMessages(conversationId);
-    renderMessageList(msgList, history);
+    renderMessageList(msgList, history, threadIntroHtml);
     refreshDirectConversationAfterLocalDelete(history);
     syncThreadSearch(false);
     await syncSelection();
@@ -4051,7 +4086,7 @@ async function renderChat(peerId: string): Promise<void> {
         const updated = await editStoredMessage(msgId, text);
         if (updated) {
           const history = await getMessages(conversationId);
-          renderMessageList(msgList, history);
+          renderMessageList(msgList, history, threadIntroHtml);
           const latest = history.at(-1);
           if (latest) {
             upsertConversation(
@@ -4498,7 +4533,7 @@ async function renderChat(peerId: string): Promise<void> {
   const sharedMediaCount = history.filter((message) => hasStoredAttachment(message)).length;
   detailSharedMediaCount.textContent = sharedMediaCount === 1 ? "1 item" : `${sharedMediaCount} items`;
   detailSharedMediaBtn.textContent = sharedMediaCount > 0 ? `Shared media (${sharedMediaCount})` : "Shared media";
-  renderMessageList(msgList, history);
+  renderMessageList(msgList, history, threadIntroHtml);
   await syncSelection();
   syncThreadSearch(false);
   scrollToBottom(container);
@@ -4525,11 +4560,14 @@ async function renderChat(peerId: string): Promise<void> {
   }
 }
 
-function renderMessageList(container: HTMLElement, msgs: StoredMessage[]): void {
+function renderMessageList(container: HTMLElement, msgs: StoredMessage[], introHtml = ""): void {
   if (msgs[0]?.conversationId) {
     container.dataset.conversationId = msgs[0].conversationId;
   }
   container.innerHTML = "";
+  if (introHtml) {
+    container.insertAdjacentHTML("beforeend", introHtml);
+  }
   let lastDate = "";
   for (const msg of msgs) {
     const date = new Date(msg.timestamp).toLocaleDateString();
@@ -5163,6 +5201,22 @@ async function renderGroupChat(groupId: string): Promise<void> {
     localCredential && privateGroupDescribeMemberCredential(localCredential).publish_key_base64,
   );
   const groupTitle = privateGroup.attributes.title || groupId;
+  const groupState = getPrivateGroupState(groupId);
+  const yourRole = groupState?.members.find((member) => member.user_id === setup.userId)?.role || "member";
+  const memberSummary = groupState
+    ? `${groupState.members.length} ${groupState.members.length === 1 ? "member" : "members"} / ${yourRole}`
+    : "Private group";
+  const threadIntroHtml = renderThreadIntroCard({
+    eyebrow: "Private group",
+    avatarText: groupTitle.slice(0, 2).toUpperCase() || groupId.slice(0, 2).toUpperCase(),
+    title: groupTitle,
+    subtitle: memberSummary,
+    body: canManage
+      ? "Invite people from this browser when you are ready. Group membership and message history stay attached to the current private-group state."
+      : "Messages stay available here while membership updates continue from an owner device.",
+    pills: [canManage ? "Invite access" : "Member view", "Private group"],
+    group: true,
+  });
   const { counts, visibleRows } = getWorkspaceInboxState({ kind: "group", threadId: groupId });
   app.innerHTML = `
     <div class="desktop-shell desktop-thread-shell">
@@ -5380,9 +5434,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
   let pendingAttachmentFile: File | null = null;
   let pendingAttachmentPreviewUrl: string | null = null;
   void loadGroupMembersCount(groupId);
-  const groupState = getPrivateGroupState(groupId);
   if (groupState) {
-    const yourRole = groupState.members.find((member) => member.user_id === setup.userId)?.role || "member";
     headerStatusEl.textContent = `${groupState.members.length} ${groupState.members.length === 1 ? "member" : "members"} / ${yourRole}`;
   } else {
     headerStatusEl.textContent = "Private group";
@@ -5440,7 +5492,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
     }
     clearMessageSelection(conversationId);
     const history = await getMessages(conversationId);
-    renderMessageList(msgList, history);
+    renderMessageList(msgList, history, threadIntroHtml);
     refreshGroupConversationAfterLocalDelete(history);
     syncThreadSearch(false);
     await syncSelection();
@@ -5733,7 +5785,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
   // Load group message history
   await syncPrivateGroupMessagesForGroup(groupId).catch(() => {});
   const history = await getMessages(conversationId);
-  renderMessageList(msgList, history);
+  renderMessageList(msgList, history, threadIntroHtml);
   await syncSelection();
   syncThreadSearch(false);
   scrollToBottom(container);
@@ -6006,7 +6058,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
         clearPendingAttachment();
         statusEl.textContent = "Sent.";
         const updatedHistory = await getMessages(`group:${groupId}`);
-        renderMessageList(msgList, updatedHistory);
+        renderMessageList(msgList, updatedHistory, threadIntroHtml);
         scrollToBottom(container);
         refreshConversationsIfVisible();
       } catch (error) {
@@ -7251,7 +7303,7 @@ async function renderSettings(): Promise<void> {
       if (!inviteToken) {
         await ensureDirectChatPeerExists(rawTarget);
       }
-      const headers = buildContactsUpsertAuthHeaders(k, contactId, alias || contactId, false, "");
+      const headers = buildContactsUpsertAuthHeaders(k, contactId, alias, false, "");
       await api.upsertContact(k.userId, { contact_user_id: contactId, alias: alias || undefined }, headers);
       notify("Contact added", "success");
       void loadContactsBackground();
@@ -9162,7 +9214,7 @@ async function addContactSilent(contactUserId: string): Promise<void> {
   try {
     const k = await ensureKeys();
     const api = new PqmsgApi(setup.serverUrl);
-    const headers = buildContactsUpsertAuthHeaders(k, contactUserId, contactUserId, false, "");
+    const headers = buildContactsUpsertAuthHeaders(k, contactUserId, "", false, "");
     await api.upsertContact(k.userId, { contact_user_id: contactUserId }, headers);
     markConversationAccepted(contactUserId);
     void loadContactsBackground();
@@ -9933,7 +9985,7 @@ async function verifyPeerSafetyNumber(peerUserId: string): Promise<void> {
     const headers = buildContactsUpsertAuthHeaders(
       k,
       peerUserId,
-      alias,
+      contact?.alias || "",
       true,
       identityPin.fingerprintSha256
     );
@@ -10108,6 +10160,9 @@ async function repairIdentityOnDevelopmentRelay(
   const api = new PqmsgApi(setup.serverUrl);
   const repairedKeys = regeneratePublishedPrekeys(activeKeys);
   await api.resetDevUserIdentity(activeKeys.userId);
+  writeCursor(activeKeys.userId, 0, activeKeys.deviceId);
+  writeSealedCursor(activeKeys.userId, 0, activeKeys.deviceId);
+  sealedInboxCursor = 0;
   await registerBrowserIdentityOnRelay(api, repairedKeys, displayName);
   await saveKeys(activeKeys.userId, passphrase, repairedKeys);
   sessionStorage.setItem("pqmsg.passphrase", passphrase);

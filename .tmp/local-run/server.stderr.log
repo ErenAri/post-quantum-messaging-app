@@ -1,2 +1,3 @@
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.10s
      Running `target\debug\pqmsg-server.exe`
+error: process didn't exit successfully: `target\debug\pqmsg-server.exe` (exit code: 0xffffffff)

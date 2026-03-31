@@ -7,6 +7,11 @@
 
 use wasm_bindgen::prelude::*;
 
+#[wasm_bindgen(start)]
+pub fn wasm_init() {
+    console_error_panic_hook::set_once();
+}
+
 use crate::ad::conversation_associated_data;
 use crate::aead;
 use crate::dh;
@@ -69,7 +74,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use sha2::Digest;
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
-use std::time::{SystemTime, UNIX_EPOCH};
+use js_sys::Date;
 
 // ---------------------------------------------------------------------------
 // Types (serialized to/from JS via serde-wasm-bindgen)
@@ -1307,10 +1312,7 @@ pub fn wasm_open_sealed_message_with_sender_cert(
         server_issuer_ed25519_pub,
     )?)
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let now_unix_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| JsValue::from_str("system clock before unix epoch"))?
-        .as_secs();
+    let now_unix_secs = (Date::now() / 1000.0).floor() as u64;
     let opened = open_message_with_cert(
         &local_secret,
         &decode_b64("sealed_message_bytes_base64", sealed_message_bytes_base64)?,

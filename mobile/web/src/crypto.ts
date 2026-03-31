@@ -896,17 +896,22 @@ export async function openJsonWithPassphrase<T>(
   const ciphertext = base64ToBytes(parsed.ct_b64);
   const key = await deriveAesGcmKey(passphrase, salt);
   const aad = utf8ToBytes("pqmsg-web-fallback-sealed-state-v1");
-  const plaintext = new Uint8Array(
-    await crypto.subtle.decrypt(
-      {
-        name: "AES-GCM",
-        iv: iv.buffer as ArrayBuffer,
-        additionalData: aad.buffer as ArrayBuffer
-      },
-      key,
-      ciphertext.buffer as ArrayBuffer
-    )
-  );
+  let plaintext: Uint8Array;
+  try {
+    plaintext = new Uint8Array(
+      await crypto.subtle.decrypt(
+        {
+          name: "AES-GCM",
+          iv: iv.buffer as ArrayBuffer,
+          additionalData: aad.buffer as ArrayBuffer
+        },
+        key,
+        ciphertext.buffer as ArrayBuffer
+      )
+    );
+  } catch {
+    throw new Error("Wrong passphrase — decryption failed. Please try again.");
+  }
   return JSON.parse(bytesToUtf8(plaintext)) as T;
 }
 

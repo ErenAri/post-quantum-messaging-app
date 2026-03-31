@@ -537,7 +537,7 @@ export function privateGroupCreateState(
       ownerUserId,
       JSON.stringify(attributes),
       JSON.stringify(initialMembers),
-      createdAtUnixSeconds
+      BigInt(createdAtUnixSeconds)
     )
   );
 }
@@ -667,7 +667,7 @@ export function privateGroupPrepareAddMemberTransition(
       JSON.stringify(state),
       memberUserId,
       role,
-      updatedAtUnixSeconds
+      BigInt(updatedAtUnixSeconds)
     )
   );
 }
@@ -684,7 +684,7 @@ export function privateGroupPrepareRemoveMemberTransition(
     wasmModule!.wasm_private_group_prepare_remove_member_transition(
       JSON.stringify(state),
       memberUserId,
-      updatedAtUnixSeconds
+      BigInt(updatedAtUnixSeconds)
     )
   );
 }
@@ -707,7 +707,7 @@ export function privateGroupEncryptMessage(
       senderIdentitySigSecretBase64,
       senderIdentityPqSigSecretBase64,
       body,
-      sentAtUnixMs
+      BigInt(sentAtUnixMs)
     )
   );
 }
