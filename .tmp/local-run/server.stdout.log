@@ -1,0 +1,4 @@
+{"timestamp":"2026-03-31T08:43:26.137321Z","level":"INFO","fields":{"message":"database migrations applied successfully"},"target":"pqmsg_server"}
+{"timestamp":"2026-03-31T08:43:26.139998Z","level":"WARN","fields":{"message":"using DEVELOPMENT sender certificate signing key — set PQMSG_SENDER_CERT_SIGNING_KEY for production"},"target":"pqmsg_server"}
+{"timestamp":"2026-03-31T08:43:26.151283Z","level":"INFO","fields":{"message":"pqmsg-server listening without TLS on 127.0.0.1:3000 deployment_mode=development profile=research db_backend=sqlite runtime_suite_id=1 pq_enabled=true max_conn=20 min_conn=1 push_enabled=false audit_enabled=false limiter_mode=in_memory registration_pow_bits=0 prekey_publish_min_interval_seconds=0 prekey_bundle_reserve_count=0 pq_ratchet_interval=1 sentry_enabled=false"},"target":"pqmsg_server"}
+{"timestamp":"2026-03-31T08:43:26.151574Z","level":"INFO","fields":{"message":"enabled_push_providers="},"target":"pqmsg_server"}
