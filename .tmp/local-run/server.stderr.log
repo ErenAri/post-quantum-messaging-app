@@ -1,3 +1,0 @@
-   Compiling pqmsg-server v0.1.0 (C:\projects\post-quantum-messaging-app\crates\pqmsg-server)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 50.69s
-     Running `target\debug\pqmsg-server.exe`

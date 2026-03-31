@@ -1271,7 +1271,7 @@ describe("web app flow coverage", () => {
     input.dispatchEvent(new Event("input", { bubbles: true }));
     await flushPromises();
 
-    expect(document.body.textContent).toContain("metadata minimized");
+    expect(document.body.textContent).toContain("secure chat");
     expect(apiState.presenceCalls).toBe(0);
     expect(apiState.typingCalls).toBe(0);
     expect(apiState.receiptCalls).toBe(0);

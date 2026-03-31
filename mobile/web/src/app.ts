@@ -2150,7 +2150,7 @@ function renderOnboarding(): void {
           <button id="onb-save-server" class="btn-sm">Save</button>
         </details>
         <div class="beta-banner beta-banner-warning">
-          <strong>Current beta scope</strong>
+          <strong>Web messaging today</strong>
           <p>${escHtml(WEB_BETA_SCOPE_SUMMARY)}</p>
         </div>
         <p class="onboarding-note">Your keys are generated locally and never leave this browser profile.</p>
@@ -2628,9 +2628,9 @@ function renderConversations(): void {
       ${renderWorkspaceSidebar(visibleRows, counts)}
       <section class="workspace-preview-pane">
         <div class="workspace-preview-card">
-          <span class="workspace-kicker">Signal-style desktop direction</span>
-          <h2>Select a conversation</h2>
-          <p class="workspace-preview-copy">Keep the inbox pinned on the left, and let the active thread or setup surface take over the main pane instead of bouncing between disconnected full-screen tools.</p>
+          <span class="workspace-kicker">Messages</span>
+          <h2>Choose a conversation</h2>
+          <p class="workspace-preview-copy">Your inbox stays on the left. Open the current chat, group, or setup page here without losing the rest of your conversations.</p>
           <div class="workspace-stat-grid">
             <div class="workspace-stat-card">
               <strong>${counts.unread}</strong>
@@ -2654,7 +2654,7 @@ function renderConversations(): void {
             <button id="workspace-preview-settings" class="btn-secondary">Open settings</button>
           </div>
           <div class="beta-banner beta-banner-warning">
-            <strong>Web beta policy</strong>
+            <strong>Web access on this server</strong>
             <p>${escHtml(WEB_BETA_SCOPE_SUMMARY)}</p>
           </div>
         </div>
@@ -2828,7 +2828,7 @@ function renderWorkspaceSidebar(
         <div class="workspace-profile-card">
           <div class="avatar workspace-profile-avatar">${escHtml(profileAvatar)}</div>
           <div class="workspace-profile-copy">
-            <span class="workspace-kicker">Desktop beta</span>
+            <span class="workspace-kicker">Messages</span>
             <strong>${escHtml(profileLabel)}</strong>
             <span class="mono">@${escHtml(setup.userId)}</span>
           </div>
@@ -2857,8 +2857,8 @@ function renderWorkspaceSidebar(
           <button id="workspace-new-group" class="btn-secondary">New group</button>
         </div>
         <div class="workspace-summary-card" role="status" aria-live="polite">
-          <span class="workspace-summary-title">Secure conversations stay in one workspace.</span>
-          <p class="workspace-summary-copy">Requests, groups, drafts, and archived chats stay visible on the left while the active thread takes the main pane.</p>
+          <span class="workspace-summary-title">Keep the inbox in view.</span>
+          <p class="workspace-summary-copy">Chats, groups, drafts, and archived conversations stay nearby while the current view opens on the right.</p>
           ${archiveToggle}
         </div>
         <div class="filter-chip-bar workspace-filter-bar" role="tablist" aria-label="Inbox filters">
@@ -3028,7 +3028,7 @@ function renderWorkspacePageHeader(
   return `
     <header class="workspace-page-header">
       <div class="workspace-page-copy">
-        <span class="workspace-kicker">${escHtml(options.eyebrow ?? "Desktop beta")}</span>
+        <span class="workspace-kicker">${escHtml(options.eyebrow ?? "Messages")}</span>
         <h1 class="workspace-page-title">${escHtml(title)}</h1>
         ${subtitleHtml ? `<p class="workspace-page-subtitle">${subtitleHtml}</p>` : ""}
       </div>
@@ -3059,7 +3059,7 @@ function renderWorkspaceEmptyState(
     <div class="workspace-empty-state${options.compact ? " compact" : ""}">
       <div class="workspace-empty-state-icon" aria-hidden="true">${iconSvg}</div>
       <div class="workspace-empty-state-copy">
-        <span class="workspace-kicker">${escHtml(options.eyebrow ?? "Desktop beta")}</span>
+        <span class="workspace-kicker">${escHtml(options.eyebrow ?? "Messages")}</span>
         <h2>${escHtml(title)}</h2>
         <p>${escHtml(body)}</p>
       </div>
@@ -3269,13 +3269,14 @@ async function renderChat(peerId: string): Promise<void> {
     directMessagingReady = (await initWasmCrypto()) && isPqSessionMessagingAvailable();
   }
   const presence = peerPresenceCache[peerId];
+  const handleLabel = identity.secondaryLabel?.trim() || "";
   const presenceText = presenceSupported()
     ? presence?.status === "online"
       ? "online"
       : presence?.status === "away"
         ? "away"
         : "encrypted"
-    : "metadata minimized";
+    : "secure chat";
   const presenceClass = presenceSupported()
     ? presence?.status === "online"
       ? "presence-online"
@@ -3286,13 +3287,14 @@ async function renderChat(peerId: string): Promise<void> {
   const fingerprintSummary = identityPin?.fingerprintSha256 || "Not pinned yet";
   const verifiedBySafetyNumber = isContactFingerprintVerified(contact, identityPin);
   const trustSummary = verifiedBySafetyNumber
-    ? "Verified via safety number"
+    ? "Verified"
     : identityPin
-      ? "Trusted on this device"
-      : "Unverified";
+      ? "Trusted"
+      : "Needs review";
   const transparencySummary = transparencyCheckpoint
-    ? `Transparency auto-verified in tree #${transparencyCheckpoint.tree_size}`
-    : "Transparency auto-check runs before encrypted traffic.";
+    ? "Checked automatically"
+    : "Checked before send";
+  const headerStatus = [handleLabel, presenceText].filter(Boolean).join(" / ");
   let safetyNumber = "";
   if (identityPin?.identityPqSigPub?.trim() && directMessagingReady && hasLocalKeys(setup.userId)) {
     try {
@@ -3370,8 +3372,7 @@ async function renderChat(peerId: string): Promise<void> {
       <div class="chat-context-strip" role="status" aria-live="polite">
         <span class="context-pill context-pill-secure">${escHtml(trustSummary)}</span>
         <span class="context-pill">${escHtml(transparencySummary)}</span>
-        <span class="context-pill">${escHtml(presenceText)}</span>
-        <button id="chat-open-details-inline" type="button" class="context-pill context-pill-link">Privacy & send defaults</button>
+        <button id="chat-open-details-inline" type="button" class="context-pill context-pill-link">Details</button>
       </div>
       <div id="thread-search-bar" class="thread-search-bar hidden" role="search">
         <input id="thread-search-input" type="text" class="thread-search-input" placeholder="Search in conversation" autocomplete="off" aria-label="Search in conversation" />
@@ -3605,6 +3606,7 @@ async function renderChat(peerId: string): Promise<void> {
   const detailsSheet = q("#chat-details-sheet");
   const threadPane = document.querySelector<HTMLElement>(".desktop-thread-pane");
   const inlineDetailsBtn = q<HTMLButtonElement>("#chat-open-details-inline");
+  const statusTextEl = q<HTMLElement>("#chat-status");
   const detailSharedMediaBtn = q<HTMLButtonElement>("#detail-shared-media");
   const detailSharedMediaCount = q<HTMLElement>("#detail-shared-media-count");
   const attachmentSheet = q("#attachment-sheet");
@@ -3624,6 +3626,7 @@ async function renderChat(peerId: string): Promise<void> {
   let pendingAttachmentFile: File | null = null;
   let pendingAttachmentPreviewUrl: string | null = null;
   const initialDraft = readThreadDraft(setup.userId, "dm", peerId);
+  statusTextEl.textContent = headerStatus;
   if (initialDraft) {
     input.value = initialDraft;
     expandedComposeInput.value = initialDraft;
@@ -5177,7 +5180,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
         </div>
         <div class="chat-header-info">
           <span class="chat-header-name">${escHtml(groupTitle)}</span>
-          <span class="chat-header-status" id="gc-member-count">group</span>
+          <span class="chat-header-status" id="gc-member-count">Private group</span>
         </div>
         <button id="gc-search" class="icon-btn" title="Search in conversation" aria-label="Search in conversation">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -5195,11 +5198,10 @@ async function renderGroupChat(groupId: string): Promise<void> {
             <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>
           </svg>
         </button>
-        <div class="chat-header-shield" title="Post-quantum encrypted">🛡️</div>
       </header>
-      <div class="chat-context-strip">
-        <strong>Opaque private-group state</strong>
-        <p>${canManage ? "This device can rotate the current epoch and issue member invites." : "This device can read and send group messages, but cannot rotate membership."}</p>
+      <div class="chat-context-strip" role="status" aria-live="polite">
+        <span class="context-pill context-pill-secure">${canManage ? "Invite access" : "Member view"}</span>
+        <span class="context-pill">${canManage ? "You can add people from this browser." : "Membership changes happen from an owner device."}</span>
       </div>
       <div id="thread-search-bar" class="thread-search-bar hidden" role="search">
         <input id="thread-search-input" type="text" class="thread-search-input" placeholder="Search in conversation" autocomplete="off" aria-label="Search in conversation" />
@@ -5350,6 +5352,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
   msgList.dataset.conversationId = conversationId;
   const input = q<HTMLTextAreaElement>("#gc-input");
   const sendButton = q<HTMLButtonElement>("#gc-send");
+  const headerStatusEl = q<HTMLElement>("#gc-member-count");
   const attachBtn = q<HTMLButtonElement>("#gc-attach");
   const expandComposeBtn = q<HTMLButtonElement>("#gc-expand-compose");
   const fileInput = q<HTMLInputElement>("#group-file-input");
@@ -5376,6 +5379,14 @@ async function renderGroupChat(groupId: string): Promise<void> {
   let sendInFlight = false;
   let pendingAttachmentFile: File | null = null;
   let pendingAttachmentPreviewUrl: string | null = null;
+  void loadGroupMembersCount(groupId);
+  const groupState = getPrivateGroupState(groupId);
+  if (groupState) {
+    const yourRole = groupState.members.find((member) => member.user_id === setup.userId)?.role || "member";
+    headerStatusEl.textContent = `${groupState.members.length} ${groupState.members.length === 1 ? "member" : "members"} / ${yourRole}`;
+  } else {
+    headerStatusEl.textContent = "Private group";
+  }
   const initialDraft = readThreadDraft(setup.userId, "group", groupId);
   if (initialDraft) {
     input.value = initialDraft;
@@ -5948,7 +5959,6 @@ async function renderGroupChat(groupId: string): Promise<void> {
   });
 
   // Load members count
-  void loadGroupMembersCount(groupId);
   input.addEventListener("input", () => {
     syncComposeValue(input.value);
   });
@@ -6108,10 +6118,9 @@ async function renderGroupInfo(groupId: string): Promise<void> {
         <div class="settings-body">
           <div class="settings-section">
             <h3>${escHtml(groupTitle)}</h3>
-            <div class="beta-banner beta-banner-warning">
-              <strong>Opaque private-group state</strong>
-              <p>${canManage ? "This device can rotate membership and issue member invites." : "This device can read the current private-group state but cannot rotate membership."}</p>
-              <p>Member trust uses the same local safety-number, identity-pin, and transparency checkpoints as direct chats.</p>
+            <div class="settings-callout">
+              <strong>${canManage ? "You can manage invites from this browser." : "This browser can read and send, but not change membership."}</strong>
+              <p>Trust for group members follows the same local safety-number and identity checks as your direct chats.</p>
             </div>
             <div id="gi-members">${membersHtml}</div>
           </div>
@@ -6127,11 +6136,11 @@ async function renderGroupInfo(groupId: string): Promise<void> {
                 <span>User</span>
                 <input id="gi-add-member" type="text" placeholder="@username, user ID, or invite link" autocomplete="off" />
               </label>
-              <button id="gi-add-member-btn" class="btn-primary">Rotate Epoch And Create Invite</button>
+              <button id="gi-add-member-btn" class="btn-primary">Create member invite</button>
             </div>
           ` : `
             <div class="settings-section">
-              <p class="text-secondary">Membership changes require an owner/admin credential for the current epoch.</p>
+              <p class="text-secondary">Only an owner or admin device can add people to this group.</p>
             </div>
           `}
           <p id="gi-status" class="text-secondary"></p>
@@ -6220,7 +6229,6 @@ async function renderGroupInfo(groupId: string): Promise<void> {
           );
           notify(`Removed @${memberUserId} from ${groupTitle}.`, "success");
           refreshConversationsIfVisible();
-          void loadGroupMembersCount(groupId);
           await renderGroupInfo(groupId);
         } catch (error) {
           setStatus(errorMsg(error), true);
@@ -6296,7 +6304,6 @@ async function renderGroupInfo(groupId: string): Promise<void> {
           await addContactSilent(memberUserId);
           notify(`Invite link for @${memberUserId} copied.`, "success");
           refreshConversationsIfVisible();
-          void loadGroupMembersCount(groupId);
           await renderGroupInfo(groupId);
         } catch (error) {
           setStatus(errorMsg(error), true);
@@ -6972,7 +6979,7 @@ async function renderSettings(): Promise<void> {
     <section class="workspace-page-card">
       ${renderWorkspacePageHeader(
         "Settings",
-        "Manage your profile, linked devices, privacy posture, and local trust state.",
+        "Account, people, devices, and privacy for this browser.",
         {
           eyebrow: "Your account",
         },
@@ -6988,11 +6995,11 @@ async function renderSettings(): Promise<void> {
                 : `Account ID <span class="mono">@${escHtml(setup.userId)}</span> on <span class="mono">${escHtml(setup.deviceId)}</span>. Claim a shareable @username below.`
             }</p>
           </div>
-          <button data-open-devices="1" class="btn-secondary">Manage Devices</button>
+          <button data-open-devices="1" class="btn-secondary">Open devices</button>
         </div>
         ${settingsSummaryCards}
         <div class="settings-section">
-          <h3>Current web scope</h3>
+          <h3>Web access</h3>
           <p class="settings-section-intro">This browser follows the server’s published web policy. Treat the web client as a companion surface and keep your primary trust decisions on a protected device.</p>
           <div class="beta-banner beta-banner-${webHoldback.tone}">
             <strong>${escHtml(webHoldback.title)}</strong>
@@ -7164,6 +7171,22 @@ async function renderSettings(): Promise<void> {
       </div>
     </section>
   `);
+
+  const settingsHeroCopy = document.querySelector<HTMLElement>(".settings-hero-copy");
+  if (settingsHeroCopy) {
+    settingsHeroCopy.innerHTML = setup.username
+      ? `People can find you with <span class="mono">@${escHtml(setup.username)}</span>. This browser keeps its own local encrypted profile for <span class="mono">@${escHtml(setup.userId)}</span>.`
+      : `This browser has a local encrypted profile for <span class="mono">@${escHtml(setup.userId)}</span>. Add a shareable @username when you want people to find you more easily.`;
+  }
+  for (const section of document.querySelectorAll<HTMLElement>(".settings-section")) {
+    const heading = section.querySelector("h3")?.textContent?.trim();
+    const intro = section.querySelector<HTMLElement>(".settings-section-intro");
+    if (heading === "Web access" && intro) {
+      intro.textContent = "This server decides which web features are available right now.";
+    }
+  }
+  q<HTMLButtonElement>("#set-devices")?.replaceChildren("Open devices");
+  q<HTMLButtonElement>("#set-server-info")?.replaceChildren("Server details");
 
   // Save profile
   q<HTMLInputElement>("#set-username").addEventListener("input", () => {
@@ -7389,21 +7412,21 @@ async function renderDevices(): Promise<void> {
     <section class="workspace-page-card">
       ${renderWorkspacePageHeader(
         "Devices",
-        "Manage this browser profile, review linked sessions, and revoke any device you no longer trust.",
+        "Review this browser, linked sessions, and device access.",
         {
           eyebrow: "Linked devices",
           backButtonId: "dev-back",
           backButtonLabel: "Back to settings",
-          actionsHtml: `<button id="dev-link" class="btn-primary" type="button">Link New Device</button>`,
+          actionsHtml: `<button id="dev-link" class="btn-primary" type="button">Link device</button>`,
         },
       )}
       <div class="settings-body">
         <div class="settings-summary-grid settings-summary-grid-compact" id="device-summary">
           <article class="settings-summary-card">
             <span class="settings-summary-kicker">Current device</span>
-            <strong>${escHtml(setup.deviceId)}</strong>
-            <span>this browser profile</span>
-            <p>Your local encrypted keys stay tied to this device ID.</p>
+            <strong>This browser</strong>
+            <span class="mono">${escHtml(setup.deviceId)}</span>
+            <p>Your local encrypted keys stay on this browser profile.</p>
           </article>
           <article class="settings-summary-card">
             <span class="settings-summary-kicker">Linked sessions</span>
@@ -7413,9 +7436,9 @@ async function renderDevices(): Promise<void> {
           </article>
           <article class="settings-summary-card">
             <span class="settings-summary-kicker">Safety</span>
-            <strong>Review regularly</strong>
-            <span>revoke what you do not recognize</span>
-            <p>Revoking a device signs it out permanently and removes future access.</p>
+            <strong>Review access</strong>
+            <span>remove devices you do not recognize</span>
+            <p>Revoking a device signs it out and stops future access.</p>
           </article>
         </div>
         <div class="settings-section">
@@ -7441,9 +7464,9 @@ async function renderDevices(): Promise<void> {
     q("#device-summary").innerHTML = `
       <article class="settings-summary-card">
         <span class="settings-summary-kicker">Current device</span>
-        <strong>${escHtml(setup.deviceId)}</strong>
-        <span>this browser profile</span>
-        <p>Your local encrypted keys stay tied to this device ID.</p>
+        <strong>This browser</strong>
+        <span class="mono">${escHtml(setup.deviceId)}</span>
+        <p>Your local encrypted keys stay on this browser profile.</p>
       </article>
       <article class="settings-summary-card">
         <span class="settings-summary-kicker">Linked sessions</span>
@@ -7453,9 +7476,9 @@ async function renderDevices(): Promise<void> {
       </article>
       <article class="settings-summary-card">
         <span class="settings-summary-kicker">Safety</span>
-        <strong>${activeCount === 1 ? "Tight" : "Shared"}</strong>
-        <span>${activeCount === 1 ? "single active session" : "multiple active sessions"}</span>
-        <p>${escHtml(activeCount === 1 ? "Only this device currently has active access." : "Multiple devices can receive updates for this account.")}</p>
+        <strong>${activeCount === 1 ? "Only this browser" : "Multiple sessions"}</strong>
+        <span>${activeCount === 1 ? "single active session" : `${activeCount} active sessions`}</span>
+        <p>${escHtml(activeCount === 1 ? "Only this browser currently has active access." : "More than one device can still receive updates for this account.")}</p>
       </article>
     `;
     const listEl = q("#device-list");
@@ -9240,7 +9263,7 @@ async function renderDiscovery(): Promise<void> {
     <section class="workspace-page-card">
       ${renderWorkspacePageHeader(
         "Contact discovery",
-        "Keep usernames and invite links as the primary path. Use discovery only when you need the advanced hashed-handle workflow.",
+        "Use usernames and invite links first. Open discovery only when you need the separate hashed-handle flow.",
         {
           eyebrow: "People",
           backButtonId: "disc-back",
@@ -9249,12 +9272,12 @@ async function renderDiscovery(): Promise<void> {
       )}
       <div class="settings-body">
         <div class="settings-callout">
-          <strong>Use this as a secondary privacy tool</strong>
-          <p>Discovery helps when both sides already know hashed handles. It is intentionally less prominent than usernames and private invites in the web client.</p>
+          <strong>Use this only when someone already shared hashed handles with you.</strong>
+          <p>Usernames and private invites stay faster and easier for everyday contact setup on web.</p>
         </div>
         <div class="settings-section">
           <h3>How it works</h3>
-          <p class="settings-section-intro">This web flow keeps discovery separate from your main contact list. Review the mode, then upload handles or search when you specifically need it.</p>
+          <p class="settings-section-intro">This flow stays separate from your main contact list. Review the mode, then upload handles or search only when you need it.</p>
           ${discoveryOverviewCards}
           ${discoveryTechnicalDetails}
         </div>
@@ -9520,16 +9543,16 @@ async function renderServerInfo(): Promise<void> {
   renderWorkspacePage(`
     <section class="workspace-page-card">
       ${renderWorkspacePageHeader(
-        "Server info",
-        "Check the connected server, beta policy, and advanced capability surface for this browser session.",
+        "Server",
+        "See what this server allows on web right now.",
         {
-          eyebrow: "Connected server",
+          eyebrow: "Server",
           backButtonId: "sinfo-back",
           backButtonLabel: "Back to settings",
         },
       )}
       <div class="settings-body" id="sinfo-body">
-        ${renderWorkspaceEmptyState("Loading server status", "Fetching health, capability, and runtime profile information from the current server.", { eyebrow: "Server info", compact: true })}
+        ${renderWorkspaceEmptyState("Loading server status", "Fetching the current connection, feature, and runtime details from this server.", { eyebrow: "Server", compact: true })}
       </div>
     </section>
   `);
@@ -9550,7 +9573,7 @@ async function renderServerInfo(): Promise<void> {
         <div class="settings-card-stack">
           <div class="settings-summary-grid settings-summary-grid-compact">
             <article class="settings-summary-card">
-              <span class="settings-summary-kicker">Health</span>
+              <span class="settings-summary-kicker">Connection</span>
               <strong>${escHtml(health ? (health.status === "ok" ? "Healthy" : health.status) : "Unavailable")}</strong>
               <span>${escHtml(health ? health.deployment_mode : "no health response")}</span>
               <p>${escHtml(
@@ -9560,12 +9583,12 @@ async function renderServerInfo(): Promise<void> {
               )}</p>
             </article>
             <article class="settings-summary-card">
-              <span class="settings-summary-kicker">Web policy</span>
+              <span class="settings-summary-kicker">Web access</span>
               <strong>${escHtml(caps?.web_client_policy || "unknown")}</strong>
               <span>${escHtml(caps?.supported_beta_clients.join(", ") || "no beta clients advertised")}</span>
               <p>${escHtml(
                 caps
-                  ? "This controls how much of the messenger surface the current web client is allowed to use."
+                  ? "This controls how much of the messenger surface the current web client can use."
                   : "Capability policy is unavailable until the server advertises it."
               )}</p>
             </article>
@@ -9590,8 +9613,8 @@ async function renderServerInfo(): Promise<void> {
       if (health) {
         html += `
           <div class="settings-section">
-            <h3>Runtime snapshot</h3>
-            <p class="settings-section-intro">A high-level view of transport, storage, and server hardening for the backend this browser is talking to right now.</p>
+            <h3>Current setup</h3>
+            <p class="settings-section-intro">A quick view of transport, storage, and server posture for this connection.</p>
             <div class="settings-kv-grid">
               <article class="settings-kv-card">
                 <span class="settings-summary-kicker">Database</span>
@@ -9683,7 +9706,7 @@ async function renderServerInfo(): Promise<void> {
             </div>
           </div>
           <details class="settings-inline-details">
-            <summary>Advanced capability contract</summary>
+            <summary>Advanced details</summary>
             <div class="settings-inline-details-body">
               <div class="settings-row"><span>Schema</span><span>v${caps.capability_schema_version}</span></div>
               <div class="settings-row"><span>Suites</span><span class="mono">${caps.supported_suite_ids.join(", ")}</span></div>
@@ -9713,13 +9736,13 @@ async function renderServerInfo(): Promise<void> {
       html = renderWorkspaceEmptyState(
         "Could not reach the server",
         "Check your server URL, make sure the backend is running, and try again.",
-        { eyebrow: "Server info", compact: true },
+        { eyebrow: "Server", compact: true },
       );
     }
 
     body.innerHTML = html;
   } catch (e) {
-    body.innerHTML = renderWorkspaceEmptyState("Server status failed", `We could not load server info: ${errorMsg(e)}`, { eyebrow: "Server info", compact: true });
+    body.innerHTML = renderWorkspaceEmptyState("Server status failed", `We could not load server info: ${errorMsg(e)}`, { eyebrow: "Server", compact: true });
   }
 }
 
