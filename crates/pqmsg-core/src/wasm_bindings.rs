@@ -72,9 +72,9 @@ use base64::Engine;
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 #[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
-use sha2::Digest;
-#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
 use js_sys::Date;
+#[cfg(any(feature = "pq-oqs", feature = "pq-rust"))]
+use sha2::Digest;
 
 // ---------------------------------------------------------------------------
 // Types (serialized to/from JS via serde-wasm-bindgen)

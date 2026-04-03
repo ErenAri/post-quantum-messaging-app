@@ -2245,7 +2245,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/capabilities", get(capabilities))
         .route("/metrics", get(metrics))
         .route("/v1/users/register", post(register_user))
-        .route("/v1/dev/users/:user_id/reset", post(reset_dev_user_identity))
+        .route(
+            "/v1/dev/users/:user_id/reset",
+            post(reset_dev_user_identity),
+        )
         .route("/v1/users/:user_id/prekeys", post(publish_prekeys))
         .route("/v1/users/:user_id/prekeys/status", get(get_prekeys_status))
         .route(

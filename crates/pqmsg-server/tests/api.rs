@@ -2502,8 +2502,14 @@ async fn development_reset_allows_reusing_same_username_with_new_identity() {
 async fn development_reset_is_forbidden_outside_research_development_mode() {
     let app = test_app_with_profile(SecurityProfile::HighAssurance).await;
     let key = signing_key(15);
+    let registration_pow_bits =
+        DosHardeningPolicy::for_security_profile(SecurityProfile::HighAssurance)
+            .registration_pow_bits();
 
-    let register = register_payload("locked-bob", "locked-bob-dev-1", [9u8; 32], &key);
+    let register = register_payload_with_pow(
+        register_payload("locked-bob", "locked-bob-dev-1", [9u8; 32], &key),
+        registration_pow_bits,
+    );
     let (status_register, _) =
         json_request(app.clone(), Method::POST, "/v1/users/register", register).await;
     assert_eq!(status_register, StatusCode::OK);
