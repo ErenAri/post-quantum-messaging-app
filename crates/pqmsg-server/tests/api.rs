@@ -5803,6 +5803,107 @@ async fn bundle_reserve_prevents_full_prekey_exhaustion() {
 }
 
 #[tokio::test]
+async fn initial_contact_replay_hits_dedup_and_consumed_otpk_pair_is_not_reissued() {
+    let app = test_app_with_authenticated_dm_compat().await;
+    let bob_sig = signing_key(173);
+    let alice_sig = signing_key(174);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [77u8; 32], &bob_sig);
+    let (status_reg_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_reg_bob, StatusCode::OK);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", [78u8; 32], &alice_sig);
+    let (status_reg_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_reg_alice, StatusCode::OK);
+
+    let publish = publish_prekeys_payload(
+        &bob_sig,
+        [79u8; 32],
+        vec![80u8; 64],
+        vec![[81u8; 32]],
+        vec![vec![82u8; 64]],
+    );
+    let publish_auth = prekeys_auth_headers(&bob_sig, "bob", "bob-dev-1", &publish);
+    let (status_publish, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/prekeys",
+        publish,
+        &publish_auth,
+    )
+    .await;
+    assert_eq!(status_publish, StatusCode::OK);
+
+    let (status_bundle_1, bundle_1) =
+        json_request(app.clone(), Method::GET, "/v1/users/bob/bundle", json!({})).await;
+    assert_eq!(status_bundle_1, StatusCode::OK);
+    assert!(bundle_1["one_time_prekey_x25519"].as_str().is_some());
+    assert!(bundle_1["one_time_prekey_mlkem768"].as_str().is_some());
+    assert_eq!(
+        bundle_1["remaining_one_time_prekeys_x25519"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        bundle_1["remaining_one_time_prekeys_mlkem768"].as_u64(),
+        Some(0)
+    );
+
+    let initial_message = b"opaque-initial-message-replay-test";
+    let relay = json!({
+        "sender_user_id": "alice",
+        "device_id": "alice-dev-1",
+        "message_bytes_base64": B64.encode(initial_message),
+    });
+    let relay_headers =
+        relay_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob", initial_message);
+    let (status_relay_1, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob",
+        relay.clone(),
+        &relay_headers,
+    )
+    .await;
+    assert_eq!(status_relay_1, StatusCode::OK);
+
+    let replay_headers =
+        relay_auth_headers(&alice_sig, "alice", "alice-dev-1", "bob", initial_message);
+    let (status_relay_2, replay_body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob",
+        relay,
+        &replay_headers,
+    )
+    .await;
+    assert_eq!(status_relay_2, StatusCode::CONFLICT);
+    assert!(
+        replay_body["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("duplicate"),
+        "expected relay dedup rejection: {replay_body}"
+    );
+
+    let (status_bundle_2, bundle_2) =
+        json_request(app.clone(), Method::GET, "/v1/users/bob/bundle", json!({})).await;
+    assert_eq!(status_bundle_2, StatusCode::OK);
+    assert!(bundle_2["one_time_prekey_x25519"].is_null());
+    assert!(bundle_2["one_time_prekey_mlkem768"].is_null());
+    assert_eq!(
+        bundle_2["remaining_one_time_prekeys_x25519"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        bundle_2["remaining_one_time_prekeys_mlkem768"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(bundle_2["last_resort_prekey_only"].as_bool(), Some(true));
+}
+
+#[tokio::test]
 async fn rich_media_profile_and_disabled_metadata_signals_flow() {
     let app = test_app().await;
     let alice_sig = signing_key(171);

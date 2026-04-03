@@ -69,6 +69,7 @@ Residual risk remains substantial in:
 
 - endpoint malware compromise,
 - replay policy beyond current minimal semantics,
+- snapshot restore and skipped-key continuity are covered for the current session model, but this is not a claim of full production-grade multi-device state convergence,
 - global traffic analysis and social-graph extraction,
 - trust-on-first-use UX and large-scale key lifecycle management.
 

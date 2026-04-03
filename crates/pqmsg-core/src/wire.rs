@@ -337,8 +337,9 @@ pub fn try_decrypt_header(hk: &[u8; 32], ciphertext: &[u8]) -> Option<HeaderPlai
 }
 
 /// V2 wire message with encrypted header blob.
-/// The header (sender DH pub, msg_num, prev_chain_len, pq_step_ct) is encrypted
-/// with a header key derived during each DH ratchet step, preventing metadata leakage.
+/// The header (sender DH pub, msg_num, prev_chain_len, and optional sparse PQ
+/// ratchet metadata) is encrypted with a header key derived during each DH
+/// ratchet step, preventing metadata leakage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WireMessageV2 {
     pub version: u16,
@@ -447,7 +448,7 @@ impl DecodedWireMessage {
 }
 
 /// Decode a wire message, dispatching by version tag.
-/// V1 messages use TAG_VERSION (0x9001), V2 messages use TAG_V2_VERSION (0x9101).
+/// V1 messages use TAG_VERSION (0x1001), V2 messages use TAG_V2_VERSION (0x1101).
 /// The first 2 bytes of the TLV stream determine the tag type.
 pub fn decode_wire_message(input: &[u8]) -> Result<DecodedWireMessage, CoreError> {
     if input.len() < 4 {

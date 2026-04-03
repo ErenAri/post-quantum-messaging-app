@@ -13,7 +13,7 @@ The design targets a verifiable baseline for hybrid post-quantum asynchronous me
 2. authenticated prekey bundle consumption with hybrid dual signatures (Ed25519 + ML-DSA-65),
 3. explicit downgrade checks via version and suite binding,
 4. strict parse failure for malformed or ambiguous wire material,
-5. one-time prekey (DH4) consumption for replay protection.
+5. one-time prekey (DH4) consumption for single-use initial-contact setup, with relay-side ciphertext deduplication as a separate server replay control.
 
 ## 3. Handshake Construction
 
@@ -23,6 +23,7 @@ sequenceDiagram
     participant S as Server
     participant B as Bob
     A->>S: GET /v1/users/{bob}/bundle
+    S->>S: Mark served OTPK pair consumed when inventory is above reserve
     S-->>A: IK_B, SPK_B, PQSPK_B, OTPK_B, signatures (Ed25519 + ML-DSA-65)
     A->>A: Verify dual signatures (Ed25519 + ML-DSA-65)
     A->>A: EK_A + encapsulate(PQSPK_B)
@@ -30,7 +31,6 @@ sequenceDiagram
     A->>S: Relay InitialMessage (includes otpk_id)
     B->>S: Poll inbox or subscribe ws-inbox
     S-->>B: InitialMessage
-    S->>S: Mark OTPK consumed (reject replay)
     B->>B: decapsulate + DH recompute (DH1-4) + decrypt
 ```
 
@@ -82,6 +82,14 @@ Bundles from peers that do not include PQ signatures are accepted in `Ed25519` m
 - sparse PQ ratchet state support with configurable interval.
 
 The implementation is intentionally minimal and is not a complete Signal clone.
+
+Current recovery guarantee:
+
+- session snapshots preserve the bounded skipped-message-key cache, allowing
+  out-of-order messages that were already derivable at snapshot time to remain
+  decryptable after restore,
+- snapshot restore is an implementation continuity guarantee, not a claim of
+  full production-grade multi-device synchronization semantics by itself.
 
 ## 6. Authentication and Identity Rules
 
@@ -138,7 +146,9 @@ Session AEAD associated data MUST include:
 4. message number,
 5. previous chain length,
 6. `pq_step_ct` when present on interval-triggered PQ step messages,
-7. external caller AD derived from shared `pqmsg-core` conversation-associated-data construction.
+7. `pq_target_pub_hash` when present,
+8. `pq_next_public_key` when present,
+9. external caller AD derived from shared `pqmsg-core` conversation-associated-data construction.
 
 This requirement ensures ratchet header mutation is rejected at AEAD verification time.
 
@@ -164,13 +174,17 @@ The implementation enforces replay resistance at four layers:
 1. transport request nonces (signed header transcripts),
 2. relay ciphertext deduplication with TTL on the server,
 3. client-side seen-message tracking and per-peer monotonic transport message-id checks,
-4. one-time prekey (OTPK) consumption: server marks OTPKs as used on bundle fetch and rejects replayed `InitialMessage` payloads that reference consumed OTPK IDs.
+4. one-time prekey (OTPK) consumption: server marks OTPKs as used on bundle fetch and does not reissue consumed OTPK material in later bundle responses for that device inventory state.
+
+The current server does not parse opaque relayed `InitialMessage` payloads deeply enough to reject replay by `otpk_id` at relay time; replay protection for relayed blobs is currently enforced via relay deduplication plus client-side state.
 
 ## 11. Verification Artifacts
 
 Current verification set:
 
 - unit tests for handshake/session success and tamper failure paths,
+- snapshot restore coverage for skipped-message-key continuity after out-of-order
+  delivery,
 - deterministic handshake KAT transcript,
 - fuzz targets for TLV and wire decoding,
 - integration tests for server endpoint behavior and input validation,

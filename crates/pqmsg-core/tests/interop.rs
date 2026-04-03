@@ -6,9 +6,10 @@
 //! Android client, an iOS client and a server implementation exchange
 //! bytes over the network.
 
+use pqmsg_core::alg::SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305;
 use pqmsg_core::dh::generate_keypair;
 use pqmsg_core::session::{SessionRole, SessionSnapshot, SessionState};
-use pqmsg_core::wire::WireMessage;
+use pqmsg_core::wire::{decode_wire_message, WireMessage, WIRE_VERSION_V2};
 use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng};
 
@@ -42,6 +43,44 @@ fn seeded_session_pair(seed: [u8; 32]) -> (SessionState, SessionState) {
         root_key,
         bob_dh,
         alice_dh.public,
+        64,
+    )
+    .expect("bob session");
+
+    (alice, bob)
+}
+
+fn seeded_session_pair_with_suite_and_wire_version(
+    seed: [u8; 32],
+    suite_id: u16,
+    wire_version: u16,
+) -> (SessionState, SessionState) {
+    let mut rng = ChaCha20Rng::from_seed(seed);
+
+    let mut root_key = [0u8; 32];
+    rng.fill_bytes(&mut root_key);
+
+    let alice_dh = generate_keypair(&mut rng);
+    let bob_dh = generate_keypair(&mut rng);
+
+    let alice = SessionState::from_handshake_with_suite_and_wire_version(
+        SessionRole::Initiator,
+        root_key,
+        alice_dh.clone(),
+        bob_dh.public,
+        suite_id,
+        wire_version,
+        64,
+    )
+    .expect("alice session");
+
+    let bob = SessionState::from_handshake_with_suite_and_wire_version(
+        SessionRole::Responder,
+        root_key,
+        bob_dh,
+        alice_dh.public,
+        suite_id,
+        wire_version,
         64,
     )
     .expect("bob session");
@@ -198,6 +237,73 @@ fn snapshot_roundtrip_preserves_session() {
     let ct = bob.encrypt(b"reply-post-snapshot", ad).expect("enc");
     let pt = alice2.decrypt(&ct, ad).expect("dec");
     assert_eq!(pt, b"reply-post-snapshot");
+}
+
+#[test]
+fn snapshot_roundtrip_preserves_skipped_message_keys() {
+    let (mut alice, mut bob) = seeded_session_pair([9u8; 32]);
+    let ad = b"snapshot-skipped-ad";
+
+    let ct1 = alice.encrypt(b"m1", ad).expect("enc1");
+    let ct2 = alice.encrypt(b"m2", ad).expect("enc2");
+    let ct3 = alice.encrypt(b"m3", ad).expect("enc3");
+
+    // Force Bob to cache skipped keys by receiving the third message first.
+    assert_eq!(bob.decrypt(&ct3, ad).expect("dec3"), b"m3");
+
+    let snap = bob.snapshot();
+    let snap_json = serde_json::to_string(&snap).expect("serialize");
+    let restored_snap: SessionSnapshot = serde_json::from_str(&snap_json).expect("deserialize");
+    let mut bob2 = SessionState::from_snapshot(restored_snap);
+
+    assert_eq!(bob2.decrypt(&ct1, ad).expect("dec1"), b"m1");
+    assert_eq!(bob2.decrypt(&ct2, ad).expect("dec2"), b"m2");
+}
+
+#[test]
+fn snapshot_roundtrip_preserves_suite_and_wire_version_continuity() {
+    let suite_id = SUITE_ID_KYBER768_X25519_HKDF_SHA256_CHACHA20POLY1305;
+    let (mut alice, mut bob) =
+        seeded_session_pair_with_suite_and_wire_version([11u8; 32], suite_id, WIRE_VERSION_V2);
+    let ad = b"snapshot-suite-wire-ad";
+
+    let pre_snapshot = alice.encrypt(b"before-restore", ad).expect("enc");
+    assert_eq!(
+        bob.decrypt(&pre_snapshot, ad).expect("dec"),
+        b"before-restore"
+    );
+
+    let alice_json = serde_json::to_string(&alice.snapshot()).expect("alice serialize");
+    let bob_json = serde_json::to_string(&bob.snapshot()).expect("bob serialize");
+    let alice_snapshot: SessionSnapshot =
+        serde_json::from_str(&alice_json).expect("alice deserialize");
+    let bob_snapshot: SessionSnapshot = serde_json::from_str(&bob_json).expect("bob deserialize");
+
+    assert_eq!(alice_snapshot.suite_id, suite_id);
+    assert_eq!(alice_snapshot.negotiated_wire_version, WIRE_VERSION_V2);
+    assert_eq!(bob_snapshot.suite_id, suite_id);
+    assert_eq!(bob_snapshot.negotiated_wire_version, WIRE_VERSION_V2);
+
+    let mut alice2 = SessionState::from_snapshot(alice_snapshot);
+    let mut bob2 = SessionState::from_snapshot(bob_snapshot);
+
+    let from_alice = alice2.encrypt(b"after-restore-a", ad).expect("alice enc");
+    let decoded_alice = decode_wire_message(&from_alice).expect("decode alice");
+    assert_eq!(decoded_alice.suite_id(), suite_id);
+    assert_eq!(decoded_alice.version(), WIRE_VERSION_V2);
+    assert_eq!(
+        bob2.decrypt(&from_alice, ad).expect("bob dec"),
+        b"after-restore-a"
+    );
+
+    let from_bob = bob2.encrypt(b"after-restore-b", ad).expect("bob enc");
+    let decoded_bob = decode_wire_message(&from_bob).expect("decode bob");
+    assert_eq!(decoded_bob.suite_id(), suite_id);
+    assert_eq!(decoded_bob.version(), WIRE_VERSION_V2);
+    assert_eq!(
+        alice2.decrypt(&from_bob, ad).expect("alice dec"),
+        b"after-restore-b"
+    );
 }
 
 #[test]
