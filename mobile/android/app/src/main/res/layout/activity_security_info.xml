@@ -15,7 +15,6 @@
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:gravity="center_vertical"
             android:orientation="horizontal">
 
             <com.google.android.material.button.MaterialButton
@@ -35,7 +34,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Security"
+                    android:text="@string/security_header_eyebrow"
                     android:textAppearance="@style/TextAppearance.PQMsg.Eyebrow" />
 
                 <TextView
@@ -44,10 +43,17 @@
                     android:text="@string/security_title"
                     android:textAppearance="@style/TextAppearance.PQMsg.ScreenTitle" />
             </LinearLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="end">
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonRefreshSecurityInfo"
-                style="@style/Widget.PQMsg.Button.Compact"
+                style="@style/Widget.PQMsg.Button.Toolbar"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@string/button_refresh_security" />
@@ -58,6 +64,13 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
+            android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/security_header_intro"
             android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
         <com.google.android.material.card.MaterialCardView
@@ -74,8 +87,15 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Operational context"
+                    android:text="@string/security_context_title"
                     android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/security_context_body"
+                    android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
                 <com.google.android.material.textfield.TextInputLayout
                     style="@style/Widget.PQMsg.TextInputLayout"
@@ -105,59 +125,76 @@
                         android:inputType="text" />
                 </com.google.android.material.textfield.TextInputLayout>
 
-                <com.google.android.material.textfield.TextInputLayout
-                    style="@style/Widget.PQMsg.TextInputLayout"
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonToggleSecurityRecovery"
+                    style="@style/Widget.PQMsg.Button.Compact"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="@string/button_show_recovery_tools" />
+
+                <LinearLayout
+                    android:id="@+id/sectionSecurityRecoveryInputs"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:hint="@string/hint_managed_device">
+                    android:layout_marginTop="6dp"
+                    android:orientation="vertical"
+                    android:visibility="gone">
 
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editSecurityManagedDevice"
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.PQMsg.TextInputLayout"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:inputType="text" />
-                </com.google.android.material.textfield.TextInputLayout>
+                        android:layout_marginTop="10dp"
+                        android:hint="@string/hint_managed_device">
 
-                <com.google.android.material.textfield.TextInputLayout
-                    style="@style/Widget.PQMsg.TextInputLayout"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:hint="@string/hint_onboarding_passphrase">
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/editSecurityManagedDevice"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="text" />
+                    </com.google.android.material.textfield.TextInputLayout>
 
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editSecurityOnboardingPassphrase"
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.PQMsg.TextInputLayout"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:inputType="textPassword" />
-                </com.google.android.material.textfield.TextInputLayout>
+                        android:layout_marginTop="10dp"
+                        android:hint="@string/hint_onboarding_passphrase">
 
-                <com.google.android.material.textfield.TextInputLayout
-                    style="@style/Widget.PQMsg.TextInputLayout"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:hint="@string/hint_onboarding_package">
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/editSecurityOnboardingPassphrase"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="textPassword" />
+                    </com.google.android.material.textfield.TextInputLayout>
 
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editSecurityOnboardingPackage"
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.PQMsg.TextInputLayout"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:gravity="top|start"
-                        android:inputType="textMultiLine"
-                        android:minLines="3" />
-                </com.google.android.material.textfield.TextInputLayout>
+                        android:layout_marginTop="10dp"
+                        android:hint="@string/hint_onboarding_package">
 
-                <TextView
-                    android:id="@+id/textSecurityOnboardingPackagePreview"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:background="@drawable/bg_detail_panel"
-                    android:padding="12dp"
-                    android:textAppearance="@style/TextAppearance.PQMsg.Mono"
-                    android:visibility="gone" />
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/editSecurityOnboardingPackage"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="top|start"
+                            android:inputType="textMultiLine"
+                            android:minLines="3" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <TextView
+                        android:id="@+id/textSecurityOnboardingPackagePreview"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:background="@drawable/bg_detail_panel"
+                        android:padding="12dp"
+                        android:textAppearance="@style/TextAppearance.PQMsg.Mono"
+                        android:visibility="gone" />
+                </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -175,8 +212,15 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Actions"
+                    android:text="@string/security_actions_title"
                     android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/security_actions_body"
+                    android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -217,70 +261,78 @@
                         android:text="@string/button_link_device" />
 
                     <com.google.android.material.button.MaterialButton
-                        android:id="@+id/buttonRevokeDevice"
-                        style="@style/Widget.PQMsg.Button.Secondary"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="10dp"
-                        android:layout_weight="1"
-                        android:text="@string/button_revoke_device" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:orientation="horizontal">
-
-                    <com.google.android.material.button.MaterialButton
                         android:id="@+id/buttonListIdentityLog"
                         style="@style/Widget.PQMsg.Button.Secondary"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/button_list_identity_log" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/buttonRotateIdentity"
-                        style="@style/Widget.PQMsg.Button.Secondary"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
                         android:layout_marginStart="10dp"
                         android:layout_weight="1"
-                        android:text="@string/button_rotate_identity" />
+                        android:text="@string/button_list_identity_log" />
                 </LinearLayout>
 
                 <LinearLayout
+                    android:id="@+id/sectionSecurityRecoveryActions"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
-                    android:orientation="horizontal">
+                    android:orientation="vertical"
+                    android:visibility="gone">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/buttonRevokeDevice"
+                            style="@style/Widget.PQMsg.Button.Secondary"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/button_revoke_device" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/buttonRotateIdentity"
+                            style="@style/Widget.PQMsg.Button.Secondary"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="10dp"
+                            android:layout_weight="1"
+                            android:text="@string/button_rotate_identity" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/buttonPrepareSecondaryDevicePackage"
+                            style="@style/Widget.PQMsg.Button.Secondary"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/button_prepare_secondary_device" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/buttonCopyOnboardingPackage"
+                            style="@style/Widget.PQMsg.Button.Secondary"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="10dp"
+                            android:layout_weight="1"
+                            android:text="@string/button_copy_onboarding_package" />
+                    </LinearLayout>
 
                     <com.google.android.material.button.MaterialButton
-                        android:id="@+id/buttonPrepareSecondaryDevicePackage"
-                        style="@style/Widget.PQMsg.Button.Secondary"
-                        android:layout_width="0dp"
+                        android:id="@+id/buttonResetLocalState"
+                        style="@style/Widget.PQMsg.Button.Danger"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/button_prepare_secondary_device" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/buttonCopyOnboardingPackage"
-                        style="@style/Widget.PQMsg.Button.Secondary"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="10dp"
-                        android:layout_weight="1"
-                        android:text="@string/button_copy_onboarding_package" />
+                        android:layout_marginTop="10dp"
+                        android:text="@string/button_reset_local_state" />
                 </LinearLayout>
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/buttonResetLocalState"
-                    style="@style/Widget.PQMsg.Button.Danger"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:text="@string/button_reset_local_state" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -296,9 +348,23 @@
                 android:padding="18dp">
 
                 <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/security_snapshot_title"
+                    android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/security_snapshot_body"
+                    android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
+
+                <TextView
                     android:id="@+id/textSecurityProfile"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
                     android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
                 <TextView

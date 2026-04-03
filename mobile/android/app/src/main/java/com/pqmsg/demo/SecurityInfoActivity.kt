@@ -6,6 +6,7 @@ import android.content.Context
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -47,6 +48,9 @@ class SecurityInfoActivity : AppCompatActivity() {
     private lateinit var onboardingPassphraseInput: EditText
     private lateinit var onboardingPackageInput: EditText
     private lateinit var onboardingPreviewText: TextView
+    private lateinit var toggleRecoveryButton: Button
+    private lateinit var recoveryInputsSection: LinearLayout
+    private lateinit var recoveryActionsSection: LinearLayout
     private lateinit var refreshButton: Button
     private lateinit var editProfileButton: Button
     private lateinit var listDevicesButton: Button
@@ -74,6 +78,7 @@ class SecurityInfoActivity : AppCompatActivity() {
     private val clipboardClearHandler = Handler(Looper.getMainLooper())
     private var pendingClipboardClear: Runnable? = null
     private val gson = Gson()
+    private var recoveryToolsExpanded: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -86,6 +91,9 @@ class SecurityInfoActivity : AppCompatActivity() {
         onboardingPassphraseInput = findViewById(R.id.editSecurityOnboardingPassphrase)
         onboardingPackageInput = findViewById(R.id.editSecurityOnboardingPackage)
         onboardingPreviewText = findViewById(R.id.textSecurityOnboardingPackagePreview)
+        toggleRecoveryButton = findViewById(R.id.buttonToggleSecurityRecovery)
+        recoveryInputsSection = findViewById(R.id.sectionSecurityRecoveryInputs)
+        recoveryActionsSection = findViewById(R.id.sectionSecurityRecoveryActions)
         refreshButton = findViewById(R.id.buttonRefreshSecurityInfo)
         editProfileButton = findViewById(R.id.buttonEditShareableProfile)
         listDevicesButton = findViewById(R.id.buttonListDevices)
@@ -135,12 +143,24 @@ class SecurityInfoActivity : AppCompatActivity() {
             syncActionAvailability()
         }
         onboardingPackageInput.doAfterTextChanged {
+            if (!it.isNullOrBlank()) {
+                recoveryToolsExpanded = true
+                syncRecoveryToolVisibility()
+            }
             refreshOnboardingPackagePreview()
             syncActionAvailability()
         }
         onboardingPassphraseInput.doAfterTextChanged {
+            if (!it.isNullOrBlank()) {
+                recoveryToolsExpanded = true
+                syncRecoveryToolVisibility()
+            }
             refreshOnboardingPackagePreview()
             syncActionAvailability()
+        }
+        toggleRecoveryButton.setOnClickListener {
+            recoveryToolsExpanded = !recoveryToolsExpanded
+            syncRecoveryToolVisibility()
         }
         refreshButton.setOnClickListener { renderSecurityInfo() }
         editProfileButton.setOnClickListener { showShareableProfileEditor() }
@@ -163,6 +183,7 @@ class SecurityInfoActivity : AppCompatActivity() {
         renderSecurityInfo()
         refreshOnboardingPackagePreview()
         syncActionAvailability()
+        syncRecoveryToolVisibility()
     }
 
     override fun onDestroy() {
@@ -177,7 +198,7 @@ class SecurityInfoActivity : AppCompatActivity() {
 
         val cryptoProfile = runCatching { activeCryptoProfile() }
             .getOrElse { "Unavailable: ${it.message ?: "native runtime error"}" }
-        profileText.text = "Active Crypto Profile\n$cryptoProfile"
+        profileText.text = getString(R.string.security_profile_summary, cryptoProfile)
 
         val transportPolicy = runCatching {
             val policy = ApiClientFactory.resolveTransportPolicy(
@@ -191,11 +212,11 @@ class SecurityInfoActivity : AppCompatActivity() {
             } else {
                 "TLS pins:\n${policy.certificatePins.joinToString(separator = "\n") { "- $it" }}"
             }
-            "Resolved base URL: ${policy.baseUrl}\n$pinLine"
+            "Address: ${policy.baseUrl}\n$pinLine"
         }.getOrElse {
-            "Invalid transport policy: ${it.message ?: "unavailable"}"
+            it.message ?: "unavailable"
         }
-        transportText.text = "Transport Security\n$transportPolicy"
+        transportText.text = getString(R.string.security_transport_summary, transportPolicy)
         if (server.isNotBlank()) {
             val requestedServer = server
             lifecycleScope.launch {
@@ -208,15 +229,22 @@ class SecurityInfoActivity : AppCompatActivity() {
                     lastCapabilitiesSnapshot = capabilities
                     val supportedClients = capabilities.supported_beta_clients.joinToString(", ")
                         .ifBlank { "none" }
-                    transportText.text =
-                        "Transport Security\n$transportPolicy\nSupported beta clients: $supportedClients\nWeb policy: ${capabilities.web_client_policy}"
+                    transportText.text = getString(
+                        R.string.security_transport_capabilities,
+                        transportPolicy,
+                        supportedClients,
+                        capabilities.web_client_policy,
+                    )
                 }.onFailure {
                     if (serverInput.text.toString().trim() != requestedServer) {
                         return@onFailure
                     }
                     lastCapabilitiesSnapshot = null
-                    transportText.text =
-                        "Transport Security\n$transportPolicy\nCapabilities unavailable: ${it.message ?: "unavailable"}"
+                    transportText.text = getString(
+                        R.string.security_transport_capabilities_unavailable,
+                        transportPolicy,
+                        it.message ?: "unavailable",
+                    )
                 }
             }
         } else {
@@ -228,23 +256,31 @@ class SecurityInfoActivity : AppCompatActivity() {
                 "${it.peerUserId}: ${it.pin.fingerprintSha256} (v${it.pin.identityKeyVersion})"
         }
         pinsText.text = if (pinLines.isEmpty()) {
-            "Pinned Identities\nNo pins recorded for user '$user'"
+            getString(R.string.security_pins_empty, user)
         } else {
-            "Pinned Identities\n${pinLines.joinToString("\n")}"
+            getString(R.string.security_pins_list, pinLines.joinToString("\n"))
         }
         devicesText.text = buildDeviceSnapshotText(user)
         identityLogText.text = buildIdentityLogText(user)
 
         val sessionCount = store.countSessions(user)
         val conversations = store.listConversations(user)
-        localStateText.text =
-            "Local Security State\nSessions: $sessionCount\nConversations: ${conversations.size}\nCurrent user: $user\nBackup restore: disabled\nRecovery path: linked-device package or full reprovision"
+        localStateText.text = getString(
+            R.string.security_local_state_summary,
+            sessionCount,
+            conversations.size,
+            user,
+        )
     }
 
     private fun confirmResetLocalState() {
         val user = userInput.text.toString().trim()
         if (user.isBlank()) {
-            Toast.makeText(this, "Enter user id before wiping local state.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                getString(R.string.security_enter_user_before_reset),
+                Toast.LENGTH_SHORT,
+            ).show()
             return
         }
         AlertDialog.Builder(this)
@@ -271,7 +307,7 @@ class SecurityInfoActivity : AppCompatActivity() {
     private fun showShareableProfileEditor() {
         val user = userInput.text.toString().trim()
         if (user.isBlank()) {
-            statusText.text = "Enter a user id before editing the shareable profile."
+            statusText.text = getString(R.string.security_enter_user_before_profile)
             return
         }
         lifecycleScope.launch {
@@ -386,20 +422,39 @@ class SecurityInfoActivity : AppCompatActivity() {
         resetButton.isEnabled = hasUser
     }
 
+    private fun syncRecoveryToolVisibility() {
+        recoveryInputsSection.visibility = if (recoveryToolsExpanded) View.VISIBLE else View.GONE
+        recoveryActionsSection.visibility = if (recoveryToolsExpanded) View.VISIBLE else View.GONE
+        toggleRecoveryButton.text =
+            getString(
+                if (recoveryToolsExpanded) {
+                    R.string.button_hide_recovery_tools
+                } else {
+                    R.string.button_show_recovery_tools
+                },
+            )
+    }
+
     private fun refreshOnboardingPackagePreview() {
         val packagePassphrase = onboardingPassphraseInput.text.toString()
         val packageJson = onboardingPackageInput.text.toString().trim()
-        onboardingPreviewText.text = when {
-            packagePassphrase.isBlank() || packageJson.isBlank() ->
-                getString(R.string.onboarding_package_preview_default)
-            else -> runCatching {
+        if (packagePassphrase.isBlank() || packageJson.isBlank()) {
+            onboardingPreviewText.visibility = View.GONE
+            onboardingPreviewText.text = getString(R.string.onboarding_package_preview_default)
+            return
+        }
+        onboardingPreviewText.visibility = View.VISIBLE
+        onboardingPreviewText.text =
+            runCatching {
                 formatLinkedDevicePackagePreview(
                     openSecondaryDevicePackage(packageJson, packagePassphrase),
                 )
             }.getOrElse {
-                "Linked device package preview unavailable\n${it.message ?: "The package or passphrase is invalid."}"
+                getString(
+                    R.string.security_preview_invalid,
+                    it.message ?: getString(R.string.setup_preview_invalid_fallback),
+                )
             }
-        }
     }
 
     private suspend fun resetLocalStateWithRemoteRetire(user: String): String {
@@ -433,9 +488,9 @@ class SecurityInfoActivity : AppCompatActivity() {
         renderSecurityInfo()
         syncActionAvailability()
         return if (retiredRemotely) {
-            "Retired current device and cleared local state for $user"
+            getString(R.string.security_reset_retired_status, user)
         } else {
-            "Cleared local state for $user"
+            getString(R.string.security_reset_local_only_status, user)
         }
     }
 
@@ -459,7 +514,7 @@ class SecurityInfoActivity : AppCompatActivity() {
         val user = requireCurrentUser()
         val context = loadDeviceManagementContext(user)
         val response = fetchDeviceSnapshot(context)
-        return "Loaded ${response.devices.size} device record(s) for ${response.user_id}"
+        return getString(R.string.security_devices_loaded_status, response.devices.size, response.user_id)
     }
 
     private suspend fun linkManagedDevice(): String {
@@ -482,7 +537,7 @@ class SecurityInfoActivity : AppCompatActivity() {
             "link response device mismatch: expected '$targetDevice' got '${response.linked_device_id}'"
         }
         fetchDeviceSnapshot(context)
-        return "Linked device ${response.linked_device_id} for ${response.user_id}"
+        return getString(R.string.security_linked_device_status, response.linked_device_id)
     }
 
     private suspend fun revokeManagedDevice(): String {
@@ -505,7 +560,7 @@ class SecurityInfoActivity : AppCompatActivity() {
             "revoke response device mismatch: expected '$targetDevice' got '${response.revoked_device_id}'"
         }
         fetchDeviceSnapshot(context)
-        return "Revoked device ${response.revoked_device_id} for ${response.user_id}"
+        return getString(R.string.security_revoked_device_status, response.revoked_device_id)
     }
 
     private suspend fun prepareSecondaryDeviceOnboardingPackage(): String {
@@ -541,7 +596,7 @@ class SecurityInfoActivity : AppCompatActivity() {
         onboardingPackageInput.setText(packageJson)
         fetchDeviceSnapshot(context)
         copyOnboardingPackageToClipboard()
-        return "Prepared linked device ${response.linked_device_id} and copied onboarding package"
+        return getString(R.string.security_prepared_package_status, response.linked_device_id)
     }
 
     private suspend fun loadIdentityLog(): String {
@@ -717,7 +772,11 @@ class SecurityInfoActivity : AppCompatActivity() {
     private fun copyOnboardingPackageToClipboard() {
         val packageJson = onboardingPackageInput.text.toString().trim()
         if (packageJson.isBlank()) {
-            Toast.makeText(this, "No onboarding package to copy.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                getString(R.string.security_no_package_to_copy),
+                Toast.LENGTH_SHORT,
+            ).show()
             return
         }
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -794,25 +853,40 @@ class SecurityInfoActivity : AppCompatActivity() {
 
     private fun buildDeviceSnapshotText(user: String): String {
         if (user.isBlank()) {
-            return "Linked Devices\nEnter a user id to inspect linked devices"
+            return getString(R.string.security_device_snapshot_prompt)
         }
         val snapshot = lastDeviceSnapshot
         if (snapshot == null || snapshot.user_id != user) {
-            return "Linked Devices\nNot checked for user '$user'"
+            return getString(R.string.security_device_snapshot_idle, user)
         }
         if (snapshot.devices.isEmpty()) {
-            return "Linked Devices\nNo linked devices returned for user '$user'"
+            return getString(R.string.security_device_snapshot_empty, user)
         }
+        val currentDeviceId = store.loadSetup().deviceId
         return buildString {
-            append("Linked Devices\n")
+            append(getString(R.string.security_device_snapshot_title))
+            append('\n')
             append(
-                snapshot.devices.joinToString("\n") { device ->
-                    val state = if (device.active) {
-                        "active"
+                snapshot.devices.joinToString("\n\n") { device ->
+                    if (device.active && device.device_id == currentDeviceId) {
+                        getString(
+                            R.string.security_device_snapshot_this_phone,
+                            device.device_id,
+                            device.linked_at,
+                        )
+                    } else if (device.active) {
+                        getString(
+                            R.string.security_device_snapshot_active,
+                            device.device_id,
+                            device.linked_at,
+                        )
                     } else {
-                        "revoked at ${device.revoked_at ?: "unknown"}"
+                        getString(
+                            R.string.security_device_snapshot_revoked,
+                            device.device_id,
+                            device.revoked_at ?: "unknown",
+                        )
                     }
-                    "${device.device_id}: $state (linked ${device.linked_at})"
                 }
             )
         }
@@ -820,38 +894,53 @@ class SecurityInfoActivity : AppCompatActivity() {
 
     private fun buildIdentityLogText(user: String): String {
         if (user.isBlank()) {
-            return "Identity Log\nEnter a user id to inspect identity events"
+            return getString(R.string.security_identity_log_prompt)
         }
         val snapshot = lastIdentityLogSnapshot
         if (snapshot == null || snapshot.user_id != user) {
-            return "Identity Log\nNot checked for user '$user'"
+            return getString(R.string.security_identity_log_idle, user)
         }
         if (snapshot.events.isEmpty()) {
-            return "Identity Log\nNo identity events returned for user '$user'"
+            return getString(R.string.security_identity_log_empty, user)
         }
         return buildString {
-            append("Identity Log\n")
+            append(getString(R.string.security_identity_log_title))
+            append('\n')
             lastTransparencyVerification?.let { verification ->
-                append(
-                    "Transparency: verified v${verification.leafVersion} in tree #${verification.treeSize}"
-                )
+                append(getString(R.string.security_identity_verified, verification.leafVersion, verification.treeSize))
                 append('\n')
                 append(
                     if (lastTransparencyUsedCheckpoint && verification.consistencyVerified) {
-                        "Append-only growth verified against the saved checkpoint"
+                        getString(R.string.security_identity_checkpoint_verified)
                     } else if (lastTransparencyUsedCheckpoint) {
-                        "Current proof verified, but append-only growth was not checked"
+                        getString(R.string.security_identity_current_only)
                     } else {
-                        "First verified transparency checkpoint saved on this device"
+                        getString(R.string.security_identity_first_checkpoint)
                     }
                 )
                 append('\n')
             }
+            val previewEvents = snapshot.events.take(5)
             append(
-                snapshot.events.joinToString("\n") { event ->
-                    "v${event.version} ${event.event_type} ${event.device_id} ${event.changed_at}"
+                previewEvents.joinToString("\n\n") { event ->
+                    getString(
+                        R.string.security_identity_event_line,
+                        event.version.toString(),
+                        event.event_type.lowercase().replace('_', ' '),
+                        event.device_id,
+                        event.changed_at,
+                    )
                 }
             )
+            if (snapshot.events.size > previewEvents.size) {
+                append("\n\n")
+                append(
+                    getString(
+                        R.string.security_identity_more_events,
+                        snapshot.events.size - previewEvents.size,
+                    ),
+                )
+            }
         }
     }
 

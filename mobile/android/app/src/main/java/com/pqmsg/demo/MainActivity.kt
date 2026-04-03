@@ -13,7 +13,10 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
+import org.json.JSONObject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import uniffi.pqmsg_android.SecondaryDeviceOnboardingPackage
 import uniffi.pqmsg_android.activeCryptoProfile
 import uniffi.pqmsg_android.loadUserProfile
@@ -35,7 +38,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pasteOnboardingButton: Button
     private lateinit var importOnboardingButton: Button
     private lateinit var toggleAdvancedButton: Button
+    private lateinit var toggleLinkedDeviceButton: Button
     private lateinit var advancedPanel: LinearLayout
+    private lateinit var linkedDevicePanel: LinearLayout
     private lateinit var statusText: TextView
     private lateinit var setupSummaryText: TextView
     private lateinit var cryptoProfileText: TextView
@@ -44,6 +49,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var errorToggleButton: Button
     private var errorExpanded = false
     private var advancedVisible = false
+    private var linkedDeviceVisible = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -64,7 +70,9 @@ class MainActivity : AppCompatActivity() {
         pasteOnboardingButton = findViewById(R.id.buttonPasteOnboardingPackage)
         importOnboardingButton = findViewById(R.id.buttonImportOnboardingPackage)
         toggleAdvancedButton = findViewById(R.id.buttonToggleAdvancedSetup)
+        toggleLinkedDeviceButton = findViewById(R.id.buttonToggleLinkedDeviceImport)
         advancedPanel = findViewById(R.id.layoutAdvancedSetup)
+        linkedDevicePanel = findViewById(R.id.layoutLinkedDeviceImport)
         statusText = findViewById(R.id.textStatusSetup)
         setupSummaryText = findViewById(R.id.textSetupSummary)
         cryptoProfileText = findViewById(R.id.textCryptoProfile)
@@ -92,6 +100,7 @@ class MainActivity : AppCompatActivity() {
         configureInputObservers()
         configureErrorToggle()
         configureAdvancedToggle()
+        configureLinkedDeviceToggle()
 
         presetAliceButton.setOnClickListener {
             applyPreset("alice", "bob")
@@ -119,11 +128,14 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             runCatching {
-                activeCryptoProfile()
+                withContext(Dispatchers.Default) {
+                    activeCryptoProfile()
+                }
             }.onSuccess {
-                cryptoProfileText.text = "Crypto profile: $it"
+                cryptoProfileText.text =
+                    getString(R.string.setup_crypto_profile_ready, formatCryptoProfileSummary(it))
             }.onFailure {
-                cryptoProfileText.text = "Crypto profile unavailable"
+                cryptoProfileText.text = getString(R.string.setup_crypto_profile_unavailable)
                 renderError(UiErrorMapper.fromThrowable(it, "Native runtime check"))
             }
         }
@@ -131,6 +143,7 @@ class MainActivity : AppCompatActivity() {
         refreshSummary()
         refreshOnboardingPackagePreview()
         refreshAdvancedVisibility()
+        refreshLinkedDeviceVisibility()
         syncActionAvailability()
     }
 
@@ -148,10 +161,18 @@ class MainActivity : AppCompatActivity() {
         deviceInput.doAfterTextChanged { refreshSummary() }
         pushTokenInput.doAfterTextChanged { refreshSummary() }
         onboardingPassphraseInput.doAfterTextChanged {
+            if (!it.isNullOrBlank()) {
+                linkedDeviceVisible = true
+                refreshLinkedDeviceVisibility()
+            }
             refreshOnboardingPackagePreview()
             syncActionAvailability()
         }
         onboardingPackageInput.doAfterTextChanged {
+            if (!it.isNullOrBlank()) {
+                linkedDeviceVisible = true
+                refreshLinkedDeviceVisibility()
+            }
             refreshOnboardingPackagePreview()
             syncActionAvailability()
         }
@@ -163,12 +184,20 @@ class MainActivity : AppCompatActivity() {
             refreshErrorDetailsVisibility()
         }
         renderError(null)
+        showStatus(null)
     }
 
     private fun configureAdvancedToggle() {
         toggleAdvancedButton.setOnClickListener {
             advancedVisible = !advancedVisible
             refreshAdvancedVisibility()
+        }
+    }
+
+    private fun configureLinkedDeviceToggle() {
+        toggleLinkedDeviceButton.setOnClickListener {
+            linkedDeviceVisible = !linkedDeviceVisible
+            refreshLinkedDeviceVisibility()
         }
     }
 
@@ -183,15 +212,26 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun refreshLinkedDeviceVisibility() {
+        linkedDevicePanel.visibility = if (linkedDeviceVisible) View.VISIBLE else View.GONE
+        toggleLinkedDeviceButton.setText(
+            if (linkedDeviceVisible) {
+                R.string.button_hide_linked_device_import
+            } else {
+                R.string.button_show_linked_device_import
+            },
+        )
+    }
+
     private suspend fun runAction(action: String, block: suspend () -> String) {
         runCatching {
             block()
         }.onSuccess {
             renderError(null)
-            statusText.text = it
+            showStatus(it)
         }.onFailure {
             renderError(UiErrorMapper.fromThrowable(it, action))
-            statusText.text = "${action} failed"
+            showStatus(null)
         }
         refreshSummary()
     }
@@ -216,11 +256,34 @@ class MainActivity : AppCompatActivity() {
         val server = serverInput.text.toString().trim()
         setupSummaryText.text = when {
             user.isBlank() ->
-                "Choose a username to create this device profile, or import a linked-device package from another trusted device."
+                getString(R.string.setup_summary_no_user)
             server.isBlank() ->
-                "Enter the relay address before creating @$user on this phone."
+                getString(R.string.setup_summary_no_server, user)
             else ->
-                "Create a secure local profile for @$user on this phone. Advanced relay, device, and push options stay available below if you need them."
+                getString(R.string.setup_summary_ready, user)
+        }
+    }
+
+    private fun formatCryptoProfileSummary(raw: String): String {
+        val trimmed = raw.trim()
+        if (!trimmed.startsWith("{")) {
+            return trimmed.replace("\n", " ").take(80)
+        }
+        return runCatching {
+            val json = JSONObject(trimmed)
+            val suite = when (json.optString("kem")) {
+                "MlKem768" -> "ML-KEM-768"
+                "Kyber768" -> "Kyber-768"
+                else -> json.optString("kem").ifBlank { "PQ KEM" }
+            }
+            val dh = json.optString("dh").ifBlank { "X25519" }
+            val aead = when (json.optString("aead")) {
+                "ChaCha20Poly1305" -> "ChaCha20-Poly1305"
+                else -> json.optString("aead").ifBlank { "AEAD" }
+            }
+            listOf(suite, dh, aead).joinToString(" / ")
+        }.getOrElse {
+            trimmed.replace("\n", " ").take(80)
         }
     }
 
@@ -240,10 +303,10 @@ class MainActivity : AppCompatActivity() {
             suiteLabel = suite,
             deviceId = deviceId,
             pushToken = pushToken,
-            onStep = { statusText.text = it },
+            onStep = { showStatus(it) },
         )
         openHome(finishCurrent = true)
-        return "Secure profile ready for $user"
+        return getString(R.string.setup_status_profile_ready, user)
     }
 
     private fun requireOpenedOnboardingPackage(): SecondaryDeviceOnboardingPackage {
@@ -257,17 +320,23 @@ class MainActivity : AppCompatActivity() {
     private fun refreshOnboardingPackagePreview() {
         val packagePassphrase = onboardingPassphraseInput.text.toString()
         val packageJson = onboardingPackageInput.text.toString().trim()
-        onboardingPreviewText.text = when {
-            packagePassphrase.isBlank() || packageJson.isBlank() ->
-                getString(R.string.onboarding_package_preview_default)
-            else -> runCatching {
+        if (packagePassphrase.isBlank() || packageJson.isBlank()) {
+            onboardingPreviewText.visibility = View.GONE
+            onboardingPreviewText.text = getString(R.string.onboarding_package_preview_default)
+            return
+        }
+        onboardingPreviewText.visibility = View.VISIBLE
+        onboardingPreviewText.text =
+            runCatching {
                 formatLinkedDevicePackagePreview(
                     openSecondaryDevicePackage(packageJson, packagePassphrase),
                 )
             }.getOrElse {
-                "Linked device package preview unavailable\n${it.message ?: "The package or passphrase is invalid."}"
+                getString(
+                    R.string.setup_preview_unavailable,
+                    it.message ?: getString(R.string.setup_preview_invalid_fallback),
+                )
             }
-        }
     }
 
     private fun confirmImportSecondaryDevicePackage() {
@@ -296,7 +365,7 @@ class MainActivity : AppCompatActivity() {
                 .show()
         }.onFailure {
             renderError(UiErrorMapper.fromThrowable(it, "Inspect linked-device package"))
-            statusText.text = "Import linked device failed"
+            showStatus(null)
         }
     }
 
@@ -342,7 +411,7 @@ class MainActivity : AppCompatActivity() {
             userId = imported.userId,
             suiteLabel = suiteInput.text.toString(),
             deviceId = imported.deviceId,
-            onStep = { statusText.text = it },
+            onStep = { showStatus(it) },
         )
         openHome(finishCurrent = true)
         return "Linked device imported for ${imported.userId}"
@@ -353,11 +422,11 @@ class MainActivity : AppCompatActivity() {
         val clip = clipboard.primaryClip
         val itemText = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)
         if (itemText.isNullOrBlank()) {
-            statusText.text = "Clipboard does not contain an onboarding package"
+            showStatus(getString(R.string.setup_status_clipboard_empty))
             return
         }
         onboardingPackageInput.setText(itemText.toString())
-        statusText.text = "Onboarding package pasted"
+        showStatus(getString(R.string.setup_status_package_pasted))
     }
 
     private fun openHome(finishCurrent: Boolean = false) {
@@ -392,6 +461,16 @@ class MainActivity : AppCompatActivity() {
         } else {
             errorDetailsText.visibility = View.GONE
             errorToggleButton.setText(R.string.button_show_error_details)
+        }
+    }
+
+    private fun showStatus(message: String?) {
+        if (message.isNullOrBlank()) {
+            statusText.text = ""
+            statusText.visibility = View.GONE
+        } else {
+            statusText.text = message
+            statusText.visibility = View.VISIBLE
         }
     }
 }

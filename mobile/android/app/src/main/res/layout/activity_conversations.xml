@@ -24,14 +24,14 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Private messaging"
+                android:text="Secure chats"
                 android:textAppearance="@style/TextAppearance.PQMsg.Eyebrow" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="2dp"
-                android:text="Chats"
+                android:text="@string/conversations_title"
                 android:textAppearance="@style/TextAppearance.PQMsg.ScreenTitle" />
         </LinearLayout>
 
@@ -59,123 +59,120 @@
         android:id="@+id/textCurrentProfile"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
+        android:layout_marginTop="4dp"
         android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
     <TextView
         android:id="@+id/textConversationsStatus"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
+        android:layout_marginTop="2dp"
         android:textAppearance="@style/TextAppearance.PQMsg.CaptionStrong" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="14dp"
+        android:layout_marginTop="12dp"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/buttonComposeConversation"
             style="@style/Widget.PQMsg.Button.Primary"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/button_compose_conversation" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonArchivedConversations"
+            style="@style/Widget.PQMsg.Button.Compact"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="@string/button_compose_conversation" />
+            android:layout_marginStart="10dp"
+            android:text="@string/button_open_archived_conversations"
+            android:visibility="gone" />
     </LinearLayout>
 
-    <HorizontalScrollView
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
-        android:overScrollMode="never"
-        android:scrollbars="none">
+        android:orientation="horizontal"
+        android:weightSum="4">
 
-        <LinearLayout
-            android:layout_width="wrap_content"
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonFilterAll"
+            style="@style/Widget.PQMsg.Button.Filter"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:orientation="horizontal">
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="@string/conversations_filter_all" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonFilterAll"
-                style="@style/Widget.PQMsg.Button.Compact"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/conversations_filter_all" />
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonFilterUnread"
+            style="@style/Widget.PQMsg.Button.Filter"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="@string/conversations_filter_unread" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonFilterUnread"
-                style="@style/Widget.PQMsg.Button.Compact"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:text="@string/conversations_filter_unread" />
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonFilterGroups"
+            style="@style/Widget.PQMsg.Button.Filter"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="@string/conversations_filter_groups" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonFilterGroups"
-                style="@style/Widget.PQMsg.Button.Compact"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:text="@string/conversations_filter_groups" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonFilterRequests"
-                style="@style/Widget.PQMsg.Button.Compact"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:text="@string/conversations_filter_requests" />
-        </LinearLayout>
-    </HorizontalScrollView>
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonFilterRequests"
+            style="@style/Widget.PQMsg.Button.Filter"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="@string/conversations_filter_requests" />
+    </LinearLayout>
 
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_marginTop="14dp"
+        android:layout_marginTop="12dp"
         android:layout_weight="1">
 
-        <LinearLayout
+        <FrameLayout
             android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:orientation="vertical">
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:paddingHorizontal="18dp"
-                android:paddingTop="18dp"
-                android:text="Inbox"
-                android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
-
-            <TextView
-                android:id="@+id/textConversationsEmpty"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:paddingHorizontal="18dp"
-                android:paddingTop="8dp"
-                android:text="@string/conversations_empty"
-                android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted"
-                android:visibility="gone" />
+            android:layout_height="match_parent">
 
             <ListView
                 android:id="@+id/listConversations"
                 android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_marginTop="8dp"
-                android:layout_weight="1"
+                android:layout_height="match_parent"
+                android:layout_marginTop="4dp"
                 android:divider="@android:color/transparent"
                 android:dividerHeight="0dp"
                 android:listSelector="?attr/colorControlHighlight" />
-        </LinearLayout>
-    </com.google.android.material.card.MaterialCardView>
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/buttonArchivedConversations"
-        style="@style/Widget.PQMsg.Button.Compact"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:text="@string/button_open_archived_conversations"
-        android:visibility="gone" />
+            <TextView
+                android:id="@+id/textConversationsEmpty"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:paddingHorizontal="28dp"
+                android:text="@string/conversations_empty"
+                android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted"
+                android:visibility="gone" />
+        </FrameLayout>
+    </com.google.android.material.card.MaterialCardView>
 </LinearLayout>

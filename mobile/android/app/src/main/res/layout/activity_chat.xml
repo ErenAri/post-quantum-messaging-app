@@ -4,9 +4,9 @@
     android:layout_height="match_parent"
     android:background="@drawable/bg_screen"
     android:orientation="vertical"
-    android:paddingHorizontal="14dp"
-    android:paddingTop="14dp"
-    android:paddingBottom="10dp">
+    android:paddingHorizontal="12dp"
+    android:paddingTop="12dp"
+    android:paddingBottom="8dp">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -35,7 +35,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Direct chat"
+                android:text="@string/conversation_secondary_direct"
                 android:textAppearance="@style/TextAppearance.PQMsg.Eyebrow" />
 
             <TextView
@@ -49,32 +49,39 @@
                 android:id="@+id/textChatMeta"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
+                android:layout_marginTop="4dp"
                 android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
         </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="end"
+        android:orientation="horizontal">
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/buttonThreadSearch"
-            style="@style/Widget.PQMsg.Button.Compact"
+            style="@style/Widget.PQMsg.Button.Toolbar"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
             android:text="@string/button_thread_search" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/buttonThreadTips"
-            style="@style/Widget.PQMsg.Button.Compact"
+            style="@style/Widget.PQMsg.Button.Toolbar"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
+            android:layout_marginStart="6dp"
             android:text="@string/button_thread_tips" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/buttonSyncThread"
-            style="@style/Widget.PQMsg.Button.Compact"
+            style="@style/Widget.PQMsg.Button.Toolbar"
             android:layout_width="wrap_content"
-            android:layout_marginStart="8dp"
             android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
             android:text="@string/button_sync_thread" />
     </LinearLayout>
 
@@ -110,8 +117,8 @@
         android:id="@+id/layoutChatSelectionMode"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:background="@drawable/bg_detail_panel"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_thread_panel"
         android:orientation="vertical"
         android:paddingHorizontal="14dp"
         android:paddingVertical="10dp"
@@ -167,8 +174,8 @@
         android:id="@+id/layoutChatSearchMode"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:background="@drawable/bg_detail_panel"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_thread_panel"
         android:orientation="vertical"
         android:paddingHorizontal="14dp"
         android:paddingVertical="10dp"
@@ -229,47 +236,42 @@
             android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
     </LinearLayout>
 
-    <com.google.android.material.card.MaterialCardView
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_marginTop="12dp"
-        android:layout_weight="1">
+        android:layout_marginTop="8dp"
+        android:layout_weight="1"
+        android:background="@drawable/bg_thread_panel"
+        android:paddingTop="10dp"
+        android:paddingBottom="8dp">
 
-        <LinearLayout
+        <ListView
+            android:id="@+id/listChatMessages"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:orientation="vertical"
-            android:paddingTop="10dp"
-            android:paddingBottom="8dp">
+            android:clipToPadding="false"
+            android:divider="@android:color/transparent"
+            android:dividerHeight="0dp"
+            android:listSelector="@android:color/transparent"
+            android:paddingHorizontal="8dp"
+            android:transcriptMode="alwaysScroll" />
 
-            <ListView
-                android:id="@+id/listChatMessages"
-                android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_weight="1"
-                android:divider="@android:color/transparent"
-                android:dividerHeight="0dp"
-                android:listSelector="@android:color/transparent"
-                android:transcriptMode="alwaysScroll" />
-
-            <TextView
-                android:id="@+id/textChatEmpty"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:paddingHorizontal="18dp"
-                android:paddingTop="18dp"
-                android:paddingBottom="18dp"
-                android:text="@string/chat_log_empty"
-                android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted"
-                android:gravity="center_horizontal" />
-        </LinearLayout>
-    </com.google.android.material.card.MaterialCardView>
+        <TextView
+            android:id="@+id/textChatEmpty"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:paddingHorizontal="22dp"
+            android:text="@string/chat_log_empty"
+            android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
+    </FrameLayout>
 
     <com.google.android.material.card.MaterialCardView
+        style="@style/Widget.PQMsg.Card"
         android:id="@+id/cardAttachmentPreview"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="8dp"
         android:visibility="gone">
 
         <LinearLayout
@@ -297,8 +299,8 @@
         android:id="@+id/layoutReplyPreview"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:background="@drawable/bg_detail_panel"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_thread_panel"
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:paddingHorizontal="14dp"
@@ -327,51 +329,64 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
         android:background="@drawable/bg_composer_surface"
-        android:gravity="bottom"
-        android:orientation="horizontal"
+        android:orientation="vertical"
         android:padding="8dp">
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/buttonAttachMedia"
-            style="@style/Widget.PQMsg.Button.Compact"
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/button_attach_media" />
+            android:gravity="start"
+            android:orientation="horizontal">
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/buttonClearAttachment"
-            style="@style/Widget.PQMsg.Button.Compact"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="@string/button_clear_attachment" />
-
-        <com.google.android.material.textfield.TextInputLayout
-            style="@style/Widget.PQMsg.TextInputLayout"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:hint="@string/hint_message">
-
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/editMessage"
-                android:layout_width="match_parent"
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonAttachMedia"
+                style="@style/Widget.PQMsg.Button.Compact"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:gravity="top|start"
-                android:inputType="textMultiLine"
-                android:imeOptions="flagNoEnterAction"
-                android:maxHeight="144dp"
-                android:maxLines="5"
-                android:minLines="1" />
-        </com.google.android.material.textfield.TextInputLayout>
+                android:text="@string/button_attach_media" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/buttonSend"
-            style="@style/Widget.PQMsg.Button.Primary"
-            android:layout_width="wrap_content"
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonClearAttachment"
+                style="@style/Widget.PQMsg.Button.Compact"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/button_clear_attachment" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="@string/button_send" />
+            android:layout_marginTop="8dp"
+            android:gravity="bottom"
+            android:orientation="horizontal">
+
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.PQMsg.TextInputLayout"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="@string/hint_message">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/editMessage"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="top|start"
+                    android:inputType="textMultiLine"
+                    android:imeOptions="flagNoEnterAction"
+                    android:maxHeight="144dp"
+                    android:maxLines="5"
+                    android:minLines="1" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonSend"
+                style="@style/Widget.PQMsg.Button.Primary"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/button_send" />
+        </LinearLayout>
     </LinearLayout>
 </LinearLayout>

@@ -889,31 +889,30 @@ class ChatActivity : AppCompatActivity() {
         val transparencyCheckpoint = store.readTransparencyCheckpoint(setup.serverUrl, activePeerUserId)
         val pin = store.readIdentityPin(setup.userId, activePeerUserId)
         val details = buildList {
-            add("Contact: $activePeerUserId")
-            add("Presence: ${if (peerIsTyping) getString(R.string.typing_indicator) else if (peerPresenceOnline) getString(R.string.presence_online) else getString(R.string.presence_offline)}")
-            add("Sealed sender: required")
-            add("Sealed cursor: $cursor")
+            add(getString(R.string.chat_info_status, if (peerIsTyping) getString(R.string.typing_indicator) else if (peerPresenceOnline) getString(R.string.presence_online) else getString(R.string.presence_offline)))
             add(
                 if (pin == null) {
-                    "Trust: no local identity pin yet"
+                    getString(R.string.chat_info_safety_review)
                 } else {
-                    "Trust: pinned identity v${pin.identityKeyVersion}"
+                    getString(R.string.chat_info_safety_verified)
                 },
             )
             add(
                 if (bundleFetched.isNullOrBlank()) {
-                    "Bundle cache: fetched automatically on first send"
+                    getString(R.string.chat_info_bundle_auto)
                 } else {
-                    "Bundle cache: $bundleFetched"
+                    getString(R.string.chat_info_bundle_last, bundleFetched)
                 },
             )
             add(
                 if (transparencyCheckpoint.isNullOrBlank()) {
-                    "Transparency: checked automatically before encrypted traffic"
+                    getString(R.string.chat_info_transparency_auto)
                 } else {
-                    "Transparency: checkpoint saved for this chat"
+                    getString(R.string.chat_info_transparency_saved)
                 },
             )
+            add(getString(R.string.chat_info_history_local))
+            add("Cursor: $cursor")
         }.joinToString("\n")
 
         AlertDialog.Builder(this)
@@ -931,7 +930,7 @@ class ChatActivity : AppCompatActivity() {
                     context = this,
                     title = "$activePeerUserId shared media",
                     messages = currentThreadMessages,
-                    emptyMessage = "No shared media saved in this chat on this device yet.",
+                    emptyMessage = getString(R.string.chat_shared_media_empty),
                 ) {
                     renderError(UiErrorMapper.fromThrowable(it, "Open shared media"))
                 }
@@ -944,17 +943,20 @@ class ChatActivity : AppCompatActivity() {
         val setup = currentSetup()
         chatTitleText.text = activePeerUserId
         val trustSummary = if (store.readIdentityPin(setup.userId, activePeerUserId) != null) {
-            "trusted locally"
+            getString(R.string.chat_meta_trusted)
         } else {
-            "tap for safety details"
+            getString(R.string.chat_meta_review)
         }
         val presenceSummary = when {
             peerIsTyping -> getString(R.string.typing_indicator)
             peerPresenceOnline -> getString(R.string.presence_online)
             else -> getString(R.string.presence_offline)
         }
-        val syncSummary = if (syncInFlight) "refreshing" else "ready"
-        chatMeta.text = "$presenceSummary | sealed sender | $trustSummary | $syncSummary"
+        chatMeta.text = if (syncInFlight) {
+            getString(R.string.chat_meta_presence_refreshing, presenceSummary)
+        } else {
+            getString(R.string.chat_meta_presence_state, presenceSummary, trustSummary)
+        }
     }
 
     private fun renderThreadHistory() {
@@ -980,8 +982,7 @@ class ChatActivity : AppCompatActivity() {
             threadAdapter.submitList(emptyList())
             syncSelectionAfterThreadUpdate()
             syncThreadSearch(scrollToActive = false)
-            chatEmptyText.text =
-                "Local encrypted message history is unavailable on this device.\nRe-import a linked-device package or fully reprovision this device."
+            chatEmptyText.text = getString(R.string.chat_history_unavailable)
         }
         syncActionAvailability()
     }

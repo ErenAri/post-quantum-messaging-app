@@ -10,12 +10,12 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="center_horizontal"
-        android:layout_marginTop="12dp"
-        android:layout_marginBottom="6dp"
-        android:background="@drawable/bg_detail_panel"
-        android:paddingHorizontal="12dp"
-        android:paddingVertical="6dp"
-        android:textAppearance="@style/TextAppearance.MaterialComponents.Caption"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="4dp"
+        android:background="@drawable/bg_thread_day_header"
+        android:paddingHorizontal="10dp"
+        android:paddingVertical="5dp"
+        android:textAppearance="@style/TextAppearance.PQMsg.CaptionStrong"
         android:textColor="@color/pq_ink_muted"
         android:visibility="gone" />
 
@@ -23,25 +23,25 @@
         android:id="@+id/threadMessageRow"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:paddingHorizontal="12dp"
-        android:paddingVertical="4dp">
+        android:paddingHorizontal="8dp"
+        android:paddingVertical="2dp">
 
         <LinearLayout
             android:id="@+id/threadMessageBubble"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="start"
-            android:layout_marginEnd="56dp"
+            android:layout_marginEnd="48dp"
             android:orientation="vertical"
-            android:paddingHorizontal="14dp"
-            android:paddingTop="10dp"
-            android:paddingBottom="8dp">
+            android:paddingHorizontal="13dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="7dp">
 
             <TextView
                 android:id="@+id/textThreadMessageReply"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="6dp"
+                android:layout_marginBottom="4dp"
                 android:maxWidth="280dp"
                 android:textAppearance="@style/TextAppearance.MaterialComponents.Caption"
                 android:textColor="@color/pq_ink_muted"
@@ -51,7 +51,7 @@
                 android:id="@+id/textThreadMessageBody"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:maxWidth="280dp"
+                android:maxWidth="300dp"
                 android:textAppearance="@style/TextAppearance.MaterialComponents.Body1" />
 
             <com.google.android.material.chip.ChipGroup
@@ -77,7 +77,7 @@
                 android:id="@+id/textThreadMessageMeta"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
+                android:layout_marginTop="4dp"
                 android:textAppearance="@style/TextAppearance.MaterialComponents.Caption" />
         </LinearLayout>
     </FrameLayout>

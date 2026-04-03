@@ -84,6 +84,25 @@
         <item name="android:paddingRight">14dp</item>
     </style>
 
+    <style name="Widget.PQMsg.Button.Toolbar" parent="Widget.MaterialComponents.Button.OutlinedButton">
+        <item name="cornerRadius">12dp</item>
+        <item name="strokeColor">@color/pq_line</item>
+        <item name="android:textColor">@color/pq_ink_muted</item>
+        <item name="android:minHeight">34dp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:paddingLeft">10dp</item>
+        <item name="android:paddingRight">10dp</item>
+        <item name="strokeWidth">1dp</item>
+    </style>
+
+    <style name="Widget.PQMsg.Button.Filter" parent="Widget.PQMsg.Button.Compact">
+        <item name="android:minHeight">36dp</item>
+        <item name="android:paddingLeft">6dp</item>
+        <item name="android:paddingRight">6dp</item>
+        <item name="android:textSize">13sp</item>
+    </style>
+
     <style name="Widget.PQMsg.Chip.Reaction" parent="Widget.MaterialComponents.Chip.Action">
         <item name="shapeAppearance">@style/ShapeAppearance.PQMsg.Small</item>
         <item name="chipStrokeWidth">0dp</item>

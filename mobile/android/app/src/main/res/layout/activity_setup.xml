@@ -15,7 +15,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Private messaging"
+            android:text="Secure chats"
             android:textAppearance="@style/TextAppearance.PQMsg.Eyebrow" />
 
         <TextView
@@ -36,13 +36,9 @@
             android:id="@+id/textCryptoProfile"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
-            android:background="@drawable/bg_badge"
-            android:paddingHorizontal="10dp"
-            android:paddingVertical="6dp"
+            android:layout_marginTop="12dp"
             android:text="@string/setup_crypto_profile_loading"
-            android:textColor="@color/pq_badge_fg"
-            android:textStyle="bold" />
+            android:textAppearance="@style/TextAppearance.PQMsg.CaptionStrong" />
 
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
@@ -58,14 +54,14 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Create this device profile"
+                    android:text="@string/setup_section_create_title"
                     android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
 
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="Pick a username, generate keys locally on this phone, and start chatting. Relay, device, and push details stay tucked away unless you need them."
+                    android:text="@string/setup_section_create_body"
                     android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
                 <com.google.android.material.textfield.TextInputLayout
@@ -86,7 +82,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:text="Your profile keys stay on this device. Cloud backup restore is disabled; linked-device reprovisioning is the recovery path."
+                    android:text="@string/setup_local_keys_note"
                     android:textAppearance="@style/TextAppearance.PQMsg.CaptionStrong" />
 
                 <com.google.android.material.button.MaterialButton
@@ -116,7 +112,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Relay and device details"
+                        android:text="@string/setup_advanced_title"
                         android:textAppearance="@style/TextAppearance.PQMsg.CaptionStrong" />
 
                     <com.google.android.material.textfield.TextInputLayout
@@ -179,7 +175,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="14dp"
-                        android:text="Demo presets"
+                        android:text="@string/setup_demo_presets_title"
                         android:textAppearance="@style/TextAppearance.PQMsg.CaptionStrong" />
 
                     <LinearLayout
@@ -212,7 +208,7 @@
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="14dp">
+            android:layout_marginTop="12dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -223,21 +219,37 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Use a linked-device package instead"
+                    android:text="@string/setup_section_linked_title"
                     android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
 
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="If another trusted device prepared a package for this phone, import it here instead of creating a new profile from scratch."
+                    android:text="@string/setup_section_linked_body"
                     android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
-                <com.google.android.material.textfield.TextInputLayout
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonToggleLinkedDeviceImport"
+                    style="@style/Widget.PQMsg.Button.Compact"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="@string/button_show_linked_device_import" />
+
+                <LinearLayout
+                    android:id="@+id/layoutLinkedDeviceImport"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+
+                    <com.google.android.material.textfield.TextInputLayout
                     style="@style/Widget.PQMsg.TextInputLayout"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="14dp"
+                    android:layout_marginTop="8dp"
                     android:hint="@string/hint_onboarding_passphrase">
 
                     <com.google.android.material.textfield.TextInputEditText
@@ -245,9 +257,9 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:inputType="textPassword" />
-                </com.google.android.material.textfield.TextInputLayout>
+                    </com.google.android.material.textfield.TextInputLayout>
 
-                <com.google.android.material.textfield.TextInputLayout
+                    <com.google.android.material.textfield.TextInputLayout
                     style="@style/Widget.PQMsg.TextInputLayout"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -261,18 +273,19 @@
                         android:gravity="top|start"
                         android:inputType="textMultiLine"
                         android:minLines="3" />
-                </com.google.android.material.textfield.TextInputLayout>
+                    </com.google.android.material.textfield.TextInputLayout>
 
-                <TextView
+                    <TextView
                     android:id="@+id/textOnboardingPackagePreview"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
                     android:background="@drawable/bg_detail_panel"
                     android:padding="12dp"
-                    android:textAppearance="@style/TextAppearance.PQMsg.Mono" />
+                    android:textAppearance="@style/TextAppearance.PQMsg.Mono"
+                    android:visibility="gone" />
 
-                <LinearLayout
+                    <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
@@ -294,6 +307,7 @@
                         android:layout_marginStart="10dp"
                         android:layout_weight="1"
                         android:text="@string/button_import_onboarding_package" />
+                    </LinearLayout>
                 </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>

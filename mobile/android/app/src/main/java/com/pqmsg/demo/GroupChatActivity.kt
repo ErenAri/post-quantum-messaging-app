@@ -236,6 +236,9 @@ class GroupChatActivity : AppCompatActivity() {
 
     private fun renderUnavailableState() {
         selectedMessageKeys.clear()
+        pendingReplyMessage = null
+        activeSearchIndex = 0
+        searchResultKeys = emptyList()
         titleText.text = groupName
         messageInput.setText("")
         pendingAttachment = null
@@ -245,9 +248,15 @@ class GroupChatActivity : AppCompatActivity() {
         sendButton.isEnabled = false
         syncButton.isEnabled = true
         threadAdapter.submitList(emptyList())
+        threadAdapter.setSearchState(emptySet(), null)
+        searchInput.setText("")
+        searchCountText.text = getString(R.string.thread_search_empty)
+        searchPrevButton.isEnabled = false
+        searchNextButton.isEnabled = false
+        searchModeLayout.visibility = View.GONE
         renderSelectionMode()
-        groupEmptyText.text = "This device does not have the local opaque state needed to open this private group."
-        metaText.text = "Open the group from an invite link or a device that already has the current epoch state."
+        groupEmptyText.text = getString(R.string.group_missing_state_message)
+        metaText.text = getString(R.string.group_missing_state_hint)
         renderReplyPreview()
         syncThreadSearch(scrollToActive = false)
     }
@@ -284,7 +293,7 @@ class GroupChatActivity : AppCompatActivity() {
             ?.let { describePrivateGroupMemberCredential(it).publish_key_base64?.isNotBlank() == true }
             ?: false
         metaText.text = if (state == null) {
-            "Private group state unavailable\nSigned in as ${setup.userId}"
+            getString(R.string.group_meta_unavailable)
         } else {
             "${getPrivateGroupTitle(state)}\nEpoch ${state.epoch} • ${state.members.size} members • ${if (canManage) "manage enabled" else "read/send only"}"
         }
@@ -293,6 +302,19 @@ class GroupChatActivity : AppCompatActivity() {
             val role = privateGroupRoleForUser(state, setup.userId)
             metaText.text =
                 "${getPrivateGroupTitle(state)}\nEpoch ${state.epoch} | ${state.members.size} members | role $role | owner $ownerUserId | ${if (canManage) "manage enabled" else "read/send only"}"
+        }
+        if (state != null) {
+            metaText.text =
+                getString(
+                    R.string.group_meta_summary,
+                    state.members.size,
+                    getString(R.string.group_meta_you_role, privateGroupRoleForUser(state, setup.userId)),
+                    if (canManage) {
+                        getString(R.string.group_meta_manage_enabled)
+                    } else {
+                        getString(R.string.group_meta_send_only)
+                    },
+                )
         }
     }
 
@@ -416,6 +438,10 @@ class GroupChatActivity : AppCompatActivity() {
     }
 
     private fun syncActions() {
+        val hasThreadAccess = hasGroupThreadAccess()
+        updateComposerVisibility()
+        searchButton.visibility = if (hasThreadAccess) View.VISIBLE else View.GONE
+        searchButton.isEnabled = hasThreadAccess
         if (isSelectionModeActive()) {
             attachMediaButton.isEnabled = false
             clearAttachmentButton.isEnabled = false
@@ -425,15 +451,15 @@ class GroupChatActivity : AppCompatActivity() {
         }
         val hasText = messageInput.text.toString().isNotBlank()
         val hasAttachment = pendingAttachment != null
-        attachMediaButton.isEnabled = !syncInFlight && localStoreAvailable
+        attachMediaButton.isEnabled = !syncInFlight && hasThreadAccess
         clearAttachmentButton.isEnabled = hasAttachment && !syncInFlight
         sendButton.isEnabled =
-            (hasText || hasAttachment) && !syncInFlight && localStoreAvailable && privateGroupState != null && privateGroupCredential != null
+            (hasText || hasAttachment) && !syncInFlight && hasThreadAccess
         syncButton.isEnabled = !syncInFlight && localStoreAvailable
     }
 
     private fun renderAttachmentInfo() {
-        if (isSelectionModeActive()) {
+        if (isSelectionModeActive() || !hasGroupThreadAccess()) {
             attachmentPreviewCard.visibility = View.GONE
             return
         }
@@ -465,7 +491,7 @@ class GroupChatActivity : AppCompatActivity() {
 
     private fun renderReplyPreview() {
         val reply = pendingReplyMessage
-        if (reply == null || isSelectionModeActive()) {
+        if (reply == null || isSelectionModeActive() || !hasGroupThreadAccess()) {
             replyPreviewLayout.visibility = View.GONE
             replyPreviewText.text = ""
             return
@@ -527,7 +553,7 @@ class GroupChatActivity : AppCompatActivity() {
     private fun renderSelectionMode() {
         val active = isSelectionModeActive()
         selectionModeLayout.visibility = if (active) View.VISIBLE else View.GONE
-        composerBar.visibility = if (active) View.GONE else View.VISIBLE
+        updateComposerVisibility()
         selectionCountText.text = resources.getQuantityString(
             R.plurals.thread_selection_count,
             selectedMessageKeys.size,
@@ -544,6 +570,15 @@ class GroupChatActivity : AppCompatActivity() {
         }
         renderAttachmentInfo()
         syncActions()
+    }
+
+    private fun hasGroupThreadAccess(): Boolean {
+        return privateGroupState != null && privateGroupCredential != null && localStoreAvailable
+    }
+
+    private fun updateComposerVisibility() {
+        composerBar.visibility =
+            if (isSelectionModeActive() || !hasGroupThreadAccess()) View.GONE else View.VISIBLE
     }
 
     private fun openThreadSearch() {
@@ -972,16 +1007,12 @@ class GroupChatActivity : AppCompatActivity() {
 
     private fun showGroupInfo() {
         val state = privateGroupState ?: run {
-            metaText.text = "Private-group state is unavailable on this device."
+            metaText.text = getString(R.string.group_meta_unavailable)
             return
         }
         val canManage = privateGroupCredential
             ?.let { describePrivateGroupMemberCredential(it).publish_key_base64?.isNotBlank() == true }
             ?: false
-        val memberList = state.members.joinToString("\n") { member ->
-            val you = if (member.user_id == store.loadSetup().userId) " (you)" else ""
-            "- ${member.user_id} [${member.role}]$you"
-        }
         val ownerUserId = privateGroupOwnerUserId(state)
         val yourRole = privateGroupRoleForUser(state, store.loadSetup().userId)
         val detailedMemberList = state.members.joinToString("\n\n") { member ->
@@ -989,19 +1020,14 @@ class GroupChatActivity : AppCompatActivity() {
             "- ${member.user_id} [${member.role}]$you\n  Trust: ${describePrivateGroupMemberTrust(member.user_id)}"
         }
         val groupInfoMessage =
-            "Group: ${getPrivateGroupTitle(state, groupName)}\n" +
-                "Owner: $ownerUserId\n" +
-                "Your role: $yourRole\n" +
-                "Epoch ${state.epoch}\n\n" +
-                "Member trust uses local identity pins and transparency checkpoints from direct chats.\n\n" +
-                "Members (${state.members.size}):\n$detailedMemberList"
+            "${getPrivateGroupTitle(state, groupName)}\n" +
+                "${getString(R.string.group_info_owner, ownerUserId)}\n" +
+                "${getString(R.string.group_info_role, yourRole)}\n" +
+                "${getString(R.string.group_info_epoch, state.epoch)}\n\n" +
+                "${getString(R.string.group_info_trust_note)}\n\n" +
+                "${getString(R.string.group_info_member_header, state.members.size)}\n$detailedMemberList"
         AlertDialog.Builder(this@GroupChatActivity)
             .setTitle(getString(R.string.group_info_title))
-            .setMessage(
-                "Group: ${getPrivateGroupTitle(state, groupName)}\n" +
-                    "Epoch ${state.epoch}\n\n" +
-                    "Members (${state.members.size}):\n$memberList",
-            )
             .setMessage(groupInfoMessage)
             .setPositiveButton(android.R.string.ok, null)
             .setNeutralButton(R.string.button_shared_media) { _, _ ->
@@ -1009,14 +1035,14 @@ class GroupChatActivity : AppCompatActivity() {
                     context = this,
                     title = "${getPrivateGroupTitle(state, groupName)} shared media",
                     messages = currentThreadMessages,
-                    emptyMessage = "No shared media saved in this group on this device yet.",
+                    emptyMessage = getString(R.string.group_shared_media_empty),
                 ) {
                     metaText.text = UiErrorMapper.fromThrowable(it, "Open shared media").headline
                 }
             }
             .apply {
                 if (canManage) {
-                    setNegativeButton("Manage Members") { _, _ ->
+                    setNegativeButton(R.string.group_info_manage_members) { _, _ ->
                         showMemberManagementDialog()
                     }
                 }
@@ -1404,8 +1430,7 @@ class GroupChatActivity : AppCompatActivity() {
             threadAdapter.submitList(emptyList())
             syncSelectionAfterThreadUpdate()
             syncThreadSearch(scrollToActive = false)
-            groupEmptyText.text =
-                "Local encrypted group history is unavailable on this device.\nRe-import the current group state from a linked device or fully reprovision this device."
+            groupEmptyText.text = getString(R.string.group_local_history_unavailable)
         }
         syncActions()
     }

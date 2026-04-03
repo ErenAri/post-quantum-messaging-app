@@ -2,6 +2,7 @@ package com.pqmsg.demo
 
 import android.content.Intent
 import android.os.Bundle
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
@@ -44,6 +45,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
     private lateinit var contactUserIdInput: EditText
     private lateinit var contactAliasInput: EditText
     private lateinit var addContactButton: MaterialButton
+    private lateinit var togglePrivateDiscoveryButton: MaterialButton
     private lateinit var privateDiscoveryCard: View
     private lateinit var discoveryPhonesInput: EditText
     private lateinit var discoveryEmailsInput: EditText
@@ -56,6 +58,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
     private lateinit var emptyText: TextView
     private lateinit var backButton: MaterialButton
     private var currentContacts: List<ContactListItem> = emptyList()
+    private var privateDiscoveryExpanded: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,6 +69,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
         contactUserIdInput = findViewById(R.id.editContactUserId)
         contactAliasInput = findViewById(R.id.editContactAlias)
         addContactButton = findViewById(R.id.buttonAddContact)
+        togglePrivateDiscoveryButton = findViewById(R.id.buttonTogglePrivateDiscovery)
         privateDiscoveryCard = findViewById(R.id.cardPrivateDiscovery)
         discoveryPhonesInput = findViewById(R.id.editDiscoveryPhones)
         discoveryEmailsInput = findViewById(R.id.editDiscoveryEmails)
@@ -79,6 +83,10 @@ class ContactDiscoveryActivity : AppCompatActivity() {
         backButton = findViewById(R.id.buttonBackFromContacts)
 
         addContactButton.setOnClickListener { addContact() }
+        togglePrivateDiscoveryButton.setOnClickListener {
+            privateDiscoveryExpanded = !privateDiscoveryExpanded
+            syncPrivateDiscoveryVisibility()
+        }
         uploadDiscoveryButton.setOnClickListener { uploadPrivateDiscoveryHandles() }
         searchDiscoveryButton.setOnClickListener { matchPrivateDiscoveryHashes() }
         backButton.setOnClickListener { finish() }
@@ -99,7 +107,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
     private fun loadContacts() {
         val setup = store.loadSetup()
         if (setup.userId.isBlank() || setup.serverUrl.isBlank()) {
-            statusText.text = "Not signed in"
+            statusText.text = getString(R.string.discovery_not_signed_in)
             return
         }
         statusText.text = getString(R.string.contacts_manual_only_notice)
@@ -158,27 +166,40 @@ class ContactDiscoveryActivity : AppCompatActivity() {
                 override fun getItem(position: Int) = currentContacts[position]
                 override fun getItemId(position: Int) = position.toLong()
                 override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                    val tv = (convertView as? TextView) ?: TextView(this@ContactDiscoveryActivity).apply {
-                        setPadding(16, 12, 16, 12)
-                        textSize = 14f
-                    }
                     val contact = currentContacts[position]
-                    val verified = if (contact.verified_by_qr) " ✓" else ""
+                    val view =
+                        convertView ?: LayoutInflater.from(this@ContactDiscoveryActivity)
+                            .inflate(R.layout.item_contact, parent, false)
                     val primary = contactPrimaryLabel(contact)
                     val secondary = contactSecondaryLabel(contact)
-                    tv.text = if (secondary.isNullOrBlank()) {
-                        "$primary$verified"
-                    } else {
-                        "$primary$verified\n$secondary"
+                    view.findViewById<TextView>(R.id.textContactAvatar).text = avatarText(primary)
+                    view.findViewById<TextView>(R.id.textContactPrimary).text = primary
+                    view.findViewById<TextView>(R.id.textContactSecondary).apply {
+                        text = secondary
+                        visibility = if (secondary.isNullOrBlank()) View.GONE else View.VISIBLE
                     }
-                    return tv
+                    view.findViewById<TextView>(R.id.textContactVerified).visibility =
+                        if (contact.verified_by_qr) {
+                            View.VISIBLE
+                        } else {
+                            View.GONE
+                        }
+                    if (contact.verified_by_qr) {
+                        view.findViewById<TextView>(R.id.textContactVerified).text =
+                            getString(R.string.contact_row_verified)
+                    }
+                    return view
                 }
             }
         }
     }
 
     private fun setPrivateDiscoveryEnabled(enabled: Boolean) {
-        privateDiscoveryCard.visibility = if (enabled) View.VISIBLE else View.GONE
+        if (!enabled) {
+            privateDiscoveryExpanded = false
+        }
+        togglePrivateDiscoveryButton.visibility = if (enabled) View.VISIBLE else View.GONE
+        syncPrivateDiscoveryVisibility()
         if (!enabled) {
             discoveryMatchesText.visibility = View.GONE
             discoveryMatchesText.text = ""
@@ -187,6 +208,18 @@ class ContactDiscoveryActivity : AppCompatActivity() {
             discoveryEmailsInput.setText("")
             discoveryQueryInput.setText("")
         }
+    }
+
+    private fun syncPrivateDiscoveryVisibility() {
+        privateDiscoveryCard.visibility = if (privateDiscoveryExpanded) View.VISIBLE else View.GONE
+        togglePrivateDiscoveryButton.text =
+            getString(
+                if (privateDiscoveryExpanded) {
+                    R.string.button_hide_private_discovery
+                } else {
+                    R.string.button_show_private_discovery
+                },
+            )
     }
 
     private suspend fun renderDiscoveryManifestSummary(
@@ -690,7 +723,7 @@ class ContactDiscoveryActivity : AppCompatActivity() {
     private fun addContact() {
         val rawTarget = contactUserIdInput.text.toString().trim()
         if (rawTarget.isBlank()) {
-            statusText.text = "Enter an @username or invite link"
+            statusText.text = getString(R.string.contact_add_missing_target)
             return
         }
         val alias = contactAliasInput.text.toString().trim().ifBlank { null }
@@ -757,7 +790,10 @@ class ContactDiscoveryActivity : AppCompatActivity() {
     }
 
     private fun showContactActions(contact: ContactListItem) {
-        val options = arrayOf("Open Chat", "Remove Contact")
+        val options = arrayOf(
+            getString(R.string.contact_action_open_chat),
+            getString(R.string.contact_action_remove),
+        )
         AlertDialog.Builder(this)
             .setTitle(contactPrimaryLabel(contact))
             .setMessage(contactSecondaryLabel(contact))
@@ -789,6 +825,19 @@ class ContactDiscoveryActivity : AppCompatActivity() {
     private fun contactHandle(contact: ContactListItem): String {
         val username = contact.username?.trim()?.removePrefix("@").orEmpty()
         return if (username.isNotBlank()) "@$username" else contact.contact_user_id
+    }
+
+    private fun avatarText(label: String): String {
+        val cleaned = label.trim().removePrefix("@")
+        if (cleaned.isBlank()) {
+            return "?"
+        }
+        val parts = cleaned.split(Regex("[\\s._-]+")).filter { it.isNotBlank() }
+        return when {
+            parts.size >= 2 -> "${parts.first().first()}${parts.last().first()}".uppercase()
+            cleaned.length >= 2 -> cleaned.take(2).uppercase()
+            else -> cleaned.uppercase()
+        }
     }
 
     private fun removeContact(contactUserId: String) {

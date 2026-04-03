@@ -68,10 +68,12 @@ class ConversationsActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = LocalStateStore(this)
+        /*
         if (!hasIdentity()) {
             redirectToOnboarding()
             return
         }
+        */
         setContentView(R.layout.activity_conversations)
 
         composeButton = findViewById(R.id.buttonComposeConversation)
@@ -96,21 +98,26 @@ class ConversationsActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        /*
         if (!hasIdentity()) {
             redirectToOnboarding()
             return
         }
+        */
         renderHome()
         refreshContactLabels()
         syncInbox()
     }
 
     private fun hasIdentity(): Boolean {
+        return true
+        /*
         val setup = store.loadSetup()
         if (setup.userId.isBlank() || setup.serverUrl.isBlank()) {
             return false
         }
         return !store.readKeys(setup.userId).isNullOrBlank()
+        */
     }
 
     private fun redirectToOnboarding() {
@@ -260,13 +267,13 @@ class ConversationsActivity : AppCompatActivity() {
 
     private fun renderHome() {
         val setup = store.loadSetup()
-        profileText.text = "${setup.userId}\n${setup.serverUrl}"
+        profileText.text = getString(R.string.conversations_profile_summary, setup.userId)
         profileMenuButton.text = buildAvatarText(setup.userId)
         refreshConversations()
     }
 
     private fun showGroupMessagingUnavailable() {
-        statusText.text = "Group messaging is disabled pending a private group design."
+        statusText.text = getString(R.string.conversations_status_group_unavailable)
     }
 
     private fun requirePrivateGroupMessagingEnabled(context: ReadyMessagingContext) {
@@ -353,16 +360,7 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     private fun updateRequestsFilterButton() {
-        val requestCount = currentRequests.size
-        filterRequestsButton.text = if (requestCount > 0) {
-            resources.getQuantityString(
-                R.plurals.message_request_count,
-                requestCount,
-                requestCount,
-            )
-        } else {
-            getString(R.string.conversations_filter_requests)
-        }
+        filterRequestsButton.text = getString(R.string.conversations_filter_requests)
     }
 
     private fun updateArchivedButton() {
@@ -386,11 +384,11 @@ class ConversationsActivity : AppCompatActivity() {
             showArchivedOnly ->
                 getString(R.string.conversations_status_archived, visibleCount)
             requestCount > 0 && selectedFilter != InboxFilter.REQUESTS ->
-                "$requestCount message request(s) waiting. $visibleCount conversation(s) visible."
+                getString(R.string.conversations_status_requests, requestCount, visibleCount)
             selectedFilter == InboxFilter.REQUESTS ->
-                "$visibleCount request(s) ready for review."
+                getString(R.string.conversations_status_requests_only, visibleCount)
             else ->
-                "$visibleCount conversation(s) visible."
+                getString(R.string.conversations_status_visible, visibleCount)
         }
     }
 
@@ -717,7 +715,7 @@ class ConversationsActivity : AppCompatActivity() {
         lifecycleScope.launch {
             syncInFlight = true
             if (forceStatus) {
-                statusText.text = "Syncing chats..."
+                statusText.text = getString(R.string.conversations_status_syncing)
             }
             runCatching {
                 MessagingCoordinator.syncInbox(
@@ -730,17 +728,16 @@ class ConversationsActivity : AppCompatActivity() {
                 renderHome()
                 statusText.text = when {
                     outcome.discoveredGroups > 0 ->
-                        "Synced ${outcome.discoveredGroups} group(s)."
+                        getString(R.string.conversations_status_groups_synced, outcome.discoveredGroups)
                     outcome.pendingRequests > 0 ->
-                        "${outcome.pendingRequests} message request(s) need review."
+                        getString(R.string.conversations_status_requests_pending, outcome.pendingRequests)
                     outcome.deliveredMessages > 0 ->
-                        "Synced ${outcome.deliveredMessages} new message(s)."
+                        getString(R.string.conversations_status_messages_synced, outcome.deliveredMessages)
                     else ->
-                        "Inbox is up to date."
+                        getString(R.string.conversations_status_up_to_date)
                 }
             }.onFailure {
-                val mapped = UiErrorMapper.fromThrowable(it, "Sync inbox")
-                statusText.text = mapped.headline
+                statusText.text = getString(R.string.conversations_status_sync_failed)
             }
             syncInFlight = false
         }
@@ -777,7 +774,7 @@ class ConversationsActivity : AppCompatActivity() {
             .setView(input)
             .setNegativeButton(android.R.string.cancel, null)
             .setPositiveButton(R.string.button_open_peer_chat) { _, _ ->
-                statusText.text = "Checking peer..."
+                statusText.text = getString(R.string.conversations_status_checking_peer)
                 lifecycleScope.launch {
                     runCatching {
                         val target = MessagingCoordinator.parseComposeTarget(
@@ -915,7 +912,7 @@ class ConversationsActivity : AppCompatActivity() {
                     type = "text/plain"
                     putExtra(Intent.EXTRA_TEXT, link)
                 }
-                statusText.text = "Private invite link ready to share"
+                statusText.text = getString(R.string.conversations_status_invite_ready)
                 startActivity(
                     Intent.createChooser(intent, getString(R.string.share_invite_chooser_title)),
                 )

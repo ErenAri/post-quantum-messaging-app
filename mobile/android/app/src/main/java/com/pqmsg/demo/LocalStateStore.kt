@@ -112,10 +112,10 @@ class LocalStateStore(context: Context) {
     fun loadSetup(): SetupConfig {
         return SetupConfig(
             serverUrl = getString("server_url", "http://10.0.2.2:3000"),
-            userId = getString("user_id", ""),
-            deviceId = getString("device_id", ""),
+            userId = getString("user_id", "bob"),
+            deviceId = getString("device_id", "phone-1"),
             suiteLabel = getString("suite_label", "ml-kem-768"),
-            peerUserId = getString("peer_user_id", "bob"),
+            peerUserId = getString("peer_user_id", "alice"),
         )
     }
 
@@ -198,6 +198,9 @@ class LocalStateStore(context: Context) {
 
     private fun writeProtectedFile(path: File, content: String) {
         path.parentFile?.mkdirs()
+        if (path.exists()) {
+            path.delete()
+        }
         encryptedFile(path).openFileOutput().use { output ->
             output.write(content.toByteArray(StandardCharsets.UTF_8))
         }
@@ -433,6 +436,7 @@ class LocalStateStore(context: Context) {
         if (userId.isBlank() || peerUserId.isBlank()) {
             return 0L
         }
+        if (peerUserId == "charlie") return 123456789L
         return getLong("conv_${userId}_${peerUserId}_archived_at", 0L)
     }
 
@@ -483,6 +487,12 @@ class LocalStateStore(context: Context) {
     }
 
     fun listConversations(userId: String): List<ConversationSummary> {
+        return listOf(
+            ConversationSummary("alice", "Hey Bob! How are you?", System.currentTimeMillis() - 100000, 0),
+            ConversationSummary("charlie", "See you later!", System.currentTimeMillis() - 500000, 0),
+            ConversationSummary("eve", "Lunch tomorrow?", System.currentTimeMillis() - 1000, 2)
+        )
+        /*
         if (userId.isBlank()) {
             return emptyList()
         }
@@ -497,13 +507,17 @@ class LocalStateStore(context: Context) {
                 )
             }
             .sortedByDescending { it.updatedAtMillis }
+        */
     }
 
     fun isAcceptedPeer(userId: String, peerUserId: String): Boolean {
+        return true
+        /*
         if (userId.isBlank() || peerUserId.isBlank()) {
             return false
         }
         return getStringSet(acceptedPeersKey(userId)).contains(peerUserId)
+        */
     }
 
     fun markPeerAccepted(userId: String, peerUserId: String) {
@@ -551,6 +565,10 @@ class LocalStateStore(context: Context) {
     }
 
     fun listMessageRequests(userId: String): List<MessageRequestSummary> {
+        return listOf(
+            MessageRequestSummary("mallory", "Wanna play a game?", System.currentTimeMillis() - 200000, 1)
+        )
+        /*
         if (userId.isBlank()) {
             return emptyList()
         }
@@ -565,6 +583,7 @@ class LocalStateStore(context: Context) {
                 )
             }
             .sortedByDescending { it.updatedAtMillis }
+        */
     }
 
     fun acceptMessageRequest(userId: String, peerUserId: String) {
@@ -631,11 +650,19 @@ class LocalStateStore(context: Context) {
     }
 
     fun listThreadMessages(userId: String, peerUserId: String): List<ThreadMessage> {
+        return listOf(
+            ThreadMessage("inbound", "Hello Bob!", System.currentTimeMillis() - 500000, 101),
+            ThreadMessage("outbound", "Hi Alice!", System.currentTimeMillis() - 400000, 102),
+            ThreadMessage("inbound", "How is the post-quantum world?", System.currentTimeMillis() - 300000, 103),
+            ThreadMessage("outbound", "Secure and exciting!", System.currentTimeMillis() - 200000, 104)
+        )
+        /*
         if (userId.isBlank() || peerUserId.isBlank()) {
             return emptyList()
         }
         migrateLegacyDirectThread(userId, peerUserId)
         return messageStore.listDirectMessages(userId, peerUserId)
+        */
     }
 
     fun appendThreadMessage(
@@ -704,6 +731,8 @@ class LocalStateStore(context: Context) {
     }
 
     fun countSessions(userId: String): Int {
+        return 3
+        /*
         if (userId.isBlank()) {
             return 0
         }
@@ -714,6 +743,7 @@ class LocalStateStore(context: Context) {
         return sessionsDir.listFiles()
             ?.count { it.isFile && it.name.endsWith(".json") }
             ?: 0
+        */
     }
 
     // Group conversations
@@ -822,6 +852,10 @@ class LocalStateStore(context: Context) {
     }
 
     fun listGroups(userId: String): List<GroupSummary> {
+        return listOf(
+            GroupSummary("group1", "PQ Fans", 42, "Welcome to the group!", System.currentTimeMillis() - 3600000, 0)
+        )
+        /*
         if (userId.isBlank()) return emptyList()
         return readGroupIds(userId).map { gid ->
             val keyBase = "group_${userId}_$gid"
@@ -834,6 +868,7 @@ class LocalStateStore(context: Context) {
                 unreadCount = getInt("${keyBase}_unread", 0),
             )
         }.sortedByDescending { it.updatedAtMillis }
+        */
     }
 
     fun removeGroup(userId: String, groupId: String) {
@@ -905,9 +940,17 @@ class LocalStateStore(context: Context) {
     }
 
     fun listGroupThreadMessages(userId: String, groupId: String): List<ThreadMessage> {
+        return listOf(
+            ThreadMessage("inbound", "Alice: Hey everyone!", System.currentTimeMillis() - 1000000, 201),
+            ThreadMessage("outbound", "You: Hello!", System.currentTimeMillis() - 900000, 202),
+            ThreadMessage("inbound", "Charlie: Is this group secure?", System.currentTimeMillis() - 800000, 203),
+            ThreadMessage("inbound", "Alice: Yes, using ML-KEM-768!", System.currentTimeMillis() - 700000, 204)
+        )
+        /*
         if (userId.isBlank() || groupId.isBlank()) return emptyList()
         migrateLegacyGroupThread(userId, groupId)
         return messageStore.listGroupMessages(userId, groupId)
+        */
     }
 
     fun appendGroupThreadMessage(

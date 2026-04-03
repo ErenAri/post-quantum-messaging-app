@@ -49,6 +49,13 @@
         android:layout_marginTop="8dp"
         android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="@string/discovery_header_intro"
+        android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
+
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -63,8 +70,15 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Add by username or invite"
+                android:text="@string/discovery_add_title"
                 android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/discovery_add_body"
+                android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
             <com.google.android.material.textfield.TextInputLayout
                 style="@style/Widget.PQMsg.TextInputLayout"
@@ -104,11 +118,20 @@
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/buttonTogglePrivateDiscovery"
+        style="@style/Widget.PQMsg.Button.Compact"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="@string/button_show_private_discovery"
+        android:visibility="gone" />
+
     <com.google.android.material.card.MaterialCardView
         android:id="@+id/cardPrivateDiscovery"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="8dp"
         android:visibility="gone">
 
         <LinearLayout
@@ -122,6 +145,13 @@
                 android:layout_height="wrap_content"
                 android:text="@string/private_discovery_title"
                 android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/discovery_private_body"
+                android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
             <TextView
                 android:id="@+id/textDiscoveryManifest"
@@ -220,8 +250,16 @@
                 android:layout_height="wrap_content"
                 android:paddingHorizontal="18dp"
                 android:paddingTop="18dp"
-                android:text="Contacts"
+                android:text="@string/discovery_saved_title"
                 android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingHorizontal="18dp"
+                android:paddingTop="4dp"
+                android:text="@string/discovery_saved_body"
+                android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
 
             <TextView
                 android:id="@+id/textContactsEmpty"

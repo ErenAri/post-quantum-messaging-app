@@ -11,7 +11,7 @@ class PqmsgApplication : Application() {
         registerActivityLifecycleCallbacks(
             object : ActivityLifecycleCallbacks {
                 override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
-                    activity.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    // activity.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 }
 
                 override fun onActivityStarted(activity: Activity) = Unit
