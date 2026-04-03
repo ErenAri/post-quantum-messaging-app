@@ -17,6 +17,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.PopupMenu
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -50,13 +51,14 @@ class GroupChatActivity : AppCompatActivity() {
     private lateinit var attachMediaButton: MaterialButton
     private lateinit var clearAttachmentButton: MaterialButton
     private lateinit var sendButton: MaterialButton
-    private lateinit var searchButton: MaterialButton
-    private lateinit var syncButton: MaterialButton
-    private lateinit var threadTipsButton: MaterialButton
+    private lateinit var moreButton: MaterialButton
     private lateinit var backButton: MaterialButton
     private lateinit var groupHeaderContainer: View
     private lateinit var groupMessages: ListView
+    private lateinit var groupEmptyLayout: View
+    private lateinit var groupEmptyTitle: TextView
     private lateinit var groupEmptyText: TextView
+    private lateinit var groupEmptyBackButton: MaterialButton
     private lateinit var selectionModeLayout: View
     private lateinit var selectionCountText: TextView
     private lateinit var selectionCopyButton: MaterialButton
@@ -135,13 +137,14 @@ class GroupChatActivity : AppCompatActivity() {
         attachMediaButton = findViewById(R.id.buttonAttachGroupMedia)
         clearAttachmentButton = findViewById(R.id.buttonClearGroupAttachment)
         sendButton = findViewById(R.id.buttonSendGroup)
-        searchButton = findViewById(R.id.buttonGroupThreadSearch)
-        syncButton = findViewById(R.id.buttonSyncGroup)
-        threadTipsButton = findViewById(R.id.buttonGroupThreadTips)
+        moreButton = findViewById(R.id.buttonGroupThreadMore)
         backButton = findViewById(R.id.buttonBackFromGroup)
         groupHeaderContainer = findViewById(R.id.groupHeaderContainer)
         groupMessages = findViewById(R.id.listGroupMessages)
+        groupEmptyLayout = findViewById(R.id.layoutGroupEmptyState)
+        groupEmptyTitle = findViewById(R.id.textGroupEmptyTitle)
         groupEmptyText = findViewById(R.id.textGroupChatEmpty)
+        groupEmptyBackButton = findViewById(R.id.buttonGroupEmptyBack)
         selectionModeLayout = findViewById(R.id.layoutGroupSelectionMode)
         selectionCountText = findViewById(R.id.textGroupSelectionCount)
         selectionCopyButton = findViewById(R.id.buttonGroupSelectionCopy)
@@ -168,7 +171,7 @@ class GroupChatActivity : AppCompatActivity() {
             onOpenQuotedReply = { targetId -> jumpToReplySource(targetId) },
         )
         groupMessages.adapter = threadAdapter
-        groupMessages.emptyView = groupEmptyText
+        groupMessages.emptyView = groupEmptyLayout
         groupMessages.setOnItemClickListener { _, _, position, _ ->
             if (!isSelectionModeActive()) {
                 return@setOnItemClickListener
@@ -200,14 +203,13 @@ class GroupChatActivity : AppCompatActivity() {
         }
         configureSelectionMode()
         configureThreadSearch()
-        searchButton.setOnClickListener { openThreadSearch() }
-        threadTipsButton.setOnClickListener { showThreadTipsDialog() }
+        moreButton.setOnClickListener { anchor -> showThreadOverflowMenu(anchor) }
         sendButton.setOnClickListener {
             lifecycleScope.launch { runAction("Send group message") { sendGroupMessage() } }
         }
-        syncButton.setOnClickListener { syncGroupMessages() }
         groupHeaderContainer.setOnClickListener { showGroupInfo() }
         backButton.setOnClickListener { finish() }
+        groupEmptyBackButton.setOnClickListener { finish() }
 
         if (privateGroupState == null || privateGroupCredential == null) {
             renderUnavailableState()
@@ -246,7 +248,7 @@ class GroupChatActivity : AppCompatActivity() {
         messageInput.isEnabled = false
         renderAttachmentInfo()
         sendButton.isEnabled = false
-        syncButton.isEnabled = true
+        moreButton.isEnabled = true
         threadAdapter.submitList(emptyList())
         threadAdapter.setSearchState(emptySet(), null)
         searchInput.setText("")
@@ -255,8 +257,11 @@ class GroupChatActivity : AppCompatActivity() {
         searchNextButton.isEnabled = false
         searchModeLayout.visibility = View.GONE
         renderSelectionMode()
+        groupEmptyTitle.visibility = View.VISIBLE
+        groupEmptyTitle.text = getString(R.string.group_missing_state_title)
         groupEmptyText.text = getString(R.string.group_missing_state_message)
-        metaText.text = getString(R.string.group_missing_state_hint)
+        groupEmptyBackButton.visibility = View.VISIBLE
+        metaText.text = getString(R.string.group_meta_state_needed)
         renderReplyPreview()
         syncThreadSearch(scrollToActive = false)
     }
@@ -267,6 +272,42 @@ class GroupChatActivity : AppCompatActivity() {
             .setMessage(getString(R.string.thread_tips_group_body))
             .setPositiveButton(android.R.string.ok, null)
             .show()
+    }
+
+    private fun showThreadOverflowMenu(anchor: View) {
+        PopupMenu(this, anchor).apply {
+            menu.add(0, 1, 0, getString(R.string.button_thread_info))
+            if (hasGroupThreadAccess()) {
+                menu.add(0, 2, 1, getString(R.string.button_thread_search))
+            }
+            menu.add(0, 3, 2, getString(R.string.button_sync_thread))
+            menu.add(0, 4, 3, getString(R.string.button_thread_tips))
+            setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    1 -> {
+                        showGroupInfo()
+                        true
+                    }
+                    2 -> {
+                        if (hasGroupThreadAccess()) {
+                            openThreadSearch()
+                        } else {
+                            syncGroupMessages()
+                        }
+                        true
+                    }
+                    3 -> {
+                        syncGroupMessages()
+                        true
+                    }
+                    4 -> {
+                        showThreadTipsDialog()
+                        true
+                    }
+                    else -> false
+                }
+            }
+        }.show()
     }
 
     private fun maybeShowThreadTipsOnFirstOpen() {
@@ -440,13 +481,11 @@ class GroupChatActivity : AppCompatActivity() {
     private fun syncActions() {
         val hasThreadAccess = hasGroupThreadAccess()
         updateComposerVisibility()
-        searchButton.visibility = if (hasThreadAccess) View.VISIBLE else View.GONE
-        searchButton.isEnabled = hasThreadAccess
         if (isSelectionModeActive()) {
             attachMediaButton.isEnabled = false
             clearAttachmentButton.isEnabled = false
             sendButton.isEnabled = false
-            syncButton.isEnabled = false
+            moreButton.isEnabled = false
             return
         }
         val hasText = messageInput.text.toString().isNotBlank()
@@ -455,23 +494,26 @@ class GroupChatActivity : AppCompatActivity() {
         clearAttachmentButton.isEnabled = hasAttachment && !syncInFlight
         sendButton.isEnabled =
             (hasText || hasAttachment) && !syncInFlight && hasThreadAccess
-        syncButton.isEnabled = !syncInFlight && localStoreAvailable
+        moreButton.isEnabled = !syncInFlight && localStoreAvailable
     }
 
     private fun renderAttachmentInfo() {
         if (isSelectionModeActive() || !hasGroupThreadAccess()) {
             attachmentPreviewCard.visibility = View.GONE
+            clearAttachmentButton.visibility = View.GONE
             return
         }
         val attachment = pendingAttachment
         if (attachment == null) {
             attachmentPreviewCard.visibility = View.GONE
+            clearAttachmentButton.visibility = View.GONE
             attachmentTitle.text = getString(R.string.chat_attachment_none_title)
             attachmentInfo.text = getString(R.string.chat_attachment_none)
             messageInput.hint = getString(R.string.hint_message)
             return
         }
         attachmentPreviewCard.visibility = View.VISIBLE
+        clearAttachmentButton.visibility = View.VISIBLE
         val attachmentType = when {
             attachment.mimeType.startsWith("image/") -> "Photo"
             attachment.mimeType.startsWith("video/") -> "Video"
@@ -1417,7 +1459,9 @@ class GroupChatActivity : AppCompatActivity() {
             threadAdapter.submitList(messages)
             syncSelectionAfterThreadUpdate()
             syncThreadSearch(scrollToActive = false)
+            groupEmptyTitle.visibility = View.GONE
             groupEmptyText.text = getString(R.string.group_chat_log_empty)
+            groupEmptyBackButton.visibility = View.GONE
             groupMessages.post {
                 if (messages.isNotEmpty() && !isSelectionModeActive()) {
                     groupMessages.setSelection(messages.lastIndex)
@@ -1430,7 +1474,10 @@ class GroupChatActivity : AppCompatActivity() {
             threadAdapter.submitList(emptyList())
             syncSelectionAfterThreadUpdate()
             syncThreadSearch(scrollToActive = false)
+            groupEmptyTitle.visibility = View.VISIBLE
+            groupEmptyTitle.text = getString(R.string.group_local_history_unavailable_title)
             groupEmptyText.text = getString(R.string.group_local_history_unavailable)
+            groupEmptyBackButton.visibility = View.VISIBLE
         }
         syncActions()
     }

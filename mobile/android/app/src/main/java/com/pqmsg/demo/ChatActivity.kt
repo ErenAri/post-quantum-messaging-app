@@ -17,6 +17,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.PopupMenu
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import com.google.gson.Gson
@@ -52,9 +53,7 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var attachMediaButton: Button
     private lateinit var clearAttachmentButton: Button
     private lateinit var sendButton: Button
-    private lateinit var searchButton: Button
-    private lateinit var syncButton: Button
-    private lateinit var threadTipsButton: Button
+    private lateinit var moreButton: Button
     private lateinit var backButton: Button
     private lateinit var chatHeaderContainer: View
     private lateinit var chatMessages: ListView
@@ -154,9 +153,7 @@ class ChatActivity : AppCompatActivity() {
         attachMediaButton = findViewById(R.id.buttonAttachMedia)
         clearAttachmentButton = findViewById(R.id.buttonClearAttachment)
         sendButton = findViewById(R.id.buttonSend)
-        searchButton = findViewById(R.id.buttonThreadSearch)
-        syncButton = findViewById(R.id.buttonSyncThread)
-        threadTipsButton = findViewById(R.id.buttonThreadTips)
+        moreButton = findViewById(R.id.buttonThreadMore)
         backButton = findViewById(R.id.buttonBackSetup)
         chatHeaderContainer = findViewById(R.id.chatHeaderContainer)
         chatMessages = findViewById(R.id.listChatMessages)
@@ -232,14 +229,8 @@ class ChatActivity : AppCompatActivity() {
             }
         }
 
-        syncButton.setOnClickListener {
-            syncThread()
-        }
-        searchButton.setOnClickListener {
-            openThreadSearch()
-        }
-        threadTipsButton.setOnClickListener {
-            showThreadTipsDialog()
+        moreButton.setOnClickListener { anchor ->
+            showThreadOverflowMenu(anchor)
         }
 
         chatHeaderContainer.setOnClickListener {
@@ -278,6 +269,38 @@ class ChatActivity : AppCompatActivity() {
             .setMessage(getString(R.string.thread_tips_direct_body))
             .setPositiveButton(android.R.string.ok, null)
             .show()
+    }
+
+    private fun showThreadOverflowMenu(anchor: View) {
+        PopupMenu(this, anchor).apply {
+            menu.add(0, 1, 0, getString(R.string.button_thread_info))
+            menu.add(0, 2, 1, getString(R.string.button_thread_search))
+            menu.add(0, 3, 2, getString(R.string.button_sync_thread))
+            menu.add(0, 4, 3, getString(R.string.button_thread_tips))
+            setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    1 -> {
+                        lifecycleScope.launch {
+                            showChatInfoDialog()
+                        }
+                        true
+                    }
+                    2 -> {
+                        openThreadSearch()
+                        true
+                    }
+                    3 -> {
+                        syncThread()
+                        true
+                    }
+                    4 -> {
+                        showThreadTipsDialog()
+                        true
+                    }
+                    else -> false
+                }
+            }
+        }.show()
     }
 
     private fun maybeShowThreadTipsOnFirstOpen() {
@@ -1081,14 +1104,14 @@ class ChatActivity : AppCompatActivity() {
         if (isSelectionModeActive()) {
             sendButton.isEnabled = false
             clearAttachmentButton.isEnabled = false
-            syncButton.isEnabled = false
+            moreButton.isEnabled = false
             return
         }
         val hasPayload = messageInput.text.toString().isNotBlank() || pendingAttachment != null
         val hasIdentity = hasIdentity()
         sendButton.isEnabled = hasPayload && hasIdentity && localStoreAvailable && !syncInFlight
         clearAttachmentButton.isEnabled = pendingAttachment != null
-        syncButton.isEnabled = hasIdentity && localStoreAvailable && !syncInFlight
+        moreButton.isEnabled = hasIdentity && localStoreAvailable && !syncInFlight
     }
 
     private fun threadMessageKey(message: ThreadMessage): String = threadAdapter.messageKey(message)
@@ -1426,17 +1449,20 @@ class ChatActivity : AppCompatActivity() {
     private fun renderAttachmentInfo() {
         if (isSelectionModeActive()) {
             attachmentPreviewCard.visibility = View.GONE
+            clearAttachmentButton.visibility = View.GONE
             return
         }
         val attachment = pendingAttachment
         if (attachment == null) {
             attachmentPreviewCard.visibility = View.GONE
+            clearAttachmentButton.visibility = View.GONE
             attachmentTitle.text = getString(R.string.chat_attachment_none_title)
             attachmentInfo.text = getString(R.string.chat_attachment_none)
             messageInput.hint = getString(R.string.hint_message)
             return
         }
         attachmentPreviewCard.visibility = View.VISIBLE
+        clearAttachmentButton.visibility = View.VISIBLE
         val attachmentType = when {
             attachment.mimeType.startsWith("image/") -> "Photo"
             attachment.mimeType.startsWith("video/") -> "Video"

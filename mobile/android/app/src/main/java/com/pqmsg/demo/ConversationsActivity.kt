@@ -11,7 +11,10 @@ import android.widget.ListView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.PopupMenu
+import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.button.MaterialButton
 import com.google.android.material.snackbar.Snackbar
 import com.google.gson.Gson
 import kotlinx.coroutines.launch
@@ -35,9 +38,9 @@ class ConversationsActivity : AppCompatActivity() {
 
     private val gson = Gson()
     private lateinit var store: LocalStateStore
-    private lateinit var composeButton: Button
-    private lateinit var refreshButton: Button
-    private lateinit var archivedButton: Button
+    private lateinit var composeButton: MaterialButton
+    private lateinit var searchButton: MaterialButton
+    private lateinit var archivedButton: MaterialButton
     private lateinit var profileMenuButton: TextView
     private lateinit var filterAllButton: Button
     private lateinit var filterUnreadButton: Button
@@ -46,16 +49,22 @@ class ConversationsActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var profileText: TextView
     private lateinit var emptyText: TextView
+    private lateinit var searchModeLayout: View
+    private lateinit var searchInput: EditText
+    private lateinit var searchCloseButton: MaterialButton
+    private lateinit var composeRow: View
     private lateinit var conversationsList: ListView
     private lateinit var adapter: ConversationSummaryAdapter
     private var currentConversations: List<ConversationSummary> = emptyList()
     private var currentGroups: List<GroupSummary> = emptyList()
     private var currentRequests: List<MessageRequestSummary> = emptyList()
     private var currentInboxItems: List<InboxListItem> = emptyList()
+    private var visibleInboxItems: List<InboxListItem> = emptyList()
     private var currentContactsByPeer: Map<String, ContactListItem> = emptyMap()
     private var selectedFilter = InboxFilter.ALL
     private var showArchivedOnly = false
     private var syncInFlight = false
+    private var inboxSearchQuery = ""
     private var listTouchStartX = 0f
     private var listTouchStartY = 0f
     private var listTouchStartPosition = AdapterView.INVALID_POSITION
@@ -77,7 +86,7 @@ class ConversationsActivity : AppCompatActivity() {
         setContentView(R.layout.activity_conversations)
 
         composeButton = findViewById(R.id.buttonComposeConversation)
-        refreshButton = findViewById(R.id.buttonRefreshConversations)
+        searchButton = findViewById(R.id.buttonSearchConversations)
         archivedButton = findViewById(R.id.buttonArchivedConversations)
         profileMenuButton = findViewById(R.id.textProfileMenu)
         filterAllButton = findViewById(R.id.buttonFilterAll)
@@ -87,6 +96,10 @@ class ConversationsActivity : AppCompatActivity() {
         statusText = findViewById(R.id.textConversationsStatus)
         profileText = findViewById(R.id.textCurrentProfile)
         emptyText = findViewById(R.id.textConversationsEmpty)
+        searchModeLayout = findViewById(R.id.layoutConversationSearchMode)
+        searchInput = findViewById(R.id.editConversationSearch)
+        searchCloseButton = findViewById(R.id.buttonCloseConversationSearch)
+        composeRow = findViewById(R.id.layoutConversationComposeRow)
         conversationsList = findViewById(R.id.listConversations)
         adapter = ConversationSummaryAdapter(this)
         conversationsList.adapter = adapter
@@ -130,16 +143,16 @@ class ConversationsActivity : AppCompatActivity() {
             handleInboxSwipeGesture(event)
         }
         conversationsList.setOnItemClickListener { _, _, position, _ ->
-            val item = currentInboxItems.getOrNull(position) ?: return@setOnItemClickListener
+            val item = visibleInboxItems.getOrNull(position) ?: return@setOnItemClickListener
             when (item.kind) {
                 InboxItemKind.DIRECT -> openChat(item.id)
                 InboxItemKind.GROUP -> openGroup(item.id)
                 InboxItemKind.REQUEST -> showMessageRequestDialog(item.id)
             }
         }
-        conversationsList.setOnItemLongClickListener { _, _, position, _ ->
-            val item = currentInboxItems.getOrNull(position) ?: return@setOnItemLongClickListener false
-            showInboxItemActions(item)
+        conversationsList.setOnItemLongClickListener { _, view, position, _ ->
+            val item = visibleInboxItems.getOrNull(position) ?: return@setOnItemLongClickListener false
+            showInboxItemActions(item, view)
             true
         }
     }
@@ -151,7 +164,7 @@ class ConversationsActivity : AppCompatActivity() {
                 listTouchStartX = event.x
                 listTouchStartY = event.y
                 listTouchStartPosition = conversationsList.pointToPosition(event.x.toInt(), event.y.toInt())
-                activeSwipeItem = currentInboxItems.getOrNull(listTouchStartPosition)?.takeIf {
+                activeSwipeItem = visibleInboxItems.getOrNull(listTouchStartPosition)?.takeIf {
                     it.kind == InboxItemKind.DIRECT || it.kind == InboxItemKind.GROUP
                 }
                 activeSwipeContent = findSwipeContentView(listTouchStartPosition)
@@ -256,13 +269,18 @@ class ConversationsActivity : AppCompatActivity() {
 
     private fun configureButtons() {
         composeButton.setOnClickListener { showComposeChooser() }
-        refreshButton.setOnClickListener { syncInbox(forceStatus = true) }
+        searchButton.setOnClickListener { toggleSearchMode(true) }
         archivedButton.setOnClickListener { toggleArchivedView() }
         profileMenuButton.setOnClickListener { showProfileMenu() }
         filterAllButton.setOnClickListener { selectFilter(InboxFilter.ALL) }
         filterUnreadButton.setOnClickListener { selectFilter(InboxFilter.UNREAD) }
         filterGroupsButton.setOnClickListener { selectFilter(InboxFilter.GROUPS) }
         filterRequestsButton.setOnClickListener { selectFilter(InboxFilter.REQUESTS) }
+        searchCloseButton.setOnClickListener { toggleSearchMode(false) }
+        searchInput.doAfterTextChanged {
+            inboxSearchQuery = it?.toString().orEmpty().trim()
+            refreshConversations()
+        }
     }
 
     private fun renderHome() {
@@ -288,11 +306,12 @@ class ConversationsActivity : AppCompatActivity() {
         currentGroups = store.listGroups(user)
         currentRequests = store.listMessageRequests(user)
         currentInboxItems = buildInboxItems()
-        adapter.submitList(currentInboxItems)
+        visibleInboxItems = applyInboxSearch(currentInboxItems)
+        adapter.submitList(visibleInboxItems)
         updateArchivedButton()
         updateFilterButtons()
         updateRequestsFilterButton()
-        if (currentInboxItems.isEmpty()) {
+        if (visibleInboxItems.isEmpty()) {
             conversationsList.visibility = View.GONE
             emptyText.visibility = View.VISIBLE
             emptyText.text = emptyStateMessage()
@@ -379,7 +398,10 @@ class ConversationsActivity : AppCompatActivity() {
 
     private fun statusSummary(): String {
         val requestCount = currentRequests.size
-        val visibleCount = currentInboxItems.size
+        val visibleCount = visibleInboxItems.size
+        if (inboxSearchQuery.isNotBlank()) {
+            return getString(R.string.conversations_status_search_results, visibleCount)
+        }
         return when {
             showArchivedOnly ->
                 getString(R.string.conversations_status_archived, visibleCount)
@@ -393,6 +415,9 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     private fun emptyStateMessage(): String {
+        if (inboxSearchQuery.isNotBlank()) {
+            return getString(R.string.conversations_empty_search)
+        }
         if (showArchivedOnly) {
             return getString(R.string.conversations_empty_archived)
         }
@@ -484,6 +509,19 @@ class ConversationsActivity : AppCompatActivity() {
         )
     }
 
+    private fun applyInboxSearch(items: List<InboxListItem>): List<InboxListItem> {
+        val query = inboxSearchQuery.trim()
+        if (query.isBlank()) {
+            return items
+        }
+        val needle = query.lowercase()
+        return items.filter { item ->
+            listOfNotNull(item.title, item.secondaryLabel, item.kindBadge, item.preview).any { candidate ->
+                candidate.lowercase().contains(needle)
+            }
+        }
+    }
+
     private fun archivedConversationCount(): Int {
         val userId = store.loadSetup().userId
         val directArchived = currentConversations.count {
@@ -500,6 +538,23 @@ class ConversationsActivity : AppCompatActivity() {
         refreshConversations()
     }
 
+    private fun toggleSearchMode(enabled: Boolean) {
+        if (enabled) {
+            searchModeLayout.visibility = View.VISIBLE
+            composeRow.visibility = View.GONE
+            searchButton.visibility = View.GONE
+            searchInput.requestFocus()
+        } else {
+            inboxSearchQuery = ""
+            searchInput.setText("")
+            searchModeLayout.visibility = View.GONE
+            composeRow.visibility = View.VISIBLE
+            searchButton.visibility = View.VISIBLE
+            searchInput.clearFocus()
+        }
+        refreshConversations()
+    }
+
     private fun buildAvatarText(label: String): String {
         val trimmed = label.trim()
         if (trimmed.isEmpty()) {
@@ -513,30 +568,25 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     private fun showProfileMenu() {
-        val options = listOf(
-            getString(R.string.profile_menu_contacts) to {
-                startActivity(Intent(this, ContactDiscoveryActivity::class.java))
-            },
-            getString(R.string.profile_menu_share_invite) to {
-                shareInvite()
-            },
-            getString(R.string.profile_menu_security) to {
-                startActivity(Intent(this, SecurityInfoActivity::class.java))
-            },
-            getString(R.string.profile_menu_refresh) to {
-                syncInbox(forceStatus = true)
-            },
-        )
-        AlertDialog.Builder(this)
-            .setTitle(R.string.profile_menu_title)
-            .setItems(options.map { it.first }.toTypedArray()) { _, which ->
-                options[which].second.invoke()
+        PopupMenu(this, profileMenuButton).apply {
+            menu.add(0, 1, 0, getString(R.string.profile_menu_contacts))
+            menu.add(0, 2, 1, getString(R.string.profile_menu_share_invite))
+            menu.add(0, 3, 2, getString(R.string.profile_menu_security))
+            menu.add(0, 4, 3, getString(R.string.profile_menu_refresh))
+            setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    1 -> startActivity(Intent(this@ConversationsActivity, ContactDiscoveryActivity::class.java))
+                    2 -> shareInvite()
+                    3 -> startActivity(Intent(this@ConversationsActivity, SecurityInfoActivity::class.java))
+                    4 -> syncInbox(forceStatus = true)
+                }
+                true
             }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+            show()
+        }
     }
 
-    private fun showInboxItemActions(item: InboxListItem) {
+    private fun showInboxItemActions(item: InboxListItem, anchor: View) {
         val options = when (item.kind) {
             InboxItemKind.DIRECT -> listOf(
                 getString(R.string.inbox_action_open_chat) to { openChat(item.id) },
@@ -580,13 +630,16 @@ class ConversationsActivity : AppCompatActivity() {
                 getString(R.string.inbox_action_ignore_request) to { ignoreMessageRequestQuick(item.id) },
             )
         }
-        AlertDialog.Builder(this)
-            .setTitle(item.title)
-            .setItems(options.map { it.first }.toTypedArray()) { _, which ->
-                options[which].second.invoke()
+        PopupMenu(this, anchor).apply {
+            options.forEachIndexed { index, option ->
+                menu.add(0, index + 1, index, option.first)
             }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+            setOnMenuItemClickListener { menuItem ->
+                options.getOrNull(menuItem.itemId - 1)?.second?.invoke()
+                true
+            }
+            show()
+        }
     }
 
     private fun markDirectConversationRead(peerUserId: String) {
@@ -744,22 +797,20 @@ class ConversationsActivity : AppCompatActivity() {
     }
 
     private fun showComposeChooser() {
-        val options = arrayOf(
-            getString(R.string.compose_option_message),
-            getString(R.string.compose_option_create_group),
-            getString(R.string.compose_option_join_group),
-        )
-        AlertDialog.Builder(this)
-            .setTitle(R.string.compose_dialog_title)
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> showComposeDialog()
-                    1 -> showCreateGroupDialog()
-                    2 -> showJoinPrivateGroupDialog()
+        PopupMenu(this, composeButton).apply {
+            menu.add(0, 1, 0, getString(R.string.compose_option_message))
+            menu.add(0, 2, 1, getString(R.string.compose_option_create_group))
+            menu.add(0, 3, 2, getString(R.string.compose_option_join_group))
+            setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    1 -> showComposeDialog()
+                    2 -> showCreateGroupDialog()
+                    3 -> showJoinPrivateGroupDialog()
                 }
+                true
             }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+            show()
+        }
     }
 
     private fun showComposeDialog() {

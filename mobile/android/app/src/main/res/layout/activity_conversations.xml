@@ -36,17 +36,29 @@
         </LinearLayout>
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/buttonRefreshConversations"
+            android:id="@+id/buttonSearchConversations"
+            style="@style/Widget.PQMsg.Button.Icon"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:contentDescription="@string/button_search_conversations"
+            app:icon="@drawable/ic_search_20" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonArchivedConversations"
             style="@style/Widget.PQMsg.Button.Compact"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="@string/button_refresh_conversations" />
+            android:layout_marginStart="8dp"
+            android:text="@string/button_open_archived_conversations"
+            android:visibility="gone"
+            app:icon="@drawable/ic_archive_18"
+            app:iconPadding="6dp" />
 
         <TextView
             android:id="@+id/textProfileMenu"
             android:layout_width="42dp"
             android:layout_height="42dp"
-            android:layout_marginStart="10dp"
+            android:layout_marginStart="8dp"
             android:background="@drawable/bg_avatar_circle"
             android:clickable="true"
             android:focusable="true"
@@ -70,28 +82,57 @@
         android:textAppearance="@style/TextAppearance.PQMsg.CaptionStrong" />
 
     <LinearLayout
+        android:id="@+id/layoutConversationSearchMode"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="10dp"
         android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.PQMsg.TextInputLayout"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            app:hintEnabled="false">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/editConversationSearch"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="@string/conversations_search_hint"
+                android:imeOptions="actionSearch"
+                android:maxLines="1" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonCloseConversationSearch"
+            style="@style/Widget.PQMsg.Button.Icon"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="8dp"
+            android:contentDescription="@string/thread_search_close"
+            app:icon="@drawable/ic_close_20" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/layoutConversationComposeRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
         android:orientation="horizontal">
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/buttonComposeConversation"
-            style="@style/Widget.PQMsg.Button.Primary"
+            style="@style/Widget.PQMsg.Button.Compose"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="@string/button_compose_conversation" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/buttonArchivedConversations"
-            style="@style/Widget.PQMsg.Button.Compact"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
-            android:text="@string/button_open_archived_conversations"
-            android:visibility="gone" />
+            android:text="@string/button_compose_conversation"
+            app:icon="@drawable/ic_edit_20"
+            app:iconPadding="8dp"
+            app:iconTint="@color/pq_hero" />
     </LinearLayout>
 
     <LinearLayout
@@ -148,7 +189,7 @@
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="10dp"
         android:layout_weight="1">
 
         <FrameLayout
@@ -160,9 +201,11 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:layout_marginTop="4dp"
+                android:clipToPadding="false"
                 android:divider="@android:color/transparent"
                 android:dividerHeight="0dp"
-                android:listSelector="?attr/colorControlHighlight" />
+                android:listSelector="?attr/colorControlHighlight"
+                android:paddingBottom="8dp" />
 
             <TextView
                 android:id="@+id/textConversationsEmpty"

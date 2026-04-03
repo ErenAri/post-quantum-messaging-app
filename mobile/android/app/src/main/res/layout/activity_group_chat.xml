@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/bg_screen"
@@ -16,16 +17,18 @@
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/buttonBackFromGroup"
-            style="@style/Widget.PQMsg.Button.Compact"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Back" />
+            style="@style/Widget.PQMsg.Button.Icon"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:contentDescription="@string/button_back"
+            app:icon="@drawable/ic_arrow_back_20" />
 
         <LinearLayout
             android:id="@+id/groupHeaderContainer"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginStart="10dp"
+            android:layout_marginEnd="8dp"
             android:layout_weight="1"
             android:background="?attr/selectableItemBackground"
             android:clickable="true"
@@ -52,37 +55,14 @@
                 android:layout_marginTop="4dp"
                 android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
         </LinearLayout>
-    </LinearLayout>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:gravity="end"
-        android:orientation="horizontal">
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/buttonGroupThreadSearch"
-            style="@style/Widget.PQMsg.Button.Toolbar"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/button_thread_search" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/buttonGroupThreadTips"
-            style="@style/Widget.PQMsg.Button.Toolbar"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="6dp"
-            android:text="@string/button_thread_tips" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/buttonSyncGroup"
-            style="@style/Widget.PQMsg.Button.Toolbar"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="6dp"
-            android:text="@string/button_sync_thread" />
+            android:id="@+id/buttonGroupThreadMore"
+            style="@style/Widget.PQMsg.Button.Icon"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:contentDescription="@string/button_more"
+            app:icon="@drawable/ic_more_vert_20" />
     </LinearLayout>
 
     <LinearLayout
@@ -229,14 +209,40 @@
             android:paddingHorizontal="8dp"
             android:transcriptMode="alwaysScroll" />
 
-        <TextView
-            android:id="@+id/textGroupChatEmpty"
+        <LinearLayout
+            android:id="@+id/layoutGroupEmptyState"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:gravity="center"
-            android:paddingHorizontal="22dp"
-            android:text="@string/group_chat_log_empty"
-            android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
+            android:orientation="vertical"
+            android:paddingHorizontal="28dp">
+
+            <TextView
+                android:id="@+id/textGroupEmptyTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/textGroupChatEmpty"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center"
+                android:text="@string/group_chat_log_empty"
+                android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonGroupEmptyBack"
+                style="@style/Widget.PQMsg.Button.Compact"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="@string/button_back_conversations"
+                android:visibility="gone" />
+        </LinearLayout>
     </FrameLayout>
 
     <com.google.android.material.card.MaterialCardView
@@ -302,64 +308,56 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
         android:background="@drawable/bg_composer_surface"
-        android:orientation="vertical"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
         android:padding="8dp">
 
-        <LinearLayout
-            android:layout_width="match_parent"
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonAttachGroupMedia"
+            style="@style/Widget.PQMsg.Button.Icon"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:contentDescription="@string/button_attach_media"
+            app:icon="@drawable/ic_add_20" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonClearGroupAttachment"
+            style="@style/Widget.PQMsg.Button.Icon"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="6dp"
+            android:contentDescription="@string/button_clear_attachment"
+            android:visibility="gone"
+            app:icon="@drawable/ic_close_20" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.PQMsg.TextInputLayout"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:gravity="start"
-            android:orientation="horizontal">
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            app:hintEnabled="false">
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonAttachGroupMedia"
-                style="@style/Widget.PQMsg.Button.Compact"
-                android:layout_width="wrap_content"
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/editGroupMessage"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/button_attach_media" />
+                android:gravity="top|start"
+                android:hint="@string/hint_message"
+                android:inputType="textMultiLine"
+                android:imeOptions="flagNoEnterAction"
+                android:maxHeight="144dp"
+                android:maxLines="5"
+                android:minLines="1" />
+        </com.google.android.material.textfield.TextInputLayout>
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonClearGroupAttachment"
-                style="@style/Widget.PQMsg.Button.Compact"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:text="@string/button_clear_attachment" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:gravity="bottom"
-            android:orientation="horizontal">
-
-            <com.google.android.material.textfield.TextInputLayout
-                style="@style/Widget.PQMsg.TextInputLayout"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:hint="@string/hint_message">
-
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/editGroupMessage"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="top|start"
-                    android:inputType="textMultiLine"
-                    android:imeOptions="flagNoEnterAction"
-                    android:maxHeight="144dp"
-                    android:maxLines="5"
-                    android:minLines="1" />
-            </com.google.android.material.textfield.TextInputLayout>
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonSendGroup"
-                style="@style/Widget.PQMsg.Button.Primary"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:text="@string/button_send" />
-        </LinearLayout>
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonSendGroup"
+            style="@style/Widget.PQMsg.Button.IconPrimary"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="8dp"
+            android:contentDescription="@string/button_send"
+            app:icon="@drawable/ic_send_20" />
     </LinearLayout>
 </LinearLayout>
