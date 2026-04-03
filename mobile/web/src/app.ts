@@ -2628,43 +2628,24 @@ function renderConversations(): void {
       ${renderWorkspaceSidebar(visibleRows, counts)}
       <section class="workspace-preview-pane">
         <div class="workspace-preview-card">
-          <span class="workspace-kicker">Messages</span>
-          <h2>Choose a conversation</h2>
-          <p class="workspace-preview-copy">Keep the inbox anchored on the left while chats, groups, and settings open in the main workspace.</p>
-          <div class="workspace-stat-grid">
-            <div class="workspace-stat-card">
-              <strong>${counts.unread}</strong>
-              <span>Unread</span>
-            </div>
-            <div class="workspace-stat-card">
-              <strong>${counts.groups}</strong>
-              <span>Groups</span>
-            </div>
-            <div class="workspace-stat-card">
-              <strong>${counts.requests}</strong>
-              <span>Requests</span>
-            </div>
-            <div class="workspace-stat-card">
-              <strong>${counts.archived}</strong>
-              <span>Archived</span>
-            </div>
-          </div>
-          <div class="workspace-preview-actions">
-            <button id="workspace-preview-search" class="btn-primary">Search messages</button>
-            <button id="workspace-preview-settings" class="btn-secondary">Open settings</button>
-          </div>
-          <div class="beta-banner beta-banner-warning">
+          <span class="workspace-kicker">Inbox</span>
+          <h2>Pick up a conversation</h2>
+          <p class="workspace-preview-copy">Select a chat on the left to keep reading, reply, or jump into details.</p>
+          <p class="workspace-preview-meta">
+            <span>${counts.unread} unread</span>
+            <span>${counts.groups} groups</span>
+            <span>${counts.requests} requests</span>
+            <span>${counts.archived} archived</span>
+          </p>
+          <div class="workspace-preview-note" role="status" aria-live="polite">
             <strong>Web access on this server</strong>
-            <p>${escHtml(WEB_BETA_SCOPE_SUMMARY)}</p>
+            <span>${escHtml(WEB_BETA_SCOPE_SUMMARY)}</span>
           </div>
         </div>
       </section>
     </div>
   `;
   bindWorkspaceSidebarInteractions();
-  document.querySelector<HTMLButtonElement>("#workspace-preview-search")?.addEventListener("click", () => navigateTo({ screen: "search" }));
-  document.querySelector<HTMLButtonElement>("#workspace-preview-settings")?.addEventListener("click", () => navigateTo({ screen: "settings" }));
-
   // Start realtime delivery on the active inbox path.
   void connectRealtime();
   if (presenceSupported()) {
@@ -2856,9 +2837,8 @@ function renderWorkspaceSidebar(
           <button id="workspace-new-chat" class="btn-primary">New chat</button>
           <button id="workspace-new-group" class="btn-secondary">New group</button>
         </div>
-        <div class="workspace-summary-card" role="status" aria-live="polite">
-          <span class="workspace-summary-title">Stay anchored.</span>
-          <p class="workspace-summary-copy">Chats, groups, drafts, and archived threads stay nearby while the active view opens on the right.</p>
+        <div class="workspace-summary-inline" role="status" aria-live="polite">
+          <span class="workspace-summary-copy">Open chats and settings without losing your place.</span>
           ${archiveToggle}
         </div>
         <div class="filter-chip-bar workspace-filter-bar" role="tablist" aria-label="Inbox filters">
@@ -3317,11 +3297,16 @@ async function renderChat(peerId: string): Promise<void> {
     ? "Verified"
     : identityPin
       ? "Trusted"
-      : "Needs review";
+      : "Review safety";
+  const contextSummary = verifiedBySafetyNumber
+    ? "Safety number confirmed on this browser."
+    : identityPin
+      ? "Pinned on this browser."
+      : "Open Details to compare safety numbers.";
   const transparencySummary = transparencyCheckpoint
-    ? "Checked automatically"
-    : "Checked before send";
-  const headerStatus = [handleLabel, presenceText].filter(Boolean).join(" / ");
+    ? "Saved on this browser"
+    : "Checked on first send";
+  const headerStatus = [presenceText, handleLabel].filter(Boolean).join(" · ");
   let safetyNumber = "";
   if (identityPin?.identityPqSigPub?.trim() && directMessagingReady && hasLocalKeys(setup.userId)) {
     try {
@@ -3348,8 +3333,8 @@ async function renderChat(peerId: string): Promise<void> {
     avatarText: identity.avatarText,
     title: displayName,
     subtitle: handleLabel || "Secure chat",
-    body: "This is the start of your conversation on this browser. Open Details when you need safety, shared media, or archive controls.",
-    pills: [trustSummary, transparencySummary],
+    body: "Start chatting here. Open Details when you need safety, shared media, or archive controls.",
+    pills: [trustSummary],
   });
   const requestBanner = meta.requestState === "pending"
     ? `
@@ -3406,7 +3391,7 @@ async function renderChat(peerId: string): Promise<void> {
       ${requestBanner}
       <div class="chat-context-strip" role="status" aria-live="polite">
         <span class="context-pill context-pill-secure">${escHtml(trustSummary)}</span>
-        <span class="context-pill">${escHtml(transparencySummary)}</span>
+        <span class="chat-context-copy">${escHtml(contextSummary)}</span>
         <button id="chat-open-details-inline" type="button" class="context-pill context-pill-link">Details</button>
       </div>
       <div id="thread-search-bar" class="thread-search-bar hidden" role="search">
@@ -4152,9 +4137,9 @@ async function renderChat(peerId: string): Promise<void> {
             : `You: Sent ${describeAttachmentKind(mimeType).toLowerCase()}`;
           upsertConversation(setup.userId, peerId, conversationPreview, false);
           markConversationRead(setup.userId, peerId);
-          refreshConversationsIfVisible();
           syncComposeValue("");
           clearPendingAttachment();
+          refreshActiveWorkspaceView();
         } catch (e) {
           notify(`Upload failed: ${errorMsg(e)}`, "error");
         }
@@ -4194,8 +4179,8 @@ async function renderChat(peerId: string): Promise<void> {
         await updateMessageStatus(tempId, "sent");
         upsertConversation(setup.userId, peerId, `You: ${text}`, false);
         markConversationRead(setup.userId, peerId);
-        refreshConversationsIfVisible();
         updateBubbleStatus(tempId, "sent");
+        refreshActiveWorkspaceView();
       } catch (e) {
         await updateMessageStatus(tempId, "failed");
         updateBubbleStatus(tempId, "failed");
@@ -4534,6 +4519,7 @@ async function renderChat(peerId: string): Promise<void> {
   detailSharedMediaCount.textContent = sharedMediaCount === 1 ? "1 item" : `${sharedMediaCount} items`;
   detailSharedMediaBtn.textContent = sharedMediaCount > 0 ? `Shared media (${sharedMediaCount})` : "Shared media";
   renderMessageList(msgList, history, threadIntroHtml);
+  refreshDirectConversationAfterLocalDelete(history);
   await syncSelection();
   syncThreadSearch(false);
   scrollToBottom(container);
@@ -4564,8 +4550,10 @@ function renderMessageList(container: HTMLElement, msgs: StoredMessage[], introH
   if (msgs[0]?.conversationId) {
     container.dataset.conversationId = msgs[0].conversationId;
   }
+  const chatShell = container.closest(".chat-shell");
+  chatShell?.classList.toggle("thread-has-messages", msgs.length > 0);
   container.innerHTML = "";
-  if (introHtml) {
+  if (introHtml && msgs.length === 0) {
     container.insertAdjacentHTML("beforeend", introHtml);
   }
   let lastDate = "";
@@ -4586,6 +4574,7 @@ function renderMessageList(container: HTMLElement, msgs: StoredMessage[], introH
 }
 
 function appendBubble(container: HTMLElement, msg: StoredMessage, scrollContainer: HTMLElement): void {
+  container.closest(".chat-shell")?.classList.add("thread-has-messages");
   // Date separator if needed
   const lastBubble = container.lastElementChild;
   const lastDate = lastBubble?.getAttribute("data-date") || "";
@@ -4601,6 +4590,7 @@ function appendBubble(container: HTMLElement, msg: StoredMessage, scrollContaine
   refreshReplyThreadDecorations(container);
   refreshThreadSearchDecorations(container);
   refreshMessageSelectionDecorations(container);
+  refreshWorkspaceSidebarIfVisible();
   scrollToBottom(scrollContainer);
 }
 
@@ -5212,9 +5202,9 @@ async function renderGroupChat(groupId: string): Promise<void> {
     title: groupTitle,
     subtitle: memberSummary,
     body: canManage
-      ? "Invite people from this browser when you are ready. Group membership and message history stay attached to the current private-group state."
+      ? "Invite people when you are ready. Group membership and history stay attached to this private group."
       : "Messages stay available here while membership updates continue from an owner device.",
-    pills: [canManage ? "Invite access" : "Member view", "Private group"],
+    pills: [canManage ? "Can invite" : "Member view"],
     group: true,
   });
   const { counts, visibleRows } = getWorkspaceInboxState({ kind: "group", threadId: groupId });
@@ -5254,8 +5244,9 @@ async function renderGroupChat(groupId: string): Promise<void> {
         </button>
       </header>
       <div class="chat-context-strip" role="status" aria-live="polite">
-        <span class="context-pill context-pill-secure">${canManage ? "Invite access" : "Member view"}</span>
-        <span class="context-pill">${canManage ? "You can add people from this browser." : "Membership changes happen from an owner device."}</span>
+        <span class="context-pill context-pill-secure">${canManage ? "Can invite" : "Member view"}</span>
+        <span class="chat-context-copy">${canManage ? "Invite people from this browser when you need to." : "Membership changes are managed from an owner device."}</span>
+        <button id="gc-open-details-inline" type="button" class="context-pill context-pill-link">Group info</button>
       </div>
       <div id="thread-search-bar" class="thread-search-bar hidden" role="search">
         <input id="thread-search-input" type="text" class="thread-search-input" placeholder="Search in conversation" autocomplete="off" aria-label="Search in conversation" />
@@ -5672,6 +5663,10 @@ async function renderGroupChat(groupId: string): Promise<void> {
     clearMessageSelection(conversationId);
     navigateTo({ screen: "group-info", groupId });
   });
+  q("#gc-open-details-inline").addEventListener("click", () => {
+    clearMessageSelection(conversationId);
+    navigateTo({ screen: "group-info", groupId });
+  });
   q("#gc-search").addEventListener("click", () => {
     openThreadSearch();
   });
@@ -5786,6 +5781,7 @@ async function renderGroupChat(groupId: string): Promise<void> {
   await syncPrivateGroupMessagesForGroup(groupId).catch(() => {});
   const history = await getMessages(conversationId);
   renderMessageList(msgList, history, threadIntroHtml);
+  refreshGroupConversationAfterLocalDelete(history);
   await syncSelection();
   syncThreadSearch(false);
   scrollToBottom(container);
@@ -6974,39 +6970,39 @@ async function renderSettings(): Promise<void> {
     }
   }
   const trustedContactsCount = cachedContacts.length;
-  const settingsSummaryCards = `
-    <div class="settings-summary-grid">
-      <article class="settings-summary-card">
-        <span class="settings-summary-kicker">People</span>
-        <strong>${trustedContactsCount}</strong>
-        <span>${trustedContactsCount === 1 ? "trusted contact" : "trusted contacts"}</span>
-        <p>${escHtml(
-          contactDiscoveryMode === "private_service"
-            ? "Manual contacts stay primary. Discovery is available as an advanced privacy surface."
-            : "Add people by exact username or invite link."
-        )}</p>
+  const settingsOverviewRows = `
+    <div class="settings-overview-list">
+      <article class="settings-overview-row">
+        <div class="settings-overview-copy">
+          <span class="settings-summary-kicker">People</span>
+          <strong>${trustedContactsCount} ${trustedContactsCount === 1 ? "trusted contact" : "trusted contacts"}</strong>
+          <p>${escHtml(
+            contactDiscoveryMode === "private_service"
+              ? "Manual contacts stay primary. Discovery remains a secondary privacy surface."
+              : "Add people by exact username or invite link."
+          )}</p>
+        </div>
+        <span class="settings-overview-meta">${escHtml(contactDiscoveryMode === "private_service" ? "advanced discovery available" : "invite-first")}</span>
       </article>
-      <article class="settings-summary-card">
-        <span class="settings-summary-kicker">Privacy</span>
-        <strong>${escHtml(contactDiscoveryMode === "private_service" ? "Hardened" : "Manual")}</strong>
-        <span>${escHtml(contactDiscoveryMode === "private_service" ? contactDiscoveryContinuityStatus : "Invite-first discovery")}</span>
-        <p>${escHtml(
-          contactDiscoveryMode === "private_service"
-            ? "Manifest continuity and attestation are checked before future private lookups."
-            : "Share usernames and private invites instead of raw-hash discovery."
-        )}</p>
+      <article class="settings-overview-row">
+        <div class="settings-overview-copy">
+          <span class="settings-summary-kicker">Privacy</span>
+          <strong>${escHtml(contactDiscoveryMode === "private_service" ? "Hardened discovery checks" : "Manual privacy flow")}</strong>
+          <p>${escHtml(
+            contactDiscoveryMode === "private_service"
+              ? "Manifest continuity and attestation are checked before future private lookups."
+              : "Share usernames and private invites instead of raw-hash discovery."
+          )}</p>
+        </div>
+        <span class="settings-overview-meta">${escHtml(contactDiscoveryMode === "private_service" ? contactDiscoveryContinuityStatus : "exact username lookup")}</span>
       </article>
-      <article class="settings-summary-card">
-        <span class="settings-summary-kicker">Devices</span>
-        <strong>${escHtml(setup.deviceId)}</strong>
-        <span>current browser profile</span>
-        <p>Manage linked devices, revoke old browsers, and keep this local profile protected.</p>
-      </article>
-      <article class="settings-summary-card">
-        <span class="settings-summary-kicker">Web scope</span>
-        <strong>${escHtml(webHoldback.title)}</strong>
-        <span>${escHtml(capabilities?.web_client_policy || "local beta")}</span>
-        <p>${escHtml(webHoldback.detail)}</p>
+      <article class="settings-overview-row">
+        <div class="settings-overview-copy">
+          <span class="settings-summary-kicker">Devices</span>
+          <strong>${escHtml(setup.deviceId)}</strong>
+          <p>Manage linked devices, revoke old browsers, and keep this local profile protected.</p>
+        </div>
+        <span class="settings-overview-meta">current browser profile</span>
       </article>
     </div>
   `;
@@ -7047,13 +7043,13 @@ async function renderSettings(): Promise<void> {
                 : `Account ID <span class="mono">@${escHtml(setup.userId)}</span> on <span class="mono">${escHtml(setup.deviceId)}</span>. Claim a shareable @username below.`
             }</p>
           </div>
-          <button data-open-devices="1" class="btn-secondary">Open devices</button>
+          <button data-open-devices="1" class="summary-link-btn" type="button">Devices</button>
         </div>
-        ${settingsSummaryCards}
+        ${settingsOverviewRows}
         <div class="settings-section">
           <h3>Web access</h3>
           <p class="settings-section-intro">This browser follows the server’s published web policy. Treat the web client as a companion surface and keep your primary trust decisions on a protected device.</p>
-          <div class="beta-banner beta-banner-${webHoldback.tone}">
+          <div class="settings-callout settings-callout-subtle">
             <strong>${escHtml(webHoldback.title)}</strong>
             <p>${escHtml(webHoldback.detail)}</p>
           </div>
@@ -7237,7 +7233,7 @@ async function renderSettings(): Promise<void> {
       intro.textContent = "This server decides which web features are available right now.";
     }
   }
-  q<HTMLButtonElement>("#set-devices")?.replaceChildren("Open devices");
+  q<HTMLButtonElement>("#set-devices")?.replaceChildren("Devices");
   q<HTMLButtonElement>("#set-server-info")?.replaceChildren("Server details");
 
   // Save profile
@@ -7473,24 +7469,22 @@ async function renderDevices(): Promise<void> {
         },
       )}
       <div class="settings-body">
-        <div class="settings-summary-grid settings-summary-grid-compact" id="device-summary">
-          <article class="settings-summary-card">
-            <span class="settings-summary-kicker">Current device</span>
-            <strong>This browser</strong>
-            <span class="mono">${escHtml(setup.deviceId)}</span>
-            <p>Your local encrypted keys stay on this browser profile.</p>
+        <div class="settings-overview-list" id="device-summary">
+          <article class="settings-overview-row">
+            <div class="settings-overview-copy">
+              <span class="settings-summary-kicker">Current device</span>
+              <strong>This browser</strong>
+              <p>Your local encrypted keys stay on this browser profile.</p>
+            </div>
+            <span class="settings-overview-meta mono">${escHtml(setup.deviceId)}</span>
           </article>
-          <article class="settings-summary-card">
-            <span class="settings-summary-kicker">Linked sessions</span>
-            <strong>Loading</strong>
-            <span>checking account devices</span>
-            <p>Review every browser or device currently linked to this account.</p>
-          </article>
-          <article class="settings-summary-card">
-            <span class="settings-summary-kicker">Safety</span>
-            <strong>Review access</strong>
-            <span>remove devices you do not recognize</span>
-            <p>Revoking a device signs it out and stops future access.</p>
+          <article class="settings-overview-row">
+            <div class="settings-overview-copy">
+              <span class="settings-summary-kicker">Linked sessions</span>
+              <strong>Loading linked sessions</strong>
+              <p>Review every browser or device currently linked to this account.</p>
+            </div>
+            <span class="settings-overview-meta">checking account devices</span>
           </article>
         </div>
         <div class="settings-section">
@@ -7514,23 +7508,22 @@ async function renderDevices(): Promise<void> {
     const activeCount = resp.devices.filter((device) => device.active).length;
     const revokedCount = resp.devices.filter((device) => !device.active).length;
     q("#device-summary").innerHTML = `
-      <article class="settings-summary-card">
-        <span class="settings-summary-kicker">Current device</span>
-        <strong>This browser</strong>
-        <span class="mono">${escHtml(setup.deviceId)}</span>
-        <p>Your local encrypted keys stay on this browser profile.</p>
+      <article class="settings-overview-row">
+        <div class="settings-overview-copy">
+          <span class="settings-summary-kicker">Current device</span>
+          <strong>This browser</strong>
+          <p>Your local encrypted keys stay on this browser profile.</p>
+        </div>
+        <span class="settings-overview-meta mono">${escHtml(setup.deviceId)}</span>
       </article>
-      <article class="settings-summary-card">
-        <span class="settings-summary-kicker">Linked sessions</span>
-        <strong>${resp.devices.length}</strong>
+      <article class="settings-overview-row">
+        <div class="settings-overview-copy">
+          <span class="settings-summary-kicker">Linked sessions</span>
+          <strong>${resp.devices.length} ${resp.devices.length === 1 ? "device" : "devices"}</strong>
         <span>${activeCount} active${revokedCount ? ` · ${revokedCount} revoked` : ""}</span>
-        <p>Review old browsers and remove anything you do not recognize.</p>
-      </article>
-      <article class="settings-summary-card">
-        <span class="settings-summary-kicker">Safety</span>
-        <strong>${activeCount === 1 ? "Only this browser" : "Multiple sessions"}</strong>
-        <span>${activeCount === 1 ? "single active session" : `${activeCount} active sessions`}</span>
-        <p>${escHtml(activeCount === 1 ? "Only this browser currently has active access." : "More than one device can still receive updates for this account.")}</p>
+        <p>${escHtml(activeCount === 1 ? "Only this browser is active right now." : "Review older browsers and remove anything you do not recognize.")}</p>
+        </div>
+        <span class="settings-overview-meta">${activeCount} active${revokedCount ? ` · ${revokedCount} revoked` : ""}</span>
       </article>
     `;
     const listEl = q("#device-list");
@@ -7623,24 +7616,18 @@ function renderLinkDevice(): void {
         },
       )}
       <div class="settings-body">
-        <div class="settings-summary-grid settings-summary-grid-compact">
-          <article class="settings-summary-card">
-            <span class="settings-summary-kicker">What this does</span>
-            <strong>Adds a session</strong>
-            <span>for the same account</span>
-            <p>The new device receives its own device ID while staying part of your account.</p>
-          </article>
-          <article class="settings-summary-card">
-            <span class="settings-summary-kicker">Best use</span>
-            <strong>Secondary browser</strong>
-            <span>or test device</span>
-            <p>Use clear names so you can revoke old sessions quickly later.</p>
-          </article>
-          <article class="settings-summary-card">
-            <span class="settings-summary-kicker">Recommendation</span>
-            <strong>Keep names obvious</strong>
-            <span>for example <span class="mono">work-laptop</span></span>
-            <p>Readable device IDs make future cleanup and audits much easier.</p>
+        <div class="settings-callout settings-callout-subtle">
+          <strong>Add another session for the same account.</strong>
+          <p>Use clear device names like <span class="mono">work-laptop</span> so old browsers are easy to review and revoke later.</p>
+        </div>
+        <div class="settings-overview-list">
+          <article class="settings-overview-row">
+            <div class="settings-overview-copy">
+              <span class="settings-summary-kicker">Best use</span>
+              <strong>Secondary browser or test device</strong>
+              <p>The new session gets its own device ID while staying part of the same account.</p>
+            </div>
+            <span class="settings-overview-meta">same account, separate session</span>
           </article>
         </div>
         <div class="settings-section">
@@ -9238,7 +9225,7 @@ async function renderDiscovery(): Promise<void> {
       <section class="workspace-page-card">
         ${renderWorkspacePageHeader(
           "Contact discovery",
-          "Use usernames and invite links first. This advanced discovery surface is not available on the current server policy.",
+          "Use usernames and invite links first. Discovery stays secondary on web.",
           {
             eyebrow: "People",
             backButtonId: "disc-back",
@@ -9246,18 +9233,18 @@ async function renderDiscovery(): Promise<void> {
           },
         )}
         <div class="settings-body">
-          ${renderWorkspaceEmptyState(
-            "Discovery is unavailable",
-            "This server does not allow web contact discovery right now. Share your @username or a private invite link from Settings instead.",
-            {
-              eyebrow: "People",
-              compact: true,
-              actionsHtml: `
-                <button id="disc-open-settings" class="btn-primary" type="button">Open settings</button>
-                <button id="disc-new-chat" class="btn-secondary" type="button">Start new chat</button>
-              `,
-            },
-          )}
+          <div class="settings-section">
+            <h3>Use instead</h3>
+            <p class="settings-section-intro">This server keeps discovery off on web, so start with exact @usernames or private invite links.</p>
+            <div class="settings-callout settings-callout-subtle">
+              <strong>Discovery is unavailable on this server</strong>
+              <p>Open Settings to copy your shareable @username, or start a chat with someone who already shared theirs.</p>
+            </div>
+            <div class="settings-section-actions">
+              <button id="disc-open-settings" class="btn-primary" type="button">Open settings</button>
+              <button id="disc-new-chat" class="btn-secondary" type="button">Start new chat</button>
+            </div>
+          </div>
         </div>
       </section>
     `);
@@ -9596,7 +9583,7 @@ async function renderServerInfo(): Promise<void> {
     <section class="workspace-page-card">
       ${renderWorkspacePageHeader(
         "Server",
-        "See what this server allows on web right now.",
+        "See what this connection supports on web right now.",
         {
           eyebrow: "Server",
           backButtonId: "sinfo-back",
@@ -9604,7 +9591,7 @@ async function renderServerInfo(): Promise<void> {
         },
       )}
       <div class="settings-body" id="sinfo-body">
-        ${renderWorkspaceEmptyState("Loading server status", "Fetching the current connection, feature, and runtime details from this server.", { eyebrow: "Server", compact: true })}
+        ${renderWorkspaceEmptyState("Loading server status", "Checking this connection and the web features it currently publishes.", { eyebrow: "Server", compact: true })}
       </div>
     </section>
   `);
@@ -9623,49 +9610,56 @@ async function renderServerInfo(): Promise<void> {
     if (health || caps) {
       html += `
         <div class="settings-card-stack">
-          <div class="settings-summary-grid settings-summary-grid-compact">
-            <article class="settings-summary-card">
-              <span class="settings-summary-kicker">Connection</span>
-              <strong>${escHtml(health ? (health.status === "ok" ? "Healthy" : health.status) : "Unavailable")}</strong>
-              <span>${escHtml(health ? health.deployment_mode : "no health response")}</span>
-              <p>${escHtml(
-                health
-                  ? `Security profile ${health.security_profile} with ${health.db_backend} storage.`
-                  : "The browser could not read a live health response from this server."
-              )}</p>
+          <div class="settings-overview-list">
+            <article class="settings-overview-row">
+              <div class="settings-overview-copy">
+                <span class="settings-summary-kicker">Connection</span>
+                <strong>${escHtml(health ? (health.status === "ok" ? "Healthy" : health.status) : "Unavailable")}</strong>
+                <p>${escHtml(
+                  health
+                    ? `${health.security_profile} security profile with ${health.db_backend} storage.`
+                    : "The browser could not read a live health response from this server."
+                )}</p>
+              </div>
+              <span class="settings-overview-meta">${escHtml(health ? health.deployment_mode : "no health response")}</span>
             </article>
-            <article class="settings-summary-card">
-              <span class="settings-summary-kicker">Web access</span>
-              <strong>${escHtml(caps?.web_client_policy || "unknown")}</strong>
-              <span>${escHtml(caps?.supported_beta_clients.join(", ") || "no beta clients advertised")}</span>
-              <p>${escHtml(
-                caps
-                  ? "This controls how much of the messenger surface the current web client can use."
-                  : "Capability policy is unavailable until the server advertises it."
-              )}</p>
+            <article class="settings-overview-row">
+              <div class="settings-overview-copy">
+                <span class="settings-summary-kicker">Web access</span>
+                <strong>${escHtml(caps?.web_client_policy || "unknown")}</strong>
+                <p>${escHtml(
+                  caps
+                    ? "This server decides how much of the messenger the web client can use."
+                    : "Capability policy is unavailable until the server advertises it."
+                )}</p>
+              </div>
+              <span class="settings-overview-meta">${escHtml(caps?.supported_beta_clients.join(", ") || "no beta clients advertised")}</span>
             </article>
-            <article class="settings-summary-card">
-              <span class="settings-summary-kicker">Discovery</span>
-              <strong>${escHtml(
-                caps
-                  ? (caps.contact_discovery_mode === "private_service"
-                    ? "Separate service"
-                    : (caps.contact_discovery_supported ? "Manual lookup" : "Disabled"))
-                  : "Unavailable"
-              )}</strong>
-              <span>${escHtml(caps?.contact_discovery_ticket_supported ? "ticketed flow" : "no discovery tickets")}</span>
-              <p>${escHtml(
-                caps
-                  ? "Discovery stays advanced on web, with the contract available below when you need to inspect it."
-                  : "The current server did not advertise discovery policy."
-              )}</p>
+            <article class="settings-overview-row">
+              <div class="settings-overview-copy">
+                <span class="settings-summary-kicker">Discovery</span>
+                <strong>${escHtml(
+                  caps
+                    ? (caps.contact_discovery_mode === "private_service"
+                      ? "Separate service"
+                      : (caps.contact_discovery_supported ? "Manual lookup" : "Disabled"))
+                    : "Unavailable"
+                )}</strong>
+                <p>${escHtml(
+                  caps
+                    ? "Discovery stays secondary on web. Use usernames and private invites first."
+                    : "The current server did not advertise discovery policy."
+                )}</p>
+              </div>
+              <span class="settings-overview-meta">${escHtml(caps?.contact_discovery_ticket_supported ? "tickets available" : "no discovery tickets")}</span>
             </article>
           </div>
       `;
       if (health) {
         html += `
-          <div class="settings-section">
-            <h3>Current setup</h3>
+          <details class="settings-inline-details">
+            <summary>Connection snapshot</summary>
+            <div class="settings-inline-details-body server-inline-details-body">
             <p class="settings-section-intro">A quick view of transport, storage, and server posture for this connection.</p>
             <div class="settings-kv-grid">
               <article class="settings-kv-card">
@@ -9689,14 +9683,16 @@ async function renderServerInfo(): Promise<void> {
                 <p>${escHtml(health.deployment_mode)} deployment with ${health.status === "ok" ? "healthy" : "degraded"} status.</p>
               </article>
             </div>
-          </div>
+            </div>
+          </details>
         `;
       }
       if (caps) {
         const cp = caps.runtime_crypto_profile;
         html += `
-          <div class="settings-section">
-            <h3>Messenger features</h3>
+          <details class="settings-inline-details">
+            <summary>What works on web</summary>
+            <div class="settings-inline-details-body server-inline-details-body">
             <p class="settings-section-intro">These are the user-facing features and product boundaries this server currently publishes to the web client.</p>
             <div class="settings-status-grid">
               <article class="settings-status-card">
@@ -9730,30 +9726,35 @@ async function renderServerInfo(): Promise<void> {
                 <p>Calling and broadcast-style surfaces stay outside the supported web beta today.</p>
               </article>
             </div>
-          </div>
+            </div>
+          </details>
           <div class="settings-section">
             <h3>Crypto profile</h3>
-            <p class="settings-section-intro">The hybrid cryptographic runtime the server advertises to this client for this session.</p>
-            <div class="settings-kv-grid">
-              <article class="settings-kv-card">
-                <span class="settings-summary-kicker">KEM</span>
-                <strong class="mono">${escHtml(cp.kem)}</strong>
-                <p>Key exchange material advertised for hybrid sessions.</p>
+            <p class="settings-section-intro">A short summary of the hybrid crypto runtime this server advertises for the current session.</p>
+            <div class="settings-overview-list">
+              <article class="settings-overview-row">
+                <div class="settings-overview-copy">
+                  <span class="settings-summary-kicker">Key exchange</span>
+                  <strong class="mono">${escHtml(cp.kem)}</strong>
+                  <p>Hybrid session setup for this browser connection.</p>
+                </div>
+                <span class="settings-overview-meta">KEM</span>
               </article>
-              <article class="settings-kv-card">
-                <span class="settings-summary-kicker">Signature</span>
-                <strong class="mono">${escHtml(cp.signature)}</strong>
-                <p>Identity signatures paired with ${escHtml(cp.dh)} and ${escHtml(cp.kdf)}.</p>
+              <article class="settings-overview-row">
+                <div class="settings-overview-copy">
+                  <span class="settings-summary-kicker">Transport</span>
+                  <strong class="mono">${escHtml(cp.signature)} + ${escHtml(cp.aead)}</strong>
+                  <p>Identity signatures paired with ${escHtml(cp.dh)} and ${escHtml(cp.kdf)} transport derivation.</p>
+                </div>
+                <span class="settings-overview-meta">signing + confidentiality</span>
               </article>
-              <article class="settings-kv-card">
-                <span class="settings-summary-kicker">AEAD</span>
-                <strong class="mono">${escHtml(cp.aead)}</strong>
-                <p>Transport confidentiality with ${escHtml(cp.kdf)} key derivation.</p>
-              </article>
-              <article class="settings-kv-card">
-                <span class="settings-summary-kicker">Compliance</span>
-                <strong>${cp.fips_mode ? "FIPS mode" : "Standard mode"}</strong>
-                <p>PQ OQS runtime ${cp.pq_oqs_enabled ? "enabled" : "disabled"} for this server profile.</p>
+              <article class="settings-overview-row">
+                <div class="settings-overview-copy">
+                  <span class="settings-summary-kicker">Compliance</span>
+                  <strong>${cp.fips_mode ? "FIPS mode" : "Standard mode"}</strong>
+                  <p>PQ OQS runtime ${cp.pq_oqs_enabled ? "enabled" : "disabled"} for this server profile.</p>
+                </div>
+                <span class="settings-overview-meta">${cp.pq_oqs_enabled ? "PQ runtime on" : "PQ runtime off"}</span>
               </article>
             </div>
           </div>
@@ -9816,9 +9817,12 @@ function stopAllTimers(): void {
 }
 
 function refreshConversationsIfVisible(): void {
-  if (getCurrentView().screen === "conversations") {
+  const view = getCurrentView();
+  if (view.screen === "conversations") {
     renderConversations();
+    return;
   }
+  refreshWorkspaceSidebarIfVisible(view);
 }
 
 function refreshActiveWorkspaceView(): void {
@@ -9830,6 +9834,34 @@ function refreshActiveWorkspaceView(): void {
   } else if (view.screen === "group-chat") {
     void renderGroupChat(view.groupId);
   }
+}
+
+function activeWorkspaceThreadFromView(
+  view: ReturnType<typeof getCurrentView>,
+): ActiveWorkspaceThread {
+  if (view.screen === "chat") {
+    return { kind: "dm", threadId: view.peerId };
+  }
+  if (view.screen === "group-chat") {
+    return { kind: "group", threadId: view.groupId };
+  }
+  return null;
+}
+
+function refreshWorkspaceSidebarIfVisible(
+  view: ReturnType<typeof getCurrentView> = getCurrentView(),
+): void {
+  const existingSidebar = document.querySelector<HTMLElement>(".desktop-sidebar");
+  if (!existingSidebar || !setup.userId) {
+    return;
+  }
+  const { rows, counts, visibleRows } = getWorkspaceInboxState();
+  existingSidebar.outerHTML = renderWorkspaceSidebar(
+    visibleRows,
+    counts,
+    activeWorkspaceThreadFromView(view),
+  );
+  bindWorkspaceSidebarInteractions();
 }
 
 async function logoutCurrentSession(): Promise<void> {
