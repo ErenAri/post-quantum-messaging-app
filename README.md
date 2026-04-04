@@ -245,11 +245,14 @@ Raw-hash discovery commands and legacy clear-roster group commands remain out of
 ### PQ Backend Build (required for high-assurance/NSS runs)
 
 ```powershell
-cargo run -p pqmsg-cli --features pqmsg-core/pq-oqs -- --help
+cargo run -p pqmsg-cli -- --help
 ```
 
-The CLI performs an active runtime profile check and aborts when the PQ backend is not enabled.
-`pqmsg-android` now fails closed if `pq-oqs` is not available.
+`pqmsg-core` no longer picks a PQ backend implicitly. Each consumer must opt into
+`pq-oqs` (liboqs-backed) or `pq-rust` (pure Rust) explicitly in its manifest or
+build invocation.
+The CLI performs an active runtime profile check and aborts when PQ support is not enabled.
+`pqmsg-android` now fails closed if PQ support is not available.
 `pqmsg-cli register` automatically solves registration PoW when the server advertises `registration_pow_bits > 0` via `/v1/capabilities`.
 
 ## 15-Minute Quickstart (Windows + Android Emulator)
@@ -403,9 +406,9 @@ cargo run -p pqmsg-server
 2. Build Android Rust bridge and APK from repository root:
 
 ```powershell
-cargo build -p pqmsg-android --features pqmsg-core/pq-oqs
+cargo build -p pqmsg-android
 cargo run -p pqmsg-android --bin uniffi-bindgen -- generate --library target/debug/pqmsg_android.dll --language kotlin --out-dir mobile/android/app/build/generated/uniffi/kotlin
-cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o mobile/android/app/src/main/jniLibs build -p pqmsg-android --release --features pqmsg-core/pq-oqs
+cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o mobile/android/app/src/main/jniLibs build -p pqmsg-android --release
 cd mobile/android
 .\gradlew.bat :app:assembleDebug
 ```

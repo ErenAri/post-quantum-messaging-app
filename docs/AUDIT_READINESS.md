@@ -159,9 +159,13 @@ presence of at least one completed `external_audit` engagement.
 
 | Flag | Effect |
 |------|--------|
-| `pq-oqs` (default) | Enables ML-KEM-768 via liboqs |
-| `fips` | Restricts to FIPS-approved suites only; adds `FipsKemWrapper` with extra key validation |
+| `pq-oqs` | Explicitly enables the liboqs-backed ML-KEM-768 / ML-DSA-65 backend |
+| `pq-rust` | Explicitly enables the pure-Rust ML-KEM-768 / ML-DSA-65 backend |
+| `fips` | Restricts to FIPS-approved suites only; adds `FipsKemWrapper` with extra key validation and implies `pq-oqs` |
 | `classical-only-INSECURE` | Disables PQ primitives (testing only; compile-error with `fips`) |
+
+`pqmsg-core` does not select a PQ backend implicitly; consumers and CI lanes must
+opt into `pq-oqs` or `pq-rust` explicitly.
 
 ### Suite Registry
 

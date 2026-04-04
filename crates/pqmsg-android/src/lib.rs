@@ -517,7 +517,7 @@ fn suite_id_for_user_keys(suite: Suite) -> u16 {
 
 fn build_kem_for_suite(suite: Suite) -> Result<MlKem768, PqmsgAndroidError> {
     MlKem768::new(suite_to_kem_algorithm(suite))
-        .map_err(|_| operation_failed("pq-oqs backend is disabled"))
+        .map_err(|_| operation_failed("post-quantum backend is disabled"))
 }
 
 fn mandatory_pq_ratchet_state(
@@ -835,7 +835,7 @@ pub fn require_pq_backend_enabled() -> Result<(), PqmsgAndroidError> {
     if profile.pq_oqs_enabled {
         Ok(())
     } else {
-        Err(operation_failed("pq-oqs backend is disabled"))
+        Err(operation_failed("post-quantum backend is disabled"))
     }
 }
 

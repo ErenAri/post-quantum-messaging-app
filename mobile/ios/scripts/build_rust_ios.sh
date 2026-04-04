@@ -14,9 +14,9 @@ cd "${REPO_ROOT}"
 
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
 
-cargo build -p pqmsg-ios --release --target aarch64-apple-ios --features pqmsg-core/pq-oqs
-cargo build -p pqmsg-ios --release --target aarch64-apple-ios-sim --features pqmsg-core/pq-oqs
-cargo build -p pqmsg-ios --release --target x86_64-apple-ios --features pqmsg-core/pq-oqs
+cargo build -p pqmsg-ios --release --target aarch64-apple-ios
+cargo build -p pqmsg-ios --release --target aarch64-apple-ios-sim
+cargo build -p pqmsg-ios --release --target x86_64-apple-ios
 
 cargo run -p pqmsg-ios --bin uniffi-bindgen -- generate \
   --library target/aarch64-apple-ios/release/libpqmsg_ios.a \

@@ -36,7 +36,7 @@ getrandom = { version = "0.2", features = ["js"], optional = true }
 serde_json = "1"
 
 [features]
-default = ["pq-oqs"]
+default = []
 pq-oqs = ["dep:oqs"]
 pq-rust = ["dep:fips203", "dep:fips204"]
 fips = ["pq-oqs"]

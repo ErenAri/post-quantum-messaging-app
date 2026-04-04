@@ -70,6 +70,8 @@ flowchart LR
 
 Client applications MUST expose the active crypto profile and fail closed when PQ backend support is unavailable.
 PQ ratchet support MUST be compiled in all builds; feature-flag disable paths are not permitted for release artifacts.
+The historical `pq_oqs_enabled` runtime bit means "a supported PQ backend is available"
+even when the build uses `pq-rust` instead of `pq-oqs`.
 
 ## 7A. FIPS Feature Gate Policy
 

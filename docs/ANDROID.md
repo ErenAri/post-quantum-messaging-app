@@ -103,9 +103,9 @@ cargo install cargo-ndk
 From repository root:
 
 ```powershell
-cargo build -p pqmsg-android --features pqmsg-core/pq-oqs
+cargo build -p pqmsg-android
 cargo run -p pqmsg-android --bin uniffi-bindgen -- generate --library target/debug/pqmsg_android.dll --language kotlin --out-dir mobile/android/app/build/generated/uniffi/kotlin
-cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o mobile/android/app/src/main/jniLibs build -p pqmsg-android --release --features pqmsg-core/pq-oqs
+cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o mobile/android/app/src/main/jniLibs build -p pqmsg-android --release
 ```
 
 Expected shared objects:

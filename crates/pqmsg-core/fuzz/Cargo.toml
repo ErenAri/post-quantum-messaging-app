@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-pqmsg-core = { path = ".." }
+pqmsg-core = { path = "..", default-features = false, features = ["pq-rust"] }
 
 [[bin]]
 name = "fuzz_tlv_decode"

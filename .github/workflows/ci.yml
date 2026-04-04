@@ -22,9 +22,30 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all --check
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --features pqmsg-core/pq-rust -- -D warnings
       - name: cargo test
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets --features pqmsg-core/pq-rust
+
+  pq-backend-core-gates:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - name: pq-rust
+            features: pq-rust
+          - name: pq-oqs
+            features: pq-oqs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy (${{ matrix.backend.name }})
+        run: cargo clippy -p pqmsg-core --all-targets --no-default-features --features ${{ matrix.backend.features }} -- -D warnings
+      - name: cargo test (${{ matrix.backend.name }})
+        run: cargo test -p pqmsg-core --all-targets --no-default-features --features ${{ matrix.backend.features }}
 
   fips-build-gate:
     runs-on: ubuntu-latest
@@ -33,9 +54,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy (FIPS)
-        run: cargo clippy -p pqmsg-core --features fips -- -D warnings
+        run: cargo clippy -p pqmsg-core --no-default-features --features fips -- -D warnings
       - name: cargo test (FIPS)
-        run: cargo test -p pqmsg-core --features fips
+        run: cargo test -p pqmsg-core --no-default-features --features fips
 
   classical-only-build-gate:
     runs-on: ubuntu-latest
@@ -57,9 +78,9 @@ jobs:
       - name: install SoftHSM2
         run: sudo apt-get update && sudo apt-get install -y softhsm2
       - name: cargo clippy (hsm-pkcs11)
-        run: cargo clippy -p pqmsg-core --features hsm-pkcs11 -- -D warnings
+        run: cargo clippy -p pqmsg-core --no-default-features --features pq-rust,hsm-pkcs11 -- -D warnings
       - name: cargo test (hsm-pkcs11)
-        run: cargo test -p pqmsg-core --features hsm-pkcs11
+        run: cargo test -p pqmsg-core --no-default-features --features pq-rust,hsm-pkcs11
 
   postgres-integration:
     runs-on: ubuntu-latest
@@ -273,7 +294,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: run crypto benchmarks
-        run: cargo bench -p pqmsg-core --bench crypto_benchmarks -- --output-format bencher 2>/dev/null | tee bench-output.txt
+        run: cargo bench -p pqmsg-core --bench crypto_benchmarks --no-default-features --features pq-rust -- --output-format bencher 2>/dev/null | tee bench-output.txt
       - name: run server load benchmarks
         run: cargo bench -p pqmsg-server --bench server_load -- --output-format bencher 2>/dev/null | tee -a bench-output.txt
       - name: upload benchmark results
@@ -308,7 +329,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: cargo llvm-cov
-        run: cargo llvm-cov --workspace --exclude pqmsg-android --exclude pqmsg-ios --lcov --output-path lcov.info --fail-under-lines 50
+        run: cargo llvm-cov --workspace --features pqmsg-core/pq-rust --exclude pqmsg-android --exclude pqmsg-ios --lcov --output-path lcov.info --fail-under-lines 50
       - name: upload coverage artifact
         uses: actions/upload-artifact@v4
         with:

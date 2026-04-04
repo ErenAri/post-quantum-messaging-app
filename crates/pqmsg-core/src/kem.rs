@@ -4,8 +4,8 @@
     feature = "classical-only-INSECURE"
 )))]
 compile_error!(
-    "pqmsg-core requires either the `pq-oqs` feature (default, recommended), \
-     the `pq-rust` feature (pure Rust browser-safe PQ backend), \
+    "pqmsg-core requires an explicit PQ backend choice: enable `pq-oqs` \
+     (liboqs-backed) or `pq-rust` (pure Rust browser-safe PQ backend), \
      or the explicit `classical-only-INSECURE` opt-in. \
      Do not build without post-quantum support unless you know what you are doing."
 );

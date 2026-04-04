@@ -368,7 +368,7 @@ export function kemAvailable(): boolean {
 export function kemKeypair(): KemKeyPair {
   if (!wasmModule) throw new Error("WASM not initialized");
   if (typeof wasmModule.wasm_kem_keypair !== "function") {
-    throw new Error("KEM not available - WASM built without pq-oqs");
+    throw new Error("KEM not available - WASM built without post-quantum support");
   }
   return wasmModule.wasm_kem_keypair() as KemKeyPair;
 }
@@ -377,7 +377,7 @@ export function kemKeypair(): KemKeyPair {
 export function kemEncapsulate(recipientPublicKey: Uint8Array): KemEncapsulateResult {
   if (!wasmModule) throw new Error("WASM not initialized");
   if (typeof wasmModule.wasm_kem_encapsulate !== "function") {
-    throw new Error("KEM not available - WASM built without pq-oqs");
+    throw new Error("KEM not available - WASM built without post-quantum support");
   }
   return wasmModule.wasm_kem_encapsulate(recipientPublicKey) as KemEncapsulateResult;
 }
@@ -386,7 +386,7 @@ export function kemEncapsulate(recipientPublicKey: Uint8Array): KemEncapsulateRe
 export function kemDecapsulate(secretKey: Uint8Array, ciphertext: Uint8Array): Uint8Array {
   if (!wasmModule) throw new Error("WASM not initialized");
   if (typeof wasmModule.wasm_kem_decapsulate !== "function") {
-    throw new Error("KEM not available - WASM built without pq-oqs");
+    throw new Error("KEM not available - WASM built without post-quantum support");
   }
   return wasmModule.wasm_kem_decapsulate(secretKey, ciphertext) as unknown as Uint8Array;
 }
@@ -400,7 +400,7 @@ export function pqSigAvailable(): boolean {
 export function mlDsaKeypair(): PqSigKeyPair {
   if (!wasmModule) throw new Error("WASM not initialized");
   if (typeof wasmModule.wasm_ml_dsa_keypair !== "function") {
-    throw new Error("ML-DSA not available - WASM built without pq-oqs");
+    throw new Error("ML-DSA not available - WASM built without post-quantum support");
   }
   return wasmModule.wasm_ml_dsa_keypair() as PqSigKeyPair;
 }
@@ -409,7 +409,7 @@ export function mlDsaKeypair(): PqSigKeyPair {
 export function mlDsaSign(secretKey: Uint8Array, message: Uint8Array): Uint8Array {
   if (!wasmModule) throw new Error("WASM not initialized");
   if (typeof wasmModule.wasm_ml_dsa_sign !== "function") {
-    throw new Error("ML-DSA not available - WASM built without pq-oqs");
+    throw new Error("ML-DSA not available - WASM built without post-quantum support");
   }
   return wasmModule.wasm_ml_dsa_sign(secretKey, message) as unknown as Uint8Array;
 }
@@ -418,7 +418,7 @@ export function mlDsaSign(secretKey: Uint8Array, message: Uint8Array): Uint8Arra
 export function mlDsaVerify(publicKey: Uint8Array, message: Uint8Array, signature: Uint8Array): void {
   if (!wasmModule) throw new Error("WASM not initialized");
   if (typeof wasmModule.wasm_ml_dsa_verify !== "function") {
-    throw new Error("ML-DSA not available - WASM built without pq-oqs");
+    throw new Error("ML-DSA not available - WASM built without post-quantum support");
   }
   wasmModule.wasm_ml_dsa_verify(publicKey, message, signature);
 }

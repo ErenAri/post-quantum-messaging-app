@@ -66,7 +66,7 @@ chmod +x scripts/build_rust_ios.sh scripts/generate_project.sh
 This script performs:
 
 1. target installation (`aarch64-apple-ios`, `aarch64-apple-ios-sim`, `x86_64-apple-ios`),
-2. release builds for `pqmsg-ios` with `pqmsg-core/pq-oqs`,
+2. release builds for `pqmsg-ios` using its manifest-pinned `pq-oqs` backend,
 3. UniFFI Swift binding generation into `mobile/ios/PQMsgDemo/Generated`,
 4. XCFramework assembly at `mobile/ios/Frameworks/pqmsg_iosFFI.xcframework`.
 

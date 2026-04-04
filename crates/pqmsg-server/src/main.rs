@@ -479,7 +479,7 @@ fn enforce_deployment_contract(contract: DeploymentContract) -> anyhow::Result<(
     }
     if !contract.runtime_crypto_profile.pq_oqs_enabled {
         anyhow::bail!(
-            "PQMSG_DEPLOYMENT_MODE='{}' requires a PQ-enabled runtime (build with pqmsg-core/pq-oqs support)",
+            "PQMSG_DEPLOYMENT_MODE='{}' requires a PQ-enabled runtime (build with an explicit pqmsg-core PQ backend such as pq-rust or pq-oqs)",
             contract.deployment_mode.as_str()
         );
     }
