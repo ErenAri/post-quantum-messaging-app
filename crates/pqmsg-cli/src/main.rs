@@ -387,6 +387,8 @@ enum Commands {
         #[arg(long)]
         keys: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
+        keep_keys: bool,
+        #[arg(long, hide = true, default_value_t = false)]
         wipe_keys: bool,
         #[arg(long, default_value_t = false)]
         remote_retire: bool,
@@ -1621,6 +1623,7 @@ async fn main() -> Result<()> {
         Commands::ResetLocalState {
             user,
             keys,
+            keep_keys,
             wipe_keys,
             remote_retire,
         } => {
@@ -1649,7 +1652,8 @@ async fn main() -> Result<()> {
                 validate_retire_current_device_response(&response, &keys_file)?;
                 remote_retire_remaining = Some(response.remaining_active_devices);
             }
-            let summary = wipe_local_state(&cli.state_dir, &user, keys.as_deref(), wipe_keys)?;
+            let remove_keys = wipe_keys || !keep_keys;
+            let summary = wipe_local_state(&cli.state_dir, &user, keys.as_deref(), remove_keys)?;
             if let Some(remaining_active_devices) = remote_retire_remaining {
                 println!(
                     "retired current device for '{}' on server (remaining_active_devices={})",
@@ -4713,6 +4717,56 @@ mod tests {
 
     #[test]
     fn parse_reset_local_state_args() {
+        let cli = Cli::try_parse_from(["pqmsg-cli", "reset-local-state", "--user", "alice"])
+            .expect("parse");
+        match cli.command {
+            Commands::ResetLocalState {
+                user,
+                keys,
+                keep_keys,
+                wipe_keys,
+                remote_retire,
+            } => {
+                assert_eq!(user, "alice");
+                assert!(keys.is_none());
+                assert!(!keep_keys);
+                assert!(!wipe_keys);
+                assert!(!remote_retire);
+            }
+            _ => panic!("expected reset-local-state command"),
+        }
+    }
+
+    #[test]
+    fn parse_reset_local_state_keep_keys_opt_out() {
+        let cli = Cli::try_parse_from([
+            "pqmsg-cli",
+            "reset-local-state",
+            "--user",
+            "alice",
+            "--keep-keys",
+        ])
+        .expect("parse");
+        match cli.command {
+            Commands::ResetLocalState {
+                user,
+                keys,
+                keep_keys,
+                wipe_keys,
+                remote_retire,
+            } => {
+                assert_eq!(user, "alice");
+                assert!(keys.is_none());
+                assert!(keep_keys);
+                assert!(!wipe_keys);
+                assert!(!remote_retire);
+            }
+            _ => panic!("expected reset-local-state command"),
+        }
+    }
+
+    #[test]
+    fn parse_reset_local_state_legacy_wipe_keys_flag_is_still_accepted() {
         let cli = Cli::try_parse_from([
             "pqmsg-cli",
             "reset-local-state",
@@ -4725,11 +4779,13 @@ mod tests {
             Commands::ResetLocalState {
                 user,
                 keys,
+                keep_keys,
                 wipe_keys,
                 remote_retire,
             } => {
                 assert_eq!(user, "alice");
                 assert!(keys.is_none());
+                assert!(!keep_keys);
                 assert!(wipe_keys);
                 assert!(!remote_retire);
             }

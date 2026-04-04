@@ -25,6 +25,9 @@ type BootOptions = {
   existingUsers?: string[];
   bundleUsers?: string[];
   identityMismatchUsers?: string[];
+  immutableIdentityUsers?: string[];
+  rotatedIdentityUsers?: string[];
+  transparencyCheckpointOutOfRangeUsers?: string[];
   capabilities?: {
     web_client_policy?: string;
     contact_discovery_supported?: boolean;
@@ -69,6 +72,40 @@ type BootOptions = {
     manifest_issuer_ed25519_pub?: string;
     manifest_signature_ed25519?: string;
   };
+  discoveryAttestationError?: string;
+  discoveryTicketResponse?: Partial<{
+    service_origin: string;
+    ticket: string;
+    ticket_nonce: string;
+    expires_at: string;
+  }>;
+  discoveryEvaluateResponse?: Partial<{
+    ticket_nonce: string;
+    manifest_contract_sha256: string;
+    evaluation_proof_mode: string;
+    evaluated_elements_base64: string[];
+    dleq_proofs: Array<{
+      challenge_scalar_base64: string;
+      response_scalar_base64: string;
+      commitment_base_base64: string;
+      commitment_blinded_base64: string;
+    }>;
+  }>;
+  discoveryUploadResponse?: Partial<{
+    ticket_nonce: string;
+    manifest_contract_sha256: string;
+    uploaded_phone_tokens: number;
+    uploaded_email_tokens: number;
+  }>;
+  discoveryMatchResponse?: Partial<{
+    ticket_nonce: string;
+    manifest_contract_sha256: string;
+    matches: Array<{
+      token_sha256: string;
+      contact_invite_token: string;
+      handle_kind: string;
+    }>;
+  }>;
   profileTokensRequireContact?: boolean;
   transparencyMismatchUsers?: string[];
   prepare?: (storage: typeof import("./storage")) => Promise<void> | void;
@@ -232,6 +269,9 @@ async function bootApp(options: BootOptions = {}) {
     existingUsers: new Set(options.existingUsers ?? ["test1", "test2"]),
     bundleUsers: new Set(options.bundleUsers ?? options.existingUsers ?? ["test1", "test2"]),
     identityMismatchUsers: new Set(options.identityMismatchUsers ?? []),
+    immutableIdentityUsers: new Set(options.immutableIdentityUsers ?? []),
+    rotatedIdentityUsers: new Set(options.rotatedIdentityUsers ?? []),
+    transparencyCheckpointOutOfRangeUsers: new Set(options.transparencyCheckpointOutOfRangeUsers ?? []),
     usernames: new Map<string, string>((options.existingUsers ?? ["test1", "test2"]).map((userId) => [userId, userId] as const)),
     usernameLookupEnabledByUser: new Map<string, boolean>((options.existingUsers ?? ["test1", "test2"]).map((userId) => [userId, true] as const)),
     contacts: new Set<string>(),
@@ -403,20 +443,75 @@ async function bootApp(options: BootOptions = {}) {
         options.discoveryManifest?.attestation_document_sha256 ?? "cd".repeat(32),
       published_at: new Date().toISOString(),
     },
+    contactDiscoveryTicket: {
+      service_origin: options.capabilities?.contact_discovery_service_origin ?? "https://cdsi.example",
+      ticket: options.discoveryTicketResponse?.ticket ?? "signed-discovery-ticket",
+      ticket_nonce: options.discoveryTicketResponse?.ticket_nonce ?? "ticket-nonce-1",
+      expires_at: options.discoveryTicketResponse?.expires_at ?? "2026-03-26T12:05:00Z",
+    },
     contactDiscoveryEvaluate: {
-      ticket_nonce: "ticket-nonce-1",
-      manifest_contract_sha256: "placeholder-attestation-contract-hash",
+      ticket_nonce: options.discoveryEvaluateResponse?.ticket_nonce ?? "ticket-nonce-1",
+      manifest_contract_sha256:
+        options.discoveryEvaluateResponse?.manifest_contract_sha256
+        ?? "placeholder-attestation-contract-hash",
       evaluation_proof_mode:
-        options.discoveryManifest?.evaluation_proof_mode ?? "dleq_per_element_v1",
-      evaluated_elements_base64: [] as string[],
-      dleq_proofs: [] as Array<{
-        challenge_scalar_base64: string;
-        response_scalar_base64: string;
-        commitment_base_base64: string;
-        commitment_blinded_base64: string;
-      }>,
+        options.discoveryEvaluateResponse?.evaluation_proof_mode
+        ?? options.discoveryManifest?.evaluation_proof_mode
+        ?? "dleq_per_element_v1",
+      evaluated_elements_base64:
+        options.discoveryEvaluateResponse?.evaluated_elements_base64 ?? ([] as string[]),
+      dleq_proofs:
+        options.discoveryEvaluateResponse?.dleq_proofs ?? ([] as Array<{
+          challenge_scalar_base64: string;
+          response_scalar_base64: string;
+          commitment_base_base64: string;
+          commitment_blinded_base64: string;
+        }>),
+    },
+    contactDiscoveryUpload: {
+      ticket_nonce: options.discoveryUploadResponse?.ticket_nonce ?? "ticket-nonce-1",
+      manifest_contract_sha256:
+        options.discoveryUploadResponse?.manifest_contract_sha256
+        ?? "placeholder-attestation-contract-hash",
+      uploaded_phone_tokens: options.discoveryUploadResponse?.uploaded_phone_tokens ?? 1,
+      uploaded_email_tokens: options.discoveryUploadResponse?.uploaded_email_tokens ?? 0,
+    },
+    contactDiscoveryMatch: {
+      ticket_nonce: options.discoveryMatchResponse?.ticket_nonce ?? "ticket-nonce-1",
+      manifest_contract_sha256:
+        options.discoveryMatchResponse?.manifest_contract_sha256
+        ?? "placeholder-attestation-contract-hash",
+      matches: options.discoveryMatchResponse?.matches ?? [],
     },
   };
+
+  function bundleIdentityVersion(userId: string): number {
+    return apiState.rotatedIdentityUsers.has(userId) ? 2 : 1;
+  }
+
+  function bundleIdentityX25519(userId: string): string {
+    return apiState.rotatedIdentityUsers.has(userId)
+      ? `rotated-bundle-x25519-${userId}`
+      : `bundle-x25519-${userId}`;
+  }
+
+  function bundleIdentitySig(userId: string): string {
+    return apiState.rotatedIdentityUsers.has(userId)
+      ? `rotated-bundle-sig-${userId}`
+      : `bundle-sig-${userId}`;
+  }
+
+  function bundleIdentityPqSig(userId: string): string {
+    return apiState.rotatedIdentityUsers.has(userId)
+      ? `rotated-bundle-pq-sig-${userId}`
+      : `bundle-pq-sig-${userId}`;
+  }
+
+  function bundleFingerprint(userId: string): string {
+    return apiState.rotatedIdentityUsers.has(userId)
+      ? `rotated-bundle-fp-${userId}`
+      : `bundle-fp-${userId}`;
+  }
 
   vi.doMock("./db", () => ({
     async saveMessage(message: FakeMessage) {
@@ -600,6 +695,7 @@ async function bootApp(options: BootOptions = {}) {
       }),
       buildSealedInboxAuthHeaders: emptyHeaders,
       buildSenderCertificateAuthHeaders: emptyHeaders,
+      buildContactDiscoveryTicketAuthHeaders: emptyHeaders,
       buildEphemeralRelayAuthHeaders: emptyHeaders,
       buildDiscoveryHandlesAuthHeaders: emptyHeaders,
       buildDiscoveryMatchAuthHeaders: emptyHeaders,
@@ -609,10 +705,15 @@ async function bootApp(options: BootOptions = {}) {
         () => "placeholder-attestation-contract-hash"
       ),
       prepareContactDiscoveryBlindRequest: vi.fn((hashes: string[]) => ({
-        blinded_elements_base64: hashes.map((value) => `blind:${value}`),
-        blinding_scalars_base64: hashes.map((value) => `scalar:${value}`),
+        blindedElementsBase64: hashes.map((value) => `blind:${value}`),
+        blindingScalarsBase64: hashes.map((value) => `scalar:${value}`),
       })),
-      verifyContactDiscoveryAttestationDocument: vi.fn(),
+      verifyContactDiscoveryAttestationDocument: vi.fn(() => {
+        if (options.discoveryAttestationError) {
+          throw new Error(options.discoveryAttestationError);
+        }
+      }),
+      verifyContactDiscoveryEvaluationProofs: vi.fn(),
       finalizeContactDiscoveryTokens: vi.fn(
         (scalars: string[], evaluated: string[]) =>
           evaluated.map((value, index) => `token:${index}:${scalars[index] ?? "missing"}:${value}`)
@@ -668,6 +769,11 @@ async function bootApp(options: BootOptions = {}) {
       }
 
       async registerUser(payload: { user_id: string; device_id: string }) {
+        if (apiState.immutableIdentityUsers.has(payload.user_id)) {
+          throw new Error(
+            'HTTP 409: {"type":"about:blank","title":"Conflict","status":409,"detail":"user_id is already registered with an immutable identity"}',
+          );
+        }
         apiState.existingUsers.add(payload.user_id);
         apiState.bundleUsers.add(payload.user_id);
         apiState.usernames.set(payload.user_id, payload.user_id);
@@ -682,6 +788,7 @@ async function bootApp(options: BootOptions = {}) {
       async resetDevUserIdentity(userId: string) {
         apiState.resetCalls.push(userId);
         apiState.identityMismatchUsers.delete(userId);
+        apiState.immutableIdentityUsers.delete(userId);
         apiState.existingUsers.delete(userId);
         apiState.bundleUsers.delete(userId);
         for (const [username, owner] of [...apiState.usernames.entries()]) {
@@ -788,11 +895,11 @@ async function bootApp(options: BootOptions = {}) {
         }
         return {
           user_id: userId,
-          identity_x25519_pub: `bundle-x25519-${userId}`,
-          identity_sig_pub: `bundle-sig-${userId}`,
-          identity_pq_sig_pub: `bundle-pq-sig-${userId}`,
-          identity_fingerprint_sha256: `bundle-fp-${userId}`,
-          identity_key_version: 1,
+          identity_x25519_pub: bundleIdentityX25519(userId),
+          identity_sig_pub: bundleIdentitySig(userId),
+          identity_pq_sig_pub: bundleIdentityPqSig(userId),
+          identity_fingerprint_sha256: bundleFingerprint(userId),
+          identity_key_version: bundleIdentityVersion(userId),
           signed_prekey_x25519_pub: `spk-${userId}`,
           sig_over_spk: "sig",
           pq_signed_prekey_pub_mlkem768: `pq-${userId}`,
@@ -820,6 +927,33 @@ async function bootApp(options: BootOptions = {}) {
       }
 
       async getIdentityLog(userId: string) {
+        if (apiState.rotatedIdentityUsers.has(userId)) {
+          return {
+            user_id: userId,
+            events: [
+              {
+                version: 2,
+                identity_x25519_pub: bundleIdentityX25519(userId),
+                identity_sig_pub: bundleIdentitySig(userId),
+                identity_pq_sig_pub: bundleIdentityPqSig(userId),
+                device_id: `${userId}-device-rotated`,
+                event_type: "rotation",
+                changed_at: "2026-03-12T00:00:00Z",
+                identity_fingerprint_sha256: `fp:${bundleIdentityX25519(userId)}`,
+              },
+              {
+                version: 1,
+                identity_x25519_pub: `bundle-x25519-${userId}`,
+                identity_sig_pub: `bundle-sig-${userId}`,
+                identity_pq_sig_pub: `bundle-pq-sig-${userId}`,
+                device_id: `${userId}-device`,
+                event_type: "initial",
+                changed_at: "2026-03-11T00:00:00Z",
+                identity_fingerprint_sha256: `fp:bundle-x25519-${userId}`,
+              },
+            ],
+          };
+        }
         return {
           user_id: userId,
           events: [
@@ -838,17 +972,27 @@ async function bootApp(options: BootOptions = {}) {
       }
 
       async getTransparencyProof(userId: string, previousTreeSize?: number) {
+        if (
+          previousTreeSize
+          && apiState.transparencyCheckpointOutOfRangeUsers.has(userId)
+        ) {
+          throw new Error(
+            'HTTP 400: {"type":"about:blank","title":"Bad Request","status":400,"detail":"previous_tree_size must be in 1..=current tree size"}',
+          );
+        }
         const mismatched = new Set(options.transparencyMismatchUsers ?? []);
         return {
           user_id: userId,
           leaf: {
             user_id: userId,
-            version: previousTreeSize ? 2 : 1,
+            version: mismatched.has(userId)
+              ? (previousTreeSize ? 2 : 1)
+              : bundleIdentityVersion(userId),
             identity_x25519_pub: mismatched.has(userId)
               ? `tampered-x25519-${userId}`
-              : `bundle-x25519-${userId}`,
-            identity_sig_pub: `bundle-sig-${userId}`,
-            identity_pq_sig_pub: `bundle-pq-sig-${userId}`,
+              : bundleIdentityX25519(userId),
+            identity_sig_pub: bundleIdentitySig(userId),
+            identity_pq_sig_pub: bundleIdentityPqSig(userId),
             timestamp: 1700000000,
           },
           inclusion_proof: {
@@ -952,6 +1096,58 @@ async function bootApp(options: BootOptions = {}) {
         return apiState.contactDiscoveryAttestation;
       }
 
+      async issueContactDiscoveryTicket(userId: string) {
+        return {
+          user_id: userId,
+          device_id: `${userId}-device`,
+          service_origin: apiState.contactDiscoveryTicket.service_origin,
+          ticket: apiState.contactDiscoveryTicket.ticket,
+          ticket_nonce: apiState.contactDiscoveryTicket.ticket_nonce,
+          expires_at: apiState.contactDiscoveryTicket.expires_at,
+        };
+      }
+
+      async evaluateDiscoveryElementsAtService(
+        _serviceOrigin: string,
+        payload: { blinded_elements_base64: string[] },
+      ) {
+        return {
+          user_id: "test1",
+          device_id: "test1-device",
+          ticket_nonce: apiState.contactDiscoveryEvaluate.ticket_nonce,
+          manifest_contract_sha256: apiState.contactDiscoveryEvaluate.manifest_contract_sha256,
+          evaluation_proof_mode: apiState.contactDiscoveryEvaluate.evaluation_proof_mode,
+          evaluated_elements_base64:
+            apiState.contactDiscoveryEvaluate.evaluated_elements_base64.length > 0
+              ? apiState.contactDiscoveryEvaluate.evaluated_elements_base64
+              : payload.blinded_elements_base64.map((value) => `evaluated:${value}`),
+          dleq_proofs: apiState.contactDiscoveryEvaluate.dleq_proofs,
+          evaluated_at: "2026-03-26T12:02:30Z",
+        };
+      }
+
+      async uploadDiscoveryHandlesToService() {
+        return {
+          user_id: "test1",
+          device_id: "test1-device",
+          ticket_nonce: apiState.contactDiscoveryUpload.ticket_nonce,
+          manifest_contract_sha256: apiState.contactDiscoveryUpload.manifest_contract_sha256,
+          uploaded_phone_tokens: apiState.contactDiscoveryUpload.uploaded_phone_tokens,
+          uploaded_email_tokens: apiState.contactDiscoveryUpload.uploaded_email_tokens,
+          updated_at: "2026-03-26T12:03:00Z",
+        };
+      }
+
+      async matchDiscoveryHashesAtService() {
+        return {
+          user_id: "test1",
+          ticket_nonce: apiState.contactDiscoveryMatch.ticket_nonce,
+          manifest_contract_sha256: apiState.contactDiscoveryMatch.manifest_contract_sha256,
+          matches: apiState.contactDiscoveryMatch.matches,
+          checked_at: "2026-03-26T12:04:00Z",
+        };
+      }
+
       async createInboxWsTicket(userId: string) {
         return { ticket: `ticket-${userId}`, expires_at: "2026-03-11T00:00:30Z" };
       }
@@ -1047,6 +1243,90 @@ describe("web app flow coverage", () => {
 
     expect(apiState.resetCalls).toEqual(["test6"]);
     expect(router.getCurrentView()).toEqual({ screen: "conversations" });
+  }, 10000);
+
+  it("re-registers the same username on a development relay after an immutable-identity conflict", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const { router, apiState, storage } = await bootApp({
+      existingUsers: ["test8"],
+      immutableIdentityUsers: ["test8"],
+    });
+
+    router.navigateTo({ screen: "create-account" });
+    await flushPromises();
+
+    const userInput = document.querySelector<HTMLInputElement>("#onb-user");
+    const nameInput = document.querySelector<HTMLInputElement>("#onb-name");
+    const passInput = document.querySelector<HTMLInputElement>("#onb-pass");
+    const pass2Input = document.querySelector<HTMLInputElement>("#onb-pass2");
+    userInput!.value = "test8";
+    userInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    nameInput!.value = "Test Eight";
+    nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    passInput!.value = "pass-8";
+    passInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    pass2Input!.value = "pass-8";
+    pass2Input!.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>("#onb-go")!.click();
+
+    await eventually(() => {
+      expect(document.querySelector("#onb-status")?.textContent).toContain("Ready!");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    expect(apiState.resetCalls).toEqual(["test8"]);
+    expect(apiState.existingUsers.has("test8")).toBe(true);
+    expect(storage.hasLocalKeys("test8")).toBe(true);
+    expect(storage.loadSetup().userId).toBe("test8");
+    expect(router.getCurrentView()).toEqual({ screen: "conversations" });
+    expect(document.body.textContent).toContain("No conversations yet");
+  }, 10000);
+
+  it("forgets one local browser profile without clearing another profile's sessions or trust pins", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const { router, storage } = await bootApp({
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        await storage.saveKeys("test2", "pass-2", makeKeys("test2"));
+        await storage.saveDirectMessageSession("test1", "peer-a", "pass-1", "session-1");
+        await storage.saveDirectMessageSession("test2", "peer-b", "pass-2", "session-2");
+        storage.writeIdentityPin("test1", "peer-a", {
+          fingerprintSha256: "fp-a",
+          identityKeyVersion: 1,
+          identityX25519Pub: "x-a",
+          identitySigPub: "sig-a",
+          identityPqSigPub: "pq-sig-a",
+          observedAt: "2026-03-11T00:00:00Z",
+        });
+        storage.writeIdentityPin("test2", "peer-b", {
+          fingerprintSha256: "fp-b",
+          identityKeyVersion: 1,
+          identityX25519Pub: "x-b",
+          identitySigPub: "sig-b",
+          identityPqSigPub: "pq-sig-b",
+          observedAt: "2026-03-11T00:00:00Z",
+        });
+      },
+    });
+
+    router.navigateTo({ screen: "sign-in" });
+    await flushPromises();
+
+    document.querySelector<HTMLElement>("[data-local-account-forget='test1']")?.click();
+
+    await eventually(() => {
+      expect(storage.hasLocalKeys("test1")).toBe(false);
+      expect(storage.hasLocalKeys("test2")).toBe(true);
+      expect(document.querySelector("[data-local-account-fill='test1']")).toBeNull();
+      expect(document.querySelector("[data-local-account-fill='test2']")).not.toBeNull();
+    });
+
+    await expect(storage.loadDirectMessageSession("test1", "peer-a", "pass-1")).resolves.toBeNull();
+    await expect(storage.loadDirectMessageSession("test2", "peer-b", "pass-2")).resolves.toContain(
+      "session-2",
+    );
+    expect(storage.listIdentityPins("test1")).toEqual([]);
+    expect(storage.listIdentityPins("test2")).toHaveLength(1);
   }, 10000);
 
   it("rejects a nonexistent new-chat target and keeps local conversations unchanged", async () => {
@@ -1202,6 +1482,59 @@ describe("web app flow coverage", () => {
       expect(saved[0].status).toBe("failed");
       expect(apiState.relays).toHaveLength(0);
     });
+  });
+
+  it("blocks direct messaging from an existing session when the peer rotated identity and the saved trust pin is stale", async () => {
+    const { router, apiState, messagesByConversation, storage } = await bootApp({
+      rotatedIdentityUsers: ["test2"],
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        await storage.saveDirectMessageSession(
+          "test1",
+          "test2",
+          "pass-1",
+          JSON.stringify({ snapshot: { pq_ratchet: { interval: 1 } } }),
+        );
+        storage.writeIdentityPin("test1", "test2", {
+          fingerprintSha256: "bundle-fp-test2",
+          identityKeyVersion: 1,
+          identityX25519Pub: "bundle-x25519-test2",
+          identitySigPub: "bundle-sig-test2",
+          identityPqSigPub: "bundle-pq-sig-test2",
+          observedAt: "2026-03-11T00:00:00Z",
+        });
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "test2",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "chat", peerId: "test2" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLInputElement>("#chat-input")).not.toBeNull();
+    });
+
+    const input = document.querySelector<HTMLInputElement>("#chat-input")!;
+    input.value = "blocked by rotated identity";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>("#chat-send")!.click();
+
+    await eventually(() => {
+      const saved = messagesByConversation.get(convId("test1", "test2")) ?? [];
+      expect(saved).toHaveLength(1);
+      expect(saved[0].status).toBe("failed");
+      expect(apiState.relays).toHaveLength(0);
+    });
+
+    await expect(storage.loadDirectMessageSession("test1", "test2", "pass-1")).resolves.toContain(
+      "\"pq_ratchet\"",
+    );
   });
 
   it("clears legacy stored sessions and re-establishes them with a fresh handshake", async () => {
@@ -1421,6 +1754,185 @@ describe("web app flow coverage", () => {
       expect(document.body.textContent).toContain("Manifest Continuity");
       expect(document.body.textContent).toContain("Changed on this device");
       expect(document.body.textContent).toContain("Contact discovery manifest continuity changed");
+    });
+  });
+
+  it("fails closed when the discovery attestation contract drifts on this device", async () => {
+    const { router } = await bootApp({
+      discoveryAttestationError: "Contact discovery attestation host release mismatch",
+      capabilities: {
+        contact_discovery_supported: true,
+        contact_discovery_mode: "private_service",
+        contact_discovery_service_origin: "https://cdsi.example",
+        contact_discovery_manifest_issuer_ed25519_pub: "manifest-issuer-pub",
+        contact_discovery_ticket_issuer_ed25519_pub: "ticket-issuer-pub",
+        contact_discovery_directory_backend: "attested_enclave_directory_v1",
+        contact_discovery_host_enclave_protocol_version: 1,
+        contact_discovery_host_release_id: "attested-host-v1",
+        contact_discovery_enclave_release_id: "attested-enclave-v1",
+        contact_discovery_expected_manifest_contract_sha256: "placeholder-attestation-contract-hash",
+        contact_discovery_attestation_verifier: "aws-nitro-root-v1",
+        contact_discovery_expected_measurement_hex: "ab".repeat(32),
+        contact_discovery_attestation_document_sha256: "cd".repeat(32),
+        contact_discovery_attestation_max_age_seconds: 86_400,
+      },
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "settings" });
+    await eventually(() => {
+      expect(document.body.textContent).toContain("Manifest");
+      expect(document.body.textContent).toContain("Contact discovery attestation host release mismatch");
+      expect(document.body.textContent).toContain("Unavailable");
+    });
+  });
+
+  it("fails closed when discovery upload receives a mismatched ticket nonce", async () => {
+    const { router } = await bootApp({
+      discoveryUploadResponse: {
+        ticket_nonce: "wrong-ticket-nonce",
+      },
+      capabilities: {
+        contact_discovery_supported: true,
+        contact_discovery_mode: "private_service",
+        contact_discovery_service_origin: "https://cdsi.example",
+        contact_discovery_manifest_issuer_ed25519_pub: "manifest-issuer-pub",
+        contact_discovery_ticket_issuer_ed25519_pub: "ticket-issuer-pub",
+        contact_discovery_directory_backend: "attested_enclave_directory_v1",
+        contact_discovery_host_enclave_protocol_version: 1,
+        contact_discovery_host_release_id: "attested-host-v1",
+        contact_discovery_enclave_release_id: "attested-enclave-v1",
+        contact_discovery_expected_manifest_contract_sha256: "placeholder-attestation-contract-hash",
+        contact_discovery_attestation_verifier: "aws-nitro-root-v1",
+        contact_discovery_expected_measurement_hex: "ab".repeat(32),
+        contact_discovery_attestation_document_sha256: "cd".repeat(32),
+        contact_discovery_attestation_max_age_seconds: 86_400,
+      },
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "discovery" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLButtonElement>("#disc-upload")).not.toBeNull();
+    });
+
+    const phones = document.querySelector<HTMLTextAreaElement>("#disc-phones")!;
+    phones.value = "a".repeat(64);
+    phones.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>("#disc-upload")!.click();
+
+    await eventually(() => {
+      expect(document.body.textContent).toContain("Upload failed: Contact discovery upload ticket mismatch");
+    });
+  });
+
+  it("fails closed when discovery match receives a mismatched manifest contract", async () => {
+    const { router } = await bootApp({
+      discoveryMatchResponse: {
+        manifest_contract_sha256: "ff".repeat(32),
+      },
+      capabilities: {
+        contact_discovery_supported: true,
+        contact_discovery_mode: "private_service",
+        contact_discovery_service_origin: "https://cdsi.example",
+        contact_discovery_manifest_issuer_ed25519_pub: "manifest-issuer-pub",
+        contact_discovery_ticket_issuer_ed25519_pub: "ticket-issuer-pub",
+        contact_discovery_directory_backend: "attested_enclave_directory_v1",
+        contact_discovery_host_enclave_protocol_version: 1,
+        contact_discovery_host_release_id: "attested-host-v1",
+        contact_discovery_enclave_release_id: "attested-enclave-v1",
+        contact_discovery_expected_manifest_contract_sha256: "placeholder-attestation-contract-hash",
+        contact_discovery_attestation_verifier: "aws-nitro-root-v1",
+        contact_discovery_expected_measurement_hex: "ab".repeat(32),
+        contact_discovery_attestation_document_sha256: "cd".repeat(32),
+        contact_discovery_attestation_max_age_seconds: 86_400,
+      },
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "discovery" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLButtonElement>("#disc-match")).not.toBeNull();
+    });
+
+    const hashes = document.querySelector<HTMLTextAreaElement>("#disc-query")!;
+    hashes.value = "b".repeat(64);
+    hashes.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>("#disc-match")!.click();
+
+    await eventually(() => {
+      expect(document.body.textContent).toContain("Contact discovery match contract mismatch");
+    });
+  });
+
+  it("recovers from a stale transparency checkpoint by retrying without previous_tree_size", async () => {
+    const { apiState, router } = await bootApp({
+      transparencyCheckpointOutOfRangeUsers: ["test2"],
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "test2",
+          displayName: "test1",
+        });
+        storage.writeTransparencyCheckpoint("http://localhost:3000", "test2", {
+          epoch: 7,
+          tree_size: 7,
+          root_hash: "stale-root",
+          signature: "stale-signature",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "chat", peerId: "test2" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLInputElement>("#chat-input")).not.toBeNull();
+    });
+
+    const input = document.querySelector<HTMLInputElement>("#chat-input")!;
+    input.value = "hello after stale checkpoint";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>("#chat-send")!.click();
+
+    await eventually(() => {
+      expect(apiState.relays).toHaveLength(1);
     });
   });
 

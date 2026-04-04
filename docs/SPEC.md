@@ -91,6 +91,30 @@ Current recovery guarantee:
 - snapshot restore is an implementation continuity guarantee, not a claim of
   full production-grade multi-device synchronization semantics by itself.
 
+Current PCS / recovery posture:
+
+- on the supported direct-message path, the sparse PQ ratchet mixes a fresh
+  ML-KEM shared secret into the root key at the configured interval; the
+  supported default remains every message,
+- the classical DH ratchet and per-message chain advancement continue to derive
+  fresh message/header keys after each honest ratchet step,
+- snapshot restore retains the bounded skipped-message-key cache and bounded PQ
+  local key history needed to decrypt already-derivable out-of-order traffic.
+
+Current PCS / recovery bounds:
+
+- these guarantees are scoped to one live session state, not to account-wide or
+  multi-device convergence,
+- identity rotation changes the server-advertised identity and active device,
+  but it does not automatically migrate or bless already-open client session
+  snapshots,
+- supported clients are expected to re-check transparency / pinned identity
+  state after rotation and establish a fresh session when the pinned peer
+  identity changes,
+- endpoint compromise remains out of scope: if an attacker continues to control
+  the local device or exported local secrets, protocol ratcheting alone does not
+  restore safety.
+
 ## 6. Authentication and Identity Rules
 
 Server-side directory behavior is defined as:

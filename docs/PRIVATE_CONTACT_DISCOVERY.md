@@ -13,6 +13,26 @@ Current product posture:
 
 This document defines the next honest step beyond that groundwork: replacing the current service-boundary-only hashed-directory flow with a real privacy-preserving contact discovery subsystem instead of rebuilding a weaker server-side address-book lookup in `pqmsg-server`.
 
+### Supported today
+
+The currently implemented contract is narrower than the longer-term enclave rollout:
+
+- The app server only advertises `contact_discovery_mode = "private_service"` when the full separate-service contract is configured end to end.
+- Supported Android and web clients verify the signed discovery manifest against the app-server-advertised issuer keys and contract fields before they use the service.
+- When the manifest advertises attestation evidence, supported Android and web clients also fetch `/v1/attestation?nonce_b64=...`, verify the signed attestation payload, require the echoed challenge nonce to match, require `manifest_contract_sha256`, host release, enclave release, attested OPRF key, and any PCR set to match the manifest/app-server contract, and reject stale evidence older than the app-server-advertised max age.
+- Supported Android and web clients continuity-pin the discovery-service contract on the current device and fail closed if the manifest contract silently changes.
+- Supported Android and web clients also reject `evaluate`, `handles`, and `match` responses if the echoed `manifest_contract_sha256` or `ticket_nonce` drift from the verified manifest contract and issued ticket.
+- Raw-hash discovery on the main app server remains disabled. Manual contacts, invite links, and optional exact `@username` lookup remain the primary contact bootstrap paths.
+
+### Not claimed today
+
+The current separate-service path is still a preview, not a production claim of Signal-equivalent private discovery:
+
+- it is not a claim of a completed enclave rollout or third-party-audited CDS deployment,
+- it is not the default contact bootstrap path,
+- it is not a public directory,
+- and it is not currently exercised uniformly across every client surface in the repository.
+
 ## Research Baseline
 
 This design direction follows Signal's published private-contact-discovery model:
@@ -66,7 +86,7 @@ The discovery service must be isolated from the main messaging server so the mai
 
 Current implementation boundary:
 
-- `pqmsg-discovery` verifies short-lived tickets, enforces a small signed per-ticket operation budget, publishes a signed manifest contract, and exposes the repo’s attested `attested_enclave_voprf_directory_v1` lookup mode.
+- `pqmsg-discovery` verifies short-lived tickets, enforces a small signed per-ticket operation budget, publishes a signed manifest contract, and exposes the repo's current `attested_enclave_voprf_directory_v1` preview lookup mode.
 - That manifest is signed by a dedicated Ed25519 manifest issuer key so clients can bind the service contract to the app-server capabilities document.
 - The signed manifest now locks the current result contract to `match_result_format = contact_invite_token`, the current blind-evaluation primitive to `oprf_suite = ristretto255-sha512-v1`, the current proof contract to `evaluation_proof_mode = dleq_per_element_v1`, and, when configured, the attestation verifier + enclave measurement + attestation PCR set + attestation document hash expected by the app server.
 - When attestation evidence is configured, the signed manifest now also pins `attestation_challenge_mode = nonce_b64_required_v1`, so supported clients can fail closed if the preview silently drops back to a static attestation fetch.
@@ -116,7 +136,7 @@ The next real implementation phase is no longer "pick any private-discovery idea
 - client-side attestation verification against a published/verifiable measurement
 - opaque bootstrap results instead of stable account identifiers
 
-That means the current `attested_enclave_voprf_directory_v1` / `enclave_backed_private_discovery_v1` flow is explicitly a development bridge, not the intended final protocol.
+That means the current `attested_enclave_voprf_directory_v1` / `enclave_backed_private_discovery_v1` flow is explicitly a supported preview bridge, not the intended final protocol.
 
 ### Why this direction
 

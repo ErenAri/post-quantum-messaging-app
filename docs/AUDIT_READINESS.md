@@ -119,6 +119,7 @@ presence of at least one completed `external_audit` engagement.
 | Document | Path | Audit Relevance |
 |----------|------|-----------------|
 | Protocol Specification | `docs/SPEC.md` | Cryptographic construction, session model, ratcheting |
+| Device Lifecycle Contract | `docs/DEVICE_LIFECYCLE.md` | Registration, linked-device import, retirement, reset semantics |
 | Threat Model | `docs/THREAT_MODEL.md` | Adversary classes, controls, residual risks |
 | Wire Format | `docs/WIRE_FORMAT.md` | Binary encoding, TLV, AEAD binding |
 | Crypto Agility | `docs/CRYPTO_AGILITY.md` | Suite registry, FIPS mode, downgrade resistance |

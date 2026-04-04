@@ -42,6 +42,9 @@ For the current beta:
 - The SPA shell ships an explicit CSP plus hardened COOP/COEP/CORP browser response headers in the Vite dev/preview surface.
 - The service worker only caches same-origin app-shell assets; cross-origin API traffic and `/v1/*` messaging traffic are never cached by the web shell.
 - Calling is unavailable from the web UI.
+- When `contact_discovery_mode = private_service`, the web client verifies the signed manifest, app-server-pinned discovery contract fields, optional nonce-bound attestation evidence, and continuity-pins that service contract on this browser before discovery can proceed.
+- The web client also rejects discovery `evaluate`, `handles`, and `match` responses if `manifest_contract_sha256` or `ticket_nonce` drift from the already-verified manifest contract and issued ticket.
+- For peer transparency, the web client still fails closed on proof/pin mismatch. The only bounded recovery exception is a stale `previous_tree_size` checkpoint: if the server rejects that checkpoint as out of range, the client refetches the proof once without `previous_tree_size` and still requires the refreshed proof to match the pinned identity.
 
 ## 3. Prerequisites
 

@@ -710,7 +710,7 @@ Response:
 
 `GET {contact_discovery_service_origin}/v1/manifest`
 
-Separate discovery-service manifest. Final attested service contract:
+Separate discovery-service manifest. Current signed preview contract:
 
 ```json
 {
@@ -742,7 +742,7 @@ Separate discovery-service manifest. Final attested service contract:
 }
 ```
 
-The current client contract verifies both:
+The current supported Android and web client contract verifies both:
 
 - `ticket_issuer_ed25519_pub` against the app-server capabilities document
 - `manifest_issuer_ed25519_pub` / `manifest_signature_ed25519` against the signed manifest payload
@@ -888,7 +888,7 @@ Supported Android and web clients reject `handles` and `match` responses if
 issuing the request, or if `ticket_nonce` does not match the exact discovery ticket used for that
 request.
 
-This current separate-service lookup mode is intentionally limited to `privacy_mode = "enclave_backed_private_discovery_v1"` and is not a production claim of full private contact discovery. The service no longer returns stable account IDs directly; clients resolve the returned opaque bootstrap invite through `/v1/contact-invites/{invite_token}` or `/v1/contact-invites/{invite_token}/bundle` only when the user chooses to continue.
+This current separate-service lookup mode is intentionally limited to `privacy_mode = "enclave_backed_private_discovery_v1"` and is not a production claim of full private contact discovery. The service no longer returns stable account IDs directly; clients resolve the returned opaque bootstrap invite through `/v1/contact-invites/{invite_token}` or `/v1/contact-invites/{invite_token}/bundle` only when the user chooses to continue. The longer-term goal remains a fuller enclave-backed discovery deployment, but the contract documented here is the narrower supported preview that Android and web currently enforce.
 
 `GET /v1/contact-invites/{invite_token}`
 

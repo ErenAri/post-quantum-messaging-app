@@ -17,30 +17,31 @@ infrastructure expansion.
   initial-message flows at the server boundary.
 - [x] Add explicit tests for suite continuity and wire-version continuity across
   session snapshot restore.
-- [ ] Add tests covering identity rotation interaction with existing session and
+- [x] Add tests covering identity rotation interaction with existing session and
   trust-pin state.
-- [ ] Document which PCS guarantees are currently implemented, which are bounded,
+- [x] Document which PCS guarantees are currently implemented, which are bounded,
   and which are still aspirational.
 
 ## Phase 2: Multi-Device And Local-Key Lifecycle
 
-- [ ] Write a single device-lifecycle contract covering registration, linked
+- [x] Write a single device-lifecycle contract covering registration, linked
   device import, device retirement, and local reset.
-- [ ] Add cross-client tests for stale-local-key recovery and same-username
+- [x] Add cross-client tests for stale-local-key recovery and same-username
   re-registration behavior in supported development flows.
-- [ ] Make local reset semantics consistent across Android, web, desktop, and
+- [x] Make local reset semantics consistent across Android, web, desktop, and
   CLI for keys, sessions, cursors, and trust pins.
-- [ ] Add explicit server/client tests for current-device retirement clearing the
+- [x] Add explicit server/client tests for current-device retirement clearing the
   correct device-scoped state and nothing broader.
 
 ## Phase 3: Transparency And Discovery Maturity
 
-- [ ] Align discovery/transparency docs with the actual manifest, attestation,
+- [x] Align discovery/transparency docs with the actual manifest, attestation,
   and client verification behavior.
-- [ ] Add fail-closed tests for stale tree size, manifest drift, attestation
-  drift, and ticket drift in supported clients.
-- [ ] Split “supported today” discovery behavior from “target enclave-backed”
-  discovery behavior in the docs so the contract is unambiguous.
+- [x] Add client coverage for stale transparency checkpoint recovery plus
+  fail-closed checks for manifest drift, attestation drift, and ticket/contract
+  drift in supported clients.
+- [x] Split "supported today" discovery behavior from the longer-term
+  enclave-backed target in the docs so the contract is unambiguous.
 
 ## Phase 4: Private Group Maturity
 

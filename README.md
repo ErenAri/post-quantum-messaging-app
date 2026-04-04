@@ -18,9 +18,9 @@ As of March 9, 2026, the supported beta path is **Android private beta for messa
 - Calling remains out of scope for the beta on every client.
 - Manual contact bootstrap on the hardened Android/web path is `@username` or opaque invite only.
 - Private discovery is still not fully implemented.
-- The separate discovery service now ships the repo’s final attested service contract: signed manifest + signed nonce-bound `/v1/attestation`, client-side continuity pinning, manifest/app-server-pinned verifier + measurement + optional PCR contract + attestation document hash, manifest/app-server-pinned OPRF public key, `dleq_per_element_v1` blind evaluation proofs, short-lived purpose-scoped discovery tickets with signed use budgets, and opaque bootstrap invite tokens instead of stable account IDs.
+- The current separate discovery-service preview now ships a signed manifest contract plus signed nonce-bound `/v1/attestation`, client-side continuity pinning, manifest/app-server-pinned verifier + measurement + optional PCR contract + attestation document hash, manifest/app-server-pinned OPRF public key, `dleq_per_element_v1` blind evaluation proofs, short-lived purpose-scoped discovery tickets with signed use budgets, and opaque bootstrap invite tokens instead of stable account IDs.
 - The signed discovery manifest now also pins `attestation_challenge_mode = nonce_b64_required_v1` whenever attestation evidence is configured, so supported clients fail closed if the preview silently downgrades from nonce-bound attestation back to a static evidence fetch.
-- The final intended private-discovery direction is now explicitly an enclave-backed separate service, following Signal's CDS/CDSI model, rather than a permanently widened blind-directory preview.
+- The longer-term intended private-discovery direction is still an enclave-backed separate service, following Signal's CDS/CDSI model, rather than a permanently widened blind-directory preview.
 - The current preview now also pins `directory_backend = attested_enclave_directory_v1`, `host_enclave_protocol_version = 1`, and `host_release_id = attested-host-v1` in the signed discovery contract so the eventual enclave-backed replacement has a fixed compatibility boundary and clients can continuity-pin host-side rollouts separately from enclave release changes.
 - When attestation evidence is configured, supported clients now also require the signed `/v1/attestation` payload to repeat that same `host_release_id`, so host-side rollout drift is caught in attestation as well as in the manifest/capability contract.
 - The attestation payload now also carries `manifest_contract_sha256`, which binds the evidence to the stable signed discovery contract rather than only to a loose set of matching fields.
@@ -215,12 +215,13 @@ cargo run -p pqmsg-cli -- delete-messages --user alice --keys ./devkeys/alice.js
 cargo run -p pqmsg-cli -- delete-messages --user alice --keys ./devkeys/alice.json --before-message-id 250 --remote
 ```
 
-CLI local-state reset (optionally delete the local identity key file too):
+CLI local-state reset (wipes the local identity key file by default; use
+`--keep-keys` only when you intentionally want to preserve it):
 
 ```powershell
 cargo run -p pqmsg-cli -- reset-local-state --user alice
-cargo run -p pqmsg-cli -- reset-local-state --user alice --keys ./devkeys/alice.json --wipe-keys
-cargo run -p pqmsg-cli -- reset-local-state --user alice --keys ./devkeys/alice.json --remote-retire --wipe-keys
+cargo run -p pqmsg-cli -- reset-local-state --user alice --keys ./devkeys/alice.json --remote-retire
+cargo run -p pqmsg-cli -- reset-local-state --user alice --keys ./devkeys/alice.json --keep-keys
 ```
 
 CLI linked-device management:

@@ -3273,6 +3273,122 @@ async fn identity_rotation_happy_path_and_log() {
 }
 
 #[tokio::test]
+async fn identity_rotation_revokes_old_device_auth_for_existing_sessions() {
+    let app = test_app().await;
+    let key_old = signing_key(133);
+    let key_new = signing_key(134);
+
+    let reg = register_payload("bob-rot-auth", "bob-dev-1", [1u8; 32], &key_old);
+    let (status_reg, _) = json_request(app.clone(), Method::POST, "/v1/users/register", reg).await;
+    assert_eq!(status_reg, StatusCode::OK);
+
+    let publish = publish_prekeys_payload(
+        &key_old,
+        [7u8; 32],
+        vec![8u8; 64],
+        vec![[9u8; 32]],
+        vec![vec![10u8; 64]],
+    );
+    let publish_auth = prekeys_auth_headers(&key_old, "bob-rot-auth", "bob-dev-1", &publish);
+    let (status_publish, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob-rot-auth/prekeys",
+        publish,
+        &publish_auth,
+    )
+    .await;
+    assert_eq!(status_publish, StatusCode::OK);
+
+    let new_identity_x25519 = [2u8; 32];
+    let new_identity_sig = key_new.verifying_key().to_bytes();
+    let rotate_init = json!({
+        "new_identity_x25519_pub": B64.encode(new_identity_x25519),
+        "new_identity_sig_pub": B64.encode(new_identity_sig),
+        "new_identity_pq_sig_pub": B64.encode(&key_new.pq_public),
+        "new_device_id": "bob-dev-2"
+    });
+    let rotate_init_auth =
+        rotate_init_auth_headers(&key_old, "bob-rot-auth", "bob-dev-1", &rotate_init);
+    let (status_init, body_init) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob-rot-auth/rotate/init",
+        rotate_init,
+        &rotate_init_auth,
+    )
+    .await;
+    assert_eq!(status_init, StatusCode::OK);
+    let challenge_id = body_init["challenge_id"].as_str().expect("challenge_id");
+    let challenge_nonce = B64
+        .decode(
+            body_init["challenge_nonce"]
+                .as_str()
+                .expect("challenge_nonce"),
+        )
+        .expect("challenge nonce");
+
+    let message = rotation_signature_message(
+        "bob-rot-auth",
+        challenge_id,
+        &challenge_nonce,
+        &new_identity_x25519,
+        &new_identity_sig,
+        &key_new.pq_public,
+        "bob-dev-2",
+    );
+    let rotate_confirm = json!({
+        "challenge_id": challenge_id,
+        "sig_by_current_identity": B64.encode(key_old.sign(&message).to_bytes()),
+        "sig_by_new_identity": B64.encode(key_new.sign(&message).to_bytes()),
+        "pq_sig_by_current_identity": pq_signature_b64(&key_old, &message),
+        "pq_sig_by_new_identity": pq_signature_b64(&key_new, &message)
+    });
+    let rotate_confirm_auth =
+        rotate_confirm_auth_headers(&key_old, "bob-rot-auth", "bob-dev-1", &rotate_confirm);
+    let (status_confirm, body_confirm) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob-rot-auth/rotate/confirm",
+        rotate_confirm,
+        &rotate_confirm_auth,
+    )
+    .await;
+    assert_eq!(status_confirm, StatusCode::OK);
+    assert_eq!(body_confirm["identity_key_version"].as_u64(), Some(2));
+
+    let old_identity_log_headers = identity_log_auth_headers(&key_old, "bob-rot-auth", "bob-dev-1");
+    let (status_old_log, body_old_log) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/bob-rot-auth/identity-log",
+        json!({}),
+        &old_identity_log_headers,
+    )
+    .await;
+    assert_eq!(status_old_log, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_old_log["detail"].as_str(),
+        Some("auth device mismatch for user or device revoked")
+    );
+
+    let new_identity_log_headers = identity_log_auth_headers(&key_new, "bob-rot-auth", "bob-dev-2");
+    let (status_new_log, body_new_log) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/bob-rot-auth/identity-log",
+        json!({}),
+        &new_identity_log_headers,
+    )
+    .await;
+    assert_eq!(status_new_log, StatusCode::OK);
+    assert_eq!(
+        body_new_log["events"].as_array().map(|events| events.len()),
+        Some(2)
+    );
+}
+
+#[tokio::test]
 async fn transparency_proof_verifies_current_hybrid_identity_leaf() {
     let app = test_app().await;
     let key = signing_key(77);
@@ -3619,6 +3735,179 @@ async fn current_device_retire_clears_device_scoped_server_state() {
             .as_array()
             .map(|items| items.len()),
         Some(0)
+    );
+}
+
+#[tokio::test]
+async fn current_device_retire_preserves_other_active_linked_device_state() {
+    let app = test_app_with_authenticated_dm_compat().await;
+    let bob_sig = signing_key(205);
+    let alice_sig = signing_key(206);
+
+    let reg_bob = register_payload("bob", "bob-dev-1", [31u8; 32], &bob_sig);
+    let (status_reg_bob, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_bob).await;
+    assert_eq!(status_reg_bob, StatusCode::OK);
+
+    let publish_dev1 = publish_prekeys_payload(
+        &bob_sig,
+        [32u8; 32],
+        vec![33u8; 64],
+        vec![[34u8; 32]],
+        vec![vec![35u8; 64]],
+    );
+    let publish_dev1_auth = prekeys_auth_headers(&bob_sig, "bob", "bob-dev-1", &publish_dev1);
+    let (status_publish_dev1, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/prekeys",
+        publish_dev1,
+        &publish_dev1_auth,
+    )
+    .await;
+    assert_eq!(status_publish_dev1, StatusCode::OK);
+
+    let link_headers = link_device_auth_headers(&bob_sig, "bob", "bob-dev-1", "bob-dev-2");
+    let (status_link, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/devices/link",
+        json!({ "new_device_id": "bob-dev-2" }),
+        &link_headers,
+    )
+    .await;
+    assert_eq!(status_link, StatusCode::OK);
+
+    let publish_dev2 = publish_prekeys_payload(
+        &bob_sig,
+        [36u8; 32],
+        vec![37u8; 64],
+        vec![[38u8; 32]],
+        vec![vec![39u8; 64]],
+    );
+    let publish_dev2_auth = prekeys_auth_headers(&bob_sig, "bob", "bob-dev-2", &publish_dev2);
+    let (status_publish_dev2, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/prekeys",
+        publish_dev2,
+        &publish_dev2_auth,
+    )
+    .await;
+    assert_eq!(status_publish_dev2, StatusCode::OK);
+
+    let reg_alice = register_payload("alice", "alice-dev-1", [41u8; 32], &alice_sig);
+    let (status_reg_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_reg_alice, StatusCode::OK);
+
+    let relay_body = json!({
+        "sender_user_id": "alice",
+        "device_id": "alice-dev-1",
+        "message_bytes_base64": B64.encode("linked-device-fanout")
+    });
+    let relay_headers = relay_auth_headers(
+        &alice_sig,
+        "alice",
+        "alice-dev-1",
+        "bob",
+        b"linked-device-fanout",
+    );
+    let (status_relay, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/relay/bob",
+        relay_body,
+        &relay_headers,
+    )
+    .await;
+    assert_eq!(status_relay, StatusCode::OK);
+
+    let retire_headers = retire_device_auth_headers(&bob_sig, "bob", "bob-dev-1");
+    let (status_retire, retire_body) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/bob/devices/current/retire",
+        json!({}),
+        &retire_headers,
+    )
+    .await;
+    assert_eq!(status_retire, StatusCode::OK);
+    assert_eq!(retire_body["retired_device_id"].as_str(), Some("bob-dev-1"));
+    assert_eq!(retire_body["remaining_active_devices"].as_u64(), Some(1));
+
+    let dev2_list_headers = devices_list_auth_headers(&bob_sig, "bob", "bob-dev-2");
+    let (status_list, list_body) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/bob/devices",
+        json!({}),
+        &dev2_list_headers,
+    )
+    .await;
+    assert_eq!(status_list, StatusCode::OK);
+    let devices = list_body["devices"].as_array().expect("devices array");
+    assert!(devices
+        .iter()
+        .any(|item| item["device_id"].as_str() == Some("bob-dev-1") && item["active"] == false));
+    assert!(devices
+        .iter()
+        .any(|item| item["device_id"].as_str() == Some("bob-dev-2") && item["active"] == true));
+
+    let (status_bundle_dev1, _) = json_request(
+        app.clone(),
+        Method::GET,
+        "/v1/users/bob/bundle?device_id=bob-dev-1",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_bundle_dev1, StatusCode::NOT_FOUND);
+
+    let (status_inbox_dev1, _) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/inbox/bob?since=0",
+        json!({}),
+        &inbox_auth_headers(&bob_sig, "bob", "bob-dev-1", 0),
+    )
+    .await;
+    assert_eq!(status_inbox_dev1, StatusCode::BAD_REQUEST);
+
+    let (status_bundle_dev2, bundle_dev2) = json_request(
+        app.clone(),
+        Method::GET,
+        "/v1/users/bob/bundle?device_id=bob-dev-2",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_bundle_dev2, StatusCode::OK);
+    assert_eq!(bundle_dev2["device_id"].as_str(), Some("bob-dev-2"));
+
+    let dev2_status_headers = prekeys_status_auth_headers(&bob_sig, "bob", "bob-dev-2");
+    let (status_dev2_status, _) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/bob/prekeys/status",
+        json!({}),
+        &dev2_status_headers,
+    )
+    .await;
+    assert_eq!(status_dev2_status, StatusCode::OK);
+
+    let (status_inbox_dev2, inbox_dev2_body) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/inbox/bob?since=0",
+        json!({}),
+        &inbox_auth_headers(&bob_sig, "bob", "bob-dev-2", 0),
+    )
+    .await;
+    assert_eq!(status_inbox_dev2, StatusCode::OK);
+    assert_eq!(
+        inbox_dev2_body["messages"]
+            .as_array()
+            .map(|items| items.len()),
+        Some(1)
     );
 }
 
