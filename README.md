@@ -142,6 +142,7 @@ builds live in [INSTALLATION](docs/INSTALLATION.md).
 Operational deployment and release workflows live in:
 
 - [DEPLOYMENT](docs/DEPLOYMENT.md)
+- [PILOT](docs/PILOT.md)
 - [OBSERVABILITY](docs/OBSERVABILITY.md)
 - [OPERATIONS](docs/OPERATIONS.md)
 - [RELEASE_GOVERNANCE](docs/RELEASE_GOVERNANCE.md)
@@ -158,6 +159,7 @@ Operational deployment and release workflows live in:
 | [API](docs/API.md) | Server REST and WebSocket API reference |
 | [SECURITY_GATES](docs/SECURITY_GATES.md) | Security quality gates policy |
 | [DEPLOYMENT](docs/DEPLOYMENT.md) | Container and Kubernetes deployment guidance |
+| [PILOT](docs/PILOT.md) | Android pilot scope, launch checklist, and daily operations |
 | [OBSERVABILITY](docs/OBSERVABILITY.md) | Metrics, logs, tracing, and alerting |
 | [OPERATIONS](docs/OPERATIONS.md) | Operational runbooks |
 | [RELEASE_GOVERNANCE](docs/RELEASE_GOVERNANCE.md) | Release gate pipeline |

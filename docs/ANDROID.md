@@ -6,6 +6,8 @@ This document specifies a reproducible Android demonstration workflow for the PQ
 
 Current pilot scope: Android messaging is the supported pilot path. Voice and video calling remain out of scope for this release and are not part of the acceptance criteria below.
 
+Pilot launch, cohort, and daily operations are defined in [PILOT](PILOT.md).
+
 ## 2. Architecture
 
 ```mermaid

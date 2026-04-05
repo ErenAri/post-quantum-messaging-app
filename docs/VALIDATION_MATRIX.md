@@ -60,3 +60,11 @@ currently supported product surface:
 
 Anything deeper belongs in CI, protocol tests, or release-specific governance
 checks.
+
+For the full Android pilot gate, use:
+
+- [scripts/release/validate_pilot_readiness.py](../scripts/release/validate_pilot_readiness.py)
+
+That script layers the candidate freeze checks over this matrix and, in launch
+mode, adds parser fuzz smoke, ProVerif smoke, penetration smoke, and alert
+escalation drill validation.

@@ -4,6 +4,8 @@
 
 This document specifies the Web client demonstration and pilot-holdback path for the PQ messaging prototype.
 
+The Android pilot launch contract and operations runbook live in [PILOT](PILOT.md).
+
 The web client requires the WASM PQ runtime for messaging:
 
 - **WASM PQ mode**: real ML-KEM-768 key encapsulation and ML-DSA-65 signatures via compiled Rust WASM bindings.
