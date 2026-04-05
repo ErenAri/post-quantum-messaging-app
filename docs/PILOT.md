@@ -146,6 +146,30 @@ Record the manual Android smoke result in the launch handoff with one line per s
 - timestamp
 - incident or bug reference if the step failed
 
+Use the provided template:
+
+- [docs/PILOT_ANDROID_SMOKE_TEMPLATE.json](PILOT_ANDROID_SMOKE_TEMPLATE.json)
+
+After the launch gate and manual Android smoke both pass, write the final cohort-launch handoff:
+
+```powershell
+py -3 scripts/release/write_pilot_launch_handoff.py `
+  --candidate-readiness dist/pilot-candidate-readiness.json `
+  --launch-readiness dist/pilot-launch-readiness.json `
+  --manual-smoke docs/PILOT_ANDROID_SMOKE_TEMPLATE.json `
+  --promotion-record dist/promotion-record.json `
+  --release-owner initials-or-name `
+  --rollback-owner initials-or-name `
+  --output dist/pilot-launch-handoff.json
+```
+
+That handoff fails closed if:
+
+- candidate readiness is not green
+- launch readiness is not green
+- live runtime verification is missing or failed
+- any required Android smoke step is still `pending` or marked `fail`
+
 ## 7. Cohort Launch
 
 Launch only to a trusted small cohort.

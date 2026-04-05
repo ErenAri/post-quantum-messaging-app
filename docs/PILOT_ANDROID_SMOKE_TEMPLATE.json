@@ -1,0 +1,60 @@
+{
+  "steps": [
+    {
+      "id": "provision_two_fresh_android_users",
+      "description": "Provision two fresh Android users against the pilot environment.",
+      "status": "pending",
+      "tester": "",
+      "completed_at_utc": "",
+      "notes": ""
+    },
+    {
+      "id": "direct_messages_both_directions",
+      "description": "Exchange direct messages in both directions.",
+      "status": "pending",
+      "tester": "",
+      "completed_at_utc": "",
+      "notes": ""
+    },
+    {
+      "id": "private_group_create_and_message",
+      "description": "Create one private group and exchange messages.",
+      "status": "pending",
+      "tester": "",
+      "completed_at_utc": "",
+      "notes": ""
+    },
+    {
+      "id": "attachments_dm_and_private_group",
+      "description": "Send one attachment in DM and one in a private group.",
+      "status": "pending",
+      "tester": "",
+      "completed_at_utc": "",
+      "notes": ""
+    },
+    {
+      "id": "restart_and_inbox_sync_continuity",
+      "description": "Restart both apps and verify inbox sync continuity.",
+      "status": "pending",
+      "tester": "",
+      "completed_at_utc": "",
+      "notes": ""
+    },
+    {
+      "id": "trust_change_fail_closed_behavior",
+      "description": "Verify fail-closed trust-change behavior.",
+      "status": "pending",
+      "tester": "",
+      "completed_at_utc": "",
+      "notes": ""
+    },
+    {
+      "id": "stale_private_group_state_fail_closed_behavior",
+      "description": "Verify fail-closed stale private-group-state behavior.",
+      "status": "pending",
+      "tester": "",
+      "completed_at_utc": "",
+      "notes": ""
+    }
+  ]
+}
