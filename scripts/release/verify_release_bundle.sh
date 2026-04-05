@@ -31,7 +31,7 @@ for file in "${required_files[@]}"; do
   fi
 done
 
-(cd "$dist_dir" && sha256sum --check checksums.txt)
+sha256sum --check < "$dist_dir/checksums.txt"
 
 python - "$dist_dir/release-manifest.json" <<'PY'
 import json

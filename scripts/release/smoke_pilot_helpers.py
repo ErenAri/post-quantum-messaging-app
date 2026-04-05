@@ -115,6 +115,11 @@ def smoke_release_bundle_patterns() -> None:
         assert f'--pattern "{pattern}"' in script
 
 
+def smoke_verify_release_bundle_checksum_paths() -> None:
+    script = (ROOT / "scripts" / "release" / "verify_release_bundle.sh").read_text(encoding="utf-8")
+    assert 'sha256sum --check < "$dist_dir/checksums.txt"' in script
+
+
 def smoke_prepare_release_candidate() -> None:
     with tempfile.TemporaryDirectory(prefix="pqmsg-pilot-tag-") as raw_tmp:
         root = pathlib.Path(raw_tmp)
@@ -238,6 +243,7 @@ def main() -> int:
     TMP.mkdir(parents=True, exist_ok=True)
     try:
         smoke_release_bundle_patterns()
+        smoke_verify_release_bundle_checksum_paths()
         smoke_prepare_release_candidate()
         smoke_launch_handoff_success()
         smoke_launch_handoff_fails_closed()
