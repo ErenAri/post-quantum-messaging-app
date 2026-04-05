@@ -41,6 +41,7 @@ def main() -> int:
             }
         )
 
+    output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(
             {
