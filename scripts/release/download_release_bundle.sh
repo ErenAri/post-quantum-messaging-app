@@ -24,6 +24,7 @@ cmd=(
   --pattern "pqmsg-server-linux-x86_64"
   --pattern "sbom.tar.gz"
   --pattern "release-manifest.json"
+  --pattern "release-security-posture.json"
   --pattern "container-image.txt"
   --pattern "helm-image-overrides.yaml"
   --pattern "checksums.txt"

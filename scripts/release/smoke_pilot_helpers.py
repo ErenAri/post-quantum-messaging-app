@@ -98,6 +98,23 @@ def manual_smoke_payload(step_status: str = "pass") -> dict:
     return {"steps": steps}
 
 
+def smoke_release_bundle_patterns() -> None:
+    script = (ROOT / "scripts" / "release" / "download_release_bundle.sh").read_text(encoding="utf-8")
+    required_patterns = [
+        "pqmsg-server-linux-x86_64",
+        "sbom.tar.gz",
+        "release-manifest.json",
+        "release-security-posture.json",
+        "container-image.txt",
+        "helm-image-overrides.yaml",
+        "checksums.txt",
+        "checksums.txt.sig",
+        "checksums.txt.pem",
+    ]
+    for pattern in required_patterns:
+        assert f'--pattern "{pattern}"' in script
+
+
 def smoke_prepare_release_candidate() -> None:
     with tempfile.TemporaryDirectory(prefix="pqmsg-pilot-tag-") as raw_tmp:
         root = pathlib.Path(raw_tmp)
@@ -220,6 +237,7 @@ def main() -> int:
     shutil.rmtree(TMP, ignore_errors=True)
     TMP.mkdir(parents=True, exist_ok=True)
     try:
+        smoke_release_bundle_patterns()
         smoke_prepare_release_candidate()
         smoke_launch_handoff_success()
         smoke_launch_handoff_fails_closed()
