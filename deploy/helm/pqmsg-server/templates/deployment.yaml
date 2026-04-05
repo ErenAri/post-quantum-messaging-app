@@ -36,6 +36,8 @@ spec:
               readOnly: true
             - name: audit-log
               mountPath: /var/log/pqmsg
+            - name: blob-store
+              mountPath: /var/lib/pqmsg/blob-store
           readinessProbe:
             httpGet:
               scheme: HTTPS
@@ -63,4 +65,6 @@ spec:
           secret:
             secretName: {{ .Values.tlsSecretName }}
         - name: audit-log
+          emptyDir: {}
+        - name: blob-store
           emptyDir: {}

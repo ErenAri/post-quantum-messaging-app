@@ -62,6 +62,7 @@ env:
   PQMSG_PREKEY_BUNDLE_RESERVE_COUNT: "2"
   PQMSG_TLS_CERT_PATH: /etc/pqmsg/tls/tls.crt
   PQMSG_TLS_KEY_PATH: /etc/pqmsg/tls/tls.key
+  PQMSG_BLOB_STORE_DIR: /var/lib/pqmsg/blob-store
   PQMSG_SENTRY_TRACES_SAMPLE_RATE: "0.1"
 
 secretEnv:
