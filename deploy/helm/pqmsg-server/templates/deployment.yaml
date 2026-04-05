@@ -34,6 +34,8 @@ spec:
             - name: tls
               mountPath: /etc/pqmsg/tls
               readOnly: true
+            - name: audit-log
+              mountPath: /var/log/pqmsg
           readinessProbe:
             httpGet:
               scheme: HTTPS
@@ -60,3 +62,5 @@ spec:
         - name: tls
           secret:
             secretName: {{ .Values.tlsSecretName }}
+        - name: audit-log
+          emptyDir: {}
