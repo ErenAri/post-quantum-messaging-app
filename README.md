@@ -47,6 +47,26 @@ Its strongest contributions are:
 - authenticated, fail-closed client behavior
 - cross-surface experimentation across CLI, Android, iOS, web, and desktop
 
+## Technical Comparison
+
+This repository is closer to a protocol and product-direction prototype than a
+finished consumer messenger. The most useful technical comparison is not
+"feature count", but where each system places its trust boundary.
+
+| System | Registration and bootstrap | Default encryption boundary | Device and history model | PQ posture |
+|---|---|---|---|---|
+| This repository | Hardened path uses `@username` or opaque invite; identity is immutable after first bind | Supported messaging paths are designed as end-to-end, fail-closed channels over an opaque relay | Multi-surface prototype with explicit device lifecycle, repair, reset, and support gating; Android is the current beta path | Hybrid PQXDH-style initiation using X25519 plus ML-KEM-family KEMs, with explicit PQ backend policy |
+| Signal | Phone number registration is required; usernames are optional for contact initiation and privacy layering | End-to-end encrypted messaging and calling by default, with safety-number verification and linked-device privacy model | Mature linked-device model with private linked communication and bounded history transfer from the phone at link time | Official PQXDH direction and deployed post-quantum migration path |
+| Telegram | Cloud-account model with usernames; separate Secret Chats for stronger peer-to-peer secrecy | Cloud Chats use server-client encryption; Secret Chats add client-client end-to-end encryption | Cloud-first multi-device history for regular chats; Secret Chats stay bound to the originating devices and are not part of the cloud | Official protocol surface emphasizes MTProto and Secret Chat PFS, not a post-quantum migration story |
+
+Technically, this project aims to be much closer to Signal than Telegram in
+where confidentiality is enforced: the relay should not be trusted with message
+plaintext. The main difference from Signal is maturity. Signal is a production
+consumer system with a refined multi-device model and established operational
+practice; this repository is still a research and beta-validation codebase with
+explicit support boundaries, more visible fail-closed behavior, and a stronger
+focus on post-quantum transition mechanics.
+
 ## System Architecture
 
 ```mermaid
