@@ -45,25 +45,25 @@ infrastructure expansion.
 
 ## Phase 4: Private Group Maturity
 
-- [ ] Define a clear private-group availability contract for local state,
+- [x] Define a clear private-group availability contract for local state,
   history, epoch sync, and unavailable-state handling.
-- [ ] Add tests for private-group state refresh and attachment/reply/search
+- [x] Add tests for private-group state refresh and attachment/reply/search
   behavior when local state is missing or stale.
-- [ ] Tighten cross-client parity for private-group unavailable states so they
+- [x] Tighten cross-client parity for private-group unavailable states so they
   fail consistently and intentionally.
 
 ## Phase 5: Client Hardening And UX Reliability
 
-- [ ] Normalize security-critical recovery copy across Android, web, desktop,
+- [x] Normalize security-critical recovery copy across Android, web, desktop,
   and CLI.
-- [ ] Add a small supported-flow validation matrix that is exercised manually or
+- [x] Add a small supported-flow validation matrix that is exercised manually or
   automatically before release screenshots are refreshed.
-- [ ] Reduce prototype-only surfaces that contradict `docs/SUPPORT_MATRIX.json`
+- [x] Reduce prototype-only surfaces that contradict `docs/SUPPORT_MATRIX.json`
   or current server capability policy.
 
 ## Phase 6: Operational Hardening
 
-- [ ] Review deployment-profile guardrails against the actual supported beta
+- [x] Review deployment-profile guardrails against the actual supported beta
   paths and remove stale or purely aspirational checks.
 - [ ] Add privacy-safe observability for the most common sync, transparency, and
   local-state recovery failures.

@@ -156,6 +156,38 @@ function convId(userId: string, peerId: string): string {
   return [userId, peerId].sort().join(":");
 }
 
+function makePrivateGroupState(groupId: string, ownerUserId: string, epoch = 1) {
+  return {
+    group_id: groupId,
+    epoch,
+    root_secret: [1, 2, 3, 4],
+    attributes: {
+      title: "Core team",
+      description: null,
+      avatar_hash_sha256: null,
+      disappearing_message_timer_seconds: null,
+    },
+    members: [
+      {
+        user_id: ownerUserId,
+        role: "Owner",
+      },
+    ],
+    created_at_unix_seconds: 1_700_000_000,
+    updated_at_unix_seconds: 1_700_000_100,
+  };
+}
+
+function makePrivateGroupCredential(groupId: string, userId: string, epoch = 1) {
+  return {
+    group_id: groupId,
+    epoch,
+    member_user_id: userId,
+    role: "Owner",
+    credential_secret: [7, 8, 9, 10],
+  };
+}
+
 function flushPromises(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -1969,8 +2001,11 @@ describe("web app flow coverage", () => {
     expect(document.body.textContent).toContain("Create Account");
   });
 
-  it("shows private-group create and join UI while keeping calls in holdback", async () => {
+  it("hides unsupported compose actions and fails closed on blocked web routes in demo-only mode", async () => {
     const { router } = await bootApp({
+      capabilities: {
+        web_client_policy: "demo_only",
+      },
       prepare: async (storage) => {
         await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
         storage.saveSetup({
@@ -1985,15 +2020,97 @@ describe("web app flow coverage", () => {
       },
     });
 
+    router.navigateTo({ screen: "conversations" });
+    await eventually(() => {
+      expect(document.body.textContent).toContain("Web messaging unavailable");
+    });
+    expect(document.querySelector("#workspace-new-chat")).toBeNull();
+    expect(document.querySelector("#workspace-new-group")).toBeNull();
+    expect(document.querySelector("#workspace-open-settings")).not.toBeNull();
+
+    router.navigateTo({ screen: "new-chat" });
+    await eventually(() => {
+      expect(document.body.textContent).toContain("This server is still holding the web client in demo-only mode.");
+      expect(document.querySelector("#nc-peer")).toBeNull();
+    });
+
     router.navigateTo({ screen: "create-group" });
-    await flushPromises();
-    expect(document.body.textContent).toContain("Private groups stay client-managed");
-    expect(document.body.textContent).toContain("Create Private Group");
-    expect(document.body.textContent).toContain("Join Private Group");
+    await eventually(() => {
+      expect(document.body.textContent).toContain("Private groups unavailable");
+      expect(document.body.textContent).toContain("Direct web messaging and private groups stay disabled while the server remains in demo-only web mode.");
+    });
+    expect(document.querySelector("#cg-create")).toBeNull();
+    expect(document.querySelector("#cg-join")).toBeNull();
 
     router.navigateTo({ screen: "call", peerId: "test2", callType: "audio" });
     await flushPromises();
     expect(document.body.textContent).toContain("Audio calling is unavailable on web");
+  });
+
+  it("shows an unavailable private-group state when local opaque state is missing", async () => {
+    const { router, storage } = await bootApp({
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "",
+          displayName: "test1",
+        });
+        storage.upsertGroupConversation("test1", "pg-1", "test1", "No content", false);
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "group-chat", groupId: "pg-1" });
+    await eventually(() => {
+      expect(document.body.textContent).toContain("This group is not ready on this device.");
+    });
+    expect(document.body.textContent).toContain(
+      "Open this group from an invite link or from a device that already has the latest group state.",
+    );
+    expect(document.querySelector("#gc-input")).toBeNull();
+    expect(document.querySelector("#gc-search")).toBeNull();
+    expect(document.querySelector("#gc-send")).toBeNull();
+    expect(document.querySelector("#gc-attach")).toBeNull();
+    expect(document.querySelector("#gc-back-to-inbox")).not.toBeNull();
+    expect(storage.readPrivateGroup("test1", "pg-1")).toBeNull();
+  });
+
+  it("fails closed when the saved private-group credential is stale for the current epoch", async () => {
+    const { router } = await bootApp({
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "",
+          displayName: "test1",
+        });
+        storage.upsertGroupConversation("test1", "pg-1", "test1", "No content", false);
+        storage.upsertPrivateGroup(
+          "test1",
+          "pg-1",
+          JSON.stringify(makePrivateGroupState("pg-1", "test1", 2)),
+          JSON.stringify(makePrivateGroupCredential("pg-1", "test1", 1)),
+        );
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "group-chat", groupId: "pg-1" });
+    await eventually(() => {
+      expect(document.body.textContent).toContain("This group is not ready on this device.");
+    });
+    expect(document.body.textContent).toContain("This device needs the latest group state to open this conversation.");
+    expect(document.querySelector("#gc-input")).toBeNull();
+    expect(document.querySelector("#gc-search")).toBeNull();
+    expect(document.querySelector("#gc-send")).toBeNull();
+    expect(document.querySelector("#gc-attach")).toBeNull();
   });
 });
 

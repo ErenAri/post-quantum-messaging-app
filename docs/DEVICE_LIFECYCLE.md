@@ -242,6 +242,19 @@ re-registration and stale-local-key repair.
   the same username from a browser after an immutable-identity conflict or
   repairing mismatched saved browser keys.
 
+### 6.8 Recovery Terminology
+
+Use the following terms consistently across clients and docs:
+
+- **Forget local profile**: web/desktop local-only cleanup of one saved browser
+  profile. This does not imply remote retirement.
+- **Repair saved keys**: development-relay-only same-username recovery that
+  resets the relay record and re-publishes the keys already saved on the local
+  browser profile.
+- **Reset local state** / **Reset this device**: destructive local wipe that
+  removes the client-local account state and may attempt current-device
+  retirement first when keys are still available.
+
 ## 7. Bounded Guarantees And Non-Goals
 
 This repo currently guarantees less than a production multi-device messenger.

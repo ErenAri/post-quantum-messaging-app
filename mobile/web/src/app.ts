@@ -299,6 +299,59 @@ function getPrivateGroupCredential(groupId: string): PrivateGroupMemberCredentia
   return local ? parsePrivateGroupMemberCredentialJson(local.memberCredentialJson) : null;
 }
 
+type PrivateGroupAvailability =
+  | {
+      available: true;
+      local: PrivateGroupLocalState;
+      state: PrivateGroupState;
+      credential: PrivateGroupMemberCredential;
+    }
+  | {
+      available: false;
+      title: string;
+      body: string;
+      statusLine: string;
+    };
+
+function getPrivateGroupUnavailableCopy(): Pick<
+  Extract<PrivateGroupAvailability, { available: false }>,
+  "title" | "body" | "statusLine"
+> {
+  return {
+    title: "This group is not ready on this device.",
+    body: "Open this group from an invite link or from a device that already has the latest group state.",
+    statusLine: "This device needs the latest group state to open this conversation.",
+  };
+}
+
+function getPrivateGroupAvailability(groupId: string): PrivateGroupAvailability {
+  const unavailable = getPrivateGroupUnavailableCopy();
+  const local = getPrivateGroupLocalState(groupId);
+  if (!local) {
+    return { available: false, ...unavailable };
+  }
+  const state = parsePrivateGroupStateJson(local.stateJson);
+  const credential = parsePrivateGroupMemberCredentialJson(local.memberCredentialJson);
+  if (!state || !credential) {
+    return { available: false, ...unavailable };
+  }
+  if (state.group_id !== groupId || credential.group_id !== groupId) {
+    return { available: false, ...unavailable };
+  }
+  if (credential.member_user_id !== setup.userId || credential.epoch !== state.epoch) {
+    return { available: false, ...unavailable };
+  }
+  if (!isPrivateGroupMember(state, setup.userId)) {
+    return { available: false, ...unavailable };
+  }
+  return {
+    available: true,
+    local,
+    state,
+    credential,
+  };
+}
+
 function findPrivateGroupCredentialForUser(
   memberCredentials: PrivateGroupMemberCredential[],
   userId: string
@@ -750,14 +803,11 @@ function buildInboundGroupAttachmentPreview(senderLabel: string, envelope: Media
 }
 
 async function sendPrivateGroupMessage(groupId: string, outbound: GroupOutboundPayload): Promise<void> {
-  const state = getPrivateGroupState(groupId);
-  if (!state) {
-    throw new Error("Private-group state is not available on this device.");
+  const groupAccess = getPrivateGroupAvailability(groupId);
+  if (!groupAccess.available) {
+    throw new Error(groupAccess.statusLine);
   }
-  const credential = getPrivateGroupCredential(groupId);
-  if (!credential) {
-    throw new Error("Private-group credential is not available on this device.");
-  }
+  const { state, credential } = groupAccess;
   const k = await ensureKeys();
   await ensureWebPqRuntime();
   const api = new PqmsgApi(setup.serverUrl);
@@ -879,12 +929,11 @@ async function openPrivateGroupTransportMessageWithCandidates(
 }
 
 async function syncPrivateGroupMessagesForGroup(groupId: string): Promise<boolean> {
-  const local = getPrivateGroupLocalState(groupId);
-  const state = local ? parsePrivateGroupStateJson(local.stateJson) : null;
-  const credential = local ? parsePrivateGroupMemberCredentialJson(local.memberCredentialJson) : null;
-  if (!state || !credential) {
+  const groupAccess = getPrivateGroupAvailability(groupId);
+  if (!groupAccess.available) {
     return false;
   }
+  const { state, credential } = groupAccess;
   const api = new PqmsgApi(setup.serverUrl);
   const credentialMaterial = privateGroupDescribeMemberCredential(credential);
   let cursor = readPrivateGroupCursor(setup.userId, groupId);
@@ -1161,6 +1210,10 @@ async function loadServerCapabilitiesCached(): Promise<ServerCapabilitiesRespons
     cachedCapabilitiesServerUrl = setup.serverUrl;
     return null;
   }
+}
+
+function currentWebBetaHoldback() {
+  return getWebBetaHoldback(cachedCapabilities);
 }
 
 function presenceSupported(): boolean {
@@ -1622,14 +1675,14 @@ function render(view: AppView): void {
       renderSignIn();
       break;
     case "conversations":
-      renderConversations();
+      void renderConversations();
       break;
     case "chat":
       activeChatPeer = view.peerId;
       renderChat(view.peerId);
       break;
     case "new-chat":
-      renderNewChat();
+      void renderNewChat();
       break;
     case "settings":
       renderSettings();
@@ -1642,7 +1695,7 @@ function render(view: AppView): void {
       renderGroupInfo(view.groupId);
       break;
     case "create-group":
-      renderCreateGroup();
+      void renderCreateGroup();
       break;
     case "identity-log":
       renderIdentityLog();
@@ -2228,7 +2281,7 @@ function renderCreateAccount(): void {
                       <span class="contact-id">Already saved locally in this browser</span>
                     </div>
                   </div>
-                  <button type="button" class="btn-secondary contact-row-forget" data-local-account-forget="${escHtml(accountId)}">Forget</button>
+                  <button type="button" class="btn-secondary contact-row-forget" data-local-account-forget="${escHtml(accountId)}">Forget profile</button>
                 </div>
               `
                 )
@@ -2278,7 +2331,7 @@ function renderCreateAccount(): void {
       if (!accountId) {
         return;
       }
-      if (!confirm(`Forget the saved local profile for @${accountId} on this browser?`)) {
+      if (!confirm(`Forget the saved local profile for @${accountId} on this browser? This removes local keys, sessions, pins, and cached chats from this browser only.`)) {
         return;
       }
       await wipeLocalState(accountId);
@@ -2286,7 +2339,7 @@ function renderCreateAccount(): void {
         setup = { ...DEFAULT_SETUP, serverUrl: setup.serverUrl, suiteLabel: setup.suiteLabel };
         saveSetup(setup);
       }
-      notify(`Forgot local profile for @${accountId}`, "info");
+      notify(`Forgot the local profile for @${accountId} on this browser.`, "info");
       renderCreateAccount();
     });
   }
@@ -2309,7 +2362,7 @@ function renderCreateAccount(): void {
       return;
     }
     if (hasLocalKeys(requestedUserId)) {
-      status.textContent = `This browser already has saved local keys for @${requestedUserId}. Sign in with that profile or forget it first.`;
+      status.textContent = `This browser already has a saved local profile for @${requestedUserId}. Sign in with that profile or forget it first.`;
       status.classList.add("error-text");
       userInput.focus();
       return;
@@ -2366,7 +2419,7 @@ function renderCreateAccount(): void {
         }
         if (
           !confirm(
-            `@${userId} is already registered on this development relay. Reset that relay identity and continue with this browser's @${userId}?`
+            `@${userId} is already registered on this development relay. Reset the relay record and continue with the saved keys for @${userId} in this browser?`
           )
         ) {
           throw new Error(`Registration stopped because @${userId} is already registered on this relay.`);
@@ -2472,7 +2525,7 @@ function renderSignIn(): void {
                         <span class="contact-id">Tap to fill username</span>
                       </div>
                     </button>
-                    <button type="button" class="btn-secondary contact-row-forget" data-local-account-forget="${escHtml(accountId)}">Forget</button>
+                    <button type="button" class="btn-secondary contact-row-forget" data-local-account-forget="${escHtml(accountId)}">Forget profile</button>
                   </div>
                 ` 
                   )
@@ -2520,7 +2573,7 @@ function renderSignIn(): void {
       if (!accountId) {
         return;
       }
-      if (!confirm(`Forget the saved local profile for @${accountId} on this browser?`)) {
+      if (!confirm(`Forget the saved local profile for @${accountId} on this browser? This removes local keys, sessions, pins, and cached chats from this browser only.`)) {
         return;
       }
       await wipeLocalState(accountId);
@@ -2528,7 +2581,7 @@ function renderSignIn(): void {
         setup = { ...DEFAULT_SETUP, serverUrl: setup.serverUrl, suiteLabel: setup.suiteLabel };
         saveSetup(setup);
       }
-      notify(`Forgot local profile for @${accountId}`, "info");
+      notify(`Forgot the local profile for @${accountId} on this browser.`, "info");
       renderSignIn();
     });
   }
@@ -2575,7 +2628,7 @@ function renderSignIn(): void {
           if (
             canUseDevelopmentRelayReset(capabilities)
             && confirm(
-              `Saved local keys for @${uid} do not match the current server record. Repair @${uid} on this development relay using the keys already saved in this browser?`
+              `Saved local keys for @${uid} do not match the current server record. Repair the saved keys for @${uid} on this development relay by resetting the relay record and re-publishing the keys already saved in this browser?`
             )
           ) {
             status.textContent = `Repairing @${uid} on the development relayâ€¦`;
@@ -2620,8 +2673,16 @@ function renderSignIn(): void {
 // 2. Conversation List
 // ---------------------------------------------------------------------------
 
-function renderConversations(): void {
+async function renderConversations(): Promise<void> {
+  await loadServerCapabilitiesCached();
   const { rows, counts, visibleRows } = getWorkspaceInboxState();
+  const webHoldback = currentWebBetaHoldback();
+  const previewTitle = webHoldback.directMessagingAllowed
+    ? "Pick up a conversation"
+    : "Review saved conversations";
+  const previewCopy = webHoldback.directMessagingAllowed
+    ? "Select a chat on the left to keep reading, reply, or jump into details."
+    : "This server keeps web messaging in demo-only mode. You can still review local chats and open settings from here.";
 
   app.innerHTML = `
     <div class="desktop-shell desktop-home-shell">
@@ -2629,8 +2690,8 @@ function renderConversations(): void {
       <section class="workspace-preview-pane">
         <div class="workspace-preview-card">
           <span class="workspace-kicker">Inbox</span>
-          <h2>Pick up a conversation</h2>
-          <p class="workspace-preview-copy">Select a chat on the left to keep reading, reply, or jump into details.</p>
+          <h2>${escHtml(previewTitle)}</h2>
+          <p class="workspace-preview-copy">${escHtml(previewCopy)}</p>
           <p class="workspace-preview-meta">
             <span>${counts.unread} unread</span>
             <span>${counts.groups} groups</span>
@@ -2638,8 +2699,8 @@ function renderConversations(): void {
             <span>${counts.archived} archived</span>
           </p>
           <div class="workspace-preview-note" role="status" aria-live="polite">
-            <strong>Web access on this server</strong>
-            <span>${escHtml(WEB_BETA_SCOPE_SUMMARY)}</span>
+            <strong>${escHtml(webHoldback.title)}</strong>
+            <span>${escHtml(webHoldback.detail)}</span>
           </div>
         </div>
       </section>
@@ -2793,6 +2854,7 @@ function renderWorkspaceSidebar(
   counts: Record<InboxFilter, number>,
   activeThread: ActiveWorkspaceThread = null
 ): string {
+  const webHoldback = currentWebBetaHoldback();
   const archiveToggle = activeInboxFilter === "archived"
     ? `<button id="workspace-archived-toggle" class="summary-link-btn" type="button">Back to inbox</button>`
     : counts.archived > 0
@@ -2803,6 +2865,23 @@ function renderWorkspaceSidebar(
     : visibleRows.map((row) => renderConversationRow(row, activeThread)).join("");
   const profileLabel = setup.displayName || setup.userId;
   const profileAvatar = profileLabel.slice(0, 2).toUpperCase();
+  const composeRowHtml = webHoldback.directMessagingAllowed
+    ? `
+        <div class="workspace-compose-row">
+          <button id="workspace-new-chat" class="btn-primary">New chat</button>
+          ${webHoldback.groupMessagingAllowed ? `<button id="workspace-new-group" class="btn-secondary">New group</button>` : ""}
+        </div>
+      `
+    : `
+        <div class="workspace-compose-row">
+          <button id="workspace-open-settings" class="btn-primary">Settings</button>
+        </div>
+      `;
+  const summaryCopy = webHoldback.directMessagingAllowed
+    ? webHoldback.groupMessagingAllowed
+      ? "Open chats and settings without losing your place."
+      : "Direct web messaging is available here. Private groups stay blocked by this server."
+    : "This server keeps web messaging in demo-only mode.";
   return `
     <aside class="workspace-sidebar">
       <div class="workspace-sidebar-head">
@@ -2833,12 +2912,9 @@ function renderWorkspaceSidebar(
             </svg>
           </button>
         </div>
-        <div class="workspace-compose-row">
-          <button id="workspace-new-chat" class="btn-primary">New chat</button>
-          <button id="workspace-new-group" class="btn-secondary">New group</button>
-        </div>
+        ${composeRowHtml}
         <div class="workspace-summary-inline" role="status" aria-live="polite">
-          <span class="workspace-summary-copy">Open chats and settings without losing your place.</span>
+          <span class="workspace-summary-copy">${escHtml(summaryCopy)}</span>
           ${archiveToggle}
         </div>
         <div class="filter-chip-bar workspace-filter-bar" role="tablist" aria-label="Inbox filters">
@@ -2859,6 +2935,7 @@ function renderWorkspaceSidebar(
 function bindWorkspaceSidebarInteractions(): void {
   document.querySelector<HTMLButtonElement>("#workspace-new-chat")?.addEventListener("click", () => navigateTo({ screen: "new-chat" }));
   document.querySelector<HTMLButtonElement>("#workspace-new-group")?.addEventListener("click", () => navigateTo({ screen: "create-group" }));
+  document.querySelector<HTMLButtonElement>("#workspace-open-settings")?.addEventListener("click", () => navigateTo({ screen: "settings" }));
   document.querySelector<HTMLButtonElement>("#workspace-search")?.addEventListener("click", () => navigateTo({ screen: "search" }));
   document.querySelector<HTMLButtonElement>("#workspace-shortcuts")?.addEventListener("click", () => showKeyboardShortcutOverlay());
   document.querySelector<HTMLButtonElement>("#workspace-settings")?.addEventListener("click", () => navigateTo({ screen: "settings" }));
@@ -4187,7 +4264,7 @@ async function renderChat(peerId: string): Promise<void> {
         const message = errorMsg(e);
         if (isAuthSignatureFailureMessage(message) && canUseDevelopmentRelayReset(cachedCapabilities)) {
           notify(`Send failed: ${explainLocalIdentityMismatch(setup.userId)}`, "error", {
-            actionLabel: "Repair account",
+            actionLabel: "Repair saved keys",
             action: () => {
               void (async () => {
                 try {
@@ -4197,7 +4274,7 @@ async function renderChat(peerId: string): Promise<void> {
                     getPassphrase(),
                   );
                   await bootstrapIdentityData();
-                  notify(`Repaired @${setup.userId} on this development relay. Send again.`, "success");
+                  notify(`Repaired the saved keys for @${setup.userId} on this development relay. Send again.`, "success");
                 } catch (repairError) {
                   notify(`Repair failed: ${errorMsg(repairError)}`, "error");
                 }
@@ -5016,7 +5093,39 @@ function statusSvg(status: StoredMessage["status"]): string {
 // 4. New Chat dialog
 // ---------------------------------------------------------------------------
 
-function renderNewChat(): void {
+async function renderNewChat(): Promise<void> {
+  const webHoldback = getWebBetaHoldback(await loadServerCapabilitiesCached());
+  if (!webHoldback.directMessagingAllowed) {
+    renderWorkspacePage(`
+      <section class="workspace-page-card">
+        ${renderWorkspacePageHeader(
+          "Web messaging unavailable",
+          "This server is still holding the web client in demo-only mode.",
+          {
+            eyebrow: "New message",
+            backButtonId: "nc-back",
+            backButtonLabel: "Back to inbox",
+          },
+        )}
+        ${renderWorkspaceEmptyState(
+          webHoldback.title,
+          webHoldback.detail,
+          {
+            eyebrow: "New message",
+            compact: true,
+            actionsHtml: `
+              <button id="nc-open-settings" class="btn-primary" type="button">Open settings</button>
+              <button id="nc-back-to-inbox" class="btn-secondary" type="button">Back to inbox</button>
+            `,
+          },
+        )}
+      </section>
+    `);
+    q("#nc-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
+    q("#nc-open-settings").addEventListener("click", () => navigateTo({ screen: "settings" }));
+    q("#nc-back-to-inbox").addEventListener("click", () => navigateTo({ screen: "conversations" }));
+    return;
+  }
   const contactRows = cachedContacts.map(c => {
     const identity = resolvePeerIdentity(c.contact_user_id);
     const verified = c.verified_by_qr ? `<span class="verified-badge" title="Verified">✓</span>` : "";
@@ -5162,40 +5271,53 @@ function renderNewChat(): void {
 // ---------------------------------------------------------------------------
 
 async function renderGroupChat(groupId: string): Promise<void> {
-  const privateGroup = getPrivateGroupState(groupId);
-  if (!privateGroup) {
+  const groupAccess = getPrivateGroupAvailability(groupId);
+  if (!groupAccess.available) {
+    const { counts, visibleRows } = getWorkspaceInboxState({ kind: "group", threadId: groupId });
     app.innerHTML = `
-      <div class="app-shell">
-        <header class="topbar">
-          <button id="gc-back" class="icon-btn" aria-label="Back to conversations">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M19 12H5M12 19l-7-7 7-7"/>
-            </svg>
-          </button>
-          <h1 class="topbar-title">Private Group</h1>
-        </header>
-        <div class="settings-body">
-          <div class="beta-banner beta-banner-warning">
-            <strong>Private-group state is missing</strong>
-            <p>This device does not have the opaque state needed to open this group.</p>
+      <div class="desktop-shell desktop-thread-shell">
+        ${renderWorkspaceSidebar(visibleRows, counts, { kind: "group", threadId: groupId })}
+        <div class="desktop-thread-pane">
+          <div class="chat-shell">
+            <header class="chat-header">
+              <button id="gc-back" class="icon-btn" aria-label="Back to conversations">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M19 12H5M12 19l-7-7 7-7"/>
+                </svg>
+              </button>
+              <div class="chat-header-info">
+                <span class="chat-header-name">Private Group</span>
+                <span class="chat-header-status">${escHtml(groupAccess.statusLine)}</span>
+              </div>
+            </header>
+            <div class="messages-container">
+              ${renderWorkspaceEmptyState(
+                groupAccess.title,
+                groupAccess.body,
+                {
+                  eyebrow: "Private group",
+                  compact: true,
+                  actionsHtml: `<button id="gc-back-to-inbox" class="btn-secondary">Back to inbox</button>`,
+                },
+              )}
+            </div>
           </div>
         </div>
       </div>
     `;
-    wrapCurrentAppShellInWorkspace({ activeThread: { kind: "group", threadId: groupId } });
     q("#gc-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
+    q("#gc-back-to-inbox").addEventListener("click", () => navigateTo({ screen: "conversations" }));
     return;
   }
-  const localCredential = getPrivateGroupCredential(groupId);
+  const privateGroup = groupAccess.state;
+  const localCredential = groupAccess.credential;
   const canManage = Boolean(
-    localCredential && privateGroupDescribeMemberCredential(localCredential).publish_key_base64,
+    privateGroupDescribeMemberCredential(localCredential).publish_key_base64,
   );
   const groupTitle = privateGroup.attributes.title || groupId;
-  const groupState = getPrivateGroupState(groupId);
-  const yourRole = groupState?.members.find((member) => member.user_id === setup.userId)?.role || "member";
-  const memberSummary = groupState
-    ? `${groupState.members.length} ${groupState.members.length === 1 ? "member" : "members"} / ${yourRole}`
-    : "Private group";
+  const groupState = privateGroup;
+  const yourRole = groupState.members.find((member) => member.user_id === setup.userId)?.role || "member";
+  const memberSummary = `${groupState.members.length} ${groupState.members.length === 1 ? "member" : "members"} / ${yourRole}`;
   const threadIntroHtml = renderThreadIntroCard({
     eyebrow: "Private group",
     avatarText: groupTitle.slice(0, 2).toUpperCase() || groupId.slice(0, 2).toUpperCase(),
@@ -6073,11 +6195,12 @@ async function loadGroupMembersCount(groupId: string): Promise<void> {
   if (!countEl) {
     return;
   }
-  const state = getPrivateGroupState(groupId);
-  if (!state) {
-    countEl.textContent = "private-group state unavailable";
+  const groupAccess = getPrivateGroupAvailability(groupId);
+  if (!groupAccess.available) {
+    countEl.textContent = groupAccess.statusLine;
     return;
   }
+  const { state } = groupAccess;
   const yourRole = state.members.find((member) => member.user_id === setup.userId)?.role || "member";
   countEl.textContent = `${state.members.length} members · epoch ${state.epoch} · your role ${yourRole}`;
 }
@@ -6087,9 +6210,8 @@ async function loadGroupMembersCount(groupId: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function renderGroupInfo(groupId: string): Promise<void> {
-  const state = getPrivateGroupState(groupId);
-  const credential = getPrivateGroupCredential(groupId);
-  if (!state || !credential) {
+  const groupAccess = getPrivateGroupAvailability(groupId);
+  if (!groupAccess.available) {
     renderWorkspacePage(
       `
         <section class="workspace-page-card">
@@ -6105,10 +6227,14 @@ async function renderGroupInfo(groupId: string): Promise<void> {
           <div class="settings-body">
             <div class="settings-section">
               <h3>${escHtml(getPrivateGroupTitle(groupId))}</h3>
-              <div class="beta-banner beta-banner-warning">
-                <strong>Private-group state is unavailable</strong>
-                <p>This device does not have the local opaque state needed to manage this group.</p>
-              </div>
+              ${renderWorkspaceEmptyState(
+                groupAccess.title,
+                groupAccess.body,
+                {
+                  eyebrow: "Private group",
+                  compact: true,
+                },
+              )}
             </div>
           </div>
         </section>
@@ -6118,6 +6244,7 @@ async function renderGroupInfo(groupId: string): Promise<void> {
     q("#gi-back").addEventListener("click", () => navigateTo({ screen: "group-chat", groupId }));
     return;
   }
+  const { state, credential } = groupAccess;
 
   const credentialMaterial = privateGroupDescribeMemberCredential(credential);
   const canManage = Boolean(credentialMaterial.publish_key_base64);
@@ -6414,7 +6541,39 @@ async function renderGroupInfo(groupId: string): Promise<void> {
 // Phase 3: Create Group
 // ---------------------------------------------------------------------------
 
-function renderCreateGroup(): void {
+async function renderCreateGroup(): Promise<void> {
+  const webHoldback = getWebBetaHoldback(await loadServerCapabilitiesCached());
+  if (!webHoldback.groupMessagingAllowed) {
+    renderWorkspacePage(`
+      <section class="workspace-page-card">
+        ${renderWorkspacePageHeader(
+          "Private groups unavailable",
+          "This server is not exposing private-group messaging on the current web path.",
+          {
+            eyebrow: "Groups",
+            backButtonId: "cg-back",
+            backButtonLabel: "Back to inbox",
+          },
+        )}
+        ${renderWorkspaceEmptyState(
+          webHoldback.title,
+          webHoldback.detail,
+          {
+            eyebrow: "Private groups",
+            compact: true,
+            actionsHtml: `
+              <button id="cg-open-settings" class="btn-primary" type="button">Open settings</button>
+              <button id="cg-back-to-inbox" class="btn-secondary" type="button">Back to inbox</button>
+            `,
+          },
+        )}
+      </section>
+    `);
+    q("#cg-back").addEventListener("click", () => navigateTo({ screen: "conversations" }));
+    q("#cg-open-settings").addEventListener("click", () => navigateTo({ screen: "settings" }));
+    q("#cg-back-to-inbox").addEventListener("click", () => navigateTo({ screen: "conversations" }));
+    return;
+  }
   const pendingInviteTarget = extractPrivateGroupInviteTarget();
   const contactRows = cachedContacts.map(c => {
     const identity = resolvePeerIdentity(c.contact_user_id);
@@ -7100,7 +7259,9 @@ async function renderSettings(): Promise<void> {
                 {
                   eyebrow: "People",
                   compact: true,
-                  actionsHtml: `<button id="set-empty-new-chat" class="btn-secondary" type="button">Start new chat</button>`,
+                  actionsHtml: currentWebBetaHoldback().directMessagingAllowed
+                    ? `<button id="set-empty-new-chat" class="btn-secondary" type="button">Start new chat</button>`
+                    : "",
                 },
               )
               : `<div class="utility-list">${cachedContacts.map((c) => {
@@ -8564,6 +8725,7 @@ async function showSharedMediaSheet(options: {
 let searchDebounce: ReturnType<typeof setTimeout> | null = null;
 
 function renderSearch(): void {
+  const webHoldback = currentWebBetaHoldback();
   const renderBlankState = (): string =>
     renderWorkspaceEmptyState(
       "Search your messages",
@@ -8571,10 +8733,14 @@ function renderSearch(): void {
       {
         eyebrow: "Search",
         compact: true,
-        actionsHtml: `
-          <button id="search-empty-new-chat" class="btn-primary" type="button">Start new chat</button>
-          <button id="search-empty-settings" class="btn-secondary" type="button">Open settings</button>
-        `,
+        actionsHtml: webHoldback.directMessagingAllowed
+          ? `
+              <button id="search-empty-new-chat" class="btn-primary" type="button">Start new chat</button>
+              <button id="search-empty-settings" class="btn-secondary" type="button">Open settings</button>
+            `
+          : `
+              <button id="search-empty-settings" class="btn-secondary" type="button">Open settings</button>
+            `,
       },
     );
 
@@ -8585,10 +8751,14 @@ function renderSearch(): void {
       {
         eyebrow: "Search",
         compact: true,
-        actionsHtml: `
-          <button id="search-clear" class="btn-secondary" type="button">Clear search</button>
-          <button id="search-no-results-new-chat" class="btn-primary" type="button">Start new chat</button>
-        `,
+        actionsHtml: webHoldback.directMessagingAllowed
+          ? `
+              <button id="search-clear" class="btn-secondary" type="button">Clear search</button>
+              <button id="search-no-results-new-chat" class="btn-primary" type="button">Start new chat</button>
+            `
+          : `
+              <button id="search-clear" class="btn-secondary" type="button">Clear search</button>
+            `,
       },
     );
 
@@ -9221,6 +9391,7 @@ async function renderDiscovery(): Promise<void> {
   const contactDiscoveryServiceOrigin =
     capabilities?.contact_discovery_service_origin?.trim() ?? "";
   if (!capabilities?.contact_discovery_supported) {
+    const webHoldback = getWebBetaHoldback(capabilities);
     renderWorkspacePage(`
       <section class="workspace-page-card">
         ${renderWorkspacePageHeader(
@@ -9238,11 +9409,17 @@ async function renderDiscovery(): Promise<void> {
             <p class="settings-section-intro">This server keeps discovery off on web, so start with exact @usernames or private invite links.</p>
             <div class="settings-callout settings-callout-subtle">
               <strong>Discovery is unavailable on this server</strong>
-              <p>Open Settings to copy your shareable @username, or start a chat with someone who already shared theirs.</p>
+              <p>${escHtml(
+                webHoldback.directMessagingAllowed
+                  ? "Open Settings to copy your shareable @username, or start a chat with someone who already shared theirs."
+                  : "Open Settings to copy your shareable @username, then continue on the supported Android messaging path."
+              )}</p>
             </div>
             <div class="settings-section-actions">
               <button id="disc-open-settings" class="btn-primary" type="button">Open settings</button>
-              <button id="disc-new-chat" class="btn-secondary" type="button">Start new chat</button>
+              ${webHoldback.directMessagingAllowed
+                ? `<button id="disc-new-chat" class="btn-secondary" type="button">Start new chat</button>`
+                : `<button id="disc-back-to-inbox" class="btn-secondary" type="button">Back to inbox</button>`}
             </div>
           </div>
         </div>
@@ -9251,6 +9428,7 @@ async function renderDiscovery(): Promise<void> {
     q("#disc-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
     q("#disc-open-settings")?.addEventListener("click", () => navigateTo({ screen: "settings" }));
     q("#disc-new-chat")?.addEventListener("click", () => navigateTo({ screen: "new-chat" }));
+    q("#disc-back-to-inbox")?.addEventListener("click", () => navigateTo({ screen: "conversations" }));
     return;
   }
   const discoveryOverviewCards = `
@@ -9689,6 +9867,17 @@ async function renderServerInfo(): Promise<void> {
       }
       if (caps) {
         const cp = caps.runtime_crypto_profile;
+        const webHoldback = getWebBetaHoldback(caps);
+        const webMessagingTitle = !webHoldback.directMessagingAllowed
+          ? "Messaging blocked"
+          : webHoldback.groupMessagingAllowed
+            ? "Messaging on"
+            : "Direct messaging only";
+        const webMessagingMeta = !webHoldback.directMessagingAllowed
+          ? "Demo-only web mode"
+          : webHoldback.groupMessagingAllowed
+            ? "Direct and private groups"
+            : "Private groups unavailable";
         html += `
           <details class="settings-inline-details">
             <summary>What works on web</summary>
@@ -9696,9 +9885,9 @@ async function renderServerInfo(): Promise<void> {
             <p class="settings-section-intro">These are the user-facing features and product boundaries this server currently publishes to the web client.</p>
             <div class="settings-status-grid">
               <article class="settings-status-card">
-                <strong>${caps.group_messaging_supported ? "Groups on" : "Groups off"}</strong>
-                <span>${caps.private_group_messaging_supported ? "Private groups available" : "No private groups"}</span>
-                <p>Standard and private group surfaces depend on this capability set.</p>
+                <strong>${escHtml(webMessagingTitle)}</strong>
+                <span>${escHtml(webMessagingMeta)}</span>
+                <p>${escHtml(webHoldback.detail)}</p>
               </article>
               <article class="settings-status-card">
                 <strong>${caps.contact_discovery_supported ? "Discovery on" : "Discovery off"}</strong>
@@ -9819,7 +10008,7 @@ function stopAllTimers(): void {
 function refreshConversationsIfVisible(): void {
   const view = getCurrentView();
   if (view.screen === "conversations") {
-    renderConversations();
+    void renderConversations();
     return;
   }
   refreshWorkspaceSidebarIfVisible(view);
@@ -9828,7 +10017,7 @@ function refreshConversationsIfVisible(): void {
 function refreshActiveWorkspaceView(): void {
   const view = getCurrentView();
   if (view.screen === "conversations") {
-    renderConversations();
+    void renderConversations();
   } else if (view.screen === "chat") {
     void renderChat(view.peerId);
   } else if (view.screen === "group-chat") {
@@ -10214,9 +10403,9 @@ async function repairIdentityOnDevelopmentRelay(
 
 function explainLocalIdentityMismatch(userId: string): string {
   if (canUseDevelopmentRelayReset(cachedCapabilities)) {
-    return `Saved local keys for @${userId} do not match the server record. Use Repair account to reset @${userId} on this development relay and re-publish this browser's saved keys.`;
+    return `Saved local keys for @${userId} do not match the server record. Use Repair saved keys to reset the development-relay record for @${userId} and re-publish the keys already saved in this browser.`;
   }
-  return `Saved local keys for @${userId} do not match the server record. This usually happens after an earlier failed registration left stale browser keys behind. Use Forget next to @${userId} on the sign-in screen and create the account again.`;
+  return `Saved local keys for @${userId} do not match the server record. This usually happens after an earlier failed registration left stale browser keys behind. Use Forget profile next to @${userId} on the sign-in screen, then create the account again.`;
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer): string {

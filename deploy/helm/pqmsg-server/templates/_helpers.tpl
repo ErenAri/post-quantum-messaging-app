@@ -29,7 +29,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- $postgresBackups := lower (trim (toString (default "" .Values.env.PQMSG_POSTGRES_BACKUP_ENCRYPTION))) -}}
 {{- $databaseUrl := trim (toString (default "" .Values.secretEnv.PQMSG_DATABASE_URL)) -}}
 {{- $redisUrl := trim (toString (default "" .Values.secretEnv.PQMSG_RATE_LIMIT_REDIS_URL)) -}}
-{{- $sentryDsn := trim (toString (default "" .Values.secretEnv.PQMSG_SENTRY_DSN)) -}}
 {{- $imageDigest := trim (toString (default "" .Values.image.digest)) -}}
 {{- $imageTag := trim (toString (default "" .Values.image.tag)) -}}
 {{- if or (eq $mode "pilot") (eq $mode "production") -}}
@@ -56,11 +55,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
   {{- end -}}
   {{- if eq (lower $imageTag) "latest" -}}
     {{- fail "pqmsg-server hardened deployments reject mutable image.tag=latest" -}}
-  {{- end -}}
-{{- end -}}
-{{- if eq $mode "production" -}}
-  {{- if eq $sentryDsn "" -}}
-    {{- fail "pqmsg-server production deployments require secretEnv.PQMSG_SENTRY_DSN" -}}
   {{- end -}}
 {{- end -}}
 {{- end -}}

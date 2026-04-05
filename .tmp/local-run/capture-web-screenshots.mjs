@@ -1,10 +1,13 @@
 import fs from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import path from "node:path";
 import playwrightCore from "./playwright/node_modules/playwright-core/index.js";
 
 const { chromium } = playwrightCore;
 
 const BASE_URL = "http://127.0.0.1:4173/";
 const SCREENSHOTS_DIR = "C:/projects/post-quantum-messaging-app/Screenshots";
+const REPO_ROOT = "C:/projects/post-quantum-messaging-app";
 const PASS = "Passphrase123!";
 const CHROME_CANDIDATES = [
   "C:/Program Files/Google/Chrome/Application/chrome.exe",
@@ -18,6 +21,17 @@ function sleep(ms) {
 
 function log(step) {
   console.log(`[capture] ${step}`);
+}
+
+function validateSupportedFlows() {
+  const scriptPath = path.join(REPO_ROOT, "scripts", "dev", "validate_supported_client_flows.py");
+  const python = process.platform === "win32" ? "py" : "python3";
+  const pythonArgs = process.platform === "win32" ? ["-3", scriptPath, "--surface", "web"] : [scriptPath, "--surface", "web"];
+  log("validate supported flows");
+  execFileSync(python, pythonArgs, {
+    cwd: REPO_ROOT,
+    stdio: "inherit",
+  });
 }
 
 async function firstExistingPath(paths) {
@@ -128,6 +142,7 @@ async function navigateView(page, view) {
 }
 
 async function main() {
+  validateSupportedFlows();
   const executablePath = await firstExistingPath(CHROME_CANDIDATES);
   const stamp = Date.now().toString().slice(-6);
   const alice = `shots-alice-${stamp}`;

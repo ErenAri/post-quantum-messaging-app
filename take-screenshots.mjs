@@ -1,7 +1,14 @@
 import { chromium } from "playwright";
+import { execFileSync } from "node:child_process";
 
 const BASE = "http://localhost:5173";
 const DIR = "Screenshots";
+const PYTHON = process.platform === "win32" ? "py" : "python3";
+const PYTHON_ARGS = process.platform === "win32"
+  ? ["-3", "scripts/dev/validate_supported_client_flows.py", "--surface", "web"]
+  : ["scripts/dev/validate_supported_client_flows.py", "--surface", "web"];
+
+execFileSync(PYTHON, PYTHON_ARGS, { stdio: "inherit" });
 
 const browser = await chromium.launch();
 const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });

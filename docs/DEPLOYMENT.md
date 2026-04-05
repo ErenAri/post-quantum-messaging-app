@@ -176,13 +176,13 @@ Requirements:
 6. Set `PQMSG_DEPLOYMENT_MODE=pilot` (or `production`) to enable fail-closed production baseline checks.
 7. Set `PQMSG_LOG_FORMAT=json` and `PQMSG_AUDIT_LOG_PATH` for audit retention.
 8. If `PQMSG_CORS_ALLOWED_ORIGINS` is set in `pilot` or `production`, it must be an explicit origin list without wildcard entries.
-9. Set `PQMSG_SENTRY_DSN` for `production` runtime error telemetry.
+9. Configure optional runtime error telemetry such as `PQMSG_SENTRY_DSN` when you want external crash reporting.
 10. Keep `PQMSG_SECURITY_PROFILE=high_assurance` or `nss_aligned`.
 11. Configure push provider credentials:
   - FCM: `PQMSG_FCM_SERVER_KEY` (and optional `PQMSG_FCM_ENDPOINT`),
   - APNs: `PQMSG_APNS_BEARER_TOKEN`, `PQMSG_APNS_TOPIC` (and optional `PQMSG_APNS_ENDPOINT`).
-12. Configure Sentry (`PQMSG_SENTRY_DSN`, `PQMSG_SENTRY_TRACES_SAMPLE_RATE`) for production error telemetry. `PQMSG_DEPLOYMENT_MODE=production` now fails closed if `PQMSG_SENTRY_DSN` is missing.
-13. The Helm chart now enforces the same production contract at render time; `helm template` fails if `secretEnv.PQMSG_SENTRY_DSN` is blank for `production`, if `env.PQMSG_CORS_ALLOWED_ORIGINS` contains `*`, or if the Postgres at-rest declarations are missing.
+12. Configure Sentry (`PQMSG_SENTRY_DSN`, `PQMSG_SENTRY_TRACES_SAMPLE_RATE`) when you want production error telemetry, but it is optional.
+13. The Helm chart enforces the hardened deployment contract at render time; `helm template` fails if `env.PQMSG_CORS_ALLOWED_ORIGINS` contains `*` or if the Postgres at-rest declarations are missing.
 14. Hardened Kubernetes deployments now require `automountServiceAccountToken: false`, `enableServiceLinks: false`, pod `seccompProfile.type: RuntimeDefault`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, and `capabilities.drop: [ALL]`. CI validates both the raw manifest and the rendered Helm chart with `scripts/security/validate_hardened_manifests.py`.
 15. Both raw Kustomize and rendered Helm deployments must also carry a matching `NetworkPolicy` for the `pqmsg-server` pods; CI validates selector parity and the baseline ingress/egress ports with `scripts/security/validate_network_policy.py`.
 16. The raw Kustomize namespace manifest must carry Pod Security Admission `restricted` labels, and Helm operators must pre-label the target namespace to the same policy; CI validates the raw namespace with `scripts/security/validate_namespace_policy.py`.

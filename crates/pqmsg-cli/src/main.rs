@@ -381,15 +381,21 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         remote: bool,
     },
+    /// Reset local state for one user, optionally retiring the current device
+    /// on the server first.
     ResetLocalState {
         #[arg(long)]
         user: String,
         #[arg(long)]
         keys: Option<PathBuf>,
+        /// Keep the local key file instead of removing it with the rest of the
+        /// local state.
         #[arg(long, default_value_t = false)]
         keep_keys: bool,
         #[arg(long, hide = true, default_value_t = false)]
         wipe_keys: bool,
+        /// Try to retire the current device on the relay before wiping local
+        /// state.
         #[arg(long, default_value_t = false)]
         remote_retire: bool,
     },
@@ -1656,12 +1662,12 @@ async fn main() -> Result<()> {
             let summary = wipe_local_state(&cli.state_dir, &user, keys.as_deref(), remove_keys)?;
             if let Some(remaining_active_devices) = remote_retire_remaining {
                 println!(
-                    "retired current device for '{}' on server (remaining_active_devices={})",
+                    "retired the current device for '{}' on the server (remaining_active_devices={})",
                     user, remaining_active_devices
                 );
             }
             println!(
-                "cleared local state for '{}' (state_removed={}, keys_removed={})",
+                "reset local state for '{}' (state_removed={}, keys_removed={})",
                 user, summary.state_removed, summary.keys_removed
             );
         }

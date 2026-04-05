@@ -331,7 +331,6 @@ struct DeploymentContract {
     audit_enabled: bool,
     redis_enabled: bool,
     structured_logging: bool,
-    sentry_enabled: bool,
     cors_has_wildcard: bool,
     postgres_encryption: PostgresEncryptionConfig,
 }
@@ -468,12 +467,6 @@ fn enforce_deployment_contract(contract: DeploymentContract) -> anyhow::Result<(
     if contract.cors_has_wildcard {
         anyhow::bail!(
             "PQMSG_DEPLOYMENT_MODE='{}' rejects wildcard CORS origins; set PQMSG_CORS_ALLOWED_ORIGINS to an explicit origin list",
-            contract.deployment_mode.as_str()
-        );
-    }
-    if contract.deployment_mode == DeploymentMode::Production && !contract.sentry_enabled {
-        anyhow::bail!(
-            "PQMSG_DEPLOYMENT_MODE='{}' requires runtime error telemetry (set PQMSG_SENTRY_DSN)",
             contract.deployment_mode.as_str()
         );
     }
@@ -960,7 +953,6 @@ async fn main() -> anyhow::Result<()> {
         audit_enabled,
         redis_enabled: rate_limit_redis_url.is_some(),
         structured_logging,
-        sentry_enabled: sentry_dsn.is_some(),
         cors_has_wildcard,
         postgres_encryption,
     })?;
@@ -1192,7 +1184,6 @@ mod tests {
             audit_enabled: false,
             redis_enabled: false,
             structured_logging: false,
-            sentry_enabled: false,
             cors_has_wildcard: true,
             postgres_encryption: PostgresEncryptionConfig {
                 storage_encryption: None,
@@ -1214,7 +1205,6 @@ mod tests {
             audit_enabled: true,
             redis_enabled: true,
             structured_logging: true,
-            sentry_enabled: false,
             cors_has_wildcard: false,
             postgres_encryption: PostgresEncryptionConfig {
                 storage_encryption: Some(PostgresStorageEncryption::ManagedService),
@@ -1239,7 +1229,6 @@ mod tests {
             audit_enabled: true,
             redis_enabled: true,
             structured_logging: true,
-            sentry_enabled: false,
             cors_has_wildcard: false,
             postgres_encryption: PostgresEncryptionConfig {
                 storage_encryption: None,
@@ -1262,7 +1251,6 @@ mod tests {
             audit_enabled: true,
             redis_enabled: true,
             structured_logging: true,
-            sentry_enabled: false,
             cors_has_wildcard: false,
             postgres_encryption: PostgresEncryptionConfig {
                 storage_encryption: None,
@@ -1287,7 +1275,6 @@ mod tests {
             audit_enabled: true,
             redis_enabled: true,
             structured_logging: true,
-            sentry_enabled: true,
             cors_has_wildcard: false,
             postgres_encryption: PostgresEncryptionConfig {
                 storage_encryption: Some(PostgresStorageEncryption::Filesystem),
@@ -1312,7 +1299,6 @@ mod tests {
             audit_enabled: true,
             redis_enabled: false,
             structured_logging: true,
-            sentry_enabled: true,
             cors_has_wildcard: false,
             postgres_encryption: PostgresEncryptionConfig {
                 storage_encryption: Some(PostgresStorageEncryption::ManagedService),
@@ -1337,7 +1323,6 @@ mod tests {
             audit_enabled: true,
             redis_enabled: true,
             structured_logging: true,
-            sentry_enabled: false,
             cors_has_wildcard: true,
             postgres_encryption: PostgresEncryptionConfig {
                 storage_encryption: Some(PostgresStorageEncryption::ManagedService),
@@ -1349,28 +1334,26 @@ mod tests {
     }
 
     #[test]
-    fn production_requires_sentry() {
+    fn production_allows_optional_error_telemetry() {
         let runtime = runtime_crypto_profile().expect("runtime profile");
-        let error = enforce_deployment_contract(DeploymentContract {
-            deployment_mode: DeploymentMode::Production,
-            security_profile: SecurityProfile::HighAssurance,
-            runtime_crypto_profile: runtime,
-            db_backend: DbBackend::Postgres,
-            tls_enabled: true,
-            audit_enabled: true,
-            redis_enabled: true,
-            structured_logging: true,
-            sentry_enabled: false,
-            cors_has_wildcard: false,
-            postgres_encryption: PostgresEncryptionConfig {
-                storage_encryption: Some(PostgresStorageEncryption::ManagedService),
-                backups_encrypted: true,
-            },
-        })
-        .expect_err("production should reject missing sentry dsn");
-        assert!(error
-            .to_string()
-            .contains("requires runtime error telemetry"));
+        if runtime.pq_oqs_enabled {
+            enforce_deployment_contract(DeploymentContract {
+                deployment_mode: DeploymentMode::Production,
+                security_profile: SecurityProfile::HighAssurance,
+                runtime_crypto_profile: runtime,
+                db_backend: DbBackend::Postgres,
+                tls_enabled: true,
+                audit_enabled: true,
+                redis_enabled: true,
+                structured_logging: true,
+                cors_has_wildcard: false,
+                postgres_encryption: PostgresEncryptionConfig {
+                    storage_encryption: Some(PostgresStorageEncryption::ManagedService),
+                    backups_encrypted: true,
+                },
+            })
+            .expect("production should allow optional error telemetry");
+        }
     }
 
     #[test]
@@ -1386,7 +1369,6 @@ mod tests {
                 audit_enabled: true,
                 redis_enabled: true,
                 structured_logging: true,
-                sentry_enabled: true,
                 cors_has_wildcard: false,
                 postgres_encryption: PostgresEncryptionConfig {
                     storage_encryption: Some(PostgresStorageEncryption::ManagedService),

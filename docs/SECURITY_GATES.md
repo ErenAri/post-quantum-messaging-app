@@ -120,7 +120,7 @@ A change that weakens these controls requires explicit security rationale.
 3. Server MUST expose Prometheus-compatible metrics for request volume/latency and security event counters.
 4. Security-relevant rejects (auth failures, replay rejects, rate limits, conflicts) SHOULD be written to an audit log sink when configured.
 5. Production deployments SHOULD aggregate structured logs through Loki/ELK-class backends.
-6. Production deployments SHOULD forward runtime error events to an external tracking system (for example, Sentry). The hardened `production` boot contract now requires `PQMSG_SENTRY_DSN`.
+6. Production deployments SHOULD forward runtime error events to an external tracking system (for example, Sentry), but the deployment contract does not hard-code a single vendor-specific DSN.
 7. Hardened browser-facing deployments MUST NOT use wildcard CORS entries.
 
 ## 11. Formal Verification Policy

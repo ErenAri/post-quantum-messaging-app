@@ -130,6 +130,39 @@ Group membership and epoch transitions need user-visible trust surfaces:
 - Clients must reject stale or unauthenticated epoch transitions.
 - Android and web should share one serialized group-state format from `pqmsg-core`.
 
+## Current Availability Contract
+
+The current Android/web private-group surface is intentionally fail-closed.
+
+### A private group is available on a client only when all of the following are true
+
+- a local opaque private-group record exists for the current user and `group_id`
+- the saved `stateJson` parses into a `PrivateGroupState`
+- the saved `memberCredentialJson` parses into a `PrivateGroupMemberCredential`
+- the saved state and saved credential both belong to the requested `group_id`
+- the saved credential belongs to the current local user
+- the saved credential epoch matches the saved state epoch
+- the saved state still lists the local user as a current member
+
+### What does not block availability
+
+- missing local message history does not block the thread from opening
+- a zero local cursor does not block the thread from opening
+- an empty thread still renders as an available private group and then syncs from the current local cursor
+
+### When any availability prerequisite fails
+
+- clients do not open the thread as partially usable
+- clients do not send, attach, reply, search, or manage membership from that thread
+- clients do not silently fall back to the old direct-message-wrapped private-group payload path
+- clients show an explicit unavailable state and direct the user back to inbox or to a device/invite flow that can restore the latest epoch state
+
+### State refresh boundary
+
+- message fetch and other epoch-bound private-group operations require a valid current local member credential
+- clients may keep older local history rows for storage or preview purposes, but that history is not treated as proof that the current epoch is usable
+- if local state or credential is missing or stale, the client waits for a real private-group state restore path instead of attempting partial recovery from message transport alone
+
 ## Open Design Choices
 
 ### Membership primitive
