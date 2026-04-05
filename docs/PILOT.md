@@ -127,6 +127,21 @@ Use the existing `promote` workflow twice:
 1. `apply=false` to validate the release bundle, render the chart, and confirm the cluster contract.
 2. `apply=true` only after the dry run and rollout owner review are complete.
 
+### Strictly free pilot path
+
+If cloud spend must stay at zero, run the pilot on the local `kind` cluster and dispatch `promote` or `rollback` through the self-hosted GitHub Actions runner on the same machine.
+
+- keep the Kubernetes namespace as `pqmsg-pilot`
+- keep the GitHub Environment as `pilot`
+- register the runner with the label `pqmsg-pilot`
+- pass the runner labels JSON below to both workflows:
+
+```json
+["self-hosted", "Linux", "X64", "pqmsg-pilot"]
+```
+
+For this free path, `KUBECONFIG_B64` intentionally points at the local cluster endpoint and is only valid from that self-hosted runner. It will not work from GitHub-hosted runners.
+
 ## 6. Launch Validation
 
 Before onboarding pilot users, run the full launch gate against the pilot environment:

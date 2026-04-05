@@ -33,6 +33,11 @@ on:
         required: true
         default: pqmsg-server
         type: string
+      runner_labels_json:
+        description: JSON array of runner labels. Use [\"ubuntu-latest\"] for hosted or [\"self-hosted\",\"Linux\",\"X64\",\"pqmsg-pilot\"] for the free local pilot runner.
+        required: true
+        default: '["ubuntu-latest"]'
+        type: string
       apply:
         description: Apply the rollback after validation
         required: true
@@ -47,7 +52,7 @@ permissions:
 
 jobs:
   rollback:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner_labels_json) }}
     environment: ${{ inputs.environment_name }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
