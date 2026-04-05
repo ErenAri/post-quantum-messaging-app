@@ -142,6 +142,13 @@ If cloud spend must stay at zero, run the pilot on the local `kind` cluster and 
 
 For this free path, `KUBECONFIG_B64` intentionally points at the local cluster endpoint and is only valid from that self-hosted runner. It will not work from GitHub-hosted runners.
 
+Pre-apply cluster prerequisites for the free local pilot are intentionally narrow:
+
+- namespace `pqmsg-pilot` must carry the required pod-security labels
+- secret `pqmsg-server-tls` must already exist in that namespace
+
+The chart-generated release secret and configmap are created during `helm upgrade --install`; they are not a pre-apply requirement for the first pilot install.
+
 ## 6. Launch Validation
 
 Before onboarding pilot users, run the full launch gate against the pilot environment:
