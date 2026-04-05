@@ -102,6 +102,7 @@ Required GitHub Environment inputs for promotion:
   - `KUBECONFIG_B64`
   - `PQMSG_DATABASE_URL`
   - `PQMSG_RATE_LIMIT_REDIS_URL`
+  - `PQMSG_SENDER_CERT_SIGNING_KEY`
   - optional push credentials and optional telemetry DSN
   - optional `PQMSG_ALERTMANAGER_API_URL`
 - vars:

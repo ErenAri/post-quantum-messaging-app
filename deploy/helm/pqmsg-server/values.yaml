@@ -68,6 +68,8 @@ env:
 secretEnv:
   PQMSG_DATABASE_URL: postgres://pqmsg:change-me@postgres.pqmsg.svc.cluster.local:5432/pqmsg
   PQMSG_RATE_LIMIT_REDIS_URL: redis://redis.pqmsg.svc.cluster.local:6379/
+  # Required outside development mode. Base64-encoded 32-byte Ed25519 seed.
+  PQMSG_SENDER_CERT_SIGNING_KEY: ""
   PQMSG_FCM_SERVER_KEY: ""
   PQMSG_APNS_BEARER_TOKEN: ""
   PQMSG_APNS_TOPIC: ""

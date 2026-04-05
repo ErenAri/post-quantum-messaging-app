@@ -49,6 +49,7 @@ def main() -> int:
         "secretEnv": {
             "PQMSG_DATABASE_URL": required_env("PQMSG_DATABASE_URL"),
             "PQMSG_RATE_LIMIT_REDIS_URL": required_env("PQMSG_RATE_LIMIT_REDIS_URL"),
+            "PQMSG_SENDER_CERT_SIGNING_KEY": required_env("PQMSG_SENDER_CERT_SIGNING_KEY"),
         },
     }
 
