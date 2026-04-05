@@ -36,7 +36,7 @@ Validate the current web demo shell before refreshing web screenshots:
 py -3 scripts/dev/validate_supported_client_flows.py --surface web
 ```
 
-Validate the Android beta client before refreshing Android screenshots:
+Validate the Android pilot client before refreshing Android screenshots:
 
 ```powershell
 py -3 scripts/dev/validate_supported_client_flows.py --surface android
@@ -51,12 +51,12 @@ py -3 scripts/dev/validate_supported_client_flows.py --surface all
 ## Scope
 
 This matrix does not attempt to prove every protocol property or every
-cross-client feature. It is only the pre-screenshot/pre-beta guardrail for the
+cross-client feature. It is only the pre-screenshot/pre-pilot guardrail for the
 currently supported product surface:
 
 - docs and machine-readable support policy still agree
 - web demo shell still passes its main flow/build checks
-- Android beta messaging client still assembles and passes unit tests
+- Android pilot messaging client still assembles and passes unit tests
 
 Anything deeper belongs in CI, protocol tests, or release-specific governance
 checks.

@@ -314,7 +314,7 @@ jobs:
       - name: install cargo-audit
         run: cargo install cargo-audit --locked
       - name: cargo audit
-        run: cargo audit --ignore RUSTSEC-2023-0071
+        run: cargo audit
       - name: install cargo-deny
         run: cargo install cargo-deny --locked
       - name: cargo deny

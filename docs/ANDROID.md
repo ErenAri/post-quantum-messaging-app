@@ -4,7 +4,7 @@
 
 This document specifies a reproducible Android demonstration workflow for the PQ messaging prototype, with a first-run target of under 15 minutes for a fresh Windows + emulator environment.
 
-Current beta scope: Android private beta is messaging only. Voice and video calling remain out of scope for this release and are not part of the acceptance criteria below.
+Current pilot scope: Android messaging is the supported pilot path. Voice and video calling remain out of scope for this release and are not part of the acceptance criteria below.
 
 ## 2. Architecture
 
@@ -43,7 +43,7 @@ flowchart TD
 ```
 
 The Conversations screen now acts as the runtime hub after provisioning is complete.
-The Chat screen is intentionally limited to messaging actions for the current beta cycle.
+The Chat screen is intentionally limited to messaging actions for the current pilot cycle.
 
 ## 3.3 Security Enforcement in Client
 
@@ -72,7 +72,7 @@ The Chat screen is intentionally limited to messaging actions for the current be
 
 ## 3.4 Calling Scope
 
-Calling is not part of the Android messaging beta:
+Calling is not part of the Android messaging pilot:
 
 - the main Chat screen no longer exposes call entry points,
 - beta validation covers onboarding, direct chat, opaque private-group flows, manual contacts, trust state, and sealed inbox sync,

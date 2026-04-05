@@ -25,7 +25,7 @@ def main() -> int:
         current = {}
 
     expected = {
-        "summary": "Android private beta for messaging only",
+        "summary": "Android pilot for messaging only",
         "supported_beta_clients": ["android"],
         "web_client_policy": "demo_only",
         "calling_supported": False,
@@ -44,8 +44,8 @@ def main() -> int:
     api_text = API_DOC_PATH.read_text(encoding="utf-8")
 
     readme_required = [
-        "Android private beta for messaging only",
-        "Web remains a demo surface and is not part of the supported beta.",
+        "Android pilot for messaging only",
+        "Web remains a demo surface and is not part of the supported pilot.",
         "`supported_beta_clients`",
         "`web_client_policy = demo_only`",
         "Canonical machine-readable support posture now lives in `docs/SUPPORT_MATRIX.json`.",
@@ -55,7 +55,7 @@ def main() -> int:
             failures.append(f"README.md missing support-matrix snippet: {snippet}")
 
     web_required = [
-        "Android is the supported messaging beta client.",
+        "Android is the supported pilot messaging client.",
         "Web remains demo-only.",
         "`supported_beta_clients`",
         "`web_client_policy = demo_only`",

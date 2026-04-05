@@ -2,19 +2,19 @@
 
 ## 1. Objective
 
-This document specifies the Web client demonstration and beta-holdback path for the PQ messaging prototype.
+This document specifies the Web client demonstration and pilot-holdback path for the PQ messaging prototype.
 
 The web client requires the WASM PQ runtime for messaging:
 
 - **WASM PQ mode**: real ML-KEM-768 key encapsulation and ML-DSA-65 signatures via compiled Rust WASM bindings.
 
-The current release train does not treat the web client as a supported beta messaging client by default, and web calling is out of scope.
+The current release train does not treat the web client as a supported pilot messaging client by default, and web calling is out of scope.
 
 Manual contact bootstrap on the hardened web path is `@username` or opaque invite only. Raw-hash contact discovery remains disabled.
 
 ## 2. Security Position
 
-WASM bindings and call prototypes still exist as research paths in the repo, but they are not the supported beta path:
+WASM bindings and call prototypes still exist as research paths in the repo, but they are not the supported pilot path:
 
 ```mermaid
 flowchart LR
@@ -30,14 +30,14 @@ flowchart LR
     CALL --> SRV
 ```
 
-For the current beta:
+For the current pilot rollout:
 
-- Android is the supported messaging beta client.
+- Android is the supported pilot messaging client.
 - Web remains demo-only.
 - Outbound web direct messaging and private-group messaging are blocked whenever the server reports `web_client_policy = demo_only`.
 - Even when the server permits hardened web messaging, private groups additionally require `private_group_messaging_supported = true`.
-- The live capability contract also exposes `supported_beta_clients`, so the server can advertise when `web` is actually in the supported beta matrix instead of demo-only.
-- `docs/SUPPORT_MATRIX.json` is the canonical machine-readable support matrix for the current beta posture.
+- The live capability contract also exposes `supported_beta_clients`, so the server can advertise when `web` is actually in the supported rollout matrix instead of demo-only.
+- `docs/SUPPORT_MATRIX.json` is the canonical machine-readable support matrix for the current pilot posture.
 - Web messaging fails closed when the browser lacks HTTPS-or-loopback origin protection, an actual secure browser context, cross-origin isolation on hosted origins, IndexedDB, SubtleCrypto, WebAssembly, or text encoding support.
 - The SPA shell ships an explicit CSP plus hardened COOP/COEP/CORP browser response headers in the Vite dev/preview surface.
 - The service worker only caches same-origin app-shell assets; cross-origin API traffic and `/v1/*` messaging traffic are never cached by the web shell.
@@ -98,7 +98,7 @@ The hardened production build now emits no JavaScript sourcemaps by default.
 
 Web messaging requires the WASM PQ runtime. Legacy fallback envelopes are rejected on the hardened path.
 
-Do not treat the web client as part of the supported beta when the server remains in `demo_only` web mode. The Android messaging path remains the release baseline.
+Do not treat the web client as part of the supported pilot when the server remains in `demo_only` web mode. The Android messaging path remains the release baseline.
 
 ## 9. WASM PQ Crypto
 
@@ -115,7 +115,7 @@ Wrapper functions in `crypto-wasm.ts` provide TypeScript-friendly interfaces.
 
 ## 10. Calling Status
 
-Calling code paths are still present for research work, but web calling is not part of the supported beta:
+Calling code paths are still present for research work, but web calling is not part of the supported pilot:
 
 - chat surfaces no longer expose web calling as a supported action,
 - incoming and outgoing call routes are held back in the UI,

@@ -1,4 +1,26 @@
 {
-  "version": 1,
-  "findings": []
+  "findings": [
+    {
+      "affected_component": "Cargo.lock / pqmsg-server sqlx::Any dependency graph",
+      "closed_on_utc": "2026-04-05T14:01:44Z",
+      "exploit_path": "cargo audit reports RUSTSEC-2023-0071 through sqlx-mysql -> rsa, but the server deployment contract only supports SQLite and PostgreSQL and does not expose a MySQL runtime path.",
+      "finding_id": "INT-2026-001",
+      "mitigation_plan": "Keep MySQL unsupported, pin the advisory in cargo-audit config with explicit repo-local rationale, and retire the exception when sqlx::Any no longer pulls sqlx-mysql or when the server stops relying on sqlx::Any.",
+      "opened_on_utc": "2026-04-05T14:01:44Z",
+      "owner": "security-review-board",
+      "references": [
+        "https://rustsec.org/advisories/RUSTSEC-2023-0071",
+        "Cargo.toml",
+        "crates/pqmsg-server/src/db.rs"
+      ],
+      "risk_acceptance": "Accepted for the Android pilot because the affected RSA code is only present through an unused MySQL backend path and there is no fixed upstream upgrade available. This exception does not apply to adding MySQL support.",
+      "risk_acceptance_expires_on_utc": "2026-07-31T00:00:00Z",
+      "severity": "medium",
+      "source": "internal_review",
+      "status": "risk_accepted",
+      "title": "Transitive sqlx::Any mysql advisory remains risk-accepted until upstream removal",
+      "verification_test": "cargo audit; cargo deny check advisories licenses bans sources; cargo test --workspace"
+    }
+  ],
+  "version": 1
 }

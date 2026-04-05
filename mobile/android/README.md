@@ -6,7 +6,7 @@ Guided demo client that uses:
 - Rust `libpqmsg_android.so` for cryptography via UniFFI
 - Two screens: Setup and Chat
 
-Current beta scope is Android messaging only. Calling remains out of scope for this release.
+Current pilot scope is Android messaging only. Calling remains out of scope for this release.
 
 ## Flows
 

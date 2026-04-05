@@ -1,0 +1,6 @@
+[advisories]
+ignore = [
+  # Transitively pulled by sqlx::Any through sqlx-mysql, but pqmsg-server only
+  # supports SQLite and PostgreSQL in the documented deployment contract.
+  "RUSTSEC-2023-0071",
+]

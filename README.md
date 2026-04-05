@@ -17,13 +17,13 @@ The goal is not product completeness. The goal is measurable protocol
 engineering with reproducible tests, strict parsers, explicit failure modes, and
 clear support boundaries.
 
-## Current Beta Scope
+## Current Pilot Scope
 
-As of March 9, 2026, the supported beta path is **Android private beta for messaging only**.
+As of April 5, 2026, the supported rollout is **Android pilot for messaging only**.
 
-- Web remains a demo surface and is not part of the supported beta.
+- Web remains a demo surface and is not part of the supported pilot.
 - Outbound web direct messaging and private-group messaging stay blocked whenever the server advertises `web_client_policy = demo_only`.
-- The server exposes `supported_beta_clients` so the beta support matrix is machine-readable instead of only documented prose.
+- The server exposes `supported_beta_clients` so the current supported rollout is machine-readable instead of only documented prose.
 - Canonical machine-readable support posture now lives in `docs/SUPPORT_MATRIX.json`.
 - Calling remains out of scope for the beta on every client.
 - Manual contact bootstrap on the hardened Android/web path is `@username` or opaque invite only.

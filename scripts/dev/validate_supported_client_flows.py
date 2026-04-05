@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Validate the current supported/demo client flows before refreshing screenshots "
-            "or shipping a new beta snapshot."
+            "or shipping a new pilot snapshot."
         )
     )
     parser.add_argument(
@@ -58,7 +58,7 @@ def main() -> int:
 
     print("Supported-flow validation matrix")
     print(f"- Support matrix summary: {current.get('summary', 'unknown')}")
-    print(f"- Supported beta clients: {supported_beta_clients}")
+    print(f"- Supported rollout clients: {supported_beta_clients}")
     print(f"- Web client policy: {web_client_policy}")
 
     checks: list[tuple[str, Path, list[str]]] = [
@@ -88,7 +88,7 @@ def main() -> int:
     if args.surface in ("all", "android"):
         checks.append(
             (
-                "Android beta messaging build/test",
+                "Android pilot messaging build/test",
                 REPO_ROOT / "mobile" / "android",
                 [".\\gradlew.bat", ":app:assembleDebug", "app:testDebugUnitTest"],
             )

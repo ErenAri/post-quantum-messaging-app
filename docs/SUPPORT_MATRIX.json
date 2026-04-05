@@ -1,7 +1,7 @@
 {
   "version": 1,
   "current_beta_scope": {
-    "summary": "Android private beta for messaging only",
+    "summary": "Android pilot for messaging only",
     "supported_beta_clients": ["android"],
     "web_client_policy": "demo_only",
     "calling_supported": false,
