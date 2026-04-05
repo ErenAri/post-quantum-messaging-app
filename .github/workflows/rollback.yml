@@ -33,11 +33,14 @@ on:
         required: true
         default: pqmsg-server
         type: string
-      runner_labels:
-        description: Comma-separated runner labels. Use ubuntu-latest for hosted or self-hosted,Linux,X64,pqmsg-pilot for the free local pilot runner.
+      runner_profile:
+        description: Runner profile. Use pilot_local for the free local pilot runner or hosted for GitHub-hosted runners.
         required: true
-        default: ubuntu-latest
-        type: string
+        default: hosted
+        type: choice
+        options:
+          - hosted
+          - pilot_local
       apply:
         description: Apply the rollback after validation
         required: true
@@ -52,7 +55,7 @@ permissions:
 
 jobs:
   rollback:
-    runs-on: ${{ fromJSON(format('["{0}"]', replace(inputs.runner_labels, ',', '","'))) }}
+    runs-on: ${{ inputs.runner_profile == 'pilot_local' && fromJSON('["self-hosted","Linux","X64","pqmsg-pilot"]') || fromJSON('["ubuntu-latest"]') }}
     environment: ${{ inputs.environment_name }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -76,14 +79,14 @@ jobs:
       - name: prepare workflow workspace
         run: mkdir -p dist
       - name: ensure self-hosted cli tools
-        if: ${{ contains(inputs.runner_labels, 'self-hosted') }}
+        if: ${{ inputs.runner_profile == 'pilot_local' }}
         run: |
           chmod +x scripts/release/ensure_runner_cli_tools.sh
           ./scripts/release/ensure_runner_cli_tools.sh
       - uses: azure/setup-helm@v4
-        if: ${{ !contains(inputs.runner_labels, 'self-hosted') }}
+        if: ${{ inputs.runner_profile != 'pilot_local' }}
       - uses: azure/setup-kubectl@v4
-        if: ${{ !contains(inputs.runner_labels, 'self-hosted') }}
+        if: ${{ inputs.runner_profile != 'pilot_local' }}
       - name: download promotion bundle
         run: |
           chmod +x scripts/release/download_promotion_bundle.sh
