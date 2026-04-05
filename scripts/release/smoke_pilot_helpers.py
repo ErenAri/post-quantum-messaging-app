@@ -118,6 +118,11 @@ def smoke_release_bundle_patterns() -> None:
 def smoke_verify_release_bundle_checksum_paths() -> None:
     script = (ROOT / "scripts" / "release" / "verify_release_bundle.sh").read_text(encoding="utf-8")
     assert 'sha256sum --check < "$dist_dir/checksums.txt"' in script
+    assert 'python - \\' in script
+    assert '"$dist_dir/release-manifest.json" \\' in script
+    assert '"$dist_dir/container-image.txt" \\' in script
+    assert '"$dist_dir/helm-image-overrides.yaml" \\' in script
+    assert '"$dist_dir/release-security-posture.json" <<\'PY\'' in script
 
 
 def smoke_prepare_release_candidate() -> None:
