@@ -65,9 +65,20 @@ That gate must leave all required checks green:
 - support-matrix and audit validators
 - release-governance workflow validator
 - release-governance helper smoke
+- pilot helper smoke
 - supported Android/web validation matrix
 
 The candidate gate is necessary but not sufficient for launch. The launch phase below adds fuzz, formal, pentest, and escalation-drill evidence.
+
+After the candidate gate is green, prepare a fail-closed pilot release tag:
+
+```powershell
+py -3 scripts/release/prepare_pilot_release_candidate.py `
+  --tag v0.1.0-rc1 `
+  --candidate-readiness dist/pilot-candidate-readiness.json
+```
+
+That helper refuses to proceed if the candidate report is not green, the git worktree is dirty, or the tag already exists. Add `--create-tag` only when you are ready to cut the annotated tag.
 
 ## 5. Hardened Pilot Environment
 
@@ -99,6 +110,17 @@ Required GitHub Environment inputs for promotion:
   - `PQMSG_CORS_ALLOWED_ORIGINS`
   - `PQMSG_AUDIT_LOG_PATH`
   - optional `PQMSG_INCIDENT_ISSUE_REPO`
+
+Bootstrap or re-check the GitHub Environment before promotion:
+
+```powershell
+py -3 scripts/release/bootstrap_pilot_environment.py `
+  --environment-name pilot `
+  --create `
+  --output dist/pilot-environment-readiness.json
+```
+
+That helper creates the empty `pilot` environment if needed, lists the required secrets and vars that are still missing, and marks `ready_for_promotion=true` only when the environment inputs are complete.
 
 Use the existing `promote` workflow twice:
 

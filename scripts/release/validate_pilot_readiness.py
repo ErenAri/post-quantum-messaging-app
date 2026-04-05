@@ -101,6 +101,12 @@ def candidate_checks() -> list[tuple[str, Path, list[str], dict[str, str] | None
             None,
         ),
         (
+            "Pilot helper smoke",
+            REPO_ROOT,
+            [sys.executable, "scripts/release/smoke_pilot_helpers.py"],
+            None,
+        ),
+        (
             "Supported client flows",
             REPO_ROOT,
             [sys.executable, "scripts/dev/validate_supported_client_flows.py", "--surface", "all"],
