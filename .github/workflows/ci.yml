@@ -144,21 +144,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
-      - name: render hardened chart with required production secrets
+      - name: render hardened chart without optional Sentry DSN
         run: |
-          helm template pqmsg-server deploy/helm/pqmsg-server \
-            --set-string secretEnv.PQMSG_SENTRY_DSN=https://public@example.ingest.sentry.io/project-id >/tmp/pqmsg-server-chart.yaml
-      - name: production chart fails when Sentry DSN is missing
+          helm template pqmsg-server deploy/helm/pqmsg-server >/tmp/pqmsg-server-chart.yaml
+      - name: production chart allows missing Sentry DSN
         run: |
-          if helm template pqmsg-server deploy/helm/pqmsg-server >/tmp/pqmsg-server-chart-fail.yaml 2>/tmp/pqmsg-server-chart.err; then
-            echo "expected production chart without PQMSG_SENTRY_DSN to fail"
-            exit 1
-          fi
-          grep -q "require secretEnv.PQMSG_SENTRY_DSN" /tmp/pqmsg-server-chart.err
+          helm template pqmsg-server deploy/helm/pqmsg-server >/tmp/pqmsg-server-chart-no-sentry.yaml
       - name: hardened chart rejects wildcard cors
         run: |
           if helm template pqmsg-server deploy/helm/pqmsg-server \
-            --set-string secretEnv.PQMSG_SENTRY_DSN=https://public@example.ingest.sentry.io/project-id \
             --set-string env.PQMSG_CORS_ALLOWED_ORIGINS='*' >/tmp/pqmsg-server-chart-fail.yaml 2>/tmp/pqmsg-server-chart.err; then
             echo "expected wildcard CORS to fail"
             exit 1
@@ -172,8 +166,7 @@ jobs:
       - uses: azure/setup-helm@v4
       - name: render hardened production chart
         run: |
-          helm template pqmsg-server deploy/helm/pqmsg-server \
-            --set-string secretEnv.PQMSG_SENTRY_DSN=https://public@example.ingest.sentry.io/project-id >/tmp/pqmsg-server-chart.yaml
+          helm template pqmsg-server deploy/helm/pqmsg-server >/tmp/pqmsg-server-chart.yaml
       - name: validate raw and rendered hardened manifests
         run: |
           python scripts/security/validate_hardened_manifests.py \
