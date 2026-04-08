@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">PQMsg</string>
     <string name="setup_title">Set up this device</string>
+    <string name="setup_privacy_note">Read the privacy policy before creating an account. Public Play submission also needs the same policy and deletion pages linked in Play Console.</string>
     <string name="chat_title">Conversation</string>
     <string name="conversations_title">Chats</string>
     <string name="security_title">Privacy &amp; account</string>
@@ -24,6 +25,9 @@
     <string name="button_publish">Publish Prekeys</string>
     <string name="button_verify_server">Verify Server</string>
     <string name="button_create_profile">Create profile</string>
+    <string name="button_open_privacy_policy">Privacy policy</string>
+    <string name="button_open_public_privacy_policy">Open public policy URL</string>
+    <string name="button_open_account_deletion_help">Account deletion help</string>
     <string name="button_show_advanced_setup">Show advanced settings</string>
     <string name="button_hide_advanced_setup">Hide advanced settings</string>
     <string name="button_show_linked_device_import">Use linked-device package</string>
@@ -68,7 +72,12 @@
     <string name="button_rotate_identity">Rotate keys</string>
     <string name="button_prepare_secondary_device">Prepare package</string>
     <string name="button_copy_onboarding_package">Copy package</string>
+    <string name="button_delete_account">Delete account</string>
     <string name="button_reset_local_state">Reset local state</string>
+    <string name="delete_account_title">Delete account</string>
+    <string name="delete_account_message">Delete @%1$s from the relay and wipe encrypted local state on this phone. This is irreversible and may leave only limited retained security records where necessary for abuse prevention, integrity, backup windows, or legal compliance.</string>
+    <string name="security_enter_user_before_delete">Enter the current account before deleting it.</string>
+    <string name="security_account_deleted_status">Deleted @%1$s and cleared local state on this phone.</string>
     <string name="button_show_recovery_tools">Show recovery tools</string>
     <string name="button_hide_recovery_tools">Hide recovery tools</string>
     <string name="button_accept_request">Accept</string>
@@ -133,6 +142,11 @@
     <string name="share_invite_chooser_title">Share your invite</string>
     <string name="contacts_empty">No people saved yet. Add an exact @username or invite to start a chat.</string>
     <string name="security_warning_title">Verify identity change</string>
+    <string name="privacy_policy_title">Privacy policy</string>
+    <string name="privacy_policy_intro">This Android pilot client supports secure messaging only. The policy below explains what account, transport, and local-device data the app and relay process today.</string>
+    <string name="privacy_policy_load_failed">Unable to load the bundled privacy policy.</string>
+    <string name="privacy_policy_public_url">https://github.com/ErenAri/post-quantum-messaging-app/blob/main/docs/PRIVACY_POLICY.md</string>
+    <string name="account_deletion_public_url">https://github.com/ErenAri/post-quantum-messaging-app/blob/main/docs/ACCOUNT_DELETION.md</string>
     <string name="setup_crypto_profile_loading">Checking local crypto…</string>
     <string name="setup_step_keys_pending">1) Generate keys: pending</string>
     <string name="setup_step_register_pending">2) Register user: pending</string>

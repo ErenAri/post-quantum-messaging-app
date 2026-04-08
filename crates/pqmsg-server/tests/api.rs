@@ -1122,6 +1122,32 @@ fn retire_device_auth_headers(
     ]
 }
 
+fn delete_account_auth_headers(
+    signing_key: &SigningKey,
+    user_id: &str,
+    device_id: &str,
+) -> Vec<(&'static str, String)> {
+    let timestamp = Utc::now().timestamp();
+    let nonce = format!(
+        "account-delete-{}",
+        NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut records = auth_common_records("account-delete", user_id, device_id, timestamp, &nonce);
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    let message = encode(&records).expect("account-delete auth transcript");
+    let signature = signing_key.sign(&message).to_bytes();
+    vec![
+        (AUTH_HEADER_USER, user_id.to_string()),
+        (AUTH_HEADER_DEVICE, device_id.to_string()),
+        (AUTH_HEADER_TIMESTAMP, timestamp.to_string()),
+        (AUTH_HEADER_NONCE, nonce),
+        (AUTH_HEADER_SIGNATURE, B64.encode(signature)),
+    ]
+}
+
 fn normalize_message_ids(message_ids: &[i64]) -> Vec<i64> {
     let mut ids = message_ids.to_vec();
     ids.sort_unstable();
@@ -8300,4 +8326,70 @@ async fn identity_log_rejects_wrong_user_and_nonexistent() {
     )
     .await;
     assert_eq!(status_no_auth, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn delete_account_revokes_auth_and_allows_same_username_reregistration() {
+    let app = test_app_with_authenticated_dm_compat().await;
+    let old_key = signing_key(230);
+    let new_key = signing_key(231);
+
+    let register = register_payload("pilot-bob", "pilot-bob-dev-1", [41u8; 32], &old_key);
+    let (status_register, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", register).await;
+    assert_eq!(status_register, StatusCode::OK);
+
+    let delete_headers = delete_account_auth_headers(&old_key, "pilot-bob", "pilot-bob-dev-1");
+    let (status_delete, delete_body) = json_request_with_headers(
+        app.clone(),
+        Method::DELETE,
+        "/v1/users/pilot-bob/account",
+        json!({}),
+        &delete_headers,
+    )
+    .await;
+    assert_eq!(status_delete, StatusCode::OK);
+    assert_eq!(delete_body["user_id"].as_str(), Some("pilot-bob"));
+    assert_eq!(
+        delete_body["deleted_device_id"].as_str(),
+        Some("pilot-bob-dev-1")
+    );
+
+    let stale_headers = devices_list_auth_headers(&old_key, "pilot-bob", "pilot-bob-dev-1");
+    let (status_stale_auth, _) = json_request_with_headers(
+        app.clone(),
+        Method::GET,
+        "/v1/users/pilot-bob/devices",
+        json!({}),
+        &stale_headers,
+    )
+    .await;
+    assert_ne!(status_stale_auth, StatusCode::OK);
+
+    let register_again = register_payload("pilot-bob", "pilot-bob-dev-2", [42u8; 32], &new_key);
+    let (status_reregister, _) = json_request(
+        app.clone(),
+        Method::POST,
+        "/v1/users/register",
+        register_again,
+    )
+    .await;
+    assert_eq!(status_reregister, StatusCode::OK);
+
+    let new_headers = devices_list_auth_headers(&new_key, "pilot-bob", "pilot-bob-dev-2");
+    let (status_new_devices, body_new_devices) = json_request_with_headers(
+        app,
+        Method::GET,
+        "/v1/users/pilot-bob/devices",
+        json!({}),
+        &new_headers,
+    )
+    .await;
+    assert_eq!(status_new_devices, StatusCode::OK);
+    let devices = body_new_devices["devices"]
+        .as_array()
+        .expect("devices array");
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0]["device_id"].as_str(), Some("pilot-bob-dev-2"));
+    assert_eq!(devices[0]["active"].as_bool(), Some(true));
 }

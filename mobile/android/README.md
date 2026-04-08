@@ -1,10 +1,10 @@
-# Android Demo
+# Android Client
 
-Guided demo client that uses:
+Android pilot client that uses:
 
 - Retrofit/OkHttp for server transport
 - Rust `libpqmsg_android.so` for cryptography via UniFFI
-- Two screens: Setup and Chat
+- Android setup, inbox, chat, people, and privacy/account screens
 
 Current pilot scope is Android messaging only. Calling remains out of scope for this release.
 

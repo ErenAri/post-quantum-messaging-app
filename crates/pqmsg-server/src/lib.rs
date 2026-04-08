@@ -1,7 +1,7 @@
 use axum::extract::{MatchedPath, State};
 use axum::http::{header, HeaderValue, Method};
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -2261,6 +2261,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/v1/users/:user_id/devices", get(list_devices))
         .route("/v1/users/:user_id/devices/link", post(link_device))
+        .route("/v1/users/:user_id/account", delete(delete_account))
         .route(
             "/v1/users/:user_id/devices/current/retire",
             post(retire_current_device),

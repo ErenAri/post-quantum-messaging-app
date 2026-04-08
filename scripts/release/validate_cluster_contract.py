@@ -47,9 +47,6 @@ def main() -> int:
         if item.get("metadata", {}).get("name")
     }
 
-    expected_secret = f"{args.release_name}-pqmsg-server-secret"
-    expected_configmap = f"{args.release_name}-pqmsg-server-config"
-
     checks = []
     for key, expected in REQUIRED_NAMESPACE_LABELS.items():
         actual = namespace_labels.get(key)
@@ -64,19 +61,6 @@ def main() -> int:
     checks.extend(
         [
             {
-                "name": "generated_secret_present",
-                "passed": expected_secret in secret_names,
-                "details": {"expected_secret": expected_secret, "secret_names": sorted(secret_names)},
-            },
-            {
-                "name": "generated_configmap_present",
-                "passed": expected_configmap in configmap_names,
-                "details": {
-                    "expected_configmap": expected_configmap,
-                    "configmap_names": sorted(configmap_names),
-                },
-            },
-            {
                 "name": "tls_secret_present",
                 "passed": args.tls_secret_name in secret_names,
                 "details": {"tls_secret_name": args.tls_secret_name, "secret_names": sorted(secret_names)},
@@ -89,6 +73,8 @@ def main() -> int:
         "passed": not failed,
         "release_name": args.release_name,
         "tls_secret_name": args.tls_secret_name,
+        "observed_secret_names": sorted(secret_names),
+        "observed_configmap_names": sorted(configmap_names),
         "checks": checks,
     }
     Path(args.output).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

@@ -11,6 +11,9 @@ spec:
       {{- include "pqmsg-server.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
       labels:
         {{- include "pqmsg-server.selectorLabels" . | nindent 8 }}
     spec:
@@ -34,6 +37,10 @@ spec:
             - name: tls
               mountPath: /etc/pqmsg/tls
               readOnly: true
+            - name: audit-log
+              mountPath: /var/log/pqmsg
+            - name: blob-store
+              mountPath: /var/lib/pqmsg/blob-store
           readinessProbe:
             httpGet:
               scheme: HTTPS
@@ -60,3 +67,7 @@ spec:
         - name: tls
           secret:
             secretName: {{ .Values.tlsSecretName }}
+        - name: audit-log
+          emptyDir: {}
+        - name: blob-store
+          emptyDir: {}

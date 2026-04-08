@@ -65,9 +65,20 @@ That gate must leave all required checks green:
 - support-matrix and audit validators
 - release-governance workflow validator
 - release-governance helper smoke
+- pilot helper smoke
 - supported Android/web validation matrix
 
 The candidate gate is necessary but not sufficient for launch. The launch phase below adds fuzz, formal, pentest, and escalation-drill evidence.
+
+After the candidate gate is green, prepare a fail-closed pilot release tag:
+
+```powershell
+py -3 scripts/release/prepare_pilot_release_candidate.py `
+  --tag v0.1.0-rc1 `
+  --candidate-readiness dist/pilot-candidate-readiness.json
+```
+
+That helper refuses to proceed if the candidate report is not green, the git worktree is dirty, or the tag already exists. Add `--create-tag` only when you are ready to cut the annotated tag.
 
 ## 5. Hardened Pilot Environment
 
@@ -91,6 +102,7 @@ Required GitHub Environment inputs for promotion:
   - `KUBECONFIG_B64`
   - `PQMSG_DATABASE_URL`
   - `PQMSG_RATE_LIMIT_REDIS_URL`
+  - `PQMSG_SENDER_CERT_SIGNING_KEY`
   - optional push credentials and optional telemetry DSN
   - optional `PQMSG_ALERTMANAGER_API_URL`
 - vars:
@@ -100,10 +112,39 @@ Required GitHub Environment inputs for promotion:
   - `PQMSG_AUDIT_LOG_PATH`
   - optional `PQMSG_INCIDENT_ISSUE_REPO`
 
+Bootstrap or re-check the GitHub Environment before promotion:
+
+```powershell
+py -3 scripts/release/bootstrap_pilot_environment.py `
+  --environment-name pilot `
+  --create `
+  --output dist/pilot-environment-readiness.json
+```
+
+That helper creates the empty `pilot` environment if needed, lists the required secrets and vars that are still missing, and marks `ready_for_promotion=true` only when the environment inputs are complete.
+
 Use the existing `promote` workflow twice:
 
 1. `apply=false` to validate the release bundle, render the chart, and confirm the cluster contract.
 2. `apply=true` only after the dry run and rollout owner review are complete.
+
+### Strictly free pilot path
+
+If cloud spend must stay at zero, run the pilot on the local `kind` cluster and dispatch `promote` or `rollback` through the self-hosted GitHub Actions runner on the same machine.
+
+- keep the Kubernetes namespace as `pqmsg-pilot`
+- keep the GitHub Environment as `pilot`
+- register the runner with the label `pqmsg-pilot`
+- use `runner_profile=pilot_local` when dispatching `promote` or `rollback`
+
+For this free path, `KUBECONFIG_B64` intentionally points at the local cluster endpoint and is only valid from that self-hosted runner. It will not work from GitHub-hosted runners.
+
+Pre-apply cluster prerequisites for the free local pilot are intentionally narrow:
+
+- namespace `pqmsg-pilot` must carry the required pod-security labels
+- secret `pqmsg-server-tls` must already exist in that namespace
+
+The chart-generated release secret and configmap are created during `helm upgrade --install`; they are not a pre-apply requirement for the first pilot install.
 
 ## 6. Launch Validation
 

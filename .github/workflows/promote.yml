@@ -29,6 +29,14 @@ on:
         required: true
         default: pqmsg-server
         type: string
+      runner_profile:
+        description: Runner profile. Use pilot_local for the free local pilot runner or hosted for GitHub-hosted runners.
+        required: true
+        default: hosted
+        type: choice
+        options:
+          - hosted
+          - pilot_local
       apply:
         description: Apply the Helm release after validation
         required: true
@@ -43,12 +51,13 @@ permissions:
 
 jobs:
   promote:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner_profile == 'pilot_local' && fromJSON('["self-hosted","Linux","X64","pqmsg-pilot"]') || fromJSON('["ubuntu-latest"]') }}
     environment: ${{ inputs.environment_name }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PQMSG_DATABASE_URL: ${{ secrets.PQMSG_DATABASE_URL }}
       PQMSG_RATE_LIMIT_REDIS_URL: ${{ secrets.PQMSG_RATE_LIMIT_REDIS_URL }}
+      PQMSG_SENDER_CERT_SIGNING_KEY: ${{ secrets.PQMSG_SENDER_CERT_SIGNING_KEY }}
       PQMSG_SENTRY_DSN: ${{ secrets.PQMSG_SENTRY_DSN }}
       PQMSG_FCM_SERVER_KEY: ${{ secrets.PQMSG_FCM_SERVER_KEY }}
       PQMSG_APNS_BEARER_TOKEN: ${{ secrets.PQMSG_APNS_BEARER_TOKEN }}
@@ -64,8 +73,17 @@ jobs:
       PQMSG_INCIDENT_ISSUE_REPO: ${{ vars.PQMSG_INCIDENT_ISSUE_REPO }}
     steps:
       - uses: actions/checkout@v4
+      - name: prepare workflow workspace
+        run: mkdir -p dist
+      - name: ensure self-hosted cli tools
+        if: ${{ inputs.runner_profile == 'pilot_local' }}
+        run: |
+          chmod +x scripts/release/ensure_runner_cli_tools.sh
+          ./scripts/release/ensure_runner_cli_tools.sh
       - uses: azure/setup-helm@v4
+        if: ${{ inputs.runner_profile != 'pilot_local' }}
       - uses: azure/setup-kubectl@v4
+        if: ${{ inputs.runner_profile != 'pilot_local' }}
       - name: download release bundle
         run: |
           chmod +x scripts/release/download_release_bundle.sh

@@ -4,7 +4,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use chrono::Utc;
 use pqmsg_core::alg::SecurityProfile;
-use sqlx::Row;
+use sqlx::{Any, Row};
 
 use super::util::*;
 use crate::auth::*;
@@ -13,6 +13,70 @@ use crate::error::AppError;
 use crate::types::*;
 use crate::validation::*;
 use crate::{AppState, DeploymentMode, PQ_SIG_PUB_KEY_LEN, SIG_PUB_KEY_LEN, X25519_KEY_LEN};
+
+async fn delete_user_owned_state(
+    tx: &mut sqlx::Transaction<'_, Any>,
+    user_id: &str,
+) -> Result<(), AppError> {
+    for query in [
+        "DELETE FROM ws_inbox_tickets WHERE user_id = $1",
+        "DELETE FROM inbox_cursors WHERE user_id = $1",
+        "DELETE FROM sealed_inbox_cursors WHERE user_id = $1",
+        "DELETE FROM message_expiry_meta
+         WHERE message_id IN (
+            SELECT message_id
+            FROM relay_messages
+            WHERE recipient_user_id = $1 OR sender_user_id = $1
+         )",
+        "DELETE FROM message_receipts
+         WHERE recipient_user_id = $1
+            OR message_id IN (
+                SELECT message_id
+                FROM relay_messages
+                WHERE recipient_user_id = $1 OR sender_user_id = $1
+            )",
+        "DELETE FROM sealed_relay_messages WHERE sender_user_id = $1",
+        "DELETE FROM call_signals
+         WHERE from_user_id = $1
+            OR call_id IN (
+                SELECT call_id
+                FROM call_sessions
+                WHERE caller_user_id = $1 OR callee_user_id = $1
+            )",
+        "DELETE FROM call_sessions WHERE caller_user_id = $1 OR callee_user_id = $1",
+        "DELETE FROM story_views
+         WHERE viewer_user_id = $1
+            OR story_id IN (
+                SELECT story_id
+                FROM stories
+                WHERE author_user_id = $1
+            )",
+        "DELETE FROM stories WHERE author_user_id = $1",
+        "DELETE FROM channel_subscribers
+         WHERE user_id = $1
+            OR channel_id IN (
+                SELECT channel_id
+                FROM channels
+                WHERE owner_user_id = $1
+            )",
+        "DELETE FROM channel_messages
+         WHERE channel_id IN (
+            SELECT channel_id
+            FROM channels
+            WHERE owner_user_id = $1
+         )",
+        "DELETE FROM channels WHERE owner_user_id = $1",
+    ] {
+        sqlx::query(query).bind(user_id).execute(&mut **tx).await?;
+    }
+
+    sqlx::query("DELETE FROM users WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(())
+}
 
 pub(crate) async fn register_user(
     State(state): State<AppState>,
@@ -204,63 +268,7 @@ pub(crate) async fn reset_dev_user_identity(
     }
 
     let mut tx = state.pool.begin().await?;
-
-    for query in [
-        "DELETE FROM ws_inbox_tickets WHERE user_id = $1",
-        "DELETE FROM inbox_cursors WHERE user_id = $1",
-        "DELETE FROM sealed_inbox_cursors WHERE user_id = $1",
-        "DELETE FROM message_expiry_meta
-         WHERE message_id IN (
-            SELECT message_id
-            FROM relay_messages
-            WHERE recipient_user_id = $1 OR sender_user_id = $1
-         )",
-        "DELETE FROM message_receipts
-         WHERE recipient_user_id = $1
-            OR message_id IN (
-                SELECT message_id
-                FROM relay_messages
-                WHERE recipient_user_id = $1 OR sender_user_id = $1
-            )",
-        "DELETE FROM sealed_relay_messages WHERE sender_user_id = $1",
-        "DELETE FROM call_signals
-         WHERE from_user_id = $1
-            OR call_id IN (
-                SELECT call_id
-                FROM call_sessions
-                WHERE caller_user_id = $1 OR callee_user_id = $1
-            )",
-        "DELETE FROM call_sessions WHERE caller_user_id = $1 OR callee_user_id = $1",
-        "DELETE FROM story_views
-         WHERE viewer_user_id = $1
-            OR story_id IN (
-                SELECT story_id
-                FROM stories
-                WHERE author_user_id = $1
-            )",
-        "DELETE FROM stories WHERE author_user_id = $1",
-        "DELETE FROM channel_subscribers
-         WHERE user_id = $1
-            OR channel_id IN (
-                SELECT channel_id
-                FROM channels
-                WHERE owner_user_id = $1
-            )",
-        "DELETE FROM channel_messages
-         WHERE channel_id IN (
-            SELECT channel_id
-            FROM channels
-            WHERE owner_user_id = $1
-         )",
-        "DELETE FROM channels WHERE owner_user_id = $1",
-    ] {
-        sqlx::query(query).bind(&user_id).execute(&mut *tx).await?;
-    }
-
-    sqlx::query("DELETE FROM users WHERE user_id = $1")
-        .bind(&user_id)
-        .execute(&mut *tx)
-        .await?;
+    delete_user_owned_state(&mut tx, &user_id).await?;
 
     tx.commit().await?;
 
@@ -277,6 +285,47 @@ pub(crate) async fn reset_dev_user_identity(
     );
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn delete_account(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<DeleteAccountResponse>, AppError> {
+    check_rate_limit(&state, &format!("account-delete:{user_id}"))?;
+    validate_id("user_id", &user_id)?;
+
+    let auth = parse_request_auth(&headers)?;
+    if auth.user_id != user_id {
+        return Err(AppError::bad_request("auth user_id mismatch"));
+    }
+    let auth_message = delete_account_auth_message(&auth, &user_id)?;
+    verify_request_auth(&state, &auth, &auth_message).await?;
+    ensure_user_exists(state.pool(), &user_id).await?;
+
+    let deleted_at = Utc::now().to_rfc3339();
+    let deleted_device_id = auth.device_id.clone();
+    let mut tx = state.pool.begin().await?;
+    delete_user_owned_state(&mut tx, &user_id).await?;
+    tx.commit().await?;
+
+    let _ = state.ephemeral_state().clear_presence(&user_id);
+
+    record_security_event(
+        &state,
+        "account_deleted",
+        "success",
+        None,
+        Some(&user_id),
+        Some(&deleted_device_id),
+        None,
+    );
+
+    Ok(Json(DeleteAccountResponse {
+        user_id,
+        deleted_device_id,
+        deleted_at,
+    }))
 }
 
 pub(crate) async fn list_devices(

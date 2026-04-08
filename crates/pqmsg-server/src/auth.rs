@@ -413,6 +413,19 @@ pub(crate) fn retire_current_device_auth_message(
         .map_err(|_| AppError::internal("failed to encode devices-retire auth transcript"))
 }
 
+pub(crate) fn delete_account_auth_message(
+    auth: &RequestAuth,
+    user_id: &str,
+) -> Result<Vec<u8>, AppError> {
+    let mut records = auth_common_records(auth, "account-delete");
+    records.push(TlvRecord {
+        ty: AUTH_TAG_RECIPIENT_ID,
+        value: user_id.as_bytes().to_vec(),
+    });
+    encode(&records)
+        .map_err(|_| AppError::internal("failed to encode account-delete auth transcript"))
+}
+
 pub(crate) fn discovery_handles_auth_message(
     auth: &RequestAuth,
     user_id: &str,

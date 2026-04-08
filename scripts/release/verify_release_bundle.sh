@@ -31,9 +31,13 @@ for file in "${required_files[@]}"; do
   fi
 done
 
-(cd "$dist_dir" && sha256sum --check checksums.txt)
+sha256sum --check < "$dist_dir/checksums.txt"
 
-python - "$dist_dir/release-manifest.json" <<'PY'
+python - \
+  "$dist_dir/release-manifest.json" \
+  "$dist_dir/container-image.txt" \
+  "$dist_dir/helm-image-overrides.yaml" \
+  "$dist_dir/release-security-posture.json" <<'PY'
 import json
 import re
 import sys
@@ -77,7 +81,6 @@ if "blocking_findings" not in release_audit_gate:
 if release_audit_gate.get("blocking_findings"):
     raise SystemExit("release-security-posture.json contains blocking release audit findings")
 PY
-"$dist_dir/container-image.txt" "$dist_dir/helm-image-overrides.yaml" "$dist_dir/release-security-posture.json"
 
 if [[ -n "$repo" ]]; then
   if ! command -v gh >/dev/null 2>&1; then

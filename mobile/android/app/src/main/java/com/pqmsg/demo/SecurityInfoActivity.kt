@@ -3,6 +3,7 @@ package com.pqmsg.demo
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -21,6 +22,7 @@ import com.google.gson.Gson
 import kotlinx.coroutines.launch
 import uniffi.pqmsg_android.Suite
 import uniffi.pqmsg_android.activeCryptoProfile
+import uniffi.pqmsg_android.buildDeleteAccountAuthHeaders
 import uniffi.pqmsg_android.buildIdentityLogAuthHeaders
 import uniffi.pqmsg_android.buildLinkDeviceAuthHeaders
 import uniffi.pqmsg_android.buildListDevicesAuthHeaders
@@ -52,6 +54,7 @@ class SecurityInfoActivity : AppCompatActivity() {
     private lateinit var recoveryInputsSection: LinearLayout
     private lateinit var recoveryActionsSection: LinearLayout
     private lateinit var refreshButton: Button
+    private lateinit var privacyPolicyButton: Button
     private lateinit var editProfileButton: Button
     private lateinit var listDevicesButton: Button
     private lateinit var linkDeviceButton: Button
@@ -60,6 +63,7 @@ class SecurityInfoActivity : AppCompatActivity() {
     private lateinit var rotateIdentityButton: Button
     private lateinit var prepareSecondaryDeviceButton: Button
     private lateinit var copyOnboardingPackageButton: Button
+    private lateinit var deleteAccountButton: Button
     private lateinit var resetButton: Button
     private lateinit var backButton: Button
     private lateinit var statusText: TextView
@@ -95,6 +99,7 @@ class SecurityInfoActivity : AppCompatActivity() {
         recoveryInputsSection = findViewById(R.id.sectionSecurityRecoveryInputs)
         recoveryActionsSection = findViewById(R.id.sectionSecurityRecoveryActions)
         refreshButton = findViewById(R.id.buttonRefreshSecurityInfo)
+        privacyPolicyButton = findViewById(R.id.buttonOpenPrivacyPolicy)
         editProfileButton = findViewById(R.id.buttonEditShareableProfile)
         listDevicesButton = findViewById(R.id.buttonListDevices)
         linkDeviceButton = findViewById(R.id.buttonLinkDevice)
@@ -103,6 +108,7 @@ class SecurityInfoActivity : AppCompatActivity() {
         rotateIdentityButton = findViewById(R.id.buttonRotateIdentity)
         prepareSecondaryDeviceButton = findViewById(R.id.buttonPrepareSecondaryDevicePackage)
         copyOnboardingPackageButton = findViewById(R.id.buttonCopyOnboardingPackage)
+        deleteAccountButton = findViewById(R.id.buttonDeleteAccount)
         resetButton = findViewById(R.id.buttonResetLocalState)
         backButton = findViewById(R.id.buttonBackConversationsFromSecurity)
         statusText = findViewById(R.id.textSecurityStatus)
@@ -163,6 +169,9 @@ class SecurityInfoActivity : AppCompatActivity() {
             syncRecoveryToolVisibility()
         }
         refreshButton.setOnClickListener { renderSecurityInfo() }
+        privacyPolicyButton.setOnClickListener {
+            startActivity(Intent(this, PrivacyPolicyActivity::class.java))
+        }
         editProfileButton.setOnClickListener { showShareableProfileEditor() }
         listDevicesButton.setOnClickListener { runSecurityAction("List devices") { listLinkedDevices() } }
         linkDeviceButton.setOnClickListener { runSecurityAction("Link device") { linkManagedDevice() } }
@@ -177,6 +186,7 @@ class SecurityInfoActivity : AppCompatActivity() {
             runSecurityAction("Prepare secondary device") { prepareSecondaryDeviceOnboardingPackage() }
         }
         copyOnboardingPackageButton.setOnClickListener { copyOnboardingPackageToClipboard() }
+        deleteAccountButton.setOnClickListener { confirmDeleteAccount() }
         resetButton.setOnClickListener { confirmResetLocalState() }
         backButton.setOnClickListener { finish() }
 
@@ -304,6 +314,38 @@ class SecurityInfoActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun confirmDeleteAccount() {
+        val user = userInput.text.toString().trim()
+        if (user.isBlank()) {
+            Toast.makeText(
+                this,
+                getString(R.string.security_enter_user_before_delete),
+                Toast.LENGTH_SHORT,
+            ).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.delete_account_title)
+            .setMessage(getString(R.string.delete_account_message, user))
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.button_delete_account) { _, _ ->
+                lifecycleScope.launch {
+                    runCatching {
+                        deleteCurrentAccount(user)
+                    }.onSuccess { message ->
+                        Toast.makeText(this@SecurityInfoActivity, message, Toast.LENGTH_LONG).show()
+                        startActivity(Intent(this@SecurityInfoActivity, MainActivity::class.java))
+                        finishAffinity()
+                    }.onFailure {
+                        val mapped = UiErrorMapper.fromThrowable(it, "Delete account")
+                        statusText.text = mapped.headline
+                        Toast.makeText(this@SecurityInfoActivity, mapped.headline, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+            .show()
+    }
+
     private fun showShareableProfileEditor() {
         val user = userInput.text.toString().trim()
         if (user.isBlank()) {
@@ -411,6 +453,7 @@ class SecurityInfoActivity : AppCompatActivity() {
         val hasUser = userInput.text.toString().trim().isNotBlank()
         val hasManagedDevice = managedDeviceInput.text.toString().trim().isNotBlank()
         val hasOnboardingPackage = onboardingPackageInput.text.toString().trim().isNotBlank()
+        privacyPolicyButton.isEnabled = true
         editProfileButton.isEnabled = hasUser
         listDevicesButton.isEnabled = hasUser
         linkDeviceButton.isEnabled = hasUser && hasManagedDevice
@@ -419,6 +462,7 @@ class SecurityInfoActivity : AppCompatActivity() {
         rotateIdentityButton.isEnabled = hasUser && hasManagedDevice
         prepareSecondaryDeviceButton.isEnabled = hasUser && hasManagedDevice
         copyOnboardingPackageButton.isEnabled = hasOnboardingPackage
+        deleteAccountButton.isEnabled = hasUser
         resetButton.isEnabled = hasUser
     }
 
@@ -492,6 +536,28 @@ class SecurityInfoActivity : AppCompatActivity() {
         } else {
             getString(R.string.security_reset_local_only_status, user)
         }
+    }
+
+    private suspend fun deleteCurrentAccount(user: String): String {
+        val context = loadDeviceManagementContext(user)
+        val response = context.api.deleteAccount(
+            userId = user,
+            headers = buildDeleteAccountAuthHeaders(context.keysJson, user).toHeaderMap(),
+        )
+        check(response.user_id == user) {
+            "delete account response user mismatch: expected '$user' got '${response.user_id}'"
+        }
+        check(response.deleted_device_id == context.profile.deviceId) {
+            "delete account response device mismatch: expected '${context.profile.deviceId}' got '${response.deleted_device_id}'"
+        }
+        lastDeviceSnapshot = null
+        lastIdentityLogSnapshot = null
+        lastTransparencyProofSnapshot = null
+        lastTransparencyVerification = null
+        lastTransparencyUsedCheckpoint = false
+        lastCapabilitiesSnapshot = null
+        store.wipeUserState(user)
+        return getString(R.string.security_account_deleted_status, user)
     }
 
     private fun runSecurityAction(action: String, block: suspend () -> String) {

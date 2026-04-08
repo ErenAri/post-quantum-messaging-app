@@ -1,0 +1,48 @@
+PQMsg Privacy Policy
+Last updated: 2026-04-08
+
+Developer and contact
+- This Android client is part of the PQMsg pilot project.
+- Privacy inquiries and deletion requests can be initiated through the project issue tracker:
+  https://github.com/ErenAri/post-quantum-messaging-app/issues
+
+What this app is
+- PQMsg is a pilot secure-messaging client for direct messaging and opaque private groups.
+- Web messaging and calling are outside the supported Android pilot scope.
+
+Data processed by the app and relay
+- Account identifiers such as @username, device ID, and cryptographic public keys.
+- Optional profile fields such as display name, shareable username, and avatar bytes.
+- Push token registration data when notifications are configured.
+- Encrypted message ciphertext, encrypted attachment blobs, delivery timestamps, and device-routing metadata needed to deliver messages.
+- Contact and invite metadata that you explicitly create, including exact @username lookups and manual invite links.
+- Local encrypted state on this phone such as keys, sessions, conversation state, contact pins, private-group state, and cached message history.
+- Operational and security records such as audit events, delivery counters, rate-limit events, and integrity logs.
+
+What the service does not require by default
+- Phone-number registration is not required for the supported pilot path.
+- Message content is intended to remain end-to-end encrypted; the relay is designed to process routing and encrypted payload storage rather than plaintext conversation content.
+
+How data is used
+- To provision your account and devices.
+- To deliver direct messages, private-group messages, and attachments.
+- To verify identity changes, trust pins, and transparency state.
+- To operate the pilot environment, investigate abuse, and keep the service available.
+
+How data is shared
+- Data may be processed by the pilot operator and the infrastructure providers used to host the relay, database, backups, metrics, and logs.
+- We do not describe the relay as a general-purpose advertising or analytics platform.
+
+Retention and deletion
+- Local encrypted state remains on this phone until you reset local state or delete the account.
+- Deleting the account from the app is intended to remove the account record and associated user data from the relay.
+- Limited records may remain where necessary for security, abuse prevention, fraud handling, backup windows, or legal compliance.
+
+Security
+- The app stores local messaging state using Android platform protections and encrypted local storage.
+- Release builds are intended to use HTTPS transport and certificate pinning where configured.
+
+Your choices
+- You can reset local state on this phone from Privacy & account without deleting the remote account.
+- You can delete the account from Privacy & account in the app.
+- If you cannot access the app, use the public account-deletion help page linked from this screen.
