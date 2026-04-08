@@ -49,6 +49,13 @@ pub(crate) struct RetireCurrentDeviceResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct DeleteAccountResponse {
+    pub(crate) user_id: String,
+    pub(crate) deleted_device_id: String,
+    pub(crate) deleted_at: String,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct DeviceRecord {
     pub(crate) device_id: String,
     pub(crate) active: bool,

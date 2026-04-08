@@ -7,21 +7,50 @@ plugins {
 
 val repoRoot = rootProject.rootDir.resolve("../..").canonicalFile
 val generatedUniFFIDir = file("$buildDir/generated/uniffi/kotlin")
+val uploadStoreFile = providers.gradleProperty("PQMSG_UPLOAD_STORE_FILE")
+    .orElse(providers.environmentVariable("PQMSG_UPLOAD_STORE_FILE"))
+    .orNull
+val uploadStorePassword = providers.gradleProperty("PQMSG_UPLOAD_STORE_PASSWORD")
+    .orElse(providers.environmentVariable("PQMSG_UPLOAD_STORE_PASSWORD"))
+    .orNull
+val uploadKeyAlias = providers.gradleProperty("PQMSG_UPLOAD_KEY_ALIAS")
+    .orElse(providers.environmentVariable("PQMSG_UPLOAD_KEY_ALIAS"))
+    .orNull
+val uploadKeyPassword = providers.gradleProperty("PQMSG_UPLOAD_KEY_PASSWORD")
+    .orElse(providers.environmentVariable("PQMSG_UPLOAD_KEY_PASSWORD"))
+    .orNull
+val hasReleaseSigning = listOf(
+    uploadStoreFile,
+    uploadStorePassword,
+    uploadKeyAlias,
+    uploadKeyPassword
+).all { !it.isNullOrBlank() }
 
 android {
     namespace = "com.pqmsg.demo"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.pqmsg.demo"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
         buildConfigField("String", "TLS_PIN_SHA256", "\"\"")
         buildConfigField("String", "TLS_BACKUP_PIN_SHA256", "\"\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(uploadStoreFile!!)
+                storePassword = uploadStorePassword
+                keyAlias = uploadKeyAlias
+                keyPassword = uploadKeyPassword
+            }
+        }
     }
 
     buildTypes {
@@ -33,6 +62,9 @@ android {
             isMinifyEnabled = false
             buildConfigField("boolean", "ALLOW_CLEARTEXT_DEMO", "false")
             manifestPlaceholders["usesCleartextTraffic"] = "false"
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -95,6 +127,18 @@ tasks.register<Exec>("generateUniFFIBindings") {
 
 tasks.named("preBuild").configure {
     dependsOn("generateUniFFIBindings")
+}
+
+tasks.matching { it.name in setOf("bundleRelease", "assembleRelease") }.configureEach {
+    doFirst {
+        if (!hasReleaseSigning) {
+            throw GradleException(
+                "Release signing is not configured. Set PQMSG_UPLOAD_STORE_FILE, " +
+                    "PQMSG_UPLOAD_STORE_PASSWORD, PQMSG_UPLOAD_KEY_ALIAS, and " +
+                    "PQMSG_UPLOAD_KEY_PASSWORD as Gradle properties or environment variables."
+            )
+        }
+    }
 }
 
 dependencies {

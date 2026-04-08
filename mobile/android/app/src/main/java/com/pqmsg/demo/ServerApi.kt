@@ -8,6 +8,7 @@ import retrofit2.Retrofit
 import retrofit2.Response
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.HeaderMap
 import retrofit2.http.POST
@@ -80,6 +81,12 @@ data class RetireCurrentDeviceResponse(
     val retired_device_id: String,
     val retired_at: String,
     val remaining_active_devices: Int,
+)
+
+data class DeleteAccountResponse(
+    val user_id: String,
+    val deleted_device_id: String,
+    val deleted_at: String,
 )
 
 data class LinkDeviceRequest(
@@ -967,6 +974,12 @@ interface PqmsgApi {
         @Path("user_id") userId: String,
         @HeaderMap headers: Map<String, String>,
     ): RetireCurrentDeviceResponse
+
+    @DELETE("/v1/users/{user_id}/account")
+    suspend fun deleteAccount(
+        @Path("user_id") userId: String,
+        @HeaderMap headers: Map<String, String>,
+    ): DeleteAccountResponse
 
     @GET("/v1/users/{user_id}/devices")
     suspend fun listDevices(

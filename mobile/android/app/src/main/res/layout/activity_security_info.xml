@@ -52,6 +52,14 @@
             android:gravity="end">
 
             <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonOpenPrivacyPolicy"
+                style="@style/Widget.PQMsg.Button.Toolbar"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="10dp"
+                android:text="@string/button_open_privacy_policy" />
+
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonRefreshSecurityInfo"
                 style="@style/Widget.PQMsg.Button.Toolbar"
                 android:layout_width="wrap_content"
@@ -333,6 +341,14 @@
                         android:layout_marginTop="10dp"
                         android:text="@string/button_reset_local_state" />
                 </LinearLayout>
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonDeleteAccount"
+                    style="@style/Widget.PQMsg.Button.Danger"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="@string/button_delete_account" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

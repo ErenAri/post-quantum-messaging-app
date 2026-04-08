@@ -37,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var createProfileButton: Button
     private lateinit var pasteOnboardingButton: Button
     private lateinit var importOnboardingButton: Button
+    private lateinit var privacyPolicyButton: Button
     private lateinit var toggleAdvancedButton: Button
     private lateinit var toggleLinkedDeviceButton: Button
     private lateinit var advancedPanel: LinearLayout
@@ -69,6 +70,7 @@ class MainActivity : AppCompatActivity() {
         createProfileButton = findViewById(R.id.buttonCreateProfile)
         pasteOnboardingButton = findViewById(R.id.buttonPasteOnboardingPackage)
         importOnboardingButton = findViewById(R.id.buttonImportOnboardingPackage)
+        privacyPolicyButton = findViewById(R.id.buttonOpenSetupPrivacyPolicy)
         toggleAdvancedButton = findViewById(R.id.buttonToggleAdvancedSetup)
         toggleLinkedDeviceButton = findViewById(R.id.buttonToggleLinkedDeviceImport)
         advancedPanel = findViewById(R.id.layoutAdvancedSetup)
@@ -124,6 +126,9 @@ class MainActivity : AppCompatActivity() {
 
         importOnboardingButton.setOnClickListener {
             confirmImportSecondaryDevicePackage()
+        }
+        privacyPolicyButton.setOnClickListener {
+            startActivity(Intent(this, PrivacyPolicyActivity::class.java))
         }
 
         lifecycleScope.launch {

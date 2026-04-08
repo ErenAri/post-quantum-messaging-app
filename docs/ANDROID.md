@@ -82,7 +82,7 @@ Calling is not part of the Android messaging pilot:
 
 ## 4. Prerequisites
 
-- Android Studio with SDK 34 tooling,
+- Android Studio with SDK 35 tooling,
 - Android SDK Platform-Tools,
 - Android NDK installed from SDK manager,
 - Rust toolchain,
@@ -129,6 +129,17 @@ From `mobile/android`:
 APK output:
 
 - `mobile/android/app/build/outputs/apk/debug/app-debug.apk`
+
+For Android release preparation, keep the legal and deletion surfaces aligned with:
+
+- [PRIVACY_POLICY](PRIVACY_POLICY.md)
+- [ACCOUNT_DELETION](ACCOUNT_DELETION.md)
+
+The Android app exposes:
+
+- an in-app `Privacy policy` screen from setup and `Privacy & account`,
+- `Delete account` for authenticated relay-side deletion,
+- `Reset local state` for device-only cleanup without remote account deletion.
 
 ## 8. Emulator Demonstration
 

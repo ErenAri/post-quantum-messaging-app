@@ -94,6 +94,21 @@
                     android:text="@string/button_create_profile" />
 
                 <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonOpenSetupPrivacyPolicy"
+                    style="@style/Widget.PQMsg.Button.Compact"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/button_open_privacy_policy" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/setup_privacy_note"
+                    android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted" />
+
+                <com.google.android.material.button.MaterialButton
                     android:id="@+id/buttonToggleAdvancedSetup"
                     style="@style/Widget.PQMsg.Button.Compact"
                     android:layout_width="wrap_content"
