@@ -145,6 +145,51 @@ The hardened response headers should come from:
 
 - `mobile/web/public/_headers`
 
+## Local PC Backend via Cloudflare Tunnel
+
+If you want to keep the hosted web shell on Cloudflare Pages but run the relay on your own PC, use the repo scripts below.
+
+Start the local relay with the hosted-web policy and CORS for the Pages origin:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/dev/start_local_hosted_web_backend.ps1
+```
+
+That script:
+
+- binds the relay to `127.0.0.1:3000`
+- uses a local SQLite database under `.tmp/local-run/hosted-web-backend`
+- enables encrypted SQLite pages by default
+- sets `PQMSG_WEB_CLIENT_POLICY=interop_candidate`
+- sets `PQMSG_CORS_ALLOWED_ORIGINS=https://pqmsg-web.pages.dev`
+
+If you need to test a specific Pages deployment URL as well as the stable project URL, pass it as an additional origin:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/dev/start_local_hosted_web_backend.ps1 `
+  -AdditionalWebOrigins https://<deployment-id>.pqmsg-web.pages.dev
+```
+
+Then open a public HTTPS tunnel to the loopback relay:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/dev/start_cloudflare_quick_tunnel.ps1
+```
+
+When `cloudflared` prints a `https://*.trycloudflare.com` URL:
+
+1. keep both terminal windows open
+2. open the hosted web shell on Pages
+3. go to `Advanced`
+4. paste the `https://*.trycloudflare.com` URL as the relay URL
+5. save and create or unlock the web profile
+
+This path is suitable for personal testing and small trusted cohorts. It is not a production hosting model. The relay only stays reachable while:
+
+- your PC is powered on
+- the local relay process is running
+- the Cloudflare quick tunnel process is running
+
 ## Post-deploy checks
 
 Verify:
