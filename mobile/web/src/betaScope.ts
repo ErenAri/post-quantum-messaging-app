@@ -1,7 +1,7 @@
 import type { ServerCapabilitiesResponse } from "./server";
 
 export const WEB_BETA_SCOPE_SUMMARY =
-  "Web remains a demo surface until the server promotes the hardened web policy. Private groups require their own capability, and calling stays unavailable on web.";
+  "Web remains a demo surface until the server promotes the hardened web policy. direct messages require the hardened web policy, private groups require their own capability, and calling stays unavailable on web.";
 
 export type WebBetaHoldback = {
   directMessagingAllowed: boolean;

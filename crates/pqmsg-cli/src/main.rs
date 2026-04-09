@@ -21,6 +21,7 @@ use pqmsg_core::handshake::{
 };
 use pqmsg_core::kem::MlKem768;
 use pqmsg_core::keys::{IdentityKeyPair, KEMPreKey, OneTimePreKey, PreKeyBundle, SecretBytes};
+use pqmsg_core::pq_sig::{MlDsa65, PqSignatureProvider};
 use pqmsg_core::ratchet::pq::{
     PqRatchetState, DEFAULT_PQ_RATCHET_INTERVAL, DEFAULT_PQ_RATCHET_KEY_HISTORY,
 };
@@ -192,6 +193,14 @@ enum Commands {
         user: String,
         #[arg(long)]
         keys: PathBuf,
+    },
+    WsSealedTicket {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        since: i64,
     },
     DevicesLink {
         #[arg(long)]
@@ -418,6 +427,10 @@ struct UserKeysFile {
     identity_x25519_secret_b64: String,
     identity_sig_pub_b64: String,
     identity_sig_secret_b64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity_pq_sig_pub_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity_pq_sig_secret_b64: Option<String>,
     signed_prekey_x25519_pub_b64: String,
     signed_prekey_x25519_secret_b64: String,
     pq_signed_prekey_pub_b64: String,
@@ -480,10 +493,13 @@ struct BundleResponse {
     user_id: String,
     identity_x25519_pub: String,
     identity_sig_pub: String,
+    identity_pq_sig_pub: String,
     signed_prekey_x25519_pub: String,
     sig_over_spk: String,
     pq_signed_prekey_pub_mlkem768: String,
     sig_over_pqspk: String,
+    pq_sig_over_spk: String,
+    pq_sig_over_pqspk: String,
     one_time_prekey_x25519: Option<String>,
     one_time_prekey_mlkem768: Option<String>,
     remaining_one_time_prekeys_x25519: Option<usize>,
@@ -649,6 +665,7 @@ struct RegisterRequest {
     user_id: String,
     identity_x25519_pub: String,
     identity_sig_pub: String,
+    identity_pq_sig_pub: String,
     device_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pow_nonce: Option<String>,
@@ -679,6 +696,8 @@ struct PublishPrekeysRequest {
     sig_over_spk: String,
     pq_signed_prekey_pub_mlkem768: String,
     sig_over_pqspk: String,
+    pq_sig_over_spk: String,
+    pq_sig_over_pqspk: String,
     one_time_prekeys_x25519: Vec<String>,
     one_time_prekeys_mlkem768: Vec<String>,
 }
@@ -789,6 +808,12 @@ struct DeviceRecord {
 struct DeviceListResponse {
     user_id: String,
     devices: Vec<DeviceRecord>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WsInboxTicketResponse {
+    ticket: String,
+    expires_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -937,6 +962,17 @@ fn generate_signing_key<R: RngCore + CryptoRng>(rng: &mut R) -> SigningKey {
 
 fn build_signature_payload(signing_key: &SigningKey, message: &[u8]) -> String {
     B64.encode(signing_key.sign(message).to_bytes())
+}
+
+fn build_pq_signature_payload(
+    provider: &MlDsa65,
+    secret_key_b64: &str,
+    field: &'static str,
+    message: &[u8],
+) -> Result<String> {
+    let secret_key = decode_b64(field, secret_key_b64)?;
+    let signature = provider.sign(&secret_key, message)?;
+    Ok(B64.encode(signature))
 }
 
 fn auth_signing_key_for_user(keys: &UserKeysFile) -> Result<SigningKey> {
@@ -1176,6 +1212,31 @@ async fn main() -> Result<()> {
                 &cli.server,
                 &keys_file.user_id,
                 &keys_file.device_id,
+                &auth_signing_key,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::WsSealedTicket { user, keys, since } => {
+            let keys_file = read_keys_file(&keys)?;
+            if keys_file.user_id != user {
+                return Err(anyhow!(
+                    "user mismatch: command user '{}' vs keys file user '{}'",
+                    user,
+                    keys_file.user_id
+                ));
+            }
+            if since < 0 {
+                return Err(anyhow!("since must be non-negative"));
+            }
+            preflight_server_command(&client, &cli.server, security_profile, None).await?;
+            let auth_signing_key = auth_signing_key_for_user(&keys_file)?;
+            let response = create_ws_sealed_inbox_ticket_remote(
+                &client,
+                &cli.server,
+                &keys_file.user_id,
+                &keys_file.device_id,
+                since,
                 &auth_signing_key,
             )
             .await?;
@@ -1686,6 +1747,8 @@ fn generate_user_keys(
     let identity = IdentityKeyPair::generate(format!("{user}-ik"), &mut rng);
     let signed_prekey = OneTimePreKey::generate(format!("{user}-spk"), &mut rng);
     let identity_sig = generate_signing_key(&mut rng);
+    let pq_sig = MlDsa65::new()?;
+    let identity_pq_sig = pq_sig.keypair()?;
     let kem = build_kem_for_suite(suite)?;
     let pq_signed_prekey = kem.keypair()?;
 
@@ -1717,6 +1780,8 @@ fn generate_user_keys(
         identity_x25519_secret_b64: B64.encode(identity.secret_key.as_slice()),
         identity_sig_pub_b64: B64.encode(identity_sig.verifying_key().to_bytes()),
         identity_sig_secret_b64: B64.encode(identity_sig.to_bytes()),
+        identity_pq_sig_pub_b64: Some(B64.encode(identity_pq_sig.public_key)),
+        identity_pq_sig_secret_b64: Some(B64.encode(identity_pq_sig.secret_key.as_slice())),
         signed_prekey_x25519_pub_b64: B64.encode(signed_prekey.public_key.0),
         signed_prekey_x25519_secret_b64: B64.encode(signed_prekey.secret_key.as_slice()),
         pq_signed_prekey_pub_b64: B64.encode(pq_signed_prekey.public_key),
@@ -1768,10 +1833,15 @@ async fn register_user(
     keys: &UserKeysFile,
     registration_pow_bits: u8,
 ) -> Result<()> {
+    let identity_pq_sig_pub = keys
+        .identity_pq_sig_pub_b64
+        .clone()
+        .ok_or_else(|| anyhow!("keys file is missing identity_pq_sig_pub_b64; regenerate keys"))?;
     let mut req = RegisterRequest {
         user_id: keys.user_id.clone(),
         identity_x25519_pub: keys.identity_x25519_pub_b64.clone(),
         identity_sig_pub: keys.identity_sig_pub_b64.clone(),
+        identity_pq_sig_pub,
         device_id: keys.device_id.clone(),
         pow_nonce: None,
     };
@@ -1791,6 +1861,10 @@ async fn publish_prekeys(client: &Client, server: &str, keys: &UserKeysFile) -> 
     let pq_spk_pub = decode_b64("pq_signed_prekey_pub_b64", &keys.pq_signed_prekey_pub_b64)?;
     let signing_key =
         decode_signing_key_b64("identity_sig_secret_b64", &keys.identity_sig_secret_b64)?;
+    let pq_provider = MlDsa65::new()?;
+    let pq_identity_secret_b64 = keys.identity_pq_sig_secret_b64.as_deref().ok_or_else(|| {
+        anyhow!("keys file is missing identity_pq_sig_secret_b64; regenerate keys")
+    })?;
     let expected_pub = B64.encode(signing_key.verifying_key().to_bytes());
     if expected_pub != keys.identity_sig_pub_b64 {
         return Err(anyhow!(
@@ -1806,6 +1880,18 @@ async fn publish_prekeys(client: &Client, server: &str, keys: &UserKeysFile) -> 
         sig_over_spk: build_signature_payload(&signing_key, &spk_msg),
         pq_signed_prekey_pub_mlkem768: keys.pq_signed_prekey_pub_b64.clone(),
         sig_over_pqspk: build_signature_payload(&signing_key, &pq_msg),
+        pq_sig_over_spk: build_pq_signature_payload(
+            &pq_provider,
+            pq_identity_secret_b64,
+            "identity_pq_sig_secret_b64",
+            &spk_msg,
+        )?,
+        pq_sig_over_pqspk: build_pq_signature_payload(
+            &pq_provider,
+            pq_identity_secret_b64,
+            "identity_pq_sig_secret_b64",
+            &pq_msg,
+        )?,
         one_time_prekeys_x25519: keys
             .one_time_prekeys_x25519
             .iter()
@@ -1852,6 +1938,28 @@ async fn list_devices_remote(
         .send()
         .await
         .context("list devices request failed")?;
+    handle_json_response(response).await
+}
+
+async fn create_ws_sealed_inbox_ticket_remote(
+    client: &Client,
+    server: &str,
+    user: &str,
+    device_id: &str,
+    since: i64,
+    auth_signing_key: &SigningKey,
+) -> Result<WsInboxTicketResponse> {
+    let auth_headers = sealed_inbox_auth_headers(auth_signing_key, user, device_id, since)?;
+    let mut request = client
+        .post(format!("{server}/v1/ws/sealed-inbox/{user}/ticket"))
+        .query(&[("since", since)]);
+    for (name, value) in auth_headers {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .context("create sealed inbox websocket ticket request failed")?;
     handle_json_response(response).await
 }
 
@@ -2883,6 +2991,12 @@ fn bundle_to_core(bundle: &BundleResponse, suite: SuiteFlag) -> Result<PreKeyBun
         .as_ref()
         .map(|value| decode_b64("one_time_prekey_mlkem768", value))
         .transpose()?;
+    out.pq_sig_public_key = Some(decode_b64(
+        "identity_pq_sig_pub",
+        &bundle.identity_pq_sig_pub,
+    )?);
+    out.pq_spk_signature = Some(decode_b64("pq_sig_over_spk", &bundle.pq_sig_over_spk)?);
+    out.pq_pqspk_signature = Some(decode_b64("pq_sig_over_pqspk", &bundle.pq_sig_over_pqspk)?);
     Ok(out)
 }
 
@@ -3068,8 +3182,16 @@ fn to_identity_keypair(keys: &UserKeysFile) -> Result<IdentityKeyPair> {
             "identity_x25519_secret_b64",
             &keys.identity_x25519_secret_b64,
         )?),
-        pq_sig_public_key: None,
-        pq_sig_secret_key: None,
+        pq_sig_public_key: keys
+            .identity_pq_sig_pub_b64
+            .as_deref()
+            .map(|value| decode_b64("identity_pq_sig_pub_b64", value))
+            .transpose()?,
+        pq_sig_secret_key: keys
+            .identity_pq_sig_secret_b64
+            .as_deref()
+            .map(|value| decode_b64("identity_pq_sig_secret_b64", value).map(SecretBytes::from))
+            .transpose()?,
     })
 }
 
@@ -3102,6 +3224,7 @@ fn registration_pow_message(request: &RegisterRequest, nonce: &str) -> Vec<u8> {
         request.device_id.as_bytes(),
         request.identity_x25519_pub.as_bytes(),
         request.identity_sig_pub.as_bytes(),
+        request.identity_pq_sig_pub.as_bytes(),
         nonce.as_bytes(),
     ]
     .join(&[0u8][..])
@@ -4820,6 +4943,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_ws_sealed_ticket_args() {
+        let cli = Cli::try_parse_from([
+            "pqmsg-cli",
+            "ws-sealed-ticket",
+            "--user",
+            "alice",
+            "--keys",
+            "./devkeys/alice.json",
+            "--since",
+            "42",
+        ])
+        .expect("parse");
+        match cli.command {
+            Commands::WsSealedTicket { user, keys, since } => {
+                assert_eq!(user, "alice");
+                assert_eq!(keys, PathBuf::from("./devkeys/alice.json"));
+                assert_eq!(since, 42);
+            }
+            _ => panic!("expected ws-sealed-ticket command"),
+        }
+    }
+
+    #[test]
     fn parse_devices_link_args() {
         let cli = Cli::try_parse_from([
             "pqmsg-cli",
@@ -5077,10 +5223,13 @@ mod tests {
             user_id: "bob".to_string(),
             identity_x25519_pub: B64.encode([1u8; 32]),
             identity_sig_pub: B64.encode([2u8; 32]),
+            identity_pq_sig_pub: B64.encode(vec![3u8; 1952]),
             signed_prekey_x25519_pub: B64.encode([3u8; 32]),
             sig_over_spk: B64.encode([4u8; 64]),
             pq_signed_prekey_pub_mlkem768: B64.encode([5u8; 64]),
             sig_over_pqspk: B64.encode([6u8; 64]),
+            pq_sig_over_spk: B64.encode(vec![7u8; 3309]),
+            pq_sig_over_pqspk: B64.encode(vec![8u8; 3309]),
             one_time_prekey_x25519: None,
             one_time_prekey_mlkem768: None,
             remaining_one_time_prekeys_x25519: Some(0),
@@ -5139,6 +5288,23 @@ mod tests {
                 &bob_keys.identity_sig_secret_b64,
             )
             .expect("sig sk");
+            let pq_provider = MlDsa65::new().expect("pq provider");
+            let pq_sig_secret = decode_b64(
+                "identity_pq_sig_secret_b64",
+                bob_keys
+                    .identity_pq_sig_secret_b64
+                    .as_deref()
+                    .expect("pq sig sk"),
+            )
+            .expect("pq sig secret");
+            let pq_sig_pub = decode_b64(
+                "identity_pq_sig_pub_b64",
+                bob_keys
+                    .identity_pq_sig_pub_b64
+                    .as_deref()
+                    .expect("pq sig pk"),
+            )
+            .expect("pq sig public");
             let spk_msg =
                 signed_prekey_signature_message(1, &DhPublicKey(spk_pub)).expect("spk msg");
             let pq_msg = pq_signed_prekey_signature_message(1, &pq_pub).expect("pq msg");
@@ -5156,6 +5322,17 @@ mod tests {
                 sig_pub,
             );
             out.suite.kem = KemAlgorithm::MlKem768;
+            out.pq_sig_public_key = Some(pq_sig_pub);
+            out.pq_spk_signature = Some(
+                pq_provider
+                    .sign(&pq_sig_secret, &spk_msg)
+                    .expect("pq sig over spk"),
+            );
+            out.pq_pqspk_signature = Some(
+                pq_provider
+                    .sign(&pq_sig_secret, &pq_msg)
+                    .expect("pq sig over pqspk"),
+            );
             out
         };
 
@@ -5243,6 +5420,8 @@ mod tests {
             identity_x25519_secret_b64: B64.encode([2u8; 32]),
             identity_sig_pub_b64: B64.encode([3u8; 32]),
             identity_sig_secret_b64: B64.encode([4u8; 32]),
+            identity_pq_sig_pub_b64: Some(B64.encode(vec![17u8; 1952])),
+            identity_pq_sig_secret_b64: Some(B64.encode(vec![18u8; 4032])),
             signed_prekey_x25519_pub_b64: B64.encode([5u8; 32]),
             signed_prekey_x25519_secret_b64: B64.encode([6u8; 32]),
             pq_signed_prekey_pub_b64: B64.encode([7u8; 64]),
@@ -5287,6 +5466,14 @@ mod tests {
         assert_eq!(
             restored.identity_sig_secret_b64,
             keys.identity_sig_secret_b64
+        );
+        assert_eq!(
+            restored.identity_pq_sig_pub_b64,
+            keys.identity_pq_sig_pub_b64
+        );
+        assert_eq!(
+            restored.identity_pq_sig_secret_b64,
+            keys.identity_pq_sig_secret_b64
         );
         assert_eq!(restored.one_time_prekeys_x25519.len(), 2);
         assert_eq!(restored.one_time_prekeys_mlkem768.len(), 2);

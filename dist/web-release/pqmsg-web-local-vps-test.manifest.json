@@ -1,0 +1,49 @@
+{
+  "release_id": "local-vps-test",
+  "generated_at": "2026-04-09T12:06:55.827595+00:00",
+  "bundle_name": "pqmsg-web-local-vps-test",
+  "bundle_path": "C:\\projects\\post-quantum-messaging-app\\dist\\web-release\\pqmsg-web-local-vps-test.tar.gz",
+  "source_dist_dir": "C:\\projects\\post-quantum-messaging-app\\mobile\\web\\dist",
+  "files": [
+    {
+      "path": "site/assets/index-DGmE3kAs.js",
+      "size_bytes": 334204,
+      "sha256": "8fe2d63638079fd1ac0ed700e0232ba3daa1f519db375c5aa417d666bcfe709b"
+    },
+    {
+      "path": "site/assets/index-DjjWHv-z.css",
+      "size_bytes": 59263,
+      "sha256": "eadb013568e8818bda30447454229c675610b57e009943e08c0a58e0b1f5b19d"
+    },
+    {
+      "path": "site/icon-192.svg",
+      "size_bytes": 1091,
+      "sha256": "4ac9b18106f282848c86379a4edc3b4fe643ff5e089d7e135d7c64b98290c10d"
+    },
+    {
+      "path": "site/icon-512.svg",
+      "size_bytes": 1124,
+      "sha256": "20fed94c0023769594ea6cf429b12f8e4ec4ecb8f7aaae9e9d1678927a459eb2"
+    },
+    {
+      "path": "site/index.html",
+      "size_bytes": 672,
+      "sha256": "c822d3ce59fa5433925c1bb03ebda3ecc4c80b8d6986b406e6c55c4e81067fe8"
+    },
+    {
+      "path": "site/manifest.webmanifest",
+      "size_bytes": 436,
+      "sha256": "c19f829058aac68a19eb7cf1006ebd9b72f38f1a5d2dcc0323d3d1bcfe991ad9"
+    },
+    {
+      "path": "site/sw.js",
+      "size_bytes": 2211,
+      "sha256": "703b7598283b198df3e21e693ad03f97bc52d1f3373200078862c7d4ca98bdcb"
+    },
+    {
+      "path": "nginx/pqmsg-web.conf",
+      "size_bytes": 2172,
+      "sha256": "71445acbbfa8f801204883c2260719b6780c7d5efd7c7d0958c9f2f7cf3b30e4"
+    }
+  ]
+}
