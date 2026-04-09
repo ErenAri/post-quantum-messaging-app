@@ -266,6 +266,52 @@ type PrivateGroupWrappedMessage = {
 
 const PRIVATE_GROUP_MESSAGE_PREFIX = "pqmsg-private-group-message-v1:";
 const GROUP_INVITE_SECRET_FRAGMENT_KEY = "group_secret";
+const HOSTED_SERVER_SETUP_MESSAGE =
+  "Set an HTTPS relay URL in Advanced before creating or unlocking a web profile on this hosted origin.";
+
+function hostedOriginUsesLoopbackServer(serverUrl: string): boolean {
+  const trimmed = serverUrl.trim();
+  if (!trimmed || isLoopbackHostname(location.hostname)) {
+    return false;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "http:" && isLoopbackHostname(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeRuntimeServerUrl(serverUrl: string): string {
+  const trimmed = serverUrl.trim();
+  if (!trimmed) {
+    return isLoopbackHostname(location.hostname) ? DEFAULT_SETUP.serverUrl : "";
+  }
+  if (hostedOriginUsesLoopbackServer(trimmed)) {
+    return "";
+  }
+  try {
+    return validateWebServerUrl(trimmed).toString().replace(/\/+$/, "");
+  } catch {
+    return isLoopbackHostname(location.hostname) ? DEFAULT_SETUP.serverUrl : "";
+  }
+}
+
+function configuredServerUrlOrNull(): string | null {
+  const normalized = normalizeRuntimeServerUrl(setup.serverUrl);
+  return normalized || null;
+}
+
+function requireConfiguredServerUrl(): string {
+  const normalized = configuredServerUrlOrNull();
+  if (normalized) {
+    return normalized;
+  }
+  if (!isLoopbackHostname(location.hostname)) {
+    throw new Error(HOSTED_SERVER_SETUP_MESSAGE);
+  }
+  throw new Error("Set the relay URL before continuing.");
+}
 
 function parsePrivateGroupStateJson(stateJson: string): PrivateGroupState | null {
   try {
@@ -1027,7 +1073,12 @@ async function syncPrivateGroupMessagesBackground(): Promise<void> {
 async function bootstrapApp(): Promise<void> {
   try {
     await initMetadataStorage();
-    setup = loadSetup();
+    const loadedSetup = loadSetup();
+    const normalizedServerUrl = normalizeRuntimeServerUrl(loadedSetup.serverUrl);
+    setup = { ...loadedSetup, serverUrl: normalizedServerUrl };
+    if (normalizedServerUrl !== loadedSetup.serverUrl) {
+      saveSetup(setup);
+    }
     ensureSupportedWebEnvironment();
     await ensureWebPqRuntime();
   } catch (error) {
@@ -1197,17 +1248,23 @@ function installKeyboardShortcutLauncher(): void {
 }
 
 async function loadServerCapabilitiesCached(): Promise<ServerCapabilitiesResponse | null> {
-  if (cachedCapabilities && cachedCapabilitiesServerUrl === setup.serverUrl) {
+  const serverUrl = configuredServerUrlOrNull();
+  if (!serverUrl) {
+    cachedCapabilities = null;
+    cachedCapabilitiesServerUrl = null;
+    return null;
+  }
+  if (cachedCapabilities && cachedCapabilitiesServerUrl === serverUrl) {
     return cachedCapabilities;
   }
   try {
-    const caps = await new PqmsgApi(setup.serverUrl).getCapabilities();
+    const caps = await new PqmsgApi(serverUrl).getCapabilities();
     cachedCapabilities = caps;
-    cachedCapabilitiesServerUrl = setup.serverUrl;
+    cachedCapabilitiesServerUrl = serverUrl;
     return caps;
   } catch {
     cachedCapabilities = null;
-    cachedCapabilitiesServerUrl = setup.serverUrl;
+    cachedCapabilitiesServerUrl = serverUrl;
     return null;
   }
 }
@@ -2198,7 +2255,12 @@ function renderOnboarding(): void {
           <summary>Advanced</summary>
           <label class="field">
             <span>Server URL</span>
-            <input id="onb-server" type="text" value="${escHtml(setup.serverUrl)}" />
+            <input id="onb-server" type="text" value="${escHtml(setup.serverUrl)}" placeholder="${escHtml(isLoopbackHostname(location.hostname) ? DEFAULT_SETUP.serverUrl : "https://relay.example.com")}" />
+            <small class="field-help">${
+              isLoopbackHostname(location.hostname)
+                ? "Use loopback HTTP only for local development."
+                : "Hosted web origins require an HTTPS relay URL."
+            }</small>
           </label>
           <button id="onb-save-server" class="btn-sm">Save</button>
         </details>
@@ -2233,6 +2295,7 @@ function renderOnboarding(): void {
 
 function renderCreateAccount(): void {
   const localAccounts = listLocalKeyUsers();
+  const hostedServerSetupRequired = !isLoopbackHostname(location.hostname) && !configuredServerUrlOrNull();
   app.innerHTML = `
     <div class="onboarding">
       <div class="onboarding-card">
@@ -2260,6 +2323,16 @@ function renderCreateAccount(): void {
             <span>Confirm Passphrase</span>
             <input id="onb-pass2" type="password" placeholder="Re-enter passphrase" />
           </label>
+          ${
+            hostedServerSetupRequired
+              ? `
+          <div class="beta-banner beta-banner-warning">
+            <strong>Relay required</strong>
+            <p>${escHtml(HOSTED_SERVER_SETUP_MESSAGE)}</p>
+          </div>
+        `
+              : ""
+          }
           <button id="onb-go" class="btn-primary">Create Account</button>
           <button id="onb-back" class="btn-link">&larr; Back</button>
         </div>
@@ -2396,6 +2469,8 @@ function renderCreateAccount(): void {
     progress.classList.remove("hidden");
 
     try {
+      setup.serverUrl = requireConfiguredServerUrl();
+      saveSetup(setup);
       status.textContent = "Loading crypto runtime...";
       setProgress(progress, 10);
       await ensureWebPqRuntime();
@@ -2499,6 +2574,7 @@ function renderCreateAccount(): void {
 
 function renderSignIn(): void {
   const localAccounts = listLocalKeyUsers();
+  const hostedServerSetupRequired = !isLoopbackHostname(location.hostname) && !configuredServerUrlOrNull();
   app.innerHTML = `
     <div class="onboarding">
       <div class="onboarding-card">
@@ -2543,6 +2619,16 @@ function renderSignIn(): void {
             <span>Passphrase</span>
             <input id="onb-pass" type="password" placeholder="The passphrase protecting your local keys" />
           </label>
+          ${
+            hostedServerSetupRequired
+              ? `
+          <div class="beta-banner beta-banner-warning">
+            <strong>Relay required</strong>
+            <p>${escHtml(HOSTED_SERVER_SETUP_MESSAGE)}</p>
+          </div>
+        `
+              : ""
+          }
           <button id="onb-go" class="btn-primary">Unlock</button>
           <button id="onb-back" class="btn-link">&larr; Back</button>
         </div>
@@ -2607,6 +2693,8 @@ function renderSignIn(): void {
     status.classList.remove("error-text");
 
     try {
+      setup.serverUrl = requireConfiguredServerUrl();
+      saveSetup(setup);
       status.textContent = "Loading crypto runtime...";
       await ensureWebPqRuntime();
 

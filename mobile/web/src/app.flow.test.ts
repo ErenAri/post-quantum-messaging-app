@@ -22,6 +22,7 @@ type MockKeys = {
 };
 
 type BootOptions = {
+  pageUrl?: string;
   existingUsers?: string[];
   bundleUsers?: string[];
   identityMismatchUsers?: string[];
@@ -287,7 +288,7 @@ function installDom(url = "http://localhost/"): JSDOM {
 async function bootApp(options: BootOptions = {}) {
   vi.resetModules();
   vi.clearAllMocks();
-  const dom = installDom();
+  const dom = installDom(options.pageUrl);
 
   const messagesByConversation = new Map<string, FakeMessage[]>();
   const outbox: Array<{ id: string; userId: string; peerId: string; groupId?: string }> = [];
@@ -312,6 +313,7 @@ async function bootApp(options: BootOptions = {}) {
     presenceCalls: 0,
     typingCalls: 0,
     receiptCalls: 0,
+    baseUrls: [] as string[],
     capabilities: {
       capability_schema_version: 1,
       security_profile: "research",
@@ -794,7 +796,9 @@ async function bootApp(options: BootOptions = {}) {
 
   vi.doMock("./server", () => {
     class FakePqmsgApi {
-      constructor(readonly baseUrl: string) {}
+      constructor(readonly baseUrl: string) {
+        apiState.baseUrls.push(baseUrl);
+      }
 
       async getCapabilities() {
         return apiState.capabilities;
@@ -1313,6 +1317,38 @@ describe("web app flow coverage", () => {
     expect(router.getCurrentView()).toEqual({ screen: "conversations" });
     expect(document.body.textContent).toContain("No conversations yet");
   }, 10000);
+
+  it("requires an HTTPS relay before creating a hosted web profile", async () => {
+    const { apiState, router, storage } = await bootApp({
+      existingUsers: [],
+      bundleUsers: [],
+      pageUrl: "https://pqmsg-web.pages.dev/",
+    });
+
+    expect(storage.loadSetup().serverUrl).toBe("");
+
+    router.navigateTo({ screen: "create-account" });
+    await flushPromises();
+
+    const userInput = document.querySelector<HTMLInputElement>("#onb-user");
+    const nameInput = document.querySelector<HTMLInputElement>("#onb-name");
+    const passInput = document.querySelector<HTMLInputElement>("#onb-pass");
+    const pass2Input = document.querySelector<HTMLInputElement>("#onb-pass2");
+    userInput!.value = "hosted1";
+    nameInput!.value = "Hosted One";
+    passInput!.value = "StrongPass123!";
+    pass2Input!.value = "StrongPass123!";
+    document.querySelector<HTMLButtonElement>("#onb-go")!.click();
+
+    await eventually(() => {
+      expect(document.querySelector("#onb-status")?.textContent).toContain(
+        "Set an HTTPS relay URL in Advanced before creating or unlocking a web profile",
+      );
+    });
+
+    expect(apiState.baseUrls).not.toContain("http://127.0.0.1:3000");
+    expect(apiState.existingUsers.has("hosted1")).toBe(false);
+  });
 
   it("forgets one local browser profile without clearing another profile's sessions or trust pins", async () => {
     vi.stubGlobal("confirm", vi.fn(() => true));
