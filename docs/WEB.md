@@ -2,7 +2,7 @@
 
 ## 1. Objective
 
-This document specifies the Web client demonstration and pilot-holdback path for the PQ messaging prototype.
+This document specifies the web client deployment shape and the current pilot-holdback path for the PQ messaging prototype.
 
 The Android pilot launch contract and operations runbook live in [PILOT](PILOT.md).
 
@@ -11,6 +11,13 @@ The web client requires the WASM PQ runtime for messaging:
 - **WASM PQ mode**: real ML-KEM-768 key encapsulation and ML-DSA-65 signatures via compiled Rust WASM bindings.
 
 The current release train does not treat the web client as a supported pilot messaging client by default, and web calling is out of scope.
+
+The hosted deployment guidance for the production web shell lives in [WEB_DEPLOYMENT](WEB_DEPLOYMENT.md).
+The exact VPS bundle/rollout tooling now lives in:
+
+- `scripts/release/package_web_release.py`
+- `deploy/web/vps/deploy_pqmsg_web_release.sh`
+- `scripts/security/validate_hosted_web_headers.py`
 
 Manual contact bootstrap on the hardened web path is `@username` or opaque invite only. Raw-hash contact discovery remains disabled.
 
@@ -35,13 +42,13 @@ flowchart LR
 For the current pilot rollout:
 
 - Android is the supported pilot messaging client.
-- Web remains demo-only.
+- Web remains demo-only in the live rollout contract even though the static web shell can now be hosted with a hardened production header and caching profile.
 - Outbound web direct messaging and private-group messaging are blocked whenever the server reports `web_client_policy = demo_only`.
 - Even when the server permits hardened web messaging, private groups additionally require `private_group_messaging_supported = true`.
 - The live capability contract also exposes `supported_beta_clients`, so the server can advertise when `web` is actually in the supported rollout matrix instead of demo-only.
 - `docs/SUPPORT_MATRIX.json` is the canonical machine-readable support matrix for the current pilot posture.
 - Web messaging fails closed when the browser lacks HTTPS-or-loopback origin protection, an actual secure browser context, cross-origin isolation on hosted origins, IndexedDB, SubtleCrypto, WebAssembly, or text encoding support.
-- The SPA shell ships an explicit CSP plus hardened COOP/COEP/CORP browser response headers in the Vite dev/preview surface.
+- The SPA shell now uses a shared response-header contract: Vite dev/preview keeps loopback allowances for local servers, while hosted production uses an HTTPS/WSS-only header profile described in [WEB_DEPLOYMENT](WEB_DEPLOYMENT.md).
 - The service worker only caches same-origin app-shell assets; cross-origin API traffic and `/v1/*` messaging traffic are never cached by the web shell.
 - Calling is unavailable from the web UI.
 - When `contact_discovery_mode = private_service`, the web client verifies the signed manifest, app-server-pinned discovery contract fields, optional nonce-bound attestation evidence, and continuity-pins that service contract on this browser before discovery can proceed.
@@ -76,6 +83,8 @@ npm run preview
 ```
 
 The hardened production build now emits no JavaScript sourcemaps by default.
+
+Hosted production deploys should use the static server configuration in [WEB_DEPLOYMENT](WEB_DEPLOYMENT.md), not the Vite preview server.
 
 ## 6. Runtime Workflow
 

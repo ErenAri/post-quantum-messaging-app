@@ -1,6 +1,8 @@
-# PQMsg Web Demo
+# PQmsg Web
 
 Web client build and run guidance is documented in [docs/WEB.md](../../docs/WEB.md).
+
+Hosted production shell guidance is documented in [docs/WEB_DEPLOYMENT.md](../../docs/WEB_DEPLOYMENT.md).
 
 Current pilot posture:
 

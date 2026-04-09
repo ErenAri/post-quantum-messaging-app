@@ -390,6 +390,28 @@ jobs:
       - name: run web tests
         run: npm test
 
+  web-production-contract:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/web/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install web dependencies
+        working-directory: mobile/web
+        run: npm ci
+      - name: build web production bundle
+        working-directory: mobile/web
+        run: npm run build
+      - name: validate hosted web production contract
+        run: python scripts/security/validate_web_production_contract.py
+  
   fuzz-smoke:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest

@@ -168,6 +168,7 @@ Operational deployment and release workflows live in:
 | [ANDROID](docs/ANDROID.md) | Android architecture and integration guide |
 | [IOS](docs/IOS.md) | iOS architecture and integration guide |
 | [WEB](docs/WEB.md) | Web demo client and policy gating |
+| [WEB_DEPLOYMENT](docs/WEB_DEPLOYMENT.md) | Hosted web shell deployment and production header contract |
 | [PRIVATE_GROUPS](docs/PRIVATE_GROUPS.md) | Private-group availability and fail-closed behavior |
 | [PRIVATE_CONTACT_DISCOVERY](docs/PRIVATE_CONTACT_DISCOVERY.md) | Discovery contract and client verification model |
 | [DEVICE_LIFECYCLE](docs/DEVICE_LIFECYCLE.md) | Registration, linking, reset, and retirement contract |
