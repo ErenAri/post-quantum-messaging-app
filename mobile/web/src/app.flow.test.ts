@@ -24,6 +24,7 @@ type MockKeys = {
 type BootOptions = {
   pageUrl?: string;
   existingUsers?: string[];
+  contactUsers?: string[];
   bundleUsers?: string[];
   identityMismatchUsers?: string[];
   immutableIdentityUsers?: string[];
@@ -307,7 +308,7 @@ async function bootApp(options: BootOptions = {}) {
     transparencyCheckpointOutOfRangeUsers: new Set(options.transparencyCheckpointOutOfRangeUsers ?? []),
     usernames: new Map<string, string>((options.existingUsers ?? ["test1", "test2"]).map((userId) => [userId, userId] as const)),
     usernameLookupEnabledByUser: new Map<string, boolean>((options.existingUsers ?? ["test1", "test2"]).map((userId) => [userId, true] as const)),
-    contacts: new Set<string>(),
+    contacts: new Set(options.contactUsers ?? []),
     resetCalls: [] as string[],
     relays: [] as Array<{ peerId: string; body: string }>,
     presenceCalls: 0,
@@ -2073,6 +2074,43 @@ describe("web app flow coverage", () => {
     });
     expect(document.body.textContent).toContain("Create Account");
     expect(document.body.textContent).toContain("Unlock This Browser");
+  });
+
+  it("keeps settings buttons active when contacts are already populated", async () => {
+    const { storage, router } = await bootApp({
+      existingUsers: ["test1", "test2"],
+      bundleUsers: ["test1", "test2"],
+      contactUsers: ["test2"],
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "test2",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "settings" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLButtonElement>("#set-logout")).not.toBeNull();
+      expect(document.querySelector("[data-remove-contact='test2']")).not.toBeNull();
+      expect(document.querySelector("#set-empty-new-chat")).toBeNull();
+    });
+
+    document.querySelector<HTMLButtonElement>("#set-logout")!.click();
+    await flushPromises();
+
+    expect(router.getCurrentView()).toEqual({ screen: "onboarding" });
+    expect(storage.loadSetup()).toMatchObject({
+      serverUrl: "http://localhost:3000",
+      userId: "",
+      peerUserId: "",
+    });
   });
 
   it("forgets the current browser profile from settings without clearing the saved relay URL", async () => {

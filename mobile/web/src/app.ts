@@ -7530,8 +7530,8 @@ async function renderSettings(): Promise<void> {
       intro.textContent = "This server decides which web features are available right now.";
     }
   }
-  q<HTMLButtonElement>("#set-devices")?.replaceChildren("Devices");
-  q<HTMLButtonElement>("#set-server-info")?.replaceChildren("Server details");
+  qMaybe<HTMLButtonElement>("#set-devices")?.replaceChildren("Devices");
+  qMaybe<HTMLButtonElement>("#set-server-info")?.replaceChildren("Server details");
 
   // Save profile
   q<HTMLInputElement>("#set-username").addEventListener("input", () => {
@@ -7579,7 +7579,7 @@ async function renderSettings(): Promise<void> {
     }
   });
 
-  q("#set-empty-new-chat")?.addEventListener("click", () => navigateTo({ screen: "new-chat" }));
+  qMaybe("#set-empty-new-chat")?.addEventListener("click", () => navigateTo({ screen: "new-chat" }));
 
   // Add contact
   q("#set-add-contact").addEventListener("click", async () => {
@@ -9573,9 +9573,9 @@ async function renderDiscovery(): Promise<void> {
       </section>
     `);
     q("#disc-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
-    q("#disc-open-settings")?.addEventListener("click", () => navigateTo({ screen: "settings" }));
-    q("#disc-new-chat")?.addEventListener("click", () => navigateTo({ screen: "new-chat" }));
-    q("#disc-back-to-inbox")?.addEventListener("click", () => navigateTo({ screen: "conversations" }));
+    qMaybe("#disc-open-settings")?.addEventListener("click", () => navigateTo({ screen: "settings" }));
+    qMaybe("#disc-new-chat")?.addEventListener("click", () => navigateTo({ screen: "new-chat" }));
+    qMaybe("#disc-back-to-inbox")?.addEventListener("click", () => navigateTo({ screen: "conversations" }));
     return;
   }
   const discoveryOverviewCards = `
@@ -10458,6 +10458,10 @@ function q<T extends HTMLElement>(selector: string): T {
   const el = document.querySelector(selector);
   if (!el) throw new Error(`missing element: ${selector}`);
   return el as T;
+}
+
+function qMaybe<T extends HTMLElement>(selector: string): T | null {
+  return document.querySelector(selector) as T | null;
 }
 
 function qAll<T extends HTMLElement>(selector: string): T[] {
