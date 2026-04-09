@@ -127,6 +127,7 @@ import {
 } from "./storage";
 import {
   saveMessage,
+  saveMessageIfAbsent,
   updateMessageStatus,
   getMessages,
   deleteMessages,
@@ -1669,15 +1670,15 @@ async function loadPeerSealedDeliveryToken(
   if (cached) {
     return cached;
   }
-  const headers = buildProfileGetAuthHeaders(k, peerUserId);
-  let profile = await api.getProfile(peerUserId, headers);
+  const loadProfile = () => api.getProfile(peerUserId, buildProfileGetAuthHeaders(k, peerUserId));
+  let profile = await loadProfile();
   let sealedDeliveryToken = profile.sealed_delivery_token?.trim() || "";
   if (!sealedDeliveryToken) {
     const contactHeaders = buildContactsUpsertAuthHeaders(k, peerUserId, "", false, "");
     await api.upsertContact(k.userId, { contact_user_id: peerUserId }, contactHeaders);
     markConversationAccepted(peerUserId);
     void loadContactsBackground();
-    profile = await api.getProfile(peerUserId, headers);
+    profile = await loadProfile();
     sealedDeliveryToken = profile.sealed_delivery_token?.trim() || "";
   }
   if (!sealedDeliveryToken) {
@@ -8252,6 +8253,10 @@ async function connectRealtime(): Promise<void> {
   }
 }
 
+function incomingStoredMessageId(messageId: number): string {
+  return `inbox-${messageId}`;
+}
+
 async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
   try {
     const k = await ensureKeys();
@@ -8275,16 +8280,8 @@ async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
     const conversationId = isDirectMessage
       ? convId(k.userId, senderId)
       : `group:${groupId}`;
-    const existing = await getMessages(conversationId);
-    if (existing.some((msg) => msg.serverMessageId === wsMsg.message_id)) {
-      const cursor = readSealedCursor(k.userId, k.deviceId);
-      if (wsMsg.message_id > cursor) {
-        writeSealedCursor(k.userId, wsMsg.message_id, k.deviceId);
-      }
-      return;
-    }
     const msg: StoredMessage = {
-      id: `srv-${wsMsg.message_id}`,
+      id: incomingStoredMessageId(wsMsg.message_id),
       conversationId,
       sender: senderId,
       recipient: isDirectMessage ? k.userId : decrypted.recipient,
@@ -8295,15 +8292,17 @@ async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
       status: "delivered",
       serverMessageId: wsMsg.message_id,
     };
-    await saveMessage(msg);
-
-    if (isDirectMessage) {
-      void sendDeliveredReceipt(wsMsg.message_id);
-    }
-
+    const inserted = await saveMessageIfAbsent(msg);
     const cursor = readSealedCursor(k.userId, k.deviceId);
     if (wsMsg.message_id > cursor) {
       writeSealedCursor(k.userId, wsMsg.message_id, k.deviceId);
+    }
+    if (!inserted) {
+      return;
+    }
+
+    if (isDirectMessage) {
+      void sendDeliveredReceipt(wsMsg.message_id);
     }
 
     if (isDirectMessage) {
@@ -9453,13 +9452,8 @@ async function pollSealedInbox(): Promise<void> {
         const conversationId = isDirectMessage
           ? convId(k.userId, senderId)
           : `group:${groupId}`;
-        const existing = await getMessages(conversationId);
-        if (existing.some((msg) => msg.serverMessageId === item.message_id)) {
-          nextCursor = Math.max(nextCursor, item.message_id);
-          continue;
-        }
         const msg: StoredMessage = {
-          id: `sealed-${item.message_id}`,
+          id: incomingStoredMessageId(item.message_id),
           conversationId,
           sender: senderId,
           recipient: isDirectMessage ? k.userId : decrypted.recipient,
@@ -9470,7 +9464,11 @@ async function pollSealedInbox(): Promise<void> {
           status: "delivered",
           serverMessageId: item.message_id,
         };
-        await saveMessage(msg);
+        const inserted = await saveMessageIfAbsent(msg);
+        nextCursor = Math.max(nextCursor, item.message_id);
+        if (!inserted) {
+          continue;
+        }
         void loadProfileNameBackground(senderId);
         if (isDirectMessage) {
           const isActivePeer = activeChatPeer === senderId;
@@ -9496,7 +9494,6 @@ async function pollSealedInbox(): Promise<void> {
           }
         }
         conversationListChanged = true;
-        nextCursor = Math.max(nextCursor, item.message_id);
       } catch {
         // Skip malformed sealed messages
       }

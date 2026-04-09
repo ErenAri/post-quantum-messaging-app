@@ -110,6 +110,21 @@ type BootOptions = {
   }>;
   profileTokensRequireContact?: boolean;
   transparencyMismatchUsers?: string[];
+  delayedIncomingSaveMs?: number;
+  sealedInboxMessages?: Array<{
+    message_id: number;
+    sender_user_id?: string;
+    sender_identity_x25519_pub?: string | null;
+    message_bytes_base64: string;
+    received_at: string;
+  }>;
+  realtimeMessagesOnConnect?: Array<{
+    message_id: number;
+    sender_user_id?: string;
+    sender_identity_x25519_pub?: string | null;
+    message_bytes_base64: string;
+    received_at: string;
+  }>;
   prepare?: (storage: typeof import("./storage")) => Promise<void> | void;
 };
 
@@ -298,6 +313,22 @@ async function bootApp(options: BootOptions = {}) {
   const keyRecords = new Map<string, string>();
   const realtimeState = {
     connectCalls: 0,
+    messageListener: null as ((message: {
+      message_id: number;
+      sender_user_id?: string;
+      sender_identity_x25519_pub?: string | null;
+      message_bytes_base64: string;
+      received_at: string;
+    }) => void | Promise<void>) | null,
+    async emit(message: {
+      message_id: number;
+      sender_user_id?: string;
+      sender_identity_x25519_pub?: string | null;
+      message_bytes_base64: string;
+      received_at: string;
+    }) {
+      await realtimeState.messageListener?.(message);
+    },
   };
   const apiState = {
     existingUsers: new Set(options.existingUsers ?? ["test1", "test2"]),
@@ -311,6 +342,22 @@ async function bootApp(options: BootOptions = {}) {
     contacts: new Set(options.contactUsers ?? []),
     resetCalls: [] as string[],
     relays: [] as Array<{ peerId: string; body: string }>,
+    profileCalls: 0,
+    usedProfileHeaders: new Set<object>(),
+    sealedInboxMessages: [...(options.sealedInboxMessages ?? [])] as Array<{
+      message_id: number;
+      sender_user_id?: string;
+      sender_identity_x25519_pub?: string | null;
+      message_bytes_base64: string;
+      received_at: string;
+    }>,
+    realtimeMessagesOnConnect: [...(options.realtimeMessagesOnConnect ?? [])] as Array<{
+      message_id: number;
+      sender_user_id?: string;
+      sender_identity_x25519_pub?: string | null;
+      message_bytes_base64: string;
+      received_at: string;
+    }>,
     presenceCalls: 0,
     typingCalls: 0,
     receiptCalls: 0,
@@ -552,12 +599,27 @@ async function bootApp(options: BootOptions = {}) {
     async saveMessage(message: FakeMessage) {
       const list = messagesByConversation.get(message.conversationId) ?? [];
       const index = list.findIndex((item) => item.id === message.id);
+      if (options.delayedIncomingSaveMs && message.serverMessageId !== undefined) {
+        await new Promise((resolve) => setTimeout(resolve, options.delayedIncomingSaveMs));
+      }
       if (index >= 0) {
         list[index] = { ...list[index], ...message };
       } else {
         list.push({ ...message });
       }
       messagesByConversation.set(message.conversationId, list);
+    },
+    async saveMessageIfAbsent(message: FakeMessage) {
+      if (options.delayedIncomingSaveMs && message.serverMessageId !== undefined) {
+        await new Promise((resolve) => setTimeout(resolve, options.delayedIncomingSaveMs));
+      }
+      const list = messagesByConversation.get(message.conversationId) ?? [];
+      if (list.some((item) => item.id === message.id)) {
+        return false;
+      }
+      list.push({ ...message });
+      messagesByConversation.set(message.conversationId, list);
+      return true;
     },
     async updateMessageStatus(id: string, status: FakeMessage["status"], serverMessageId?: number) {
       for (const list of messagesByConversation.values()) {
@@ -664,12 +726,25 @@ async function bootApp(options: BootOptions = {}) {
 
   vi.doMock("./realtime", () => ({
     RealtimeInbox: class {
-      onMessage() {}
+      onMessage(listener: (message: {
+        message_id: number;
+        sender_user_id?: string;
+        sender_identity_x25519_pub?: string | null;
+        message_bytes_base64: string;
+        received_at: string;
+      }) => void | Promise<void>) {
+        realtimeState.messageListener = listener;
+      }
       onReconnect() {}
       connect() {
         realtimeState.connectCalls += 1;
+        for (const message of apiState.realtimeMessagesOnConnect) {
+          void Promise.resolve().then(() => realtimeState.messageListener?.(message));
+        }
       }
-      disconnect() {}
+      disconnect() {
+        realtimeState.messageListener = null;
+      }
     },
   }));
 
@@ -866,7 +941,14 @@ async function bootApp(options: BootOptions = {}) {
         return { groups: [] };
       }
 
-      async getProfile(userId: string) {
+      async getProfile(userId: string, headers?: object) {
+        apiState.profileCalls += 1;
+        if (headers && apiState.usedProfileHeaders.has(headers)) {
+          throw new Error('HTTP 409: {"type":"about:blank","title":"Conflict","status":409,"detail":"request nonce replayed"}');
+        }
+        if (headers) {
+          apiState.usedProfileHeaders.add(headers);
+        }
         if (!apiState.existingUsers.has(userId)) {
           throw new Error("HTTP 404: user not found");
         }
@@ -1070,8 +1152,11 @@ async function bootApp(options: BootOptions = {}) {
         return { user_id: userId, messages: [] };
       }
 
-      async sealedInbox(userId: string) {
-        return { user_id: userId, messages: [] };
+      async sealedInbox(userId: string, since = 0) {
+        return {
+          user_id: userId,
+          messages: apiState.sealedInboxMessages.filter((message) => message.message_id > since),
+        };
       }
 
       async getSenderCertificate(userId: string) {
@@ -1547,6 +1632,50 @@ describe("web app flow coverage", () => {
       expect(apiState.contacts.has("test2")).toBe(true);
       expect(apiState.relays).toHaveLength(1);
     });
+    expect(apiState.profileCalls).toBeGreaterThanOrEqual(2);
+    expect(document.body.textContent).not.toContain("request nonce replayed");
+  });
+
+  it("dedupes the same inbound message when realtime and sealed polling overlap", async () => {
+    const inbound = {
+      message_id: 7,
+      sender_user_id: "test2",
+      sender_identity_x25519_pub: "test2",
+      message_bytes_base64: "enc:test2:test1:hello once",
+      received_at: "2026-03-11T00:00:00Z",
+    };
+    const { router, messagesByConversation } = await bootApp({
+      delayedIncomingSaveMs: 25,
+      sealedInboxMessages: [inbound],
+      realtimeMessagesOnConnect: [inbound],
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "http://localhost:3000",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "test2",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    await eventually(() => {
+      const saved = messagesByConversation.get(convId("test1", "test2")) ?? [];
+      expect(saved).toHaveLength(1);
+    });
+
+    router.navigateTo({ screen: "chat", peerId: "test2" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLInputElement>("#chat-input")).not.toBeNull();
+    });
+
+    const saved = messagesByConversation.get(convId("test1", "test2")) ?? [];
+    expect(saved).toHaveLength(1);
+    expect(saved[0].serverMessageId).toBe(7);
+    expect(document.querySelectorAll("#messages-list .bubble")).toHaveLength(1);
   });
 
   it("blocks direct messaging when the peer transparency proof does not match the pinned identity", async () => {
