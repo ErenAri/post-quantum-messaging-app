@@ -2072,6 +2072,52 @@ describe("web app flow coverage", () => {
       peerUserId: "",
     });
     expect(document.body.textContent).toContain("Create Account");
+    expect(document.body.textContent).toContain("Unlock This Browser");
+  });
+
+  it("forgets the current browser profile from settings without clearing the saved relay URL", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const { storage, router } = await bootApp({
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        await storage.saveDirectMessageSession("test1", "peer-a", "pass-1", "session-1");
+        storage.writeIdentityPin("test1", "peer-a", {
+          fingerprintSha256: "fp-a",
+          identityKeyVersion: 1,
+          identityX25519Pub: "x-a",
+          identitySigPub: "sig-a",
+          identityPqSigPub: "pq-sig-a",
+          observedAt: "2026-03-11T00:00:00Z",
+        });
+        storage.saveSetup({
+          serverUrl: "https://relay.example.com",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "peer-a",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "settings" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLButtonElement>("#set-forget-local")).not.toBeNull();
+    });
+
+    document.querySelector<HTMLButtonElement>("#set-forget-local")!.click();
+    await flushPromises();
+
+    expect(router.getCurrentView()).toEqual({ screen: "onboarding" });
+    expect(storage.hasLocalKeys("test1")).toBe(false);
+    await expect(storage.loadDirectMessageSession("test1", "peer-a", "pass-1")).resolves.toBeNull();
+    expect(storage.listIdentityPins("test1")).toEqual([]);
+    expect(storage.loadSetup()).toMatchObject({
+      serverUrl: "https://relay.example.com",
+      userId: "",
+      peerUserId: "",
+    });
   });
 
   it("hides unsupported compose actions and fails closed on blocked web routes in demo-only mode", async () => {

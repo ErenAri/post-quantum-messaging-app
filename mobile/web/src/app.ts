@@ -7369,8 +7369,11 @@ async function renderSettings(): Promise<void> {
         </div>
         <div class="settings-section">
           <h3>Session</h3>
-          <p class="settings-section-intro">Sign out of this browser while keeping your encrypted local keys available for a later sign-in.</p>
-          <button id="set-logout" class="btn-secondary">Log Out</button>
+          <p class="settings-section-intro">Lock this browser while keeping the encrypted local profile available for a later unlock. If you want to remove this browser profile entirely, forget it below.</p>
+          <div class="settings-row">
+            <button id="set-logout" class="btn-secondary">Lock This Browser</button>
+            <button id="set-forget-local" class="btn-secondary">Forget This Browser Profile</button>
+          </div>
         </div>
         <div class="settings-section">
           <h3>People</h3>
@@ -7643,6 +7646,17 @@ async function renderSettings(): Promise<void> {
   }
   q("#set-logout").addEventListener("click", async () => {
     await logoutCurrentSession();
+  });
+  q("#set-forget-local").addEventListener("click", async () => {
+    const accountId = setup.userId;
+    if (!accountId) {
+      return;
+    }
+    if (!confirm(`Forget the saved local profile for @${accountId} on this browser? This removes local keys, sessions, pins, and cached chats from this browser only.`)) {
+      return;
+    }
+    await wipeLocalState(accountId);
+    await logoutCurrentSession(`Forgot the local profile for @${accountId} on this browser.`);
   });
 
   // Push token registration
@@ -10186,7 +10200,7 @@ function refreshWorkspaceSidebarIfVisible(
   bindWorkspaceSidebarInteractions();
 }
 
-async function logoutCurrentSession(): Promise<void> {
+async function logoutCurrentSession(notificationMessage: string = "Browser locked"): Promise<void> {
   const previousServerUrl = setup.serverUrl;
   const previousSuiteLabel = setup.suiteLabel;
 
@@ -10219,7 +10233,7 @@ async function logoutCurrentSession(): Promise<void> {
   };
   saveSetup(setup);
   navigateTo({ screen: "onboarding" });
-  notify("Logged out", "info");
+  notify(notificationMessage, "info");
 }
 
 // ---------------------------------------------------------------------------
