@@ -49,6 +49,12 @@ The bundle contains:
 - `manifest.json` - release metadata and SHA-256 hashes
 - `VERSION` - release identifier
 
+For Cloudflare Pages, the repo also ships:
+
+- `mobile/web/public/_headers`
+
+That file mirrors the hardened hosted-header contract for static Pages deployments.
+
 ## Nginx reference config
 
 Use the hardened example in:
@@ -119,6 +125,25 @@ Optional environment overrides for the rollout script:
 - `NGINX_CONF_NAME`
 - `INSTALL_NGINX_CONFIG=0`
 - `RELOAD_NGINX=0`
+
+## Cloudflare Pages Rollout
+
+Use Cloudflare Pages for the static web shell only.
+
+Recommended settings:
+
+- Repository: `ErenAri/post-quantum-messaging-app`
+- Production branch: the branch that contains the latest web deployment changes
+- Framework preset: `Vite`
+- Root directory: `mobile/web`
+- Build command: `npm ci && npm run build`
+- Build output directory: `dist`
+
+The repo does not require a `_redirects` file for Pages because the current web shell does not use pathname-based SPA routing. Deep state lives in in-memory view state plus query/hash fragments.
+
+The hardened response headers should come from:
+
+- `mobile/web/public/_headers`
 
 ## Post-deploy checks
 
