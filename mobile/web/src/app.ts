@@ -2271,56 +2271,84 @@ function renderOnboarding(): void {
   const hostedRelayReady = !isLoopbackHostname(location.hostname) && !!configuredServer;
   app.innerHTML = `
     <div class="onboarding">
-      <div class="onboarding-card">
-        ${ONBOARDING_LOGO}
-        <div class="onboarding-copy">
-          <p class="onboarding-lede">
-            Pick a username, protect this browser with a passphrase, and start private messaging without wading through advanced setup first.
-          </p>
-          <div class="onboarding-points" aria-label="Onboarding overview">
-            <div class="onboarding-point">
-              <strong>Username first</strong>
-              <span>Your account starts from a simple @name instead of a long utility form.</span>
+      <div class="onboarding-card onboarding-card-home">
+        <div class="onboarding-home-grid">
+          <section class="onboarding-home-hero">
+            ${ONBOARDING_LOGO}
+            <div class="onboarding-copy onboarding-copy-home">
+              <span class="onboarding-eyebrow">Hosted web onboarding</span>
+              <p class="onboarding-lede">
+                Create a browser profile, unlock one already saved here, or bring over a linked device package without wading through setup first.
+              </p>
             </div>
-            <div class="onboarding-point">
-              <strong>Local passphrase</strong>
-              <span>Your keys stay on this browser and are unlocked only with the passphrase you choose.</span>
+            <div class="onboarding-points onboarding-points-grid" aria-label="Onboarding overview">
+              <div class="onboarding-point">
+                <strong>Username first</strong>
+                <span>Your account starts from a simple @name instead of a long utility form.</span>
+              </div>
+              <div class="onboarding-point">
+                <strong>Local passphrase</strong>
+                <span>Your keys stay on this browser and unlock only with the passphrase you choose.</span>
+              </div>
+              <div class="onboarding-point onboarding-point-wide">
+                <strong>Linked-device import</strong>
+                <span>Use a protected package from another browser or device instead of creating a second disconnected profile.</span>
+              </div>
             </div>
-            <div class="onboarding-point">
-              <strong>Advanced stays hidden</strong>
-              <span>Relay and transport details are still available, but they no longer dominate first run.</span>
+            <div class="onboarding-chip-row" aria-label="Onboarding highlights">
+              <span class="onboarding-chip">Local keys only</span>
+              <span class="onboarding-chip">Browser unlock</span>
+              <span class="onboarding-chip">Advanced stays optional</span>
             </div>
-          </div>
+          </section>
+          <section class="onboarding-home-panel">
+            <div class="onboarding-home-panel-head">
+              <h2>Start on this browser</h2>
+              <p>Create a fresh profile, unlock one already saved locally, or import a linked-device package from another session.</p>
+            </div>
+            <div class="onboarding-actions onboarding-actions-home">
+              <button id="onb-create" class="btn-primary">Create Account</button>
+              <button id="onb-signin" class="btn-secondary">Unlock This Browser</button>
+              <button id="onb-import-device" class="btn-secondary">Import Linked Device</button>
+            </div>
+            <div class="onboarding-status-stack">
+              ${hostedRelayReady ? `
+                <div class="beta-banner beta-banner-info onboarding-inline-banner">
+                  <strong>Relay ready</strong>
+                  <p>This browser will use ${escHtml(configuredServer!)}.</p>
+                </div>
+              ` : `
+                <div class="beta-banner beta-banner-warning onboarding-inline-banner">
+                  <strong>Relay needed</strong>
+                  <p>${escHtml(HOSTED_SERVER_SETUP_MESSAGE)}</p>
+                </div>
+              `}
+              <details class="onb-advanced">
+                <summary>Advanced relay setup</summary>
+                <label class="field">
+                  <span>Server URL</span>
+                  <input id="onb-server" type="text" value="${escHtml(setup.serverUrl)}" placeholder="${escHtml(isLoopbackHostname(location.hostname) ? DEFAULT_SETUP.serverUrl : "https://relay.example.com")}" />
+                  <small class="field-help">${
+                    isLoopbackHostname(location.hostname)
+                      ? "Use loopback HTTP only for local development."
+                      : "Hosted web origins require an HTTPS relay URL."
+                  }</small>
+                </label>
+                <button id="onb-save-server" class="btn-sm">Save</button>
+              </details>
+              <details class="onboarding-scope-details">
+                <summary>Current web scope</summary>
+                <div class="onboarding-scope-pills" aria-label="Current web capabilities">
+                  <span>Direct messages</span>
+                  <span>Private groups by capability</span>
+                  <span>No calling on web</span>
+                </div>
+                <p>${escHtml(WEB_BETA_SCOPE_SUMMARY)}</p>
+              </details>
+            </div>
+            <p class="onboarding-note onboarding-note-home">Your keys are generated locally and never leave this browser profile.</p>
+          </section>
         </div>
-        <div class="onboarding-actions">
-          <button id="onb-create" class="btn-primary">Create Account</button>
-          <button id="onb-signin" class="btn-secondary">Unlock This Browser</button>
-          <button id="onb-import-device" class="btn-secondary">Import Linked Device</button>
-        </div>
-        ${hostedRelayReady ? `
-          <div class="beta-banner beta-banner-info">
-            <strong>Relay ready</strong>
-            <p>This browser will use ${escHtml(configuredServer!)}. You can still change it in Advanced.</p>
-          </div>
-        ` : ""}
-        <details class="onb-advanced">
-          <summary>Advanced</summary>
-          <label class="field">
-            <span>Server URL</span>
-            <input id="onb-server" type="text" value="${escHtml(setup.serverUrl)}" placeholder="${escHtml(isLoopbackHostname(location.hostname) ? DEFAULT_SETUP.serverUrl : "https://relay.example.com")}" />
-            <small class="field-help">${
-              isLoopbackHostname(location.hostname)
-                ? "Use loopback HTTP only for local development."
-                : "Hosted web origins require an HTTPS relay URL."
-            }</small>
-          </label>
-          <button id="onb-save-server" class="btn-sm">Save</button>
-        </details>
-        <div class="beta-banner beta-banner-warning">
-          <strong>Web messaging today</strong>
-          <p>${escHtml(WEB_BETA_SCOPE_SUMMARY)}</p>
-        </div>
-        <p class="onboarding-note">Your keys are generated locally and never leave this browser profile.</p>
       </div>
     </div>
   `;
