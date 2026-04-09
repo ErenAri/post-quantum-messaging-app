@@ -390,6 +390,27 @@ export function buildRetireDeviceAuthHeaders(keys: GeneratedKeys): RequestAuthHe
   return signAuthHeaders(keys, timestamp, nonce, records);
 }
 
+export function buildBackupUploadAuthHeaders(
+  keys: GeneratedKeys,
+  backupVersion: number,
+  encryptedBackupBytesBase64: string
+): RequestAuthHeaders {
+  const timestamp = unixTimestampSeconds();
+  const nonce = bytesToBase64(randomBytes(16));
+  const blobHash = bytesToHex(sha256(base64ToBytes(encryptedBackupBytesBase64)));
+  const authMsg =
+    `backups-upload:${keys.userId}:${keys.deviceId}:${timestamp}:${nonce}:${backupVersion}:${blobHash}`;
+  const signingKey = base64ToBytes(keys.identitySigSecret);
+  const signature = ed25519.sign(utf8ToBytes(authMsg), signingKey);
+  return {
+    "x-pqmsg-auth-user": keys.userId,
+    "x-pqmsg-auth-device": keys.deviceId,
+    "x-pqmsg-auth-timestamp": String(timestamp),
+    "x-pqmsg-auth-nonce": nonce,
+    "x-pqmsg-auth-signature": bytesToBase64(signature),
+  };
+}
+
 // --- Phase 2: Profile auth ---
 
 export function buildProfileGetAuthHeaders(

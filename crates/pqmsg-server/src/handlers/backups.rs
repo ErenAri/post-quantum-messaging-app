@@ -142,6 +142,24 @@ pub(crate) async fn download_latest_backup(
     verify_request_auth(&state, &auth, auth_message.as_bytes()).await?;
     ensure_user_exists(state.pool(), &user_id).await?;
 
+    Ok(Json(load_backup_response(&state, &user_id).await?))
+}
+
+pub(crate) async fn download_recovery_backup(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<Json<BackupDownloadResponse>, AppError> {
+    check_rate_limit(&state, &format!("backup-recovery:{user_id}"))?;
+    validate_id("user_id", &user_id)?;
+    ensure_user_exists(state.pool(), &user_id).await?;
+
+    Ok(Json(load_backup_response(&state, &user_id).await?))
+}
+
+async fn load_backup_response(
+    state: &AppState,
+    user_id: &str,
+) -> Result<BackupDownloadResponse, AppError> {
     let row = sqlx::query(
         "SELECT
             backup_id,
@@ -153,7 +171,7 @@ pub(crate) async fn download_latest_backup(
          FROM encrypted_backups
          WHERE user_id = $1",
     )
-    .bind(&user_id)
+    .bind(user_id)
     .fetch_optional(state.pool())
     .await?;
     let Some(row) = row else {
@@ -167,13 +185,13 @@ pub(crate) async fn download_latest_backup(
         .map_err(|_| AppError::internal("read encrypted backup blob"))?
         .ok_or_else(|| AppError::not_found("backup not found"))?;
 
-    Ok(Json(BackupDownloadResponse {
+    Ok(BackupDownloadResponse {
         backup_id: row.try_get("backup_id")?,
-        user_id,
+        user_id: user_id.to_string(),
         device_id: row.try_get("device_id")?,
         backup_version: row.try_get("backup_version")?,
         recovery_hint: row.try_get("recovery_hint")?,
         encrypted_backup_bytes_base64: B64.encode(blob),
         uploaded_at: row.try_get("updated_at")?,
-    }))
+    })
 }

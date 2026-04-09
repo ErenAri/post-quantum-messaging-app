@@ -31,6 +31,7 @@ import {
   buildContactDiscoveryAttestationChallengeNonce,
   contactDiscoveryManifestContractSha256,
   buildPushTokenAuthHeaders,
+  buildBackupUploadAuthHeaders,
   buildListDevicesAuthHeaders,
   buildLinkDeviceAuthHeaders,
   buildRevokeDeviceAuthHeaders,
@@ -43,11 +44,14 @@ import {
   initWasmCrypto,
   initiateDirectMessageSession,
   isPqSessionMessagingAvailable,
+  openJsonWithPassphrase,
   openSecondaryDevicePackage,
   openTransportEnvelopeWithSenderCert,
   prepareSecondaryDevicePackage,
   prepareContactDiscoveryBlindRequest,
   regeneratePublishedPrekeys,
+  rebindKeysToNewDevice,
+  sealJsonWithPassphrase,
   sealTransportEnvelopeWithSenderCert,
   verifyContactDiscoveryManifest,
   verifyContactDiscoveryAttestationDocument,
@@ -57,6 +61,7 @@ import {
 } from "./crypto";
 import {
   PqmsgApi,
+  type BackupUploadRequest,
   type BundleResponse,
   type ContactEntry,
   type ContactDiscoveryManifestResponse,
@@ -191,7 +196,7 @@ import {
   type PrivateGroupRole,
   type PrivateGroupState,
 } from "./crypto-wasm";
-import { base64ToBytes, bytesToBase64, bytesToHex } from "./base64";
+import { base64ToBytes, bytesToBase64, bytesToHex, bytesToUtf8, utf8ToBytes } from "./base64";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -273,6 +278,25 @@ const GROUP_INVITE_SECRET_FRAGMENT_KEY = "group_secret";
 const HOSTED_RELAY_QUERY_PARAM = "relay";
 const HOSTED_SERVER_SETUP_MESSAGE =
   "Set an HTTPS relay URL in Advanced before creating or unlocking a web profile on this hosted origin.";
+const BROWSER_RECOVERY_BACKUP_VERSION = 1;
+
+type BrowserRecoveryBackup = {
+  version: number;
+  userId: string;
+  deviceId: string;
+  serverUrl: string;
+  displayName: string;
+  username: string;
+  usernameLookupEnabled: boolean;
+  exportedAtUnix: number;
+  keys: GeneratedKeys;
+};
+
+type BrowserSessionIdentity = {
+  displayName: string;
+  username: string;
+  usernameLookupEnabled: boolean;
+};
 
 function hostedOriginUsesLoopbackServer(serverUrl: string): boolean {
   const trimmed = serverUrl.trim();
@@ -352,6 +376,145 @@ function requireConfiguredServerUrl(): string {
     throw new Error(HOSTED_SERVER_SETUP_MESSAGE);
   }
   throw new Error("Set the relay URL before continuing.");
+}
+
+function nextRecoveredBrowserDeviceId(userId: string): string {
+  const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const base = `${userId}-web`;
+  const maxBaseLength = Math.max(1, 127 - suffix.length);
+  return `${base.slice(0, maxBaseLength)}-${suffix}`;
+}
+
+async function uploadBrowserRecoveryBackup(
+  api: PqmsgApi,
+  activeKeys: GeneratedKeys,
+  passphrase: string,
+  identity: BrowserSessionIdentity,
+  serverUrl: string
+): Promise<void> {
+  const backup: BrowserRecoveryBackup = {
+    version: BROWSER_RECOVERY_BACKUP_VERSION,
+    userId: activeKeys.userId,
+    deviceId: activeKeys.deviceId,
+    serverUrl,
+    displayName: identity.displayName || activeKeys.userId,
+    username: identity.username.trim().replace(/^@/, "").toLowerCase(),
+    usernameLookupEnabled: Boolean(identity.usernameLookupEnabled && identity.username.trim()),
+    exportedAtUnix: Math.floor(Date.now() / 1000),
+    keys: activeKeys,
+  };
+  const sealedBackupJson = await sealJsonWithPassphrase(backup, passphrase);
+  const payload: BackupUploadRequest = {
+    device_id: activeKeys.deviceId,
+    backup_version: BROWSER_RECOVERY_BACKUP_VERSION,
+    recovery_hint: activeKeys.deviceId,
+    encrypted_backup_bytes_base64: bytesToBase64(utf8ToBytes(sealedBackupJson)),
+  };
+  const headers = buildBackupUploadAuthHeaders(
+    activeKeys,
+    payload.backup_version,
+    payload.encrypted_backup_bytes_base64
+  );
+  await api.uploadBackup(activeKeys.userId, payload, headers);
+}
+
+async function syncBrowserRecoveryBackupBestEffort(
+  api: PqmsgApi,
+  activeKeys: GeneratedKeys,
+  passphrase: string,
+  identity: BrowserSessionIdentity,
+  serverUrl: string
+): Promise<void> {
+  try {
+    await uploadBrowserRecoveryBackup(api, activeKeys, passphrase, identity, serverUrl);
+  } catch {
+    notify(
+      "Encrypted browser recovery backup could not be synced. Signing in on another browser may require importing a linked device.",
+      "info"
+    );
+  }
+}
+
+async function downloadBrowserRecoveryBackup(
+  api: PqmsgApi,
+  userId: string,
+  passphrase: string
+): Promise<BrowserRecoveryBackup> {
+  let response: Awaited<ReturnType<PqmsgApi["downloadRecoveryBackup"]>>;
+  try {
+    response = await api.downloadRecoveryBackup(userId);
+  } catch (error) {
+    if (errorMsg(error).includes("HTTP 404")) {
+      throw new Error(
+        `No encrypted recovery backup was found for @${userId} on this relay. If another device is already signed in, use Link device there first.`
+      );
+    }
+    throw error;
+  }
+  const sealedBackupJson = bytesToUtf8(base64ToBytes(response.encrypted_backup_bytes_base64));
+  const backup = await openJsonWithPassphrase<BrowserRecoveryBackup>(sealedBackupJson, passphrase);
+  if (backup.version !== BROWSER_RECOVERY_BACKUP_VERSION) {
+    throw new Error(`Unsupported browser recovery backup version '${backup.version}'.`);
+  }
+  if (backup.userId !== userId || backup.keys.userId !== userId) {
+    throw new Error(`Encrypted recovery backup for @${userId} is malformed.`);
+  }
+  const normalizedServerUrl = validateWebServerUrl(backup.serverUrl).toString().replace(/\/+$/, "");
+  return {
+    ...backup,
+    serverUrl: normalizedServerUrl,
+    username: backup.username.trim().replace(/^@/, "").toLowerCase(),
+    usernameLookupEnabled: Boolean(backup.usernameLookupEnabled && backup.username.trim()),
+  };
+}
+
+async function recoverBrowserProfileFromBackup(
+  api: PqmsgApi,
+  userId: string,
+  passphrase: string
+): Promise<{ keys: GeneratedKeys; identity: BrowserSessionIdentity; serverUrl: string }> {
+  const backup = await downloadBrowserRecoveryBackup(api, userId, passphrase);
+  const recoveredDeviceId = nextRecoveredBrowserDeviceId(userId);
+  await api.linkDevice(
+    userId,
+    recoveredDeviceId,
+    buildLinkDeviceAuthHeaders(backup.keys, recoveredDeviceId)
+  );
+  const reboundKeys = rebindKeysToNewDevice(backup.keys, recoveredDeviceId);
+  const publishPayload = buildPublishPrekeysPayload(reboundKeys);
+  await api.publishPrekeys(
+    reboundKeys.userId,
+    publishPayload,
+    buildPrekeysAuthHeaders(reboundKeys, publishPayload)
+  );
+  await api.getSenderCertificate(
+    userId,
+    buildSenderCertificateAuthHeaders(reboundKeys)
+  );
+
+  let identity: BrowserSessionIdentity = {
+    displayName: backup.displayName || userId,
+    username: backup.username,
+    usernameLookupEnabled: backup.usernameLookupEnabled,
+  };
+  try {
+    const profile = await api.getProfile(
+      userId,
+      buildProfileGetAuthHeaders(reboundKeys, userId)
+    );
+    identity = {
+      displayName: profile.display_name?.trim() || identity.displayName,
+      username: profile.username?.trim() || identity.username,
+      usernameLookupEnabled: Boolean(profile.username_lookup_enabled && (profile.username?.trim() || identity.username)),
+    };
+  } catch {
+    // Keep recovery usable even if profile metadata is temporarily unavailable.
+  }
+
+  await saveKeys(userId, passphrase, reboundKeys);
+  writeProfileDisplayName(userId, userId, identity.displayName || userId);
+  await syncBrowserRecoveryBackupBestEffort(api, reboundKeys, passphrase, identity, backup.serverUrl);
+  return { keys: reboundKeys, identity, serverUrl: backup.serverUrl };
 }
 
 function parsePrivateGroupStateJson(stateJson: string): PrivateGroupState | null {
@@ -1769,7 +1932,7 @@ function render(view: AppView): void {
       renderCreateAccount();
       break;
     case "sign-in":
-      renderSignIn();
+      renderPortableSignIn();
       break;
     case "import-device":
       renderImportDevice();
@@ -2443,7 +2606,7 @@ function renderCreateAccount(): void {
             </div>
           </div>
         `
-            : `<p class="onboarding-note">Profiles created here stay bound to this browser origin unless you export or link another device.</p>`
+            : `<p class="onboarding-note">Profiles created here also upload an encrypted recovery backup, so you can sign in again from another browser with the same username and passphrase.</p>`
         }
         <p id="onb-status" class="onboarding-status"></p>
       </div>
@@ -2639,6 +2802,17 @@ function renderCreateAccount(): void {
       keys = genKeys;
       cachedProfileNames[userId] = displayName;
       writeProfileDisplayName(userId, userId, displayName);
+      await syncBrowserRecoveryBackupBestEffort(
+        api,
+        genKeys,
+        pass,
+        {
+          displayName,
+          username: "",
+          usernameLookupEnabled: false,
+        },
+        setup.serverUrl
+      );
 
       setProgress(progress, 100);
       status.textContent = "Ready!";
@@ -2654,6 +2828,8 @@ function renderCreateAccount(): void {
 }
 
 function renderSignIn(): void {
+  renderPortableSignIn();
+  return;
   const localAccounts = listLocalKeyUsers();
   const hostedServerSetupRequired = !isLoopbackHostname(location.hostname) && !configuredServerUrlOrNull();
   app.innerHTML = `
@@ -2662,8 +2838,8 @@ function renderSignIn(): void {
         ${ONBOARDING_LOGO}
         <div class="onboarding-form">
           <div class="onboarding-copy onboarding-copy-tight">
-            <h2 class="onboarding-section-title">Unlock a saved browser profile</h2>
-            <p class="onboarding-note">Use the username and passphrase for a profile that was already created on this browser origin.</p>
+            <h2 class="onboarding-section-title">Sign in to your account</h2>
+            <p class="onboarding-note">If this browser already has local keys they will be unlocked. Otherwise PQMsg will try your encrypted recovery backup and link this browser automatically.</p>
           </div>
           ${
             localAccounts.length > 0
@@ -2690,7 +2866,7 @@ function renderSignIn(): void {
               </div>
             </div>
           `
-              : `<p class="onboarding-note">Only profiles created in this browser origin (${escHtml(location.origin)}) can be unlocked here. To join the same account from another browser, import a linked-device package from a device that is already signed in.</p>`
+              : `<p class="onboarding-note">No local profiles are saved on this browser yet. Enter your username and passphrase to restore from the encrypted recovery backup on this relay, or import a linked-device package from another signed-in browser.</p>`
           }
           <label class="field">
             <span>Username</span>
@@ -2710,7 +2886,7 @@ function renderSignIn(): void {
         `
               : ""
           }
-          <button id="onb-go" class="btn-primary">Unlock</button>
+          <button id="onb-go" class="btn-primary">Sign In</button>
           <button id="onb-import-device" class="btn-secondary" type="button">Import Linked Device Instead</button>
           <button id="onb-back" class="btn-link">&larr; Back</button>
         </div>
@@ -2829,6 +3005,221 @@ function renderSignIn(): void {
       keys = loadedKeys;
 
       status.textContent = "Loading your chats…";
+      await bootstrapIdentityData();
+      status.textContent = "Signed in!";
+      setTimeout(() => navigateTo({ screen: "conversations" }), 400);
+    } catch (e) {
+      status.textContent = errorMsg(e);
+      status.classList.add("error-text");
+      goBtn.disabled = false;
+    }
+  });
+}
+
+function renderPortableSignIn(): void {
+  const localAccounts = listLocalKeyUsers();
+  const hostedServerSetupRequired = !isLoopbackHostname(location.hostname) && !configuredServerUrlOrNull();
+  app.innerHTML = `
+    <div class="onboarding">
+      <div class="onboarding-card">
+        ${ONBOARDING_LOGO}
+        <div class="onboarding-form">
+          <div class="onboarding-copy onboarding-copy-tight">
+            <h2 class="onboarding-section-title">Sign in to your account</h2>
+            <p class="onboarding-note">If this browser already has local keys they will be unlocked. Otherwise PQMsg will use your encrypted recovery backup and link this browser automatically.</p>
+          </div>
+          ${
+            localAccounts.length > 0
+              ? `
+            <div class="contacts-section">
+              <h3 class="section-label">Profiles on this browser</h3>
+              <div class="contacts-list">
+                ${localAccounts
+                  .map(
+                    (accountId) => `
+                  <div class="contact-row-item">
+                    <button type="button" class="contact-row contact-row-main" data-local-account-fill="${escHtml(accountId)}">
+                      <div class="avatar avatar-sm">${escHtml(accountId.slice(0, 2).toUpperCase())}</div>
+                      <div class="contact-info">
+                        <span class="contact-name">${escHtml(accountId)}</span>
+                        <span class="contact-id">Tap to fill username</span>
+                      </div>
+                    </button>
+                    <button type="button" class="btn-secondary contact-row-forget" data-local-account-forget="${escHtml(accountId)}">Forget profile</button>
+                  </div>
+                `
+                  )
+                  .join("")}
+              </div>
+            </div>
+          `
+              : `<p class="onboarding-note">No local profiles are saved on this browser yet. Enter your username and passphrase to restore from the encrypted recovery backup on this relay, or import a linked-device package from another signed-in browser.</p>`
+          }
+          <label class="field">
+            <span>Username</span>
+            <input id="onb-uid" type="text" placeholder="e.g. alice" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Passphrase</span>
+            <input id="onb-pass" type="password" placeholder="The passphrase protecting your account" />
+          </label>
+          ${
+            hostedServerSetupRequired
+              ? `
+          <div class="beta-banner beta-banner-warning">
+            <strong>Relay required</strong>
+            <p>${escHtml(HOSTED_SERVER_SETUP_MESSAGE)}</p>
+          </div>
+        `
+              : ""
+          }
+          <button id="onb-go" class="btn-primary">Sign In</button>
+          <button id="onb-import-device" class="btn-secondary" type="button">Import Linked Device Instead</button>
+          <button id="onb-back" class="btn-link">&larr; Back</button>
+        </div>
+        <p id="onb-status" class="onboarding-status"></p>
+      </div>
+    </div>
+  `;
+
+  const uidInput = q<HTMLInputElement>("#onb-uid");
+  const passInput = q<HTMLInputElement>("#onb-pass");
+  const goBtn = q<HTMLButtonElement>("#onb-go");
+  const status = q("#onb-status");
+
+  q("#onb-back").addEventListener("click", () => navigateTo({ screen: "onboarding" }));
+  q("#onb-import-device").addEventListener("click", () => navigateTo({ screen: "import-device" }));
+
+  for (const button of document.querySelectorAll<HTMLElement>("[data-local-account-fill]")) {
+    button.addEventListener("click", () => {
+      uidInput.value = button.dataset.localAccountFill || "";
+      passInput.focus();
+      status.textContent = "";
+      status.classList.remove("error-text");
+    });
+  }
+
+  for (const button of document.querySelectorAll<HTMLElement>("[data-local-account-forget]")) {
+    button.addEventListener("click", async () => {
+      const accountId = button.dataset.localAccountForget || "";
+      if (!accountId) {
+        return;
+      }
+      if (!confirm(`Forget the saved local profile for @${accountId} on this browser? This removes local keys, sessions, pins, and cached chats from this browser only.`)) {
+        return;
+      }
+      await wipeLocalState(accountId);
+      if (setup.userId === accountId) {
+        setup = { ...DEFAULT_SETUP, serverUrl: setup.serverUrl, suiteLabel: setup.suiteLabel };
+        saveSetup(setup);
+      }
+      notify(`Forgot the local profile for @${accountId} on this browser.`, "info");
+      renderPortableSignIn();
+    });
+  }
+
+  goBtn.addEventListener("click", async () => {
+    const uid = normalizeBrowserUserId(uidInput.value);
+    const pass = passInput.value;
+    if (!uidInput.value.trim()) {
+      status.textContent = "Enter the username you want to sign in with.";
+      status.classList.add("error-text");
+      uidInput.focus();
+      return;
+    }
+    if (!passInput.value) {
+      status.textContent = "Enter the passphrase for this account.";
+      status.classList.add("error-text");
+      passInput.focus();
+      return;
+    }
+    uidInput.value = uid;
+
+    goBtn.disabled = true;
+    status.classList.remove("error-text");
+
+    try {
+      setup.serverUrl = requireConfiguredServerUrl();
+      saveSetup(setup);
+      status.textContent = "Loading crypto runtime...";
+      await ensureWebPqRuntime();
+
+      const api = new PqmsgApi(setup.serverUrl);
+      const localProfileExists = hasLocalKeys(uid);
+      let loadedKeys: GeneratedKeys;
+      let identity: BrowserSessionIdentity = {
+        displayName: readProfileDisplayName(uid, uid)?.trim() || uid,
+        username: "",
+        usernameLookupEnabled: false,
+      };
+
+      if (localProfileExists) {
+        status.textContent = "Unlocking saved browser keys...";
+        loadedKeys = await loadKeys(uid, pass);
+        status.textContent = "Verifying account...";
+        try {
+          await api.getSenderCertificate(uid, buildSenderCertificateAuthHeaders(loadedKeys));
+        } catch (error) {
+          const message = errorMsg(error);
+          if (isAuthSignatureFailureMessage(message)) {
+            const capabilities = await loadServerCapabilitiesCached();
+            if (
+              canUseDevelopmentRelayReset(capabilities)
+              && confirm(
+                `Saved local keys for @${uid} do not match the current server record. Repair the saved keys for @${uid} on this development relay by resetting the relay record and re-publishing the keys already saved in this browser?`
+              )
+            ) {
+              status.textContent = `Repairing @${uid} on the development relay…`;
+              loadedKeys = await repairIdentityOnDevelopmentRelay(loadedKeys, identity.displayName, pass);
+              status.textContent = "Verifying repaired account...";
+              await api.getSenderCertificate(uid, buildSenderCertificateAuthHeaders(loadedKeys));
+            } else {
+              throw new Error(explainLocalIdentityMismatch(uid));
+            }
+          } else {
+            throw error;
+          }
+        }
+        try {
+          const profile = await api.getProfile(uid, buildProfileGetAuthHeaders(loadedKeys, uid));
+          identity = {
+            displayName: profile.display_name?.trim() || identity.displayName,
+            username: profile.username?.trim() || "",
+            usernameLookupEnabled: Boolean(profile.username_lookup_enabled && profile.username?.trim()),
+          };
+        } catch {
+          // Keep local unlock usable even if profile metadata is unavailable.
+        }
+        await syncBrowserRecoveryBackupBestEffort(api, loadedKeys, pass, identity, setup.serverUrl);
+      } else {
+        status.textContent = "Recovering encrypted backup...";
+        await wipeLocalState(uid);
+        const recovered = await recoverBrowserProfileFromBackup(api, uid, pass);
+        loadedKeys = recovered.keys;
+        identity = recovered.identity;
+        setup.serverUrl = recovered.serverUrl;
+        saveSetup(setup);
+        cachedCapabilities = null;
+        cachedCapabilitiesServerUrl = null;
+      }
+
+      setup = {
+        serverUrl: setup.serverUrl,
+        userId: uid,
+        deviceId: loadedKeys.deviceId,
+        suiteLabel: loadedKeys.suite,
+        peerUserId: "",
+        displayName: identity.displayName,
+        username: identity.username,
+        usernameLookupEnabled: identity.usernameLookupEnabled,
+      };
+      saveSetup(setup);
+      sessionStorage.setItem("pqmsg.passphrase", pass);
+      keys = loadedKeys;
+      cachedProfileNames[uid] = identity.displayName;
+      writeProfileDisplayName(uid, uid, identity.displayName);
+
+      status.textContent = "Loading your chats...";
       await bootstrapIdentityData();
       status.textContent = "Signed in!";
       setTimeout(() => navigateTo({ screen: "conversations" }), 400);
@@ -3132,6 +3523,17 @@ function renderImportDevice(): void {
       sessionStorage.setItem("pqmsg.passphrase", localBrowserPassphrase);
       keys = imported.keys;
       cachedProfileNames[imported.userId] = displayName;
+      await syncBrowserRecoveryBackupBestEffort(
+        api,
+        imported.keys,
+        localBrowserPassphrase,
+        {
+          displayName,
+          username,
+          usernameLookupEnabled,
+        },
+        normalizedServerUrl
+      );
 
       status.textContent = "Loading your chats...";
       await bootstrapIdentityData();
@@ -10800,6 +11202,17 @@ async function repairIdentityOnDevelopmentRelay(
   saveSetup(setup);
   cachedProfileNames[repairedKeys.userId] = displayName;
   writeProfileDisplayName(repairedKeys.userId, repairedKeys.userId, displayName);
+  await syncBrowserRecoveryBackupBestEffort(
+    api,
+    repairedKeys,
+    passphrase,
+    {
+      displayName,
+      username: setup.username || "",
+      usernameLookupEnabled: Boolean(setup.usernameLookupEnabled && setup.username),
+    },
+    setup.serverUrl
+  );
   return repairedKeys;
 }
 

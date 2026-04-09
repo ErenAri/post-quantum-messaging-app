@@ -125,6 +125,15 @@ type BootOptions = {
     message_bytes_base64: string;
     received_at: string;
   }>;
+  recoveryBackups?: Array<{
+    userId: string;
+    deviceId?: string;
+    serverUrl?: string;
+    displayName?: string;
+    username?: string;
+    usernameLookupEnabled?: boolean;
+    keys?: MockKeys;
+  }>;
   prepare?: (storage: typeof import("./storage")) => Promise<void> | void;
 };
 
@@ -167,6 +176,32 @@ function makeKeys(userId: string, deviceId = `${userId}-device`): MockKeys {
     oneTimePrekeysMlkem768: [],
     oneTimePrekeysMlkem768Secret: [],
   };
+}
+
+function encodeRecoveryBackup(seed: {
+  userId: string;
+  deviceId?: string;
+  serverUrl?: string;
+  displayName?: string;
+  username?: string;
+  usernameLookupEnabled?: boolean;
+  keys?: MockKeys;
+}) {
+  const userId = seed.userId;
+  const deviceId = seed.deviceId ?? `${userId}-device`;
+  const keys = seed.keys ?? makeKeys(userId, deviceId);
+  const payload = {
+    version: 1,
+    userId,
+    deviceId,
+    serverUrl: seed.serverUrl ?? "https://relay.example.com",
+    displayName: seed.displayName ?? userId,
+    username: seed.username ?? "",
+    usernameLookupEnabled: seed.usernameLookupEnabled ?? false,
+    exportedAtUnix: 1_700_000_000,
+    keys,
+  };
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
 }
 
 function convId(userId: string, peerId: string): string {
@@ -344,6 +379,16 @@ async function bootApp(options: BootOptions = {}) {
     registerCalls: [] as Array<{ userId: string; deviceId: string }>,
     linkCalls: [] as Array<{ userId: string; newDeviceId: string }>,
     relays: [] as Array<{ peerId: string; body: string }>,
+    backupUploads: [] as Array<{ userId: string; deviceId: string; backupVersion: number }>,
+    recoveryBackups: new Map<string, {
+      backup_id: string;
+      user_id: string;
+      device_id: string;
+      backup_version: number;
+      recovery_hint: string | null;
+      encrypted_backup_bytes_base64: string;
+      uploaded_at: string;
+    }>(),
     profileCalls: 0,
     usedProfileHeaders: new Set<object>(),
     sealedInboxMessages: [...(options.sealedInboxMessages ?? [])] as Array<{
@@ -568,6 +613,19 @@ async function bootApp(options: BootOptions = {}) {
       matches: options.discoveryMatchResponse?.matches ?? [],
     },
   };
+
+  for (const seed of options.recoveryBackups ?? []) {
+    const userId = seed.userId;
+    apiState.recoveryBackups.set(userId, {
+      backup_id: `backup-${userId}`,
+      user_id: userId,
+      device_id: seed.deviceId ?? `${userId}-device`,
+      backup_version: 1,
+      recovery_hint: seed.deviceId ?? `${userId}-device`,
+      encrypted_backup_bytes_base64: encodeRecoveryBackup(seed),
+      uploaded_at: "2026-03-11T00:00:00Z",
+    });
+  }
 
   function bundleIdentityVersion(userId: string): number {
     return apiState.rotatedIdentityUsers.has(userId) ? 2 : 1;
@@ -831,6 +889,7 @@ async function bootApp(options: BootOptions = {}) {
           evaluated.map((value, index) => `token:${index}:${scalars[index] ?? "missing"}:${value}`)
       ),
       buildPushTokenAuthHeaders: emptyHeaders,
+      buildBackupUploadAuthHeaders: emptyHeaders,
       buildListDevicesAuthHeaders: emptyHeaders,
       buildLinkDeviceAuthHeaders: emptyHeaders,
       buildRevokeDeviceAuthHeaders: emptyHeaders,
@@ -890,6 +949,10 @@ async function bootApp(options: BootOptions = {}) {
         }, null, 2)
       ),
       regeneratePublishedPrekeys: vi.fn((activeKeys: MockKeys) => activeKeys),
+      rebindKeysToNewDevice: vi.fn((activeKeys: MockKeys, newDeviceId: string) => ({
+        ...activeKeys,
+        deviceId: newDeviceId,
+      })),
       sealTransportEnvelopeWithSenderCert: vi.fn(
         (_activeKeys: MockKeys, _recipientUserId: string, _recipientIdentityX25519Pub: string, payloadMessageBytesBase64: string) =>
           payloadMessageBytesBase64
@@ -961,6 +1024,47 @@ async function bootApp(options: BootOptions = {}) {
           linked_device_id: newDeviceId,
           linked_at: "2026-03-11T00:00:00Z",
         };
+      }
+
+      async uploadBackup(
+        userId: string,
+        payload: {
+          device_id: string;
+          backup_version: number;
+          recovery_hint?: string;
+          encrypted_backup_bytes_base64: string;
+        }
+      ) {
+        apiState.backupUploads.push({
+          userId,
+          deviceId: payload.device_id,
+          backupVersion: payload.backup_version,
+        });
+        apiState.recoveryBackups.set(userId, {
+          backup_id: `backup-${userId}-${apiState.backupUploads.length}`,
+          user_id: userId,
+          device_id: payload.device_id,
+          backup_version: payload.backup_version,
+          recovery_hint: payload.recovery_hint ?? null,
+          encrypted_backup_bytes_base64: payload.encrypted_backup_bytes_base64,
+          uploaded_at: "2026-03-11T00:00:00Z",
+        });
+        return {
+          backup_id: `backup-${userId}-${apiState.backupUploads.length}`,
+          user_id: userId,
+          device_id: payload.device_id,
+          backup_version: payload.backup_version,
+          byte_len: payload.encrypted_backup_bytes_base64.length,
+          uploaded_at: "2026-03-11T00:00:00Z",
+        };
+      }
+
+      async downloadRecoveryBackup(userId: string) {
+        const backup = apiState.recoveryBackups.get(userId);
+        if (!backup) {
+          throw new Error("HTTP 404: backup not found");
+        }
+        return backup;
       }
 
       async listContacts() {
@@ -1350,7 +1454,7 @@ afterEach(() => {
 
 describe("web app flow coverage", () => {
   it("signs in from a browser-local account list and lands in conversations", async () => {
-    const { router } = await bootApp({
+    const { router, apiState } = await bootApp({
       prepare: async (storage) => {
         await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
       },
@@ -1377,6 +1481,9 @@ describe("web app flow coverage", () => {
 
     expect(router.getCurrentView()).toEqual({ screen: "conversations" });
     expect(document.body.textContent).toContain("No conversations yet");
+    expect(apiState.backupUploads).toEqual([
+      { userId: "test1", deviceId: "test1-device", backupVersion: 1 },
+    ]);
   }, 10000);
 
   it("exports a linked-device package from a signed-in browser session", async () => {
@@ -1446,11 +1553,60 @@ describe("web app flow coverage", () => {
 
     expect(apiState.registerCalls).toEqual([]);
     expect(apiState.baseUrls).toContain("https://relay.example.com");
+    expect(apiState.backupUploads).toEqual([
+      { userId: "test9", deviceId: "test9-browser-2", backupVersion: 1 },
+    ]);
     expect(storage.hasLocalKeys("test9")).toBe(true);
     expect(storage.loadSetup()).toMatchObject({
       serverUrl: "https://relay.example.com",
       userId: "test9",
       deviceId: "test9-browser-2",
+      suiteLabel: "ml-kem-768",
+    });
+    expect(router.getCurrentView()).toEqual({ screen: "conversations" });
+  }, 10000);
+
+  it("signs in on a fresh browser from an encrypted recovery backup and links a fresh device", async () => {
+    const { router, apiState, storage } = await bootApp({
+      existingUsers: ["eren3"],
+      bundleUsers: ["eren3"],
+      pageUrl: "https://pqmsg-web.pages.dev/?relay=https%3A%2F%2Frelay.example.com",
+      recoveryBackups: [
+        {
+          userId: "eren3",
+          deviceId: "eren3-web-1",
+          serverUrl: "https://relay.example.com",
+          displayName: "eren3",
+          username: "",
+          usernameLookupEnabled: false,
+        },
+      ],
+    });
+
+    router.navigateTo({ screen: "sign-in" });
+    await flushPromises();
+
+    document.querySelector<HTMLInputElement>("#onb-uid")!.value = "eren3";
+    document.querySelector<HTMLInputElement>("#onb-pass")!.value = "browser-pass";
+    document.querySelector<HTMLButtonElement>("#onb-go")!.click();
+
+    await eventually(() => {
+      expect(document.querySelector("#onb-status")?.textContent).toContain("Signed in!");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 450));
+
+    expect(apiState.registerCalls).toEqual([]);
+    expect(apiState.linkCalls).toHaveLength(1);
+    expect(apiState.linkCalls[0]?.userId).toBe("eren3");
+    expect(apiState.linkCalls[0]?.newDeviceId).not.toBe("eren3-web-1");
+    expect(apiState.backupUploads).toHaveLength(1);
+    expect(apiState.backupUploads[0]?.userId).toBe("eren3");
+    expect(apiState.backupUploads[0]?.deviceId).toBe(apiState.linkCalls[0]?.newDeviceId);
+    expect(storage.hasLocalKeys("eren3")).toBe(true);
+    expect(storage.loadSetup()).toMatchObject({
+      serverUrl: "https://relay.example.com",
+      userId: "eren3",
+      deviceId: apiState.linkCalls[0]?.newDeviceId,
       suiteLabel: "ml-kem-768",
     });
     expect(router.getCurrentView()).toEqual({ screen: "conversations" });

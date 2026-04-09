@@ -2335,6 +2335,10 @@ pub fn build_router(state: AppState) -> Router {
             get(download_latest_backup),
         )
         .route(
+            "/v1/users/:user_id/backups/recovery",
+            get(download_recovery_backup),
+        )
+        .route(
             "/v1/users/:user_id/profile",
             get(get_user_profile).post(upsert_user_profile),
         )
