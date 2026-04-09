@@ -82,6 +82,7 @@ const ROTATE_SIG_TAG_NEW_DEVICE_ID = criticalType(0x3106);
 const ROTATE_SIG_TAG_NEW_IDENTITY_PQ_SIG = criticalType(0x3107);
 
 const PBKDF2_ITERATIONS = 200_000;
+const SECONDARY_DEVICE_PACKAGE_VERSION = 1;
 
 export type GeneratedKeys = {
   userId: string;
@@ -138,6 +139,22 @@ export type RotateConfirmPayload = {
   sig_by_new_identity: string;
   pq_sig_by_current_identity: string;
   pq_sig_by_new_identity: string;
+};
+
+type SecondaryDeviceOnboardingPayload = {
+  version: number;
+  server_url: string;
+  keys_json: string;
+  exported_at_unix: number;
+};
+
+export type SecondaryDeviceOnboardingPackage = {
+  serverUrl: string;
+  userId: string;
+  deviceId: string;
+  suite: GeneratedKeys["suite"];
+  exportedAtUnix: number;
+  keys: GeneratedKeys;
 };
 
 type SealedPayload = {
@@ -997,6 +1014,112 @@ export function regeneratePublishedPrekeys(
     oneTimePrekeysX25519Secret,
     oneTimePrekeysMlkem768,
     oneTimePrekeysMlkem768Secret,
+  };
+}
+
+export function rebindKeysToNewDevice(
+  keys: GeneratedKeys,
+  newDeviceId: string,
+  oneTimeCount = Math.max(keys.oneTimePrekeysX25519.length, 16)
+): GeneratedKeys {
+  const normalizedDeviceId = newDeviceId.trim();
+  if (!normalizedDeviceId) {
+    throw new Error("newDeviceId must not be empty");
+  }
+  if (normalizedDeviceId === keys.deviceId) {
+    throw new Error("newDeviceId must differ from the current device ID");
+  }
+  if (!wasmCrypto.kemAvailable()) {
+    throw new Error("Web post-quantum runtime unavailable in this build.");
+  }
+  if (oneTimeCount < 1 || oneTimeCount > 64) {
+    throw new Error("one-time prekey count must be in 1..64");
+  }
+
+  const signedPrekeySecret = x25519.utils.randomPrivateKey();
+  const signedPrekeyPub = x25519.getPublicKey(signedPrekeySecret);
+  const pqSignedPrekey = wasmCrypto.kemKeypair();
+  const oneTimePrekeysX25519: string[] = [];
+  const oneTimePrekeysX25519Secret: string[] = [];
+  const oneTimePrekeysMlkem768: string[] = [];
+  const oneTimePrekeysMlkem768Secret: string[] = [];
+
+  for (let idx = 0; idx < oneTimeCount; idx += 1) {
+    const xSecret = x25519.utils.randomPrivateKey();
+    const xPub = x25519.getPublicKey(xSecret);
+    const pqOtpk = wasmCrypto.kemKeypair();
+    oneTimePrekeysX25519.push(bytesToBase64(xPub));
+    oneTimePrekeysX25519Secret.push(bytesToBase64(xSecret));
+    oneTimePrekeysMlkem768.push(bytesToBase64(pqOtpk.public_key));
+    oneTimePrekeysMlkem768Secret.push(bytesToBase64(pqOtpk.secret_key));
+  }
+
+  return {
+    ...keys,
+    deviceId: normalizedDeviceId,
+    signedPrekeyX25519Pub: bytesToBase64(signedPrekeyPub),
+    signedPrekeyX25519Secret: bytesToBase64(signedPrekeySecret),
+    pqSignedPrekeyPubMlkem768: bytesToBase64(pqSignedPrekey.public_key),
+    pqSignedPrekeySecretMlkem768: bytesToBase64(pqSignedPrekey.secret_key),
+    oneTimePrekeysX25519,
+    oneTimePrekeysX25519Secret,
+    oneTimePrekeysMlkem768,
+    oneTimePrekeysMlkem768Secret,
+  };
+}
+
+export function prepareSecondaryDevicePackage(
+  keys: GeneratedKeys,
+  newDeviceId: string,
+  serverUrl: string,
+  packagePassphrase: string,
+  oneTimeCount = Math.max(keys.oneTimePrekeysX25519.length, 16)
+): string {
+  const normalizedServerUrl = serverUrl.trim();
+  if (!normalizedServerUrl) {
+    throw new Error("serverUrl must not be empty");
+  }
+  if (!packagePassphrase.trim()) {
+    throw new Error("packagePassphrase must not be empty");
+  }
+  const reboundKeys = rebindKeysToNewDevice(keys, newDeviceId, oneTimeCount);
+  const payload: SecondaryDeviceOnboardingPayload = {
+    version: SECONDARY_DEVICE_PACKAGE_VERSION,
+    server_url: normalizedServerUrl,
+    keys_json: JSON.stringify(reboundKeys, null, 2),
+    exported_at_unix: unixTimestampSeconds(),
+  };
+  const wrapped = wasmCrypto.wrapSecret(
+    packagePassphrase,
+    utf8ToBytes(JSON.stringify(payload, null, 2))
+  );
+  return bytesToUtf8(wrapped);
+}
+
+export function openSecondaryDevicePackage(
+  packageJson: string,
+  packagePassphrase: string
+): SecondaryDeviceOnboardingPackage {
+  if (!packagePassphrase.trim()) {
+    throw new Error("packagePassphrase must not be empty");
+  }
+  const plaintext = wasmCrypto.unwrapSecret(packagePassphrase, utf8ToBytes(packageJson));
+  const payload = JSON.parse(bytesToUtf8(plaintext)) as SecondaryDeviceOnboardingPayload;
+  if (payload.version !== SECONDARY_DEVICE_PACKAGE_VERSION) {
+    throw new Error(`unsupported onboarding package version '${payload.version}'`);
+  }
+  const normalizedServerUrl = payload.server_url.trim();
+  if (!normalizedServerUrl) {
+    throw new Error("onboarding package server_url must not be empty");
+  }
+  const keys = JSON.parse(payload.keys_json) as GeneratedKeys;
+  return {
+    serverUrl: normalizedServerUrl,
+    userId: keys.userId,
+    deviceId: keys.deviceId,
+    suite: keys.suite,
+    exportedAtUnix: payload.exported_at_unix,
+    keys,
   };
 }
 
@@ -1959,4 +2082,3 @@ async function deriveAesGcmKey(passphrase: string, salt: Uint8Array): Promise<Cr
 function unixTimestampSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
-

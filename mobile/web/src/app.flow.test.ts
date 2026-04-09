@@ -341,6 +341,8 @@ async function bootApp(options: BootOptions = {}) {
     usernameLookupEnabledByUser: new Map<string, boolean>((options.existingUsers ?? ["test1", "test2"]).map((userId) => [userId, true] as const)),
     contacts: new Set(options.contactUsers ?? []),
     resetCalls: [] as string[],
+    registerCalls: [] as Array<{ userId: string; deviceId: string }>,
+    linkCalls: [] as Array<{ userId: string; newDeviceId: string }>,
     relays: [] as Array<{ peerId: string; body: string }>,
     profileCalls: 0,
     usedProfileHeaders: new Set<object>(),
@@ -853,12 +855,39 @@ async function bootApp(options: BootOptions = {}) {
         usedHandshake: true,
       })),
       isPqSessionMessagingAvailable: vi.fn(() => true),
+      openSecondaryDevicePackage: vi.fn((packageJson: string) => {
+        const parsed = JSON.parse(packageJson) as {
+          server_url?: string;
+          user_id?: string;
+          device_id?: string;
+          exported_at_unix?: number;
+        };
+        const userId = parsed.user_id ?? "test1";
+        const deviceId = parsed.device_id ?? `${userId}-browser-2`;
+        return {
+          serverUrl: parsed.server_url ?? "https://relay.example.com",
+          userId,
+          deviceId,
+          suite: "ml-kem-768",
+          exportedAtUnix: parsed.exported_at_unix ?? 1_700_000_000,
+          keys: makeKeys(userId, deviceId),
+        };
+      }),
       openTransportEnvelopeWithSenderCert: vi.fn(
         (_activeKeys: MockKeys, expectedSenderUserId: string, _senderIdentityX25519Pub: string, sealedMessageBytesBase64: string) => ({
           senderUserId: expectedSenderUserId,
           senderDeviceId: `${expectedSenderUserId}-device`,
           payloadMessageBytesBase64: sealedMessageBytesBase64,
         })
+      ),
+      prepareSecondaryDevicePackage: vi.fn((activeKeys: MockKeys, newDeviceId: string, serverUrl: string) =>
+        JSON.stringify({
+          version: 1,
+          server_url: serverUrl,
+          user_id: activeKeys.userId,
+          device_id: newDeviceId,
+          exported_at_unix: 1_700_000_000,
+        }, null, 2)
       ),
       regeneratePublishedPrekeys: vi.fn((activeKeys: MockKeys) => activeKeys),
       sealTransportEnvelopeWithSenderCert: vi.fn(
@@ -886,6 +915,7 @@ async function bootApp(options: BootOptions = {}) {
             'HTTP 409: {"type":"about:blank","title":"Conflict","status":409,"detail":"user_id is already registered with an immutable identity"}',
           );
         }
+        apiState.registerCalls.push({ userId: payload.user_id, deviceId: payload.device_id });
         apiState.existingUsers.add(payload.user_id);
         apiState.bundleUsers.add(payload.user_id);
         apiState.usernames.set(payload.user_id, payload.user_id);
@@ -921,6 +951,15 @@ async function bootApp(options: BootOptions = {}) {
           low_one_time_prekeys: false,
           minimum_recommended_one_time_prekeys: 16,
           updated_at: "2026-03-11T00:00:00Z",
+        };
+      }
+
+      async linkDevice(userId: string, newDeviceId: string) {
+        apiState.linkCalls.push({ userId, newDeviceId });
+        return {
+          user_id: userId,
+          linked_device_id: newDeviceId,
+          linked_at: "2026-03-11T00:00:00Z",
         };
       }
 
@@ -1338,6 +1377,83 @@ describe("web app flow coverage", () => {
 
     expect(router.getCurrentView()).toEqual({ screen: "conversations" });
     expect(document.body.textContent).toContain("No conversations yet");
+  }, 10000);
+
+  it("exports a linked-device package from a signed-in browser session", async () => {
+    const { router, apiState } = await bootApp({
+      prepare: async (storage) => {
+        await storage.saveKeys("test1", "pass-1", makeKeys("test1"));
+        storage.saveSetup({
+          serverUrl: "https://relay.example.com",
+          userId: "test1",
+          deviceId: "test1-device",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "",
+          displayName: "test1",
+        });
+        sessionStorage.setItem("pqmsg.passphrase", "pass-1");
+      },
+    });
+
+    router.navigateTo({ screen: "link-device" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLInputElement>("#ld-device-id")).not.toBeNull();
+    });
+
+    document.querySelector<HTMLInputElement>("#ld-device-id")!.value = "test1-browser-2";
+    document.querySelector<HTMLInputElement>("#ld-package-pass")!.value = "package-pass";
+    document.querySelector<HTMLInputElement>("#ld-package-pass2")!.value = "package-pass";
+    document.querySelector<HTMLButtonElement>("#ld-submit")!.click();
+
+    await eventually(() => {
+      expect(document.querySelector<HTMLTextAreaElement>("#ld-package-json")?.value).toContain(
+        "\"device_id\": \"test1-browser-2\"",
+      );
+    });
+
+    expect(apiState.linkCalls).toEqual([{ userId: "test1", newDeviceId: "test1-browser-2" }]);
+    expect(document.querySelector("#ld-status")?.textContent).toContain("linked at");
+  });
+
+  it("imports a linked-device package on a fresh hosted browser without re-registering the account", async () => {
+    const { router, apiState, storage } = await bootApp({
+      existingUsers: ["test9"],
+      bundleUsers: ["test9"],
+      pageUrl: "https://pqmsg-web.pages.dev/",
+    });
+
+    router.navigateTo({ screen: "import-device" });
+    await eventually(() => {
+      expect(document.querySelector<HTMLTextAreaElement>("#onb-package")).not.toBeNull();
+    });
+
+    document.querySelector<HTMLTextAreaElement>("#onb-package")!.value = JSON.stringify({
+      version: 1,
+      server_url: "https://relay.example.com",
+      user_id: "test9",
+      device_id: "test9-browser-2",
+      exported_at_unix: 1_700_000_000,
+    });
+    document.querySelector<HTMLInputElement>("#onb-package-pass")!.value = "package-pass";
+    document.querySelector<HTMLInputElement>("#onb-browser-pass")!.value = "browser-pass";
+    document.querySelector<HTMLInputElement>("#onb-browser-pass2")!.value = "browser-pass";
+    document.querySelector<HTMLButtonElement>("#onb-import-go")!.click();
+
+    await eventually(() => {
+      expect(document.querySelector("#onb-import-status")?.textContent).toContain("Imported!");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 450));
+
+    expect(apiState.registerCalls).toEqual([]);
+    expect(apiState.baseUrls).toContain("https://relay.example.com");
+    expect(storage.hasLocalKeys("test9")).toBe(true);
+    expect(storage.loadSetup()).toMatchObject({
+      serverUrl: "https://relay.example.com",
+      userId: "test9",
+      deviceId: "test9-browser-2",
+      suiteLabel: "ml-kem-768",
+    });
+    expect(router.getCurrentView()).toEqual({ screen: "conversations" });
   }, 10000);
 
   it("repairs a mismatched local identity on a development relay during sign-in", async () => {

@@ -249,7 +249,8 @@ html, body {
   margin-bottom: 4px;
   font-weight: 500;
 }
-.field input {
+.field input,
+.field textarea {
   width: 100%;
   padding: 10px 14px;
   border: 1px solid var(--border);
@@ -260,7 +261,12 @@ html, body {
   outline: none;
   transition: border-color .15s;
 }
-.field input:focus {
+.field textarea {
+  resize: vertical;
+  min-height: 120px;
+}
+.field input:focus,
+.field textarea:focus {
   border-color: var(--accent);
 }
 
@@ -3166,6 +3172,7 @@ html, body {
   outline-offset: 2px;
 }
 .field input:focus-visible,
+.field textarea:focus-visible,
 .search-input:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 0;

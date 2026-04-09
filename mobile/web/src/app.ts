@@ -43,7 +43,9 @@ import {
   initWasmCrypto,
   initiateDirectMessageSession,
   isPqSessionMessagingAvailable,
+  openSecondaryDevicePackage,
   openTransportEnvelopeWithSenderCert,
+  prepareSecondaryDevicePackage,
   prepareContactDiscoveryBlindRequest,
   regeneratePublishedPrekeys,
   sealTransportEnvelopeWithSenderCert,
@@ -1769,6 +1771,9 @@ function render(view: AppView): void {
     case "sign-in":
       renderSignIn();
       break;
+    case "import-device":
+      renderImportDevice();
+      break;
     case "conversations":
       void renderConversations();
       break;
@@ -2290,6 +2295,7 @@ function renderOnboarding(): void {
         <div class="onboarding-actions">
           <button id="onb-create" class="btn-primary">Create Account</button>
           <button id="onb-signin" class="btn-secondary">Unlock This Browser</button>
+          <button id="onb-import-device" class="btn-secondary">Import Linked Device</button>
         </div>
         ${hostedRelayReady ? `
           <div class="beta-banner beta-banner-info">
@@ -2321,6 +2327,7 @@ function renderOnboarding(): void {
 
   q("#onb-create").addEventListener("click", () => navigateTo({ screen: "create-account" }));
   q("#onb-signin").addEventListener("click", () => navigateTo({ screen: "sign-in" }));
+  q("#onb-import-device").addEventListener("click", () => navigateTo({ screen: "import-device" }));
 
   q("#onb-save-server").addEventListener("click", () => {
     const server = q<HTMLInputElement>("#onb-server").value.trim();
@@ -2627,7 +2634,7 @@ function renderSignIn(): void {
         ${ONBOARDING_LOGO}
         <div class="onboarding-form">
           <div class="onboarding-copy onboarding-copy-tight">
-            <h2 class="onboarding-section-title">Unlock this browser</h2>
+            <h2 class="onboarding-section-title">Unlock a saved browser profile</h2>
             <p class="onboarding-note">Use the username and passphrase for a profile that was already created on this browser origin.</p>
           </div>
           ${
@@ -2655,7 +2662,7 @@ function renderSignIn(): void {
               </div>
             </div>
           `
-              : `<p class="onboarding-note">Only profiles created in this browser origin (${escHtml(location.origin)}) can be unlocked here.</p>`
+              : `<p class="onboarding-note">Only profiles created in this browser origin (${escHtml(location.origin)}) can be unlocked here. To join the same account from another browser, import a linked-device package from a device that is already signed in.</p>`
           }
           <label class="field">
             <span>Username</span>
@@ -2676,6 +2683,7 @@ function renderSignIn(): void {
               : ""
           }
           <button id="onb-go" class="btn-primary">Unlock</button>
+          <button id="onb-import-device" class="btn-secondary" type="button">Import Linked Device Instead</button>
           <button id="onb-back" class="btn-link">&larr; Back</button>
         </div>
         <p id="onb-status" class="onboarding-status"></p>
@@ -2689,6 +2697,7 @@ function renderSignIn(): void {
   const status = q("#onb-status");
 
   q("#onb-back").addEventListener("click", () => navigateTo({ screen: "onboarding" }));
+  q("#onb-import-device").addEventListener("click", () => navigateTo({ screen: "import-device" }));
 
   for (const button of document.querySelectorAll<HTMLElement>("[data-local-account-fill]")) {
     button.addEventListener("click", () => {
@@ -2936,6 +2945,175 @@ function filterConversationRows(rows: UnifiedConversationRow[], filter: InboxFil
         return isArchived;
       default:
         return true;
+    }
+  });
+}
+
+function renderImportDevice(): void {
+  app.innerHTML = `
+    <div class="onboarding">
+      <div class="onboarding-card">
+        ${ONBOARDING_LOGO}
+        <div class="onboarding-form">
+          <div class="onboarding-copy onboarding-copy-tight">
+            <h2 class="onboarding-section-title">Import linked device</h2>
+            <p class="onboarding-note">Use a protected onboarding package from a device that is already signed in to this account.</p>
+          </div>
+          <label class="field">
+            <span>Linked-device package</span>
+            <textarea id="onb-package" rows="8" class="mono" placeholder='Paste the protected package JSON here'></textarea>
+            <small class="field-help">This package carries the adopted device ID, fresh prekeys, and relay URL for the new browser.</small>
+          </label>
+          <label class="field">
+            <span>Package passphrase</span>
+            <input id="onb-package-pass" type="password" placeholder="Unlocks the protected onboarding package" />
+          </label>
+          <label class="field">
+            <span>Browser passphrase (optional)</span>
+            <input id="onb-browser-pass" type="password" placeholder="Protect the imported keys on this browser" />
+            <small class="field-help">Leave both browser passphrase fields empty to reuse the package passphrase for local browser storage.</small>
+          </label>
+          <label class="field">
+            <span>Confirm Browser Passphrase</span>
+            <input id="onb-browser-pass2" type="password" placeholder="Re-enter the browser passphrase" />
+          </label>
+          <button id="onb-import-go" class="btn-primary" type="button">Import & Sign In</button>
+          <button id="onb-import-back" class="btn-link" type="button">&larr; Back</button>
+        </div>
+        <p id="onb-import-status" class="onboarding-status"></p>
+      </div>
+    </div>
+  `;
+
+  const packageInput = q<HTMLTextAreaElement>("#onb-package");
+  const packagePassInput = q<HTMLInputElement>("#onb-package-pass");
+  const browserPassInput = q<HTMLInputElement>("#onb-browser-pass");
+  const browserPass2Input = q<HTMLInputElement>("#onb-browser-pass2");
+  const goBtn = q<HTMLButtonElement>("#onb-import-go");
+  const status = q("#onb-import-status");
+
+  q("#onb-import-back").addEventListener("click", () => navigateTo({ screen: "onboarding" }));
+
+  goBtn.addEventListener("click", async () => {
+    const packageJson = packageInput.value.trim();
+    const packagePassphrase = packagePassInput.value;
+    const browserPassphrase = browserPassInput.value;
+    const browserPassphraseConfirm = browserPass2Input.value;
+
+    if (!packageJson) {
+      status.textContent = "Paste the linked-device package exported from a signed-in device.";
+      status.classList.add("error-text");
+      packageInput.focus();
+      return;
+    }
+    if (!packagePassphrase) {
+      status.textContent = "Enter the passphrase that protects the linked-device package.";
+      status.classList.add("error-text");
+      packagePassInput.focus();
+      return;
+    }
+
+    const usePackagePassphraseLocally = !browserPassphrase && !browserPassphraseConfirm;
+    const localBrowserPassphrase = usePackagePassphraseLocally ? packagePassphrase : browserPassphrase;
+    if (!usePackagePassphraseLocally) {
+      if (!browserPassphrase) {
+        status.textContent = "Enter a browser passphrase or leave both browser passphrase fields empty.";
+        status.classList.add("error-text");
+        browserPassInput.focus();
+        return;
+      }
+      if (browserPassphrase !== browserPassphraseConfirm) {
+        status.textContent = "Browser passphrases do not match";
+        status.classList.add("error-text");
+        browserPass2Input.focus();
+        return;
+      }
+    }
+
+    goBtn.disabled = true;
+    status.classList.remove("error-text");
+
+    try {
+      status.textContent = "Loading crypto runtime...";
+      await ensureWebPqRuntime();
+
+      status.textContent = "Opening linked-device package...";
+      const imported = openSecondaryDevicePackage(packageJson, packagePassphrase);
+
+      const normalizedServerUrl = validateWebServerUrl(imported.serverUrl).toString().replace(/\/+$/, "");
+      if (hasLocalKeys(imported.userId)) {
+        if (
+          !confirm(
+            `This browser already has a saved local profile for @${imported.userId}. Replace that local state with the linked-device package for ${imported.deviceId}?`
+          )
+        ) {
+          throw new Error(`Import stopped because this browser already has a saved local profile for @${imported.userId}.`);
+        }
+        if (realtimeInbox) {
+          realtimeInbox.disconnect();
+          realtimeInbox = null;
+        }
+        stopAllTimers();
+        keys = null;
+        activeChatPeer = null;
+        activeGroupId = null;
+        await wipeLocalState(imported.userId);
+      }
+
+      setup.serverUrl = normalizedServerUrl;
+      saveSetup(setup);
+      cachedCapabilities = null;
+      cachedCapabilitiesServerUrl = null;
+
+      const api = new PqmsgApi(normalizedServerUrl);
+      status.textContent = "Publishing linked-device prekeys...";
+      const publishPayload = buildPublishPrekeysPayload(imported.keys);
+      const prekeyHeaders = buildPrekeysAuthHeaders(imported.keys, publishPayload);
+      await api.publishPrekeys(imported.userId, publishPayload, prekeyHeaders);
+
+      status.textContent = "Verifying imported account...";
+      await api.getSenderCertificate(imported.userId, buildSenderCertificateAuthHeaders(imported.keys));
+
+      let displayName = readProfileDisplayName(imported.userId, imported.userId)?.trim() || imported.userId;
+      let username = "";
+      let usernameLookupEnabled = false;
+      try {
+        const profile = await api.getProfile(imported.userId, buildProfileGetAuthHeaders(imported.keys));
+        displayName = profile.display_name?.trim() || displayName;
+        username = profile.username?.trim() || "";
+        usernameLookupEnabled = Boolean(profile.username_lookup_enabled && username);
+      } catch {
+        // Keep the imported browser usable even if profile metadata is unavailable.
+      }
+
+      status.textContent = "Saving imported keys on this browser...";
+      await saveKeys(imported.userId, localBrowserPassphrase, imported.keys);
+      writeProfileDisplayName(imported.userId, imported.userId, displayName);
+
+      setup = {
+        serverUrl: normalizedServerUrl,
+        userId: imported.userId,
+        deviceId: imported.deviceId,
+        suiteLabel: imported.suite,
+        peerUserId: "",
+        displayName,
+        username,
+        usernameLookupEnabled,
+      };
+      saveSetup(setup);
+      sessionStorage.setItem("pqmsg.passphrase", localBrowserPassphrase);
+      keys = imported.keys;
+      cachedProfileNames[imported.userId] = displayName;
+
+      status.textContent = "Loading your chats...";
+      await bootstrapIdentityData();
+      status.textContent = "Imported!";
+      notify(`Linked device imported for @${imported.userId}.`, "success");
+      setTimeout(() => navigateTo({ screen: "conversations" }), 400);
+    } catch (e) {
+      status.textContent = errorMsg(e);
+      status.classList.add("error-text");
+      goBtn.disabled = false;
     }
   });
 }
@@ -7917,7 +8095,7 @@ function renderLinkDevice(): void {
     <section class="workspace-page-card">
       ${renderWorkspacePageHeader(
         "Link device",
-        "Create another device entry for this account while keeping your current browser signed in.",
+        "Create a protected onboarding package for another browser or device while keeping your current browser signed in.",
         {
           eyebrow: "Linked devices",
           backButtonId: "ld-back",
@@ -7941,15 +8119,34 @@ function renderLinkDevice(): void {
         </div>
         <div class="settings-section">
           <h3>New device</h3>
-          <p class="text-secondary settings-desc">Enter a short device label. This browser will ask the server to provision a new linked session for the same account.</p>
+          <p class="text-secondary settings-desc">Enter a short device label and a package passphrase. This browser will prepare a protected linked-device package and ask the server to provision the new device ID for the same account.</p>
           <label class="field">
             <span>New Device ID</span>
             <input id="ld-device-id" type="text" placeholder="e.g. work-laptop" />
           </label>
+          <label class="field">
+            <span>Package Passphrase</span>
+            <input id="ld-package-pass" type="password" placeholder="Protect the linked-device package" />
+          </label>
+          <label class="field">
+            <span>Confirm Package Passphrase</span>
+            <input id="ld-package-pass2" type="password" placeholder="Re-enter the package passphrase" />
+          </label>
           <div class="settings-section-actions">
-            <button id="ld-submit" class="btn-primary" type="button">Link Device</button>
+            <button id="ld-submit" class="btn-primary" type="button">Create Linked-Device Package</button>
           </div>
           <div id="ld-status"></div>
+        </div>
+        <div id="ld-package-panel" class="settings-section hidden">
+          <h3>Linked-device package</h3>
+          <p class="text-secondary settings-desc">Copy this protected package to the new browser, then open <span class="mono">Import linked device</span> there.</p>
+          <label class="field">
+            <span>Package JSON</span>
+            <textarea id="ld-package-json" rows="10" class="mono" readonly></textarea>
+          </label>
+          <div class="settings-section-actions">
+            <button id="ld-copy-package" class="btn-secondary" type="button">Copy Package</button>
+          </div>
         </div>
       </div>
     </section>
@@ -7957,15 +8154,44 @@ function renderLinkDevice(): void {
   q("#ld-back").addEventListener("click", () => navigateTo({ screen: "devices" }));
   q("#ld-submit").addEventListener("click", async () => {
     const newDeviceId = q<HTMLInputElement>("#ld-device-id").value.trim();
+    const packagePassphrase = q<HTMLInputElement>("#ld-package-pass").value;
+    const packagePassphraseConfirm = q<HTMLInputElement>("#ld-package-pass2").value;
     if (!newDeviceId) { q<HTMLInputElement>("#ld-device-id").focus(); return; }
+    if (!packagePassphrase) {
+      q<HTMLInputElement>("#ld-package-pass").focus();
+      return;
+    }
+    if (packagePassphrase !== packagePassphraseConfirm) {
+      q<HTMLInputElement>("#ld-package-pass2").focus();
+      q("#ld-status").innerHTML = `<p class="text-danger">Package passphrases do not match.</p>`;
+      return;
+    }
     const statusEl = q("#ld-status");
-    statusEl.innerHTML = `<p class="text-secondary">Linking device...</p>`;
+    statusEl.innerHTML = `<p class="text-secondary">Preparing linked-device package...</p>`;
     try {
+      await ensureWebPqRuntime();
       const k = await ensureKeys();
-      const api = new PqmsgApi(setup.serverUrl);
+      const serverUrl = requireConfiguredServerUrl();
+      const packageJson = prepareSecondaryDevicePackage(k, newDeviceId, serverUrl, packagePassphrase);
+      const api = new PqmsgApi(serverUrl);
       const headers = buildLinkDeviceAuthHeaders(k, newDeviceId);
       const result = await api.linkDevice(k.userId, newDeviceId, headers);
-      statusEl.innerHTML = `<p class="text-success">Device "${escHtml(result.linked_device_id)}" linked at ${new Date(result.linked_at).toLocaleString()}</p>`;
+      const panel = q("#ld-package-panel");
+      const packageJsonEl = q<HTMLTextAreaElement>("#ld-package-json");
+      packageJsonEl.value = packageJson;
+      panel.classList.remove("hidden");
+      statusEl.innerHTML = `<p class="text-success">Device "${escHtml(result.linked_device_id)}" linked at ${new Date(result.linked_at).toLocaleString()}. Copy the protected package below to the new browser.</p>`;
+      const copyButton = q<HTMLButtonElement>("#ld-copy-package");
+      copyButton.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(packageJson);
+          notify("Linked-device package copied", "success");
+        } catch {
+          packageJsonEl.focus();
+          packageJsonEl.select();
+          notify("Copy failed. The package has been selected so you can copy it manually.", "info");
+        }
+      };
       notify(`Device ${result.linked_device_id} linked`, "success");
     } catch (e) {
       statusEl.innerHTML = `<p class="text-danger">Link failed: ${escHtml(errorMsg(e))}</p>`;
