@@ -1318,6 +1318,43 @@ describe("web app flow coverage", () => {
     expect(document.body.textContent).toContain("No conversations yet");
   }, 10000);
 
+  it("bootstraps a hosted relay from a shared link without requiring Advanced setup", async () => {
+    const relayUrl = "https://relay.example.com";
+    const { apiState, router, storage } = await bootApp({
+      existingUsers: [],
+      bundleUsers: [],
+      pageUrl: `https://pqmsg-web.pages.dev/?relay=${encodeURIComponent(relayUrl)}`,
+    });
+
+    expect(storage.loadSetup().serverUrl).toBe(relayUrl);
+    expect(window.location.search).toBe("");
+    expect(document.body.textContent).toContain("Relay ready");
+    expect(document.body.textContent).toContain("relay.example.com");
+
+    router.navigateTo({ screen: "create-account" });
+    await flushPromises();
+
+    const userInput = document.querySelector<HTMLInputElement>("#onb-user");
+    const nameInput = document.querySelector<HTMLInputElement>("#onb-name");
+    const passInput = document.querySelector<HTMLInputElement>("#onb-pass");
+    const pass2Input = document.querySelector<HTMLInputElement>("#onb-pass2");
+    userInput!.value = "hosted2";
+    nameInput!.value = "Hosted Two";
+    passInput!.value = "StrongPass123!";
+    pass2Input!.value = "StrongPass123!";
+    document.querySelector<HTMLButtonElement>("#onb-go")!.click();
+
+    await eventually(() => {
+      expect(storage.hasLocalKeys("hosted2")).toBe(true);
+      expect(apiState.existingUsers.has("hosted2")).toBe(true);
+    });
+
+    expect(apiState.baseUrls).toContain(relayUrl);
+    expect(document.querySelector("#onb-status")?.textContent ?? "").not.toContain(
+      "Set an HTTPS relay URL in Advanced",
+    );
+  });
+
   it("requires an HTTPS relay before creating a hosted web profile", async () => {
     const { apiState, router, storage } = await bootApp({
       existingUsers: [],

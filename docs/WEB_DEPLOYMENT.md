@@ -179,10 +179,15 @@ powershell -ExecutionPolicy Bypass -File scripts/dev/start_cloudflare_quick_tunn
 When `cloudflared` prints a `https://*.trycloudflare.com` URL:
 
 1. keep both terminal windows open
-2. open the hosted web shell on Pages
-3. go to `Advanced`
-4. paste the `https://*.trycloudflare.com` URL as the relay URL
-5. save and create or unlock the web profile
+2. create a share link for testers:
+
+```text
+https://pqmsg-web.pages.dev/?relay=https%3A%2F%2F<your-tunnel>.trycloudflare.com
+```
+
+3. send that link to the user instead of asking them to open `Advanced`
+4. the hosted web shell will save the relay URL automatically on first load
+5. create or unlock the web profile normally
 
 This path is suitable for personal testing and small trusted cohorts. It is not a production hosting model. The relay only stays reachable while:
 

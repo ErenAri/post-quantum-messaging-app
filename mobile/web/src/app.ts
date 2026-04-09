@@ -123,6 +123,7 @@ import {
   type ConversationSummary,
   type GroupConversationSummary,
   type PrivateGroupLocalState,
+  type SetupConfig,
 } from "./storage";
 import {
   saveMessage,
@@ -266,6 +267,7 @@ type PrivateGroupWrappedMessage = {
 
 const PRIVATE_GROUP_MESSAGE_PREFIX = "pqmsg-private-group-message-v1:";
 const GROUP_INVITE_SECRET_FRAGMENT_KEY = "group_secret";
+const HOSTED_RELAY_QUERY_PARAM = "relay";
 const HOSTED_SERVER_SETUP_MESSAGE =
   "Set an HTTPS relay URL in Advanced before creating or unlocking a web profile on this hosted origin.";
 
@@ -295,6 +297,42 @@ function normalizeRuntimeServerUrl(serverUrl: string): string {
   } catch {
     return isLoopbackHostname(location.hostname) ? DEFAULT_SETUP.serverUrl : "";
   }
+}
+
+function readHostedRelayBootstrapUrl(rawSearch: string = location.search): string | null {
+  const params = new URLSearchParams(rawSearch);
+  const relayUrl = (params.get(HOSTED_RELAY_QUERY_PARAM) || "").trim();
+  if (!relayUrl) {
+    return null;
+  }
+  const normalized = normalizeRuntimeServerUrl(relayUrl);
+  return normalized || null;
+}
+
+function clearHostedRelayBootstrapFromLocation(): void {
+  if (typeof history === "undefined" || typeof history.replaceState !== "function") {
+    return;
+  }
+  const currentUrl = new URL(location.href);
+  if (!currentUrl.searchParams.has(HOSTED_RELAY_QUERY_PARAM)) {
+    return;
+  }
+  currentUrl.searchParams.delete(HOSTED_RELAY_QUERY_PARAM);
+  const nextSearch = currentUrl.searchParams.toString();
+  const nextUrl = `${currentUrl.pathname}${nextSearch ? `?${nextSearch}` : ""}${currentUrl.hash}`;
+  history.replaceState(history.state, "", nextUrl);
+}
+
+function applyHostedRelayBootstrap(loadedSetup: SetupConfig): SetupConfig {
+  const sharedRelayUrl = readHostedRelayBootstrapUrl();
+  const normalizedServerUrl = normalizeRuntimeServerUrl(sharedRelayUrl || loadedSetup.serverUrl);
+  if (sharedRelayUrl && normalizedServerUrl === sharedRelayUrl) {
+    clearHostedRelayBootstrapFromLocation();
+  }
+  return {
+    ...loadedSetup,
+    serverUrl: normalizedServerUrl,
+  };
 }
 
 function configuredServerUrlOrNull(): string | null {
@@ -1074,9 +1112,8 @@ async function bootstrapApp(): Promise<void> {
   try {
     await initMetadataStorage();
     const loadedSetup = loadSetup();
-    const normalizedServerUrl = normalizeRuntimeServerUrl(loadedSetup.serverUrl);
-    setup = { ...loadedSetup, serverUrl: normalizedServerUrl };
-    if (normalizedServerUrl !== loadedSetup.serverUrl) {
+    setup = applyHostedRelayBootstrap(loadedSetup);
+    if (setup.serverUrl !== loadedSetup.serverUrl) {
       saveSetup(setup);
     }
     ensureSupportedWebEnvironment();
@@ -2224,6 +2261,8 @@ async function loadUsernamePeerFromHandle(username: string, api?: PqmsgApi): Pro
 // ---------------------------------------------------------------------------
 
 function renderOnboarding(): void {
+  const configuredServer = configuredServerUrlOrNull();
+  const hostedRelayReady = !isLoopbackHostname(location.hostname) && !!configuredServer;
   app.innerHTML = `
     <div class="onboarding">
       <div class="onboarding-card">
@@ -2251,6 +2290,12 @@ function renderOnboarding(): void {
           <button id="onb-create" class="btn-primary">Create Account</button>
           <button id="onb-signin" class="btn-secondary">Unlock This Browser</button>
         </div>
+        ${hostedRelayReady ? `
+          <div class="beta-banner beta-banner-info">
+            <strong>Relay ready</strong>
+            <p>This browser will use ${escHtml(configuredServer!)}. You can still change it in Advanced.</p>
+          </div>
+        ` : ""}
         <details class="onb-advanced">
           <summary>Advanced</summary>
           <label class="field">
