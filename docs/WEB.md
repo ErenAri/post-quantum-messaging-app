@@ -166,11 +166,13 @@ Tauri wraps the same Vite SPA in a native window with:
 - CSP-enforced content security.
 ## Support Matrix
 
+## Support Matrix
+
 | Algorithm / Feature | Status | Notes |
 | :--- | :--- | :--- |
-| **ML-KEM (Kyber)** | ⚠️ Experimental | WASM implementation (Demo Only) |
-| **ML-DSA (Dilithium)** | ⚠️ Experimental | WASM implementation (Demo Only) |
-| **Hybrid Key Exchange** | ❌ Unsupported | Restricted to native clients |
-| **FIPS 140-3 Mode** | ❌ Unsupported | Browser environment limitation |
+| **ML-KEM (Kyber)** | ⚠️ Demo Only | WASM implementation; Web remains demo-only. |
+| **ML-DSA (Dilithium)** | ⚠️ Demo Only | WASM implementation; Web remains demo-only. |
+| **Hybrid Key Exchange** | ❌ Unsupported | Restricted to native clients. |
+| **FIPS 140-3 Mode** | ❌ Unsupported | Browser environment limitation. |
 
-> **Warning:** The Web implementation is currently a functional prototype. For production-grade post-quantum security, use the Android or Desktop native clients.
+> **Warning:** This platform is not for production use. Web remains demo-only.
