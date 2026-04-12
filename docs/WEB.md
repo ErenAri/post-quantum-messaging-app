@@ -164,3 +164,13 @@ Tauri wraps the same Vite SPA in a native window with:
 - native notifications,
 - file drag-and-drop,
 - CSP-enforced content security.
+## Support Matrix
+
+| Algorithm / Feature | Status | Notes |
+| :--- | :--- | :--- |
+| **ML-KEM (Kyber)** | ⚠️ Experimental | WASM implementation (Demo Only) |
+| **ML-DSA (Dilithium)** | ⚠️ Experimental | WASM implementation (Demo Only) |
+| **Hybrid Key Exchange** | ❌ Unsupported | Restricted to native clients |
+| **FIPS 140-3 Mode** | ❌ Unsupported | Browser environment limitation |
+
+> **Warning:** The Web implementation is currently a functional prototype. For production-grade post-quantum security, use the Android or Desktop native clients.
