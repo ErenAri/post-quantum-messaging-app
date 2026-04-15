@@ -1,4 +1,5 @@
 import "./app.css";
+import { sha256 } from "@noble/hashes/sha2";
 import {
   buildPrekeysAuthHeaders,
   buildPublishPrekeysPayload,
@@ -70,6 +71,7 @@ import {
   type IdentityLogItem,
   type DeviceRecord,
   type PrivateDiscoveryMatchItem,
+  type RegisterUserRequest,
   type ServerCapabilitiesResponse,
   type TransparencyProofResponse,
 } from "./server";
@@ -328,6 +330,27 @@ function normalizeRuntimeServerUrl(serverUrl: string): string {
   }
 }
 
+function isTemporaryTryCloudflareRelay(serverUrl: string): boolean {
+  const trimmed = serverUrl.trim();
+  if (!trimmed) {
+    return false;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.hostname.toLowerCase().endsWith(".trycloudflare.com");
+  } catch {
+    return false;
+  }
+}
+
+function normalizeHostedServerUrlWithFallback(serverUrl: string): string {
+  const normalized = normalizeRuntimeServerUrl(serverUrl);
+  if (isLoopbackHostname(location.hostname) || !isTemporaryTryCloudflareRelay(normalized)) {
+    return normalized;
+  }
+  return readHostedDefaultRelayUrl() || "";
+}
+
 function readHostedRelayBootstrapUrl(rawSearch: string = location.search): string | null {
   const params = new URLSearchParams(rawSearch);
   const relayUrl = (params.get(HOSTED_RELAY_QUERY_PARAM) || "").trim();
@@ -361,12 +384,14 @@ function clearHostedRelayBootstrapFromLocation(): void {
 }
 
 function applyHostedRelayBootstrap(loadedSetup: SetupConfig): SetupConfig {
+  const params = new URLSearchParams(location.search);
+  const hadSharedRelayParam = params.has(HOSTED_RELAY_QUERY_PARAM);
   const sharedRelayUrl = readHostedRelayBootstrapUrl();
   const normalizedServerUrl =
-    normalizeRuntimeServerUrl(sharedRelayUrl || loadedSetup.serverUrl) ||
+    normalizeHostedServerUrlWithFallback(sharedRelayUrl || loadedSetup.serverUrl) ||
     readHostedDefaultRelayUrl() ||
     "";
-  if (sharedRelayUrl && normalizedServerUrl === sharedRelayUrl) {
+  if (hadSharedRelayParam) {
     clearHostedRelayBootstrapFromLocation();
   }
   return {
@@ -376,7 +401,13 @@ function applyHostedRelayBootstrap(loadedSetup: SetupConfig): SetupConfig {
 }
 
 function configuredServerUrlOrNull(): string | null {
-  const normalized = normalizeRuntimeServerUrl(setup.serverUrl);
+  const normalized = normalizeHostedServerUrlWithFallback(setup.serverUrl);
+  if (normalized !== setup.serverUrl) {
+    setup.serverUrl = normalized;
+    saveSetup(setup);
+    cachedCapabilities = null;
+    cachedCapabilitiesServerUrl = null;
+  }
   return normalized || null;
 }
 
@@ -443,8 +474,36 @@ async function syncBrowserRecoveryBackupBestEffort(
   } catch {
     notify(
       "Encrypted browser recovery backup could not be synced. Signing in on another browser may require importing a linked device.",
-      "info"
+      "error"
     );
+  }
+}
+
+async function syncBrowserRecoveryBackupRequired(
+  api: PqmsgApi,
+  activeKeys: GeneratedKeys,
+  passphrase: string,
+  identity: BrowserSessionIdentity,
+  serverUrl: string
+): Promise<void> {
+  try {
+    await uploadBrowserRecoveryBackup(api, activeKeys, passphrase, identity, serverUrl);
+  } catch (error) {
+    throw new Error(`Encrypted browser recovery backup could not be synced: ${errorMsg(error)}`);
+  }
+}
+
+async function assertRecoveryBackupReachable(api: PqmsgApi, userId: string): Promise<void> {
+  try {
+    await api.downloadRecoveryBackup(userId);
+  } catch (error) {
+    const detail = errorMsg(error);
+    if (detail.includes("HTTP 404")) {
+      throw new Error(
+        `No encrypted recovery backup is currently stored for @${userId}. Sign-in is blocked until recovery backup sync succeeds, otherwise cross-browser recovery is not possible.`
+      );
+    }
+    throw new Error(`Could not verify encrypted recovery backup availability for @${userId}: ${detail}`);
   }
 }
 
@@ -472,7 +531,12 @@ async function downloadBrowserRecoveryBackup(
   if (backup.userId !== userId || backup.keys.userId !== userId) {
     throw new Error(`Encrypted recovery backup for @${userId} is malformed.`);
   }
-  const normalizedServerUrl = validateWebServerUrl(backup.serverUrl).toString().replace(/\/+$/, "");
+  const normalizedServerUrl = normalizeHostedServerUrlWithFallback(
+    validateWebServerUrl(backup.serverUrl).toString().replace(/\/+$/, "")
+  );
+  if (!normalizedServerUrl && !isLoopbackHostname(location.hostname)) {
+    throw new Error(HOSTED_SERVER_SETUP_MESSAGE);
+  }
   return {
     ...backup,
     serverUrl: normalizedServerUrl,
@@ -691,7 +755,12 @@ function extractPrivateGroupInviteTarget(rawInput?: string | null): PrivateGroup
   if (!inviteToken || !inviteSecretBase64) {
     return null;
   }
-  const serverUrl = (parsed.searchParams.get("server") || setup.serverUrl || location.origin).trim();
+  const serverUrl = normalizeHostedServerUrlWithFallback(
+    (parsed.searchParams.get("server") || setup.serverUrl || location.origin).trim()
+  );
+  if (!serverUrl) {
+    return null;
+  }
   return {
     serverUrl,
     inviteToken,
@@ -2538,7 +2607,12 @@ function renderOnboarding(): void {
     if (server) {
       try {
         const parsed = validateWebServerUrl(server);
-        setup.serverUrl = parsed.toString().replace(/\/+$/, "");
+        setup.serverUrl = normalizeHostedServerUrlWithFallback(
+          parsed.toString().replace(/\/+$/, "")
+        );
+        if (!setup.serverUrl && !isLoopbackHostname(location.hostname)) {
+          throw new Error(HOSTED_SERVER_SETUP_MESSAGE);
+        }
         saveSetup(setup);
         cachedCapabilities = null;
         cachedCapabilitiesServerUrl = null;
@@ -2769,30 +2843,30 @@ function renderCreateAccount(): void {
       setProgress(progress, 50);
       const api = new PqmsgApi(setup.serverUrl);
       if (!provisionedOnRelay) {
-      await api.registerUser({
-        user_id: genKeys.userId,
-        identity_x25519_pub: genKeys.identityX25519Pub,
-        identity_sig_pub: genKeys.identitySigPub,
-        identity_pq_sig_pub: genKeys.identityPqSigPub,
-        device_id: genKeys.deviceId,
-      });
+        await registerUserWithPow(api, {
+          user_id: genKeys.userId,
+          identity_x25519_pub: genKeys.identityX25519Pub,
+          identity_sig_pub: genKeys.identitySigPub,
+          identity_pq_sig_pub: genKeys.identityPqSigPub,
+          device_id: genKeys.deviceId,
+        });
 
-      status.textContent = "Publishing prekeys…";
-      setProgress(progress, 80);
-      const payload = buildPublishPrekeysPayload(genKeys);
-      const headers = buildPrekeysAuthHeaders(genKeys, payload);
-      await api.publishPrekeys(genKeys.userId, payload, headers);
+        status.textContent = "Publishing prekeys…";
+        setProgress(progress, 80);
+        const payload = buildPublishPrekeysPayload(genKeys);
+        const headers = buildPrekeysAuthHeaders(genKeys, payload);
+        await api.publishPrekeys(genKeys.userId, payload, headers);
 
-      try {
-        const profileHeaders = buildProfileUpsertAuthHeaders(genKeys, displayName, "", false, "", "");
-        await api.upsertProfile(
-          genKeys.userId,
-          { display_name: displayName, username_lookup_enabled: false },
-          profileHeaders
-        );
-      } catch {
-        notify("Account created, but profile name could not be synced yet", "info");
-      }
+        try {
+          const profileHeaders = buildProfileUpsertAuthHeaders(genKeys, displayName, "", false, "", "");
+          await api.upsertProfile(
+            genKeys.userId,
+            { display_name: displayName, username_lookup_enabled: false },
+            profileHeaders
+          );
+        } catch {
+          notify("Account created, but profile name could not be synced yet", "info");
+        }
 
       }
 
@@ -2815,17 +2889,25 @@ function renderCreateAccount(): void {
       keys = genKeys;
       cachedProfileNames[userId] = displayName;
       writeProfileDisplayName(userId, userId, displayName);
-      await syncBrowserRecoveryBackupBestEffort(
-        api,
-        genKeys,
-        pass,
-        {
-          displayName,
-          username: "",
-          usernameLookupEnabled: false,
-        },
-        setup.serverUrl
-      );
+      status.textContent = "Syncing encrypted recovery backup...";
+      setProgress(progress, 96);
+      try {
+        await syncBrowserRecoveryBackupRequired(
+          api,
+          genKeys,
+          pass,
+          {
+            displayName,
+            username: "",
+            usernameLookupEnabled: false,
+          },
+          setup.serverUrl
+        );
+      } catch (backupError) {
+        throw new Error(
+          `Your local profile was saved, but encrypted recovery backup sync failed. Keep this browser signed in and retry shortly: ${errorMsg(backupError)}`
+        );
+      }
 
       setProgress(progress, 100);
       status.textContent = "Ready!";
@@ -3203,7 +3285,15 @@ function renderPortableSignIn(): void {
         } catch {
           // Keep local unlock usable even if profile metadata is unavailable.
         }
-        await syncBrowserRecoveryBackupBestEffort(api, loadedKeys, pass, identity, setup.serverUrl);
+        try {
+          await syncBrowserRecoveryBackupRequired(api, loadedKeys, pass, identity, setup.serverUrl);
+        } catch {
+          await assertRecoveryBackupReachable(api, uid);
+          notify(
+            `Signed in, but encrypted recovery backup sync failed on this attempt. Existing recovery backup is still available for @${uid}. Retry sync from this browser soon.`,
+            "error"
+          );
+        }
       } else {
         status.textContent = "Recovering encrypted backup...";
         await wipeLocalState(uid);
@@ -3472,7 +3562,12 @@ function renderImportDevice(): void {
       status.textContent = "Opening linked-device package...";
       const imported = openSecondaryDevicePackage(packageJson, packagePassphrase);
 
-      const normalizedServerUrl = validateWebServerUrl(imported.serverUrl).toString().replace(/\/+$/, "");
+      const normalizedServerUrl = normalizeHostedServerUrlWithFallback(
+        validateWebServerUrl(imported.serverUrl).toString().replace(/\/+$/, "")
+      );
+      if (!normalizedServerUrl && !isLoopbackHostname(location.hostname)) {
+        throw new Error(HOSTED_SERVER_SETUP_MESSAGE);
+      }
       if (hasLocalKeys(imported.userId)) {
         if (
           !confirm(
@@ -11156,12 +11251,106 @@ function canUseDevelopmentRelayReset(
   return capabilities?.security_profile === "research" && capabilities?.deployment_mode === "development";
 }
 
+function hasLeadingZeroBits(bytes: Uint8Array, bits: number): boolean {
+  if (bits <= 0) {
+    return true;
+  }
+  const fullBytes = Math.floor(bits / 8);
+  const remainingBits = bits % 8;
+  if (bytes.length < fullBytes) {
+    return false;
+  }
+  for (let idx = 0; idx < fullBytes; idx += 1) {
+    if (bytes[idx] !== 0) {
+      return false;
+    }
+  }
+  if (remainingBits === 0) {
+    return true;
+  }
+  if (bytes.length <= fullBytes) {
+    return false;
+  }
+  const mask = 0xff << (8 - remainingBits);
+  return (bytes[fullBytes] & mask) === 0;
+}
+
+function buildRegistrationPowMessage(request: RegisterUserRequest, nonce: string): Uint8Array {
+  const parts = [
+    "register",
+    request.user_id,
+    request.device_id,
+    request.identity_x25519_pub,
+    request.identity_sig_pub,
+    request.identity_pq_sig_pub,
+    nonce,
+  ];
+  return utf8ToBytes(parts.join("\u0000"));
+}
+
+async function solveRegistrationPowNonce(
+  request: RegisterUserRequest,
+  bits: number,
+): Promise<string> {
+  const normalizedBits = Math.max(0, Math.trunc(bits));
+  if (normalizedBits <= 0) {
+    return "";
+  }
+  if (normalizedBits > 32) {
+    throw new Error("Registration proof-of-work is not supported for difficulties above 32 bits.");
+  }
+  for (let nonceCounter = 0; ; nonceCounter += 1) {
+    const nonce = nonceCounter.toString(16);
+    const digest = sha256(buildRegistrationPowMessage(request, nonce));
+    if (hasLeadingZeroBits(digest, normalizedBits)) {
+      return nonce;
+    }
+    if (nonceCounter > 0 && nonceCounter % 2048 === 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+  }
+}
+
+async function registrationPowBits(api: PqmsgApi): Promise<number> {
+  const cached = await loadServerCapabilitiesCached();
+  if (cached) {
+    return Math.max(0, Math.trunc(cached.registration_pow_bits || 0));
+  }
+  const capabilities = await api.getCapabilities();
+  cachedCapabilities = capabilities;
+  cachedCapabilitiesServerUrl = setup.serverUrl;
+  return Math.max(0, Math.trunc(capabilities.registration_pow_bits || 0));
+}
+
+async function registerUserWithPow(api: PqmsgApi, request: RegisterUserRequest): Promise<void> {
+  const bits = await registrationPowBits(api);
+  const powNonce = bits > 0 ? await solveRegistrationPowNonce(request, bits) : "";
+  const payload = powNonce ? { ...request, pow_nonce: powNonce } : request;
+  try {
+    await api.registerUser(payload);
+  } catch (error) {
+    const message = errorMsg(error);
+    if (!powNonce && message.includes("pow_nonce is required for registration")) {
+      const capabilities = await api.getCapabilities();
+      cachedCapabilities = capabilities;
+      cachedCapabilitiesServerUrl = setup.serverUrl;
+      const retryBits = Math.max(0, Math.trunc(capabilities.registration_pow_bits || 0));
+      if (retryBits > 0) {
+        const retryNonce = await solveRegistrationPowNonce(request, retryBits);
+        await api.registerUser({ ...request, pow_nonce: retryNonce });
+        return;
+      }
+    }
+    throw error;
+  }
+}
+
 async function registerBrowserIdentityOnRelay(
   api: PqmsgApi,
   relayKeys: GeneratedKeys,
   displayName: string
 ): Promise<void> {
-  await api.registerUser({
+  await registerUserWithPow(api, {
     user_id: relayKeys.userId,
     identity_x25519_pub: relayKeys.identityX25519Pub,
     identity_sig_pub: relayKeys.identitySigPub,

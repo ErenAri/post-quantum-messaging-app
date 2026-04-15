@@ -20,6 +20,7 @@ export type RegisterUserRequest = {
   identity_sig_pub: string;
   identity_pq_sig_pub: string;
   device_id: string;
+  pow_nonce?: string;
 };
 
 export type RegisterUserResponse = {

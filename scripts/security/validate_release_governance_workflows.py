@@ -74,6 +74,17 @@ REQUIRED = {
             "--output dist/post-deploy-verification.json",
         ],
     },
+    "promote_backup_recovery_smoke": {
+        "path": ".github/workflows/promote.yml",
+        "permission_contents": [],
+        "ordered_contents": [
+            "PQMSG_PUBLIC_API_BASE_URL: ${{ vars.PQMSG_PUBLIC_API_BASE_URL }}",
+            "- name: resolve post-deploy smoke-check API URL",
+            "PQMSG_RUNTIME_SMOKE_API_BASE_URL",
+            "- name: run post-deploy backup recovery smoke check",
+            "dist/post-deploy-backup-smoke.txt",
+        ],
+    },
     "rollback_runtime_support_freeze": {
         "path": ".github/workflows/rollback.yml",
         "permission_contents": [],
@@ -116,7 +127,14 @@ def main() -> int:
 
     root = Path(args.root).resolve()
     errors: list[str] = []
-    for label in ("release", "promote", "rollback", "promote_runtime_support_freeze", "rollback_runtime_support_freeze"):
+    for label in (
+        "release",
+        "promote",
+        "rollback",
+        "promote_runtime_support_freeze",
+        "promote_backup_recovery_smoke",
+        "rollback_runtime_support_freeze",
+    ):
         errors.extend(validate(label, root))
 
     if errors:

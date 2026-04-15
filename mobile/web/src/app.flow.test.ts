@@ -26,11 +26,13 @@ type BootOptions = {
   existingUsers?: string[];
   contactUsers?: string[];
   bundleUsers?: string[];
+  failBackupUploadForUsers?: string[];
   identityMismatchUsers?: string[];
   immutableIdentityUsers?: string[];
   rotatedIdentityUsers?: string[];
   transparencyCheckpointOutOfRangeUsers?: string[];
   capabilities?: {
+    registration_pow_bits?: number;
     web_client_policy?: string;
     contact_discovery_supported?: boolean;
     contact_discovery_mode?: string;
@@ -368,6 +370,7 @@ async function bootApp(options: BootOptions = {}) {
   const apiState = {
     existingUsers: new Set(options.existingUsers ?? ["test1", "test2"]),
     bundleUsers: new Set(options.bundleUsers ?? options.existingUsers ?? ["test1", "test2"]),
+    failBackupUploadForUsers: new Set(options.failBackupUploadForUsers ?? []),
     identityMismatchUsers: new Set(options.identityMismatchUsers ?? []),
     immutableIdentityUsers: new Set(options.immutableIdentityUsers ?? []),
     rotatedIdentityUsers: new Set(options.rotatedIdentityUsers ?? []),
@@ -376,7 +379,7 @@ async function bootApp(options: BootOptions = {}) {
     usernameLookupEnabledByUser: new Map<string, boolean>((options.existingUsers ?? ["test1", "test2"]).map((userId) => [userId, true] as const)),
     contacts: new Set(options.contactUsers ?? []),
     resetCalls: [] as string[],
-    registerCalls: [] as Array<{ userId: string; deviceId: string }>,
+    registerCalls: [] as Array<{ userId: string; deviceId: string; powNonce?: string }>,
     linkCalls: [] as Array<{ userId: string; newDeviceId: string }>,
     relays: [] as Array<{ peerId: string; body: string }>,
     backupUploads: [] as Array<{ userId: string; deviceId: string; backupVersion: number }>,
@@ -432,7 +435,7 @@ async function bootApp(options: BootOptions = {}) {
         fips_mode: false,
       },
       production_baseline_met: false,
-      registration_pow_bits: 0,
+      registration_pow_bits: options.capabilities?.registration_pow_bits ?? 0,
       prekey_bundle_reserve_count: 0,
       pq_ratchet_interval: 1,
       contact_discovery_ticket_supported: false,
@@ -972,13 +975,17 @@ async function bootApp(options: BootOptions = {}) {
         return apiState.capabilities;
       }
 
-      async registerUser(payload: { user_id: string; device_id: string }) {
+      async registerUser(payload: { user_id: string; device_id: string; pow_nonce?: string }) {
         if (apiState.immutableIdentityUsers.has(payload.user_id)) {
           throw new Error(
             'HTTP 409: {"type":"about:blank","title":"Conflict","status":409,"detail":"user_id is already registered with an immutable identity"}',
           );
         }
-        apiState.registerCalls.push({ userId: payload.user_id, deviceId: payload.device_id });
+        apiState.registerCalls.push({
+          userId: payload.user_id,
+          deviceId: payload.device_id,
+          powNonce: payload.pow_nonce,
+        });
         apiState.existingUsers.add(payload.user_id);
         apiState.bundleUsers.add(payload.user_id);
         apiState.usernames.set(payload.user_id, payload.user_id);
@@ -1035,6 +1042,9 @@ async function bootApp(options: BootOptions = {}) {
           encrypted_backup_bytes_base64: string;
         }
       ) {
+        if (apiState.failBackupUploadForUsers.has(userId)) {
+          throw new Error("HTTP 500: persist encrypted backup blob");
+        }
         apiState.backupUploads.push({
           userId,
           deviceId: payload.device_id,
@@ -1613,6 +1623,69 @@ describe("web app flow coverage", () => {
     expect(router.getCurrentView()).toEqual({ screen: "conversations" });
   }, 10000);
 
+  it("surfaces create-account failure when encrypted recovery backup sync fails", async () => {
+    const { router, apiState, storage } = await bootApp({
+      existingUsers: [],
+      bundleUsers: [],
+      failBackupUploadForUsers: ["no-backup"],
+    });
+
+    router.navigateTo({ screen: "create-account" });
+    await flushPromises();
+
+    const userInput = document.querySelector<HTMLInputElement>("#onb-user");
+    const nameInput = document.querySelector<HTMLInputElement>("#onb-name");
+    const passInput = document.querySelector<HTMLInputElement>("#onb-pass");
+    const pass2Input = document.querySelector<HTMLInputElement>("#onb-pass2");
+    userInput!.value = "no-backup";
+    userInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    nameInput!.value = "No Backup";
+    nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    passInput!.value = "pass-8";
+    passInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    pass2Input!.value = "pass-8";
+    pass2Input!.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>("#onb-go")!.click();
+
+    await eventually(() => {
+      expect(document.querySelector("#onb-status")?.textContent).toContain(
+        "encrypted recovery backup sync failed",
+      );
+    });
+
+    expect(router.getCurrentView()).toEqual({ screen: "create-account" });
+    expect(storage.hasLocalKeys("no-backup")).toBe(true);
+    expect(apiState.backupUploads).toHaveLength(0);
+  }, 10000);
+
+  it("blocks local sign-in when backup sync fails and no recoverable backup exists", async () => {
+    const { router, apiState } = await bootApp({
+      existingUsers: ["testlock"],
+      bundleUsers: ["testlock"],
+      failBackupUploadForUsers: ["testlock"],
+      prepare: async (storage) => {
+        await storage.saveKeys("testlock", "pass-lock", makeKeys("testlock"));
+      },
+    });
+
+    router.navigateTo({ screen: "sign-in" });
+    await flushPromises();
+
+    document.querySelector<HTMLElement>("[data-local-account-fill='testlock']")?.click();
+    const passInput = document.querySelector<HTMLInputElement>("#onb-pass");
+    passInput!.value = "pass-lock";
+    document.querySelector<HTMLButtonElement>("#onb-go")!.click();
+
+    await eventually(() => {
+      expect(document.querySelector("#onb-status")?.textContent).toContain(
+        "No encrypted recovery backup is currently stored",
+      );
+    });
+
+    expect(router.getCurrentView()).toEqual({ screen: "sign-in" });
+    expect(apiState.backupUploads).toHaveLength(0);
+  }, 10000);
+
   it("repairs a mismatched local identity on a development relay during sign-in", async () => {
     vi.stubGlobal("confirm", vi.fn(() => true));
     const { router, apiState } = await bootApp({
@@ -1677,6 +1750,43 @@ describe("web app flow coverage", () => {
     expect(document.body.textContent).toContain("No conversations yet");
   }, 10000);
 
+  it("includes pow_nonce when registration proof-of-work is required", async () => {
+    const { router, apiState } = await bootApp({
+      existingUsers: [],
+      bundleUsers: [],
+      capabilities: {
+        registration_pow_bits: 8,
+      },
+    });
+
+    router.navigateTo({ screen: "create-account" });
+    await flushPromises();
+
+    const userInput = document.querySelector<HTMLInputElement>("#onb-user");
+    const nameInput = document.querySelector<HTMLInputElement>("#onb-name");
+    const passInput = document.querySelector<HTMLInputElement>("#onb-pass");
+    const pass2Input = document.querySelector<HTMLInputElement>("#onb-pass2");
+    userInput!.value = "powuser";
+    userInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    nameInput!.value = "Pow User";
+    nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    passInput!.value = "pass-8";
+    passInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    pass2Input!.value = "pass-8";
+    pass2Input!.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>("#onb-go")!.click();
+
+    await eventually(() => {
+      expect(document.querySelector("#onb-status")?.textContent).toContain("Ready!");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 450));
+
+    expect(apiState.registerCalls).toHaveLength(1);
+    const firstRegister = apiState.registerCalls[0];
+    expect(firstRegister?.powNonce).toBeTruthy();
+    expect(firstRegister?.powNonce).toMatch(/^[A-Za-z0-9_-]+$/);
+  }, 10000);
+
   it("bootstraps a hosted relay from a shared link without requiring Advanced setup", async () => {
     const relayUrl = "https://relay.example.com";
     const { apiState, router, storage } = await bootApp({
@@ -1725,6 +1835,47 @@ describe("web app flow coverage", () => {
     });
 
     expect(storage.loadSetup().serverUrl).toBe(relayUrl);
+    expect(document.body.textContent).toContain("Relay ready");
+    expect(document.body.textContent).toContain("54-157-172-51.sslip.io");
+  });
+
+  it("replaces a persisted trycloudflare relay with hosted default on hosted origin", async () => {
+    const relayUrl = "https://54-157-172-51.sslip.io";
+    vi.stubEnv("VITE_PQMSG_HOSTED_RELAY_URL", relayUrl);
+
+    const { storage } = await bootApp({
+      existingUsers: [],
+      bundleUsers: [],
+      pageUrl: "https://pqmsg-web.pages.dev/",
+      prepare: async (storage) => {
+        storage.saveSetup({
+          serverUrl: "https://premises-garage-advertisement-cycling.trycloudflare.com",
+          userId: "",
+          deviceId: "",
+          suiteLabel: "ml-kem-768",
+          peerUserId: "",
+          displayName: "",
+        });
+      },
+    });
+
+    expect(storage.loadSetup().serverUrl).toBe(relayUrl);
+    expect(document.body.textContent).toContain("Relay ready");
+    expect(document.body.textContent).toContain("54-157-172-51.sslip.io");
+  });
+
+  it("replaces a shared trycloudflare relay with hosted default on hosted origin", async () => {
+    const relayUrl = "https://54-157-172-51.sslip.io";
+    vi.stubEnv("VITE_PQMSG_HOSTED_RELAY_URL", relayUrl);
+
+    const { storage } = await bootApp({
+      existingUsers: [],
+      bundleUsers: [],
+      pageUrl: "https://pqmsg-web.pages.dev/?relay=https%3A%2F%2Fpremises-garage-advertisement-cycling.trycloudflare.com",
+    });
+
+    expect(storage.loadSetup().serverUrl).toBe(relayUrl);
+    expect(window.location.search).toBe("");
     expect(document.body.textContent).toContain("Relay ready");
     expect(document.body.textContent).toContain("54-157-172-51.sslip.io");
   });

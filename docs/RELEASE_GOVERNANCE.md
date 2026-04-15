@@ -79,6 +79,7 @@ A release candidate is promotable only when all conditions are true:
 28. any workflow that consumes a previously uploaded promotion/rollback bundle must verify the bundle-manifest inventory before using the bundle, and should verify the bundle-manifest attestation when `gh` is available.
 29. tagged releases must fail closed if `docs/AUDIT_FINDINGS.json` contains unresolved `critical` or `high` findings, or if a `risk_accepted` exception for those severities has expired (`scripts/security/validate_release_audit_gate.py`).
 30. applied promotion and rollback verification must prove the live `/v1/capabilities` support boundary still matches the published `release-security-posture.json` frozen at release time, not just that the endpoint is reachable.
+31. applied promotions must run an end-to-end encrypted backup upload/recovery smoke check against the live HTTPS API endpoint and archive the result (`post-deploy-backup-smoke.txt`), failing closed on missing API URL configuration or smoke-check failure.
 
 ## 4. Security Exception Policy
 

@@ -96,6 +96,23 @@ powershell -ExecutionPolicy Bypass -File scripts/dev/aws/configure_and_start_ec2
   -KeyFile C:\path\to\your-key.pem
 ```
 
+To fail fast when backup upload/recovery paths regress, run the helper with smoke-check enabled:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/dev/aws/configure_and_start_ec2_backend.ps1 `
+  -InstanceHost <ec2-public-dns-or-ip> `
+  -ApiDomain <public-api-domain> `
+  -KeyFile C:\path\to\your-key.pem `
+  -RunBackupSmokeCheck
+```
+
+You can also run the smoke check directly after any restart/deploy:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/dev/aws/smoke_check_ec2_backup_recovery.ps1 `
+  -ApiBaseUrl https://<public-api-domain>
+```
+
 That helper uploads rendered env files, sets a generated database password and sender-cert signing seed, and starts `pqmsg-backend-compose.service`.
 
 Start services:

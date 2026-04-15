@@ -26,6 +26,13 @@ services:
       timeout: 3s
       retries: 10
 
+  blob-permissions-init:
+    image: alpine:3.20
+    restart: "no"
+    command: ["sh", "-lc", "chown -R 10001:10001 /blob-store; chmod 700 /blob-store"]
+    volumes:
+      - pqmsg_blob_data:/blob-store
+
   pqmsg-server:
     image: ${PQMSG_SERVER_IMAGE:-ghcr.io/your-org/pqmsg-server:0.1.0}
     restart: unless-stopped
@@ -34,6 +41,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      blob-permissions-init:
+        condition: service_completed_successfully
     env_file:
       - ./pqmsg-server.aws.env
     environment:

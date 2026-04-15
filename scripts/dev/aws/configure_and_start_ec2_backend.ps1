@@ -8,7 +8,8 @@ param(
   [string]$ApiDomain,
   [string]$AcmeEmail,
   [string]$CorsOrigin = "https://pqmsg-web.pages.dev",
-  [string]$PqmsgServerImage = "ghcr.io/erenari/pqmsg-server:latest"
+  [string]$PqmsgServerImage = "ghcr.io/erenari/pqmsg-server:latest",
+  [switch]$RunBackupSmokeCheck
 )
 
 $ErrorActionPreference = "Stop"
@@ -84,12 +85,23 @@ try {
     throw "Failed to start backend service"
   }
 
+  if ($RunBackupSmokeCheck) {
+    $smokeScript = Join-Path $repoRoot "scripts\dev\aws\smoke_check_ec2_backup_recovery.ps1"
+    if (-not (Test-Path $smokeScript)) {
+      throw "Smoke-check script was not found: $smokeScript"
+    }
+    $apiBaseUrl = "https://$ApiDomain"
+    Write-Host "Running backup upload/recovery smoke check against $apiBaseUrl" -ForegroundColor Cyan
+    & $smokeScript -ApiBaseUrl $apiBaseUrl
+  }
+
   Write-Output "POSTGRES_PASSWORD=$postgresPassword"
   Write-Output "PQMSG_SENDER_CERT_SIGNING_KEY=$senderCertSigningKey"
   Write-Output "API_DOMAIN=$ApiDomain"
   Write-Output "ACME_EMAIL=$AcmeEmail"
   Write-Output "CORS_ORIGIN=$CorsOrigin"
   Write-Output "PQMSG_SERVER_IMAGE=$PqmsgServerImage"
+  Write-Output "RUN_BACKUP_SMOKE_CHECK=$RunBackupSmokeCheck"
 } finally {
   Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
 }
