@@ -42,6 +42,7 @@ flowchart LR
 For the current pilot rollout:
 
 - Android is the supported pilot messaging client.
+- Web remains demo-only.
 - Web remains demo-only in the live rollout contract even though the static web shell can now be hosted with a hardened production header and caching profile.
 - Outbound web direct messaging and private-group messaging are blocked whenever the server reports `web_client_policy = demo_only`.
 - Even when the server permits hardened web messaging, private groups additionally require `private_group_messaging_supported = true`.
