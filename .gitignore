@@ -19,3 +19,9 @@ mobile/android/app/src/main/jniLibs
 .tmp/local-run/*.log
 .tmp/local-run/*.txt
 .tmp/local-run/*.pid
+
+# Local smoke-check artifacts
+/tmp/ec2-backup-smoke/
+/tmp/pqmsg-server-ec2-fix-local.tar
+/mobile/web/tmp/live-backup-*.mjs
+/mobile/web/tmp/live-backup-*.keys.json
