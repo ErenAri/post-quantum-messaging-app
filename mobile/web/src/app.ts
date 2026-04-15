@@ -276,6 +276,8 @@ type PrivateGroupWrappedMessage = {
 const PRIVATE_GROUP_MESSAGE_PREFIX = "pqmsg-private-group-message-v1:";
 const GROUP_INVITE_SECRET_FRAGMENT_KEY = "group_secret";
 const HOSTED_RELAY_QUERY_PARAM = "relay";
+const HOSTED_DEFAULT_RELAY_URL =
+  (import.meta.env.VITE_PQMSG_HOSTED_RELAY_URL || "").trim();
 const HOSTED_SERVER_SETUP_MESSAGE =
   "Set an HTTPS relay URL in Advanced before creating or unlocking a web profile on this hosted origin.";
 const BROWSER_RECOVERY_BACKUP_VERSION = 1;
@@ -336,6 +338,14 @@ function readHostedRelayBootstrapUrl(rawSearch: string = location.search): strin
   return normalized || null;
 }
 
+function readHostedDefaultRelayUrl(): string | null {
+  if (isLoopbackHostname(location.hostname)) {
+    return null;
+  }
+  const normalized = normalizeRuntimeServerUrl(HOSTED_DEFAULT_RELAY_URL);
+  return normalized || null;
+}
+
 function clearHostedRelayBootstrapFromLocation(): void {
   if (typeof history === "undefined" || typeof history.replaceState !== "function") {
     return;
@@ -352,7 +362,10 @@ function clearHostedRelayBootstrapFromLocation(): void {
 
 function applyHostedRelayBootstrap(loadedSetup: SetupConfig): SetupConfig {
   const sharedRelayUrl = readHostedRelayBootstrapUrl();
-  const normalizedServerUrl = normalizeRuntimeServerUrl(sharedRelayUrl || loadedSetup.serverUrl);
+  const normalizedServerUrl =
+    normalizeRuntimeServerUrl(sharedRelayUrl || loadedSetup.serverUrl) ||
+    readHostedDefaultRelayUrl() ||
+    "";
   if (sharedRelayUrl && normalizedServerUrl === sharedRelayUrl) {
     clearHostedRelayBootstrapFromLocation();
   }

@@ -1449,6 +1449,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   vi.resetModules();
 });
 
@@ -1711,6 +1712,21 @@ describe("web app flow coverage", () => {
     expect(document.querySelector("#onb-status")?.textContent ?? "").not.toContain(
       "Set an HTTPS relay URL in Advanced",
     );
+  });
+
+  it("uses configured hosted default relay when no shared link is present", async () => {
+    const relayUrl = "https://54-157-172-51.sslip.io";
+    vi.stubEnv("VITE_PQMSG_HOSTED_RELAY_URL", relayUrl);
+
+    const { storage } = await bootApp({
+      existingUsers: [],
+      bundleUsers: [],
+      pageUrl: "https://pqmsg-web.pages.dev/",
+    });
+
+    expect(storage.loadSetup().serverUrl).toBe(relayUrl);
+    expect(document.body.textContent).toContain("Relay ready");
+    expect(document.body.textContent).toContain("54-157-172-51.sslip.io");
   });
 
   it("requires an HTTPS relay before creating a hosted web profile", async () => {

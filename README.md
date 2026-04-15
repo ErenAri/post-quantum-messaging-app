@@ -159,6 +159,7 @@ Operational deployment and release workflows live in:
 | [API](docs/API.md) | Server REST and WebSocket API reference |
 | [SECURITY_GATES](docs/SECURITY_GATES.md) | Security quality gates policy |
 | [DEPLOYMENT](docs/DEPLOYMENT.md) | Container and Kubernetes deployment guidance |
+| [AWS_EC2_BACKEND](docs/AWS_EC2_BACKEND.md) | Single-EC2 backend hosting runbook for the hosted web shell |
 | [PILOT](docs/PILOT.md) | Android pilot scope, launch checklist, and daily operations |
 | [OBSERVABILITY](docs/OBSERVABILITY.md) | Metrics, logs, tracing, and alerting |
 | [OPERATIONS](docs/OPERATIONS.md) | Operational runbooks |
