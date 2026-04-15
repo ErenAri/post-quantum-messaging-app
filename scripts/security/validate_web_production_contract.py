@@ -9,6 +9,7 @@ MANIFEST_PATH = ROOT / "mobile" / "web" / "public" / "manifest.webmanifest"
 INDEX_PATH = ROOT / "mobile" / "web" / "index.html"
 HEADERS_PATH = ROOT / "mobile" / "web" / "securityHeaders.ts"
 NGINX_PATH = ROOT / "deploy" / "web" / "nginx" / "pqmsg-web.conf"
+PAGES_HEADERS_PATH = ROOT / "mobile" / "web" / "public" / "_headers"
 
 
 def require(condition: bool, message: str) -> None:
@@ -58,6 +59,21 @@ def main() -> None:
 
     require("ws://localhost" not in nginx, "nginx production CSP must not allow loopback websocket origins")
     require("http://localhost" not in nginx, "nginx production CSP must not allow loopback HTTP origins")
+
+    pages_headers = PAGES_HEADERS_PATH.read_text(encoding="utf-8")
+    for required in (
+        "Content-Security-Policy:",
+        "connect-src 'self' https: wss:",
+        "Cross-Origin-Embedder-Policy: require-corp",
+        "Cross-Origin-Opener-Policy: same-origin",
+        "Cross-Origin-Resource-Policy: same-origin",
+        "/index.html",
+        "/manifest.webmanifest",
+        "/sw.js",
+        "/assets/*",
+        "immutable",
+    ):
+        require(required in pages_headers, f"pages _headers config is missing: {required}")
 
 
 if __name__ == "__main__":

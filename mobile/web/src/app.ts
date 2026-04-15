@@ -1,4 +1,5 @@
 import "./app.css";
+import { sha256 } from "@noble/hashes/sha2";
 import {
   buildPrekeysAuthHeaders,
   buildPublishPrekeysPayload,
@@ -31,6 +32,7 @@ import {
   buildContactDiscoveryAttestationChallengeNonce,
   contactDiscoveryManifestContractSha256,
   buildPushTokenAuthHeaders,
+  buildBackupUploadAuthHeaders,
   buildListDevicesAuthHeaders,
   buildLinkDeviceAuthHeaders,
   buildRevokeDeviceAuthHeaders,
@@ -43,9 +45,14 @@ import {
   initWasmCrypto,
   initiateDirectMessageSession,
   isPqSessionMessagingAvailable,
+  openJsonWithPassphrase,
+  openSecondaryDevicePackage,
   openTransportEnvelopeWithSenderCert,
+  prepareSecondaryDevicePackage,
   prepareContactDiscoveryBlindRequest,
   regeneratePublishedPrekeys,
+  rebindKeysToNewDevice,
+  sealJsonWithPassphrase,
   sealTransportEnvelopeWithSenderCert,
   verifyContactDiscoveryManifest,
   verifyContactDiscoveryAttestationDocument,
@@ -55,6 +62,7 @@ import {
 } from "./crypto";
 import {
   PqmsgApi,
+  type BackupUploadRequest,
   type BundleResponse,
   type ContactEntry,
   type ContactDiscoveryManifestResponse,
@@ -63,6 +71,7 @@ import {
   type IdentityLogItem,
   type DeviceRecord,
   type PrivateDiscoveryMatchItem,
+  type RegisterUserRequest,
   type ServerCapabilitiesResponse,
   type TransparencyProofResponse,
 } from "./server";
@@ -123,9 +132,11 @@ import {
   type ConversationSummary,
   type GroupConversationSummary,
   type PrivateGroupLocalState,
+  type SetupConfig,
 } from "./storage";
 import {
   saveMessage,
+  saveMessageIfAbsent,
   updateMessageStatus,
   getMessages,
   deleteMessages,
@@ -187,7 +198,7 @@ import {
   type PrivateGroupRole,
   type PrivateGroupState,
 } from "./crypto-wasm";
-import { base64ToBytes, bytesToBase64, bytesToHex } from "./base64";
+import { base64ToBytes, bytesToBase64, bytesToHex, bytesToUtf8, utf8ToBytes } from "./base64";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -266,6 +277,322 @@ type PrivateGroupWrappedMessage = {
 
 const PRIVATE_GROUP_MESSAGE_PREFIX = "pqmsg-private-group-message-v1:";
 const GROUP_INVITE_SECRET_FRAGMENT_KEY = "group_secret";
+const HOSTED_RELAY_QUERY_PARAM = "relay";
+const HOSTED_DEFAULT_RELAY_URL =
+  (import.meta.env.VITE_PQMSG_HOSTED_RELAY_URL || "").trim();
+const HOSTED_SERVER_SETUP_MESSAGE =
+  "Set an HTTPS relay URL in Advanced before creating or unlocking a web profile on this hosted origin.";
+const BROWSER_RECOVERY_BACKUP_VERSION = 1;
+
+type BrowserRecoveryBackup = {
+  version: number;
+  userId: string;
+  deviceId: string;
+  serverUrl: string;
+  displayName: string;
+  username: string;
+  usernameLookupEnabled: boolean;
+  exportedAtUnix: number;
+  keys: GeneratedKeys;
+};
+
+type BrowserSessionIdentity = {
+  displayName: string;
+  username: string;
+  usernameLookupEnabled: boolean;
+};
+
+function hostedOriginUsesLoopbackServer(serverUrl: string): boolean {
+  const trimmed = serverUrl.trim();
+  if (!trimmed || isLoopbackHostname(location.hostname)) {
+    return false;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "http:" && isLoopbackHostname(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeRuntimeServerUrl(serverUrl: string): string {
+  const trimmed = serverUrl.trim();
+  if (!trimmed) {
+    return isLoopbackHostname(location.hostname) ? DEFAULT_SETUP.serverUrl : "";
+  }
+  if (hostedOriginUsesLoopbackServer(trimmed)) {
+    return "";
+  }
+  try {
+    return validateWebServerUrl(trimmed).toString().replace(/\/+$/, "");
+  } catch {
+    return isLoopbackHostname(location.hostname) ? DEFAULT_SETUP.serverUrl : "";
+  }
+}
+
+function isTemporaryTryCloudflareRelay(serverUrl: string): boolean {
+  const trimmed = serverUrl.trim();
+  if (!trimmed) {
+    return false;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.hostname.toLowerCase().endsWith(".trycloudflare.com");
+  } catch {
+    return false;
+  }
+}
+
+function normalizeHostedServerUrlWithFallback(serverUrl: string): string {
+  const normalized = normalizeRuntimeServerUrl(serverUrl);
+  if (isLoopbackHostname(location.hostname) || !isTemporaryTryCloudflareRelay(normalized)) {
+    return normalized;
+  }
+  return readHostedDefaultRelayUrl() || "";
+}
+
+function readHostedRelayBootstrapUrl(rawSearch: string = location.search): string | null {
+  const params = new URLSearchParams(rawSearch);
+  const relayUrl = (params.get(HOSTED_RELAY_QUERY_PARAM) || "").trim();
+  if (!relayUrl) {
+    return null;
+  }
+  const normalized = normalizeRuntimeServerUrl(relayUrl);
+  return normalized || null;
+}
+
+function readHostedDefaultRelayUrl(): string | null {
+  if (isLoopbackHostname(location.hostname)) {
+    return null;
+  }
+  const normalized = normalizeRuntimeServerUrl(HOSTED_DEFAULT_RELAY_URL);
+  return normalized || null;
+}
+
+function clearHostedRelayBootstrapFromLocation(): void {
+  if (typeof history === "undefined" || typeof history.replaceState !== "function") {
+    return;
+  }
+  const currentUrl = new URL(location.href);
+  if (!currentUrl.searchParams.has(HOSTED_RELAY_QUERY_PARAM)) {
+    return;
+  }
+  currentUrl.searchParams.delete(HOSTED_RELAY_QUERY_PARAM);
+  const nextSearch = currentUrl.searchParams.toString();
+  const nextUrl = `${currentUrl.pathname}${nextSearch ? `?${nextSearch}` : ""}${currentUrl.hash}`;
+  history.replaceState(history.state, "", nextUrl);
+}
+
+function applyHostedRelayBootstrap(loadedSetup: SetupConfig): SetupConfig {
+  const params = new URLSearchParams(location.search);
+  const hadSharedRelayParam = params.has(HOSTED_RELAY_QUERY_PARAM);
+  const sharedRelayUrl = readHostedRelayBootstrapUrl();
+  const normalizedServerUrl =
+    normalizeHostedServerUrlWithFallback(sharedRelayUrl || loadedSetup.serverUrl) ||
+    readHostedDefaultRelayUrl() ||
+    "";
+  if (hadSharedRelayParam) {
+    clearHostedRelayBootstrapFromLocation();
+  }
+  return {
+    ...loadedSetup,
+    serverUrl: normalizedServerUrl,
+  };
+}
+
+function configuredServerUrlOrNull(): string | null {
+  const normalized = normalizeHostedServerUrlWithFallback(setup.serverUrl);
+  if (normalized !== setup.serverUrl) {
+    setup.serverUrl = normalized;
+    saveSetup(setup);
+    cachedCapabilities = null;
+    cachedCapabilitiesServerUrl = null;
+  }
+  return normalized || null;
+}
+
+function requireConfiguredServerUrl(): string {
+  const normalized = configuredServerUrlOrNull();
+  if (normalized) {
+    return normalized;
+  }
+  if (!isLoopbackHostname(location.hostname)) {
+    throw new Error(HOSTED_SERVER_SETUP_MESSAGE);
+  }
+  throw new Error("Set the relay URL before continuing.");
+}
+
+function nextRecoveredBrowserDeviceId(userId: string): string {
+  const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const base = `${userId}-web`;
+  const maxBaseLength = Math.max(1, 127 - suffix.length);
+  return `${base.slice(0, maxBaseLength)}-${suffix}`;
+}
+
+async function uploadBrowserRecoveryBackup(
+  api: PqmsgApi,
+  activeKeys: GeneratedKeys,
+  passphrase: string,
+  identity: BrowserSessionIdentity,
+  serverUrl: string
+): Promise<void> {
+  const backup: BrowserRecoveryBackup = {
+    version: BROWSER_RECOVERY_BACKUP_VERSION,
+    userId: activeKeys.userId,
+    deviceId: activeKeys.deviceId,
+    serverUrl,
+    displayName: identity.displayName || activeKeys.userId,
+    username: identity.username.trim().replace(/^@/, "").toLowerCase(),
+    usernameLookupEnabled: Boolean(identity.usernameLookupEnabled && identity.username.trim()),
+    exportedAtUnix: Math.floor(Date.now() / 1000),
+    keys: activeKeys,
+  };
+  const sealedBackupJson = await sealJsonWithPassphrase(backup, passphrase);
+  const payload: BackupUploadRequest = {
+    device_id: activeKeys.deviceId,
+    backup_version: BROWSER_RECOVERY_BACKUP_VERSION,
+    recovery_hint: activeKeys.deviceId,
+    encrypted_backup_bytes_base64: bytesToBase64(utf8ToBytes(sealedBackupJson)),
+  };
+  const headers = buildBackupUploadAuthHeaders(
+    activeKeys,
+    payload.backup_version,
+    payload.encrypted_backup_bytes_base64
+  );
+  await api.uploadBackup(activeKeys.userId, payload, headers);
+}
+
+async function syncBrowserRecoveryBackupBestEffort(
+  api: PqmsgApi,
+  activeKeys: GeneratedKeys,
+  passphrase: string,
+  identity: BrowserSessionIdentity,
+  serverUrl: string
+): Promise<void> {
+  try {
+    await uploadBrowserRecoveryBackup(api, activeKeys, passphrase, identity, serverUrl);
+  } catch {
+    notify(
+      "Encrypted browser recovery backup could not be synced. Signing in on another browser may require importing a linked device.",
+      "error"
+    );
+  }
+}
+
+async function syncBrowserRecoveryBackupRequired(
+  api: PqmsgApi,
+  activeKeys: GeneratedKeys,
+  passphrase: string,
+  identity: BrowserSessionIdentity,
+  serverUrl: string
+): Promise<void> {
+  try {
+    await uploadBrowserRecoveryBackup(api, activeKeys, passphrase, identity, serverUrl);
+  } catch (error) {
+    throw new Error(`Encrypted browser recovery backup could not be synced: ${errorMsg(error)}`);
+  }
+}
+
+async function assertRecoveryBackupReachable(api: PqmsgApi, userId: string): Promise<void> {
+  try {
+    await api.downloadRecoveryBackup(userId);
+  } catch (error) {
+    const detail = errorMsg(error);
+    if (detail.includes("HTTP 404")) {
+      throw new Error(
+        `No encrypted recovery backup is currently stored for @${userId}. Sign-in is blocked until recovery backup sync succeeds, otherwise cross-browser recovery is not possible.`
+      );
+    }
+    throw new Error(`Could not verify encrypted recovery backup availability for @${userId}: ${detail}`);
+  }
+}
+
+async function downloadBrowserRecoveryBackup(
+  api: PqmsgApi,
+  userId: string,
+  passphrase: string
+): Promise<BrowserRecoveryBackup> {
+  let response: Awaited<ReturnType<PqmsgApi["downloadRecoveryBackup"]>>;
+  try {
+    response = await api.downloadRecoveryBackup(userId);
+  } catch (error) {
+    if (errorMsg(error).includes("HTTP 404")) {
+      throw new Error(
+        `No encrypted recovery backup was found for @${userId} on this relay. If another device is already signed in, use Link device there first.`
+      );
+    }
+    throw error;
+  }
+  const sealedBackupJson = bytesToUtf8(base64ToBytes(response.encrypted_backup_bytes_base64));
+  const backup = await openJsonWithPassphrase<BrowserRecoveryBackup>(sealedBackupJson, passphrase);
+  if (backup.version !== BROWSER_RECOVERY_BACKUP_VERSION) {
+    throw new Error(`Unsupported browser recovery backup version '${backup.version}'.`);
+  }
+  if (backup.userId !== userId || backup.keys.userId !== userId) {
+    throw new Error(`Encrypted recovery backup for @${userId} is malformed.`);
+  }
+  const normalizedServerUrl = normalizeHostedServerUrlWithFallback(
+    validateWebServerUrl(backup.serverUrl).toString().replace(/\/+$/, "")
+  );
+  if (!normalizedServerUrl && !isLoopbackHostname(location.hostname)) {
+    throw new Error(HOSTED_SERVER_SETUP_MESSAGE);
+  }
+  return {
+    ...backup,
+    serverUrl: normalizedServerUrl,
+    username: backup.username.trim().replace(/^@/, "").toLowerCase(),
+    usernameLookupEnabled: Boolean(backup.usernameLookupEnabled && backup.username.trim()),
+  };
+}
+
+async function recoverBrowserProfileFromBackup(
+  api: PqmsgApi,
+  userId: string,
+  passphrase: string
+): Promise<{ keys: GeneratedKeys; identity: BrowserSessionIdentity; serverUrl: string }> {
+  const backup = await downloadBrowserRecoveryBackup(api, userId, passphrase);
+  const recoveredDeviceId = nextRecoveredBrowserDeviceId(userId);
+  await api.linkDevice(
+    userId,
+    recoveredDeviceId,
+    buildLinkDeviceAuthHeaders(backup.keys, recoveredDeviceId)
+  );
+  const reboundKeys = rebindKeysToNewDevice(backup.keys, recoveredDeviceId);
+  const publishPayload = buildPublishPrekeysPayload(reboundKeys);
+  await api.publishPrekeys(
+    reboundKeys.userId,
+    publishPayload,
+    buildPrekeysAuthHeaders(reboundKeys, publishPayload)
+  );
+  await api.getSenderCertificate(
+    userId,
+    buildSenderCertificateAuthHeaders(reboundKeys)
+  );
+
+  let identity: BrowserSessionIdentity = {
+    displayName: backup.displayName || userId,
+    username: backup.username,
+    usernameLookupEnabled: backup.usernameLookupEnabled,
+  };
+  try {
+    const profile = await api.getProfile(
+      userId,
+      buildProfileGetAuthHeaders(reboundKeys, userId)
+    );
+    identity = {
+      displayName: profile.display_name?.trim() || identity.displayName,
+      username: profile.username?.trim() || identity.username,
+      usernameLookupEnabled: Boolean(profile.username_lookup_enabled && (profile.username?.trim() || identity.username)),
+    };
+  } catch {
+    // Keep recovery usable even if profile metadata is temporarily unavailable.
+  }
+
+  await saveKeys(userId, passphrase, reboundKeys);
+  writeProfileDisplayName(userId, userId, identity.displayName || userId);
+  await syncBrowserRecoveryBackupBestEffort(api, reboundKeys, passphrase, identity, backup.serverUrl);
+  return { keys: reboundKeys, identity, serverUrl: backup.serverUrl };
+}
 
 function parsePrivateGroupStateJson(stateJson: string): PrivateGroupState | null {
   try {
@@ -428,7 +755,12 @@ function extractPrivateGroupInviteTarget(rawInput?: string | null): PrivateGroup
   if (!inviteToken || !inviteSecretBase64) {
     return null;
   }
-  const serverUrl = (parsed.searchParams.get("server") || setup.serverUrl || location.origin).trim();
+  const serverUrl = normalizeHostedServerUrlWithFallback(
+    (parsed.searchParams.get("server") || setup.serverUrl || location.origin).trim()
+  );
+  if (!serverUrl) {
+    return null;
+  }
   return {
     serverUrl,
     inviteToken,
@@ -1027,7 +1359,11 @@ async function syncPrivateGroupMessagesBackground(): Promise<void> {
 async function bootstrapApp(): Promise<void> {
   try {
     await initMetadataStorage();
-    setup = loadSetup();
+    const loadedSetup = loadSetup();
+    setup = applyHostedRelayBootstrap(loadedSetup);
+    if (setup.serverUrl !== loadedSetup.serverUrl) {
+      saveSetup(setup);
+    }
     ensureSupportedWebEnvironment();
     await ensureWebPqRuntime();
   } catch (error) {
@@ -1197,17 +1533,23 @@ function installKeyboardShortcutLauncher(): void {
 }
 
 async function loadServerCapabilitiesCached(): Promise<ServerCapabilitiesResponse | null> {
-  if (cachedCapabilities && cachedCapabilitiesServerUrl === setup.serverUrl) {
+  const serverUrl = configuredServerUrlOrNull();
+  if (!serverUrl) {
+    cachedCapabilities = null;
+    cachedCapabilitiesServerUrl = null;
+    return null;
+  }
+  if (cachedCapabilities && cachedCapabilitiesServerUrl === serverUrl) {
     return cachedCapabilities;
   }
   try {
-    const caps = await new PqmsgApi(setup.serverUrl).getCapabilities();
+    const caps = await new PqmsgApi(serverUrl).getCapabilities();
     cachedCapabilities = caps;
-    cachedCapabilitiesServerUrl = setup.serverUrl;
+    cachedCapabilitiesServerUrl = serverUrl;
     return caps;
   } catch {
     cachedCapabilities = null;
-    cachedCapabilitiesServerUrl = setup.serverUrl;
+    cachedCapabilitiesServerUrl = serverUrl;
     return null;
   }
 }
@@ -1575,15 +1917,15 @@ async function loadPeerSealedDeliveryToken(
   if (cached) {
     return cached;
   }
-  const headers = buildProfileGetAuthHeaders(k, peerUserId);
-  let profile = await api.getProfile(peerUserId, headers);
+  const loadProfile = () => api.getProfile(peerUserId, buildProfileGetAuthHeaders(k, peerUserId));
+  let profile = await loadProfile();
   let sealedDeliveryToken = profile.sealed_delivery_token?.trim() || "";
   if (!sealedDeliveryToken) {
     const contactHeaders = buildContactsUpsertAuthHeaders(k, peerUserId, "", false, "");
     await api.upsertContact(k.userId, { contact_user_id: peerUserId }, contactHeaders);
     markConversationAccepted(peerUserId);
     void loadContactsBackground();
-    profile = await api.getProfile(peerUserId, headers);
+    profile = await loadProfile();
     sealedDeliveryToken = profile.sealed_delivery_token?.trim() || "";
   }
   if (!sealedDeliveryToken) {
@@ -1672,7 +2014,10 @@ function render(view: AppView): void {
       renderCreateAccount();
       break;
     case "sign-in":
-      renderSignIn();
+      renderPortableSignIn();
+      break;
+    case "import-device":
+      renderImportDevice();
       break;
     case "conversations":
       void renderConversations();
@@ -2167,59 +2512,107 @@ async function loadUsernamePeerFromHandle(username: string, api?: PqmsgApi): Pro
 // ---------------------------------------------------------------------------
 
 function renderOnboarding(): void {
+  const configuredServer = configuredServerUrlOrNull();
+  const hostedRelayReady = !isLoopbackHostname(location.hostname) && !!configuredServer;
   app.innerHTML = `
     <div class="onboarding">
-      <div class="onboarding-card">
-        ${ONBOARDING_LOGO}
-        <div class="onboarding-copy">
-          <p class="onboarding-lede">
-            Pick a username, protect this browser with a passphrase, and start private messaging without wading through advanced setup first.
-          </p>
-          <div class="onboarding-points" aria-label="Onboarding overview">
-            <div class="onboarding-point">
-              <strong>Username first</strong>
-              <span>Your account starts from a simple @name instead of a long utility form.</span>
+      <div class="onboarding-card onboarding-card-home">
+        <div class="onboarding-home-grid">
+          <section class="onboarding-home-hero">
+            ${ONBOARDING_LOGO}
+            <div class="onboarding-copy onboarding-copy-home">
+              <span class="onboarding-eyebrow">Hosted web onboarding</span>
+              <p class="onboarding-lede">
+                Create a browser profile, unlock one already saved here, or bring over a linked device package without wading through setup first.
+              </p>
             </div>
-            <div class="onboarding-point">
-              <strong>Local passphrase</strong>
-              <span>Your keys stay on this browser and are unlocked only with the passphrase you choose.</span>
+            <div class="onboarding-points onboarding-points-grid" aria-label="Onboarding overview">
+              <div class="onboarding-point">
+                <strong>Username first</strong>
+                <span>Your account starts from a simple @name instead of a long utility form.</span>
+              </div>
+              <div class="onboarding-point">
+                <strong>Local passphrase</strong>
+                <span>Your keys stay on this browser and unlock only with the passphrase you choose.</span>
+              </div>
+              <div class="onboarding-point onboarding-point-wide">
+                <strong>Linked-device import</strong>
+                <span>Use a protected package from another browser or device instead of creating a second disconnected profile.</span>
+              </div>
             </div>
-            <div class="onboarding-point">
-              <strong>Advanced stays hidden</strong>
-              <span>Relay and transport details are still available, but they no longer dominate first run.</span>
+            <div class="onboarding-chip-row" aria-label="Onboarding highlights">
+              <span class="onboarding-chip">Local keys only</span>
+              <span class="onboarding-chip">Browser unlock</span>
+              <span class="onboarding-chip">Advanced stays optional</span>
             </div>
-          </div>
+          </section>
+          <section class="onboarding-home-panel">
+            <div class="onboarding-home-panel-head">
+              <h2>Start on this browser</h2>
+              <p>Create a fresh profile, unlock one already saved locally, or import a linked-device package from another session.</p>
+            </div>
+            <div class="onboarding-actions onboarding-actions-home">
+              <button id="onb-create" class="btn-primary">Create Account</button>
+              <button id="onb-signin" class="btn-secondary">Unlock This Browser</button>
+              <button id="onb-import-device" class="btn-secondary">Import Linked Device</button>
+            </div>
+            <div class="onboarding-status-stack">
+              ${hostedRelayReady ? `
+                <div class="beta-banner beta-banner-info onboarding-inline-banner">
+                  <strong>Relay ready</strong>
+                  <p>This browser will use ${escHtml(configuredServer!)}.</p>
+                </div>
+              ` : `
+                <div class="beta-banner beta-banner-warning onboarding-inline-banner">
+                  <strong>Relay needed</strong>
+                  <p>${escHtml(HOSTED_SERVER_SETUP_MESSAGE)}</p>
+                </div>
+              `}
+              <details class="onb-advanced">
+                <summary>Advanced relay setup</summary>
+                <label class="field">
+                  <span>Server URL</span>
+                  <input id="onb-server" type="text" value="${escHtml(setup.serverUrl)}" placeholder="${escHtml(isLoopbackHostname(location.hostname) ? DEFAULT_SETUP.serverUrl : "https://relay.example.com")}" />
+                  <small class="field-help">${
+                    isLoopbackHostname(location.hostname)
+                      ? "Use loopback HTTP only for local development."
+                      : "Hosted web origins require an HTTPS relay URL."
+                  }</small>
+                </label>
+                <button id="onb-save-server" class="btn-sm">Save</button>
+              </details>
+              <details class="onboarding-scope-details">
+                <summary>Current web scope</summary>
+                <div class="onboarding-scope-pills" aria-label="Current web capabilities">
+                  <span>Direct messages</span>
+                  <span>Private groups by capability</span>
+                  <span>No calling on web</span>
+                </div>
+                <p>${escHtml(WEB_BETA_SCOPE_SUMMARY)}</p>
+              </details>
+            </div>
+            <p class="onboarding-note onboarding-note-home">Your keys are generated locally and never leave this browser profile.</p>
+          </section>
         </div>
-        <div class="onboarding-actions">
-          <button id="onb-create" class="btn-primary">Create Account</button>
-          <button id="onb-signin" class="btn-secondary">Unlock This Browser</button>
-        </div>
-        <details class="onb-advanced">
-          <summary>Advanced</summary>
-          <label class="field">
-            <span>Server URL</span>
-            <input id="onb-server" type="text" value="${escHtml(setup.serverUrl)}" />
-          </label>
-          <button id="onb-save-server" class="btn-sm">Save</button>
-        </details>
-        <div class="beta-banner beta-banner-warning">
-          <strong>Web messaging today</strong>
-          <p>${escHtml(WEB_BETA_SCOPE_SUMMARY)}</p>
-        </div>
-        <p class="onboarding-note">Your keys are generated locally and never leave this browser profile.</p>
       </div>
     </div>
   `;
 
   q("#onb-create").addEventListener("click", () => navigateTo({ screen: "create-account" }));
   q("#onb-signin").addEventListener("click", () => navigateTo({ screen: "sign-in" }));
+  q("#onb-import-device").addEventListener("click", () => navigateTo({ screen: "import-device" }));
 
   q("#onb-save-server").addEventListener("click", () => {
     const server = q<HTMLInputElement>("#onb-server").value.trim();
     if (server) {
       try {
         const parsed = validateWebServerUrl(server);
-        setup.serverUrl = parsed.toString().replace(/\/+$/, "");
+        setup.serverUrl = normalizeHostedServerUrlWithFallback(
+          parsed.toString().replace(/\/+$/, "")
+        );
+        if (!setup.serverUrl && !isLoopbackHostname(location.hostname)) {
+          throw new Error(HOSTED_SERVER_SETUP_MESSAGE);
+        }
         saveSetup(setup);
         cachedCapabilities = null;
         cachedCapabilitiesServerUrl = null;
@@ -2233,6 +2626,7 @@ function renderOnboarding(): void {
 
 function renderCreateAccount(): void {
   const localAccounts = listLocalKeyUsers();
+  const hostedServerSetupRequired = !isLoopbackHostname(location.hostname) && !configuredServerUrlOrNull();
   app.innerHTML = `
     <div class="onboarding">
       <div class="onboarding-card">
@@ -2260,6 +2654,16 @@ function renderCreateAccount(): void {
             <span>Confirm Passphrase</span>
             <input id="onb-pass2" type="password" placeholder="Re-enter passphrase" />
           </label>
+          ${
+            hostedServerSetupRequired
+              ? `
+          <div class="beta-banner beta-banner-warning">
+            <strong>Relay required</strong>
+            <p>${escHtml(HOSTED_SERVER_SETUP_MESSAGE)}</p>
+          </div>
+        `
+              : ""
+          }
           <button id="onb-go" class="btn-primary">Create Account</button>
           <button id="onb-back" class="btn-link">&larr; Back</button>
         </div>
@@ -2289,7 +2693,7 @@ function renderCreateAccount(): void {
             </div>
           </div>
         `
-            : `<p class="onboarding-note">Profiles created here stay bound to this browser origin unless you export or link another device.</p>`
+            : `<p class="onboarding-note">Profiles created here also upload an encrypted recovery backup, so you can sign in again from another browser with the same username and passphrase.</p>`
         }
         <p id="onb-status" class="onboarding-status"></p>
       </div>
@@ -2396,6 +2800,8 @@ function renderCreateAccount(): void {
     progress.classList.remove("hidden");
 
     try {
+      setup.serverUrl = requireConfiguredServerUrl();
+      saveSetup(setup);
       status.textContent = "Loading crypto runtime...";
       setProgress(progress, 10);
       await ensureWebPqRuntime();
@@ -2437,30 +2843,30 @@ function renderCreateAccount(): void {
       setProgress(progress, 50);
       const api = new PqmsgApi(setup.serverUrl);
       if (!provisionedOnRelay) {
-      await api.registerUser({
-        user_id: genKeys.userId,
-        identity_x25519_pub: genKeys.identityX25519Pub,
-        identity_sig_pub: genKeys.identitySigPub,
-        identity_pq_sig_pub: genKeys.identityPqSigPub,
-        device_id: genKeys.deviceId,
-      });
+        await registerUserWithPow(api, {
+          user_id: genKeys.userId,
+          identity_x25519_pub: genKeys.identityX25519Pub,
+          identity_sig_pub: genKeys.identitySigPub,
+          identity_pq_sig_pub: genKeys.identityPqSigPub,
+          device_id: genKeys.deviceId,
+        });
 
-      status.textContent = "Publishing prekeys…";
-      setProgress(progress, 80);
-      const payload = buildPublishPrekeysPayload(genKeys);
-      const headers = buildPrekeysAuthHeaders(genKeys, payload);
-      await api.publishPrekeys(genKeys.userId, payload, headers);
+        status.textContent = "Publishing prekeys…";
+        setProgress(progress, 80);
+        const payload = buildPublishPrekeysPayload(genKeys);
+        const headers = buildPrekeysAuthHeaders(genKeys, payload);
+        await api.publishPrekeys(genKeys.userId, payload, headers);
 
-      try {
-        const profileHeaders = buildProfileUpsertAuthHeaders(genKeys, displayName, "", false, "", "");
-        await api.upsertProfile(
-          genKeys.userId,
-          { display_name: displayName, username_lookup_enabled: false },
-          profileHeaders
-        );
-      } catch {
-        notify("Account created, but profile name could not be synced yet", "info");
-      }
+        try {
+          const profileHeaders = buildProfileUpsertAuthHeaders(genKeys, displayName, "", false, "", "");
+          await api.upsertProfile(
+            genKeys.userId,
+            { display_name: displayName, username_lookup_enabled: false },
+            profileHeaders
+          );
+        } catch {
+          notify("Account created, but profile name could not be synced yet", "info");
+        }
 
       }
 
@@ -2483,6 +2889,25 @@ function renderCreateAccount(): void {
       keys = genKeys;
       cachedProfileNames[userId] = displayName;
       writeProfileDisplayName(userId, userId, displayName);
+      status.textContent = "Syncing encrypted recovery backup...";
+      setProgress(progress, 96);
+      try {
+        await syncBrowserRecoveryBackupRequired(
+          api,
+          genKeys,
+          pass,
+          {
+            displayName,
+            username: "",
+            usernameLookupEnabled: false,
+          },
+          setup.serverUrl
+        );
+      } catch (backupError) {
+        throw new Error(
+          `Your local profile was saved, but encrypted recovery backup sync failed. Keep this browser signed in and retry shortly: ${errorMsg(backupError)}`
+        );
+      }
 
       setProgress(progress, 100);
       status.textContent = "Ready!";
@@ -2498,15 +2923,18 @@ function renderCreateAccount(): void {
 }
 
 function renderSignIn(): void {
+  renderPortableSignIn();
+  return;
   const localAccounts = listLocalKeyUsers();
+  const hostedServerSetupRequired = !isLoopbackHostname(location.hostname) && !configuredServerUrlOrNull();
   app.innerHTML = `
     <div class="onboarding">
       <div class="onboarding-card">
         ${ONBOARDING_LOGO}
         <div class="onboarding-form">
           <div class="onboarding-copy onboarding-copy-tight">
-            <h2 class="onboarding-section-title">Unlock this browser</h2>
-            <p class="onboarding-note">Use the username and passphrase for a profile that was already created on this browser origin.</p>
+            <h2 class="onboarding-section-title">Sign in to your account</h2>
+            <p class="onboarding-note">If this browser already has local keys they will be unlocked. Otherwise PQMsg will try your encrypted recovery backup and link this browser automatically.</p>
           </div>
           ${
             localAccounts.length > 0
@@ -2533,7 +2961,7 @@ function renderSignIn(): void {
               </div>
             </div>
           `
-              : `<p class="onboarding-note">Only profiles created in this browser origin (${escHtml(location.origin)}) can be unlocked here.</p>`
+              : `<p class="onboarding-note">No local profiles are saved on this browser yet. Enter your username and passphrase to restore from the encrypted recovery backup on this relay, or import a linked-device package from another signed-in browser.</p>`
           }
           <label class="field">
             <span>Username</span>
@@ -2543,7 +2971,18 @@ function renderSignIn(): void {
             <span>Passphrase</span>
             <input id="onb-pass" type="password" placeholder="The passphrase protecting your local keys" />
           </label>
-          <button id="onb-go" class="btn-primary">Unlock</button>
+          ${
+            hostedServerSetupRequired
+              ? `
+          <div class="beta-banner beta-banner-warning">
+            <strong>Relay required</strong>
+            <p>${escHtml(HOSTED_SERVER_SETUP_MESSAGE)}</p>
+          </div>
+        `
+              : ""
+          }
+          <button id="onb-go" class="btn-primary">Sign In</button>
+          <button id="onb-import-device" class="btn-secondary" type="button">Import Linked Device Instead</button>
           <button id="onb-back" class="btn-link">&larr; Back</button>
         </div>
         <p id="onb-status" class="onboarding-status"></p>
@@ -2557,6 +2996,7 @@ function renderSignIn(): void {
   const status = q("#onb-status");
 
   q("#onb-back").addEventListener("click", () => navigateTo({ screen: "onboarding" }));
+  q("#onb-import-device").addEventListener("click", () => navigateTo({ screen: "import-device" }));
 
   for (const button of document.querySelectorAll<HTMLElement>("[data-local-account-fill]")) {
     button.addEventListener("click", () => {
@@ -2607,6 +3047,8 @@ function renderSignIn(): void {
     status.classList.remove("error-text");
 
     try {
+      setup.serverUrl = requireConfiguredServerUrl();
+      saveSetup(setup);
       status.textContent = "Loading crypto runtime...";
       await ensureWebPqRuntime();
 
@@ -2658,6 +3100,229 @@ function renderSignIn(): void {
       keys = loadedKeys;
 
       status.textContent = "Loading your chats…";
+      await bootstrapIdentityData();
+      status.textContent = "Signed in!";
+      setTimeout(() => navigateTo({ screen: "conversations" }), 400);
+    } catch (e) {
+      status.textContent = errorMsg(e);
+      status.classList.add("error-text");
+      goBtn.disabled = false;
+    }
+  });
+}
+
+function renderPortableSignIn(): void {
+  const localAccounts = listLocalKeyUsers();
+  const hostedServerSetupRequired = !isLoopbackHostname(location.hostname) && !configuredServerUrlOrNull();
+  app.innerHTML = `
+    <div class="onboarding">
+      <div class="onboarding-card">
+        ${ONBOARDING_LOGO}
+        <div class="onboarding-form">
+          <div class="onboarding-copy onboarding-copy-tight">
+            <h2 class="onboarding-section-title">Sign in to your account</h2>
+            <p class="onboarding-note">If this browser already has local keys they will be unlocked. Otherwise PQMsg will use your encrypted recovery backup and link this browser automatically.</p>
+          </div>
+          ${
+            localAccounts.length > 0
+              ? `
+            <div class="contacts-section">
+              <h3 class="section-label">Profiles on this browser</h3>
+              <div class="contacts-list">
+                ${localAccounts
+                  .map(
+                    (accountId) => `
+                  <div class="contact-row-item">
+                    <button type="button" class="contact-row contact-row-main" data-local-account-fill="${escHtml(accountId)}">
+                      <div class="avatar avatar-sm">${escHtml(accountId.slice(0, 2).toUpperCase())}</div>
+                      <div class="contact-info">
+                        <span class="contact-name">${escHtml(accountId)}</span>
+                        <span class="contact-id">Tap to fill username</span>
+                      </div>
+                    </button>
+                    <button type="button" class="btn-secondary contact-row-forget" data-local-account-forget="${escHtml(accountId)}">Forget profile</button>
+                  </div>
+                `
+                  )
+                  .join("")}
+              </div>
+            </div>
+          `
+              : `<p class="onboarding-note">No local profiles are saved on this browser yet. Enter your username and passphrase to restore from the encrypted recovery backup on this relay, or import a linked-device package from another signed-in browser.</p>`
+          }
+          <label class="field">
+            <span>Username</span>
+            <input id="onb-uid" type="text" placeholder="e.g. alice" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Passphrase</span>
+            <input id="onb-pass" type="password" placeholder="The passphrase protecting your account" />
+          </label>
+          ${
+            hostedServerSetupRequired
+              ? `
+          <div class="beta-banner beta-banner-warning">
+            <strong>Relay required</strong>
+            <p>${escHtml(HOSTED_SERVER_SETUP_MESSAGE)}</p>
+          </div>
+        `
+              : ""
+          }
+          <button id="onb-go" class="btn-primary">Sign In</button>
+          <button id="onb-import-device" class="btn-secondary" type="button">Import Linked Device Instead</button>
+          <button id="onb-back" class="btn-link">&larr; Back</button>
+        </div>
+        <p id="onb-status" class="onboarding-status"></p>
+      </div>
+    </div>
+  `;
+
+  const uidInput = q<HTMLInputElement>("#onb-uid");
+  const passInput = q<HTMLInputElement>("#onb-pass");
+  const goBtn = q<HTMLButtonElement>("#onb-go");
+  const status = q("#onb-status");
+
+  q("#onb-back").addEventListener("click", () => navigateTo({ screen: "onboarding" }));
+  q("#onb-import-device").addEventListener("click", () => navigateTo({ screen: "import-device" }));
+
+  for (const button of document.querySelectorAll<HTMLElement>("[data-local-account-fill]")) {
+    button.addEventListener("click", () => {
+      uidInput.value = button.dataset.localAccountFill || "";
+      passInput.focus();
+      status.textContent = "";
+      status.classList.remove("error-text");
+    });
+  }
+
+  for (const button of document.querySelectorAll<HTMLElement>("[data-local-account-forget]")) {
+    button.addEventListener("click", async () => {
+      const accountId = button.dataset.localAccountForget || "";
+      if (!accountId) {
+        return;
+      }
+      if (!confirm(`Forget the saved local profile for @${accountId} on this browser? This removes local keys, sessions, pins, and cached chats from this browser only.`)) {
+        return;
+      }
+      await wipeLocalState(accountId);
+      if (setup.userId === accountId) {
+        setup = { ...DEFAULT_SETUP, serverUrl: setup.serverUrl, suiteLabel: setup.suiteLabel };
+        saveSetup(setup);
+      }
+      notify(`Forgot the local profile for @${accountId} on this browser.`, "info");
+      renderPortableSignIn();
+    });
+  }
+
+  goBtn.addEventListener("click", async () => {
+    const uid = normalizeBrowserUserId(uidInput.value);
+    const pass = passInput.value;
+    if (!uidInput.value.trim()) {
+      status.textContent = "Enter the username you want to sign in with.";
+      status.classList.add("error-text");
+      uidInput.focus();
+      return;
+    }
+    if (!passInput.value) {
+      status.textContent = "Enter the passphrase for this account.";
+      status.classList.add("error-text");
+      passInput.focus();
+      return;
+    }
+    uidInput.value = uid;
+
+    goBtn.disabled = true;
+    status.classList.remove("error-text");
+
+    try {
+      setup.serverUrl = requireConfiguredServerUrl();
+      saveSetup(setup);
+      status.textContent = "Loading crypto runtime...";
+      await ensureWebPqRuntime();
+
+      const api = new PqmsgApi(setup.serverUrl);
+      const localProfileExists = hasLocalKeys(uid);
+      let loadedKeys: GeneratedKeys;
+      let identity: BrowserSessionIdentity = {
+        displayName: readProfileDisplayName(uid, uid)?.trim() || uid,
+        username: "",
+        usernameLookupEnabled: false,
+      };
+
+      if (localProfileExists) {
+        status.textContent = "Unlocking saved browser keys...";
+        loadedKeys = await loadKeys(uid, pass);
+        status.textContent = "Verifying account...";
+        try {
+          await api.getSenderCertificate(uid, buildSenderCertificateAuthHeaders(loadedKeys));
+        } catch (error) {
+          const message = errorMsg(error);
+          if (isAuthSignatureFailureMessage(message)) {
+            const capabilities = await loadServerCapabilitiesCached();
+            if (
+              canUseDevelopmentRelayReset(capabilities)
+              && confirm(
+                `Saved local keys for @${uid} do not match the current server record. Repair the saved keys for @${uid} on this development relay by resetting the relay record and re-publishing the keys already saved in this browser?`
+              )
+            ) {
+              status.textContent = `Repairing @${uid} on the development relay…`;
+              loadedKeys = await repairIdentityOnDevelopmentRelay(loadedKeys, identity.displayName, pass);
+              status.textContent = "Verifying repaired account...";
+              await api.getSenderCertificate(uid, buildSenderCertificateAuthHeaders(loadedKeys));
+            } else {
+              throw new Error(explainLocalIdentityMismatch(uid));
+            }
+          } else {
+            throw error;
+          }
+        }
+        try {
+          const profile = await api.getProfile(uid, buildProfileGetAuthHeaders(loadedKeys, uid));
+          identity = {
+            displayName: profile.display_name?.trim() || identity.displayName,
+            username: profile.username?.trim() || "",
+            usernameLookupEnabled: Boolean(profile.username_lookup_enabled && profile.username?.trim()),
+          };
+        } catch {
+          // Keep local unlock usable even if profile metadata is unavailable.
+        }
+        try {
+          await syncBrowserRecoveryBackupRequired(api, loadedKeys, pass, identity, setup.serverUrl);
+        } catch {
+          await assertRecoveryBackupReachable(api, uid);
+          notify(
+            `Signed in, but encrypted recovery backup sync failed on this attempt. Existing recovery backup is still available for @${uid}. Retry sync from this browser soon.`,
+            "error"
+          );
+        }
+      } else {
+        status.textContent = "Recovering encrypted backup...";
+        await wipeLocalState(uid);
+        const recovered = await recoverBrowserProfileFromBackup(api, uid, pass);
+        loadedKeys = recovered.keys;
+        identity = recovered.identity;
+        setup.serverUrl = recovered.serverUrl;
+        saveSetup(setup);
+        cachedCapabilities = null;
+        cachedCapabilitiesServerUrl = null;
+      }
+
+      setup = {
+        serverUrl: setup.serverUrl,
+        userId: uid,
+        deviceId: loadedKeys.deviceId,
+        suiteLabel: loadedKeys.suite,
+        peerUserId: "",
+        displayName: identity.displayName,
+        username: identity.username,
+        usernameLookupEnabled: identity.usernameLookupEnabled,
+      };
+      saveSetup(setup);
+      sessionStorage.setItem("pqmsg.passphrase", pass);
+      keys = loadedKeys;
+      cachedProfileNames[uid] = identity.displayName;
+      writeProfileDisplayName(uid, uid, identity.displayName);
+
+      status.textContent = "Loading your chats...";
       await bootstrapIdentityData();
       status.textContent = "Signed in!";
       setTimeout(() => navigateTo({ screen: "conversations" }), 400);
@@ -2802,6 +3467,191 @@ function filterConversationRows(rows: UnifiedConversationRow[], filter: InboxFil
         return isArchived;
       default:
         return true;
+    }
+  });
+}
+
+function renderImportDevice(): void {
+  app.innerHTML = `
+    <div class="onboarding">
+      <div class="onboarding-card">
+        ${ONBOARDING_LOGO}
+        <div class="onboarding-form">
+          <div class="onboarding-copy onboarding-copy-tight">
+            <h2 class="onboarding-section-title">Import linked device</h2>
+            <p class="onboarding-note">Use a protected onboarding package from a device that is already signed in to this account.</p>
+          </div>
+          <label class="field">
+            <span>Linked-device package</span>
+            <textarea id="onb-package" rows="8" class="mono" placeholder='Paste the protected package JSON here'></textarea>
+            <small class="field-help">This package carries the adopted device ID, fresh prekeys, and relay URL for the new browser.</small>
+          </label>
+          <label class="field">
+            <span>Package passphrase</span>
+            <input id="onb-package-pass" type="password" placeholder="Unlocks the protected onboarding package" />
+          </label>
+          <label class="field">
+            <span>Browser passphrase (optional)</span>
+            <input id="onb-browser-pass" type="password" placeholder="Protect the imported keys on this browser" />
+            <small class="field-help">Leave both browser passphrase fields empty to reuse the package passphrase for local browser storage.</small>
+          </label>
+          <label class="field">
+            <span>Confirm Browser Passphrase</span>
+            <input id="onb-browser-pass2" type="password" placeholder="Re-enter the browser passphrase" />
+          </label>
+          <button id="onb-import-go" class="btn-primary" type="button">Import & Sign In</button>
+          <button id="onb-import-back" class="btn-link" type="button">&larr; Back</button>
+        </div>
+        <p id="onb-import-status" class="onboarding-status"></p>
+      </div>
+    </div>
+  `;
+
+  const packageInput = q<HTMLTextAreaElement>("#onb-package");
+  const packagePassInput = q<HTMLInputElement>("#onb-package-pass");
+  const browserPassInput = q<HTMLInputElement>("#onb-browser-pass");
+  const browserPass2Input = q<HTMLInputElement>("#onb-browser-pass2");
+  const goBtn = q<HTMLButtonElement>("#onb-import-go");
+  const status = q("#onb-import-status");
+
+  q("#onb-import-back").addEventListener("click", () => navigateTo({ screen: "onboarding" }));
+
+  goBtn.addEventListener("click", async () => {
+    const packageJson = packageInput.value.trim();
+    const packagePassphrase = packagePassInput.value;
+    const browserPassphrase = browserPassInput.value;
+    const browserPassphraseConfirm = browserPass2Input.value;
+
+    if (!packageJson) {
+      status.textContent = "Paste the linked-device package exported from a signed-in device.";
+      status.classList.add("error-text");
+      packageInput.focus();
+      return;
+    }
+    if (!packagePassphrase) {
+      status.textContent = "Enter the passphrase that protects the linked-device package.";
+      status.classList.add("error-text");
+      packagePassInput.focus();
+      return;
+    }
+
+    const usePackagePassphraseLocally = !browserPassphrase && !browserPassphraseConfirm;
+    const localBrowserPassphrase = usePackagePassphraseLocally ? packagePassphrase : browserPassphrase;
+    if (!usePackagePassphraseLocally) {
+      if (!browserPassphrase) {
+        status.textContent = "Enter a browser passphrase or leave both browser passphrase fields empty.";
+        status.classList.add("error-text");
+        browserPassInput.focus();
+        return;
+      }
+      if (browserPassphrase !== browserPassphraseConfirm) {
+        status.textContent = "Browser passphrases do not match";
+        status.classList.add("error-text");
+        browserPass2Input.focus();
+        return;
+      }
+    }
+
+    goBtn.disabled = true;
+    status.classList.remove("error-text");
+
+    try {
+      status.textContent = "Loading crypto runtime...";
+      await ensureWebPqRuntime();
+
+      status.textContent = "Opening linked-device package...";
+      const imported = openSecondaryDevicePackage(packageJson, packagePassphrase);
+
+      const normalizedServerUrl = normalizeHostedServerUrlWithFallback(
+        validateWebServerUrl(imported.serverUrl).toString().replace(/\/+$/, "")
+      );
+      if (!normalizedServerUrl && !isLoopbackHostname(location.hostname)) {
+        throw new Error(HOSTED_SERVER_SETUP_MESSAGE);
+      }
+      if (hasLocalKeys(imported.userId)) {
+        if (
+          !confirm(
+            `This browser already has a saved local profile for @${imported.userId}. Replace that local state with the linked-device package for ${imported.deviceId}?`
+          )
+        ) {
+          throw new Error(`Import stopped because this browser already has a saved local profile for @${imported.userId}.`);
+        }
+        if (realtimeInbox) {
+          realtimeInbox.disconnect();
+          realtimeInbox = null;
+        }
+        stopAllTimers();
+        keys = null;
+        activeChatPeer = null;
+        activeGroupId = null;
+        await wipeLocalState(imported.userId);
+      }
+
+      setup.serverUrl = normalizedServerUrl;
+      saveSetup(setup);
+      cachedCapabilities = null;
+      cachedCapabilitiesServerUrl = null;
+
+      const api = new PqmsgApi(normalizedServerUrl);
+      status.textContent = "Publishing linked-device prekeys...";
+      const publishPayload = buildPublishPrekeysPayload(imported.keys);
+      const prekeyHeaders = buildPrekeysAuthHeaders(imported.keys, publishPayload);
+      await api.publishPrekeys(imported.userId, publishPayload, prekeyHeaders);
+
+      status.textContent = "Verifying imported account...";
+      await api.getSenderCertificate(imported.userId, buildSenderCertificateAuthHeaders(imported.keys));
+
+      let displayName = readProfileDisplayName(imported.userId, imported.userId)?.trim() || imported.userId;
+      let username = "";
+      let usernameLookupEnabled = false;
+      try {
+        const profile = await api.getProfile(imported.userId, buildProfileGetAuthHeaders(imported.keys));
+        displayName = profile.display_name?.trim() || displayName;
+        username = profile.username?.trim() || "";
+        usernameLookupEnabled = Boolean(profile.username_lookup_enabled && username);
+      } catch {
+        // Keep the imported browser usable even if profile metadata is unavailable.
+      }
+
+      status.textContent = "Saving imported keys on this browser...";
+      await saveKeys(imported.userId, localBrowserPassphrase, imported.keys);
+      writeProfileDisplayName(imported.userId, imported.userId, displayName);
+
+      setup = {
+        serverUrl: normalizedServerUrl,
+        userId: imported.userId,
+        deviceId: imported.deviceId,
+        suiteLabel: imported.suite,
+        peerUserId: "",
+        displayName,
+        username,
+        usernameLookupEnabled,
+      };
+      saveSetup(setup);
+      sessionStorage.setItem("pqmsg.passphrase", localBrowserPassphrase);
+      keys = imported.keys;
+      cachedProfileNames[imported.userId] = displayName;
+      await syncBrowserRecoveryBackupBestEffort(
+        api,
+        imported.keys,
+        localBrowserPassphrase,
+        {
+          displayName,
+          username,
+          usernameLookupEnabled,
+        },
+        normalizedServerUrl
+      );
+
+      status.textContent = "Loading your chats...";
+      await bootstrapIdentityData();
+      status.textContent = "Imported!";
+      notify(`Linked device imported for @${imported.userId}.`, "success");
+      setTimeout(() => navigateTo({ screen: "conversations" }), 400);
+    } catch (e) {
+      status.textContent = errorMsg(e);
+      status.classList.add("error-text");
+      goBtn.disabled = false;
     }
   });
 }
@@ -7236,8 +8086,11 @@ async function renderSettings(): Promise<void> {
         </div>
         <div class="settings-section">
           <h3>Session</h3>
-          <p class="settings-section-intro">Sign out of this browser while keeping your encrypted local keys available for a later sign-in.</p>
-          <button id="set-logout" class="btn-secondary">Log Out</button>
+          <p class="settings-section-intro">Lock this browser while keeping the encrypted local profile available for a later unlock. If you want to remove this browser profile entirely, forget it below.</p>
+          <div class="settings-row">
+            <button id="set-logout" class="btn-secondary">Lock This Browser</button>
+            <button id="set-forget-local" class="btn-secondary">Forget This Browser Profile</button>
+          </div>
         </div>
         <div class="settings-section">
           <h3>People</h3>
@@ -7394,8 +8247,8 @@ async function renderSettings(): Promise<void> {
       intro.textContent = "This server decides which web features are available right now.";
     }
   }
-  q<HTMLButtonElement>("#set-devices")?.replaceChildren("Devices");
-  q<HTMLButtonElement>("#set-server-info")?.replaceChildren("Server details");
+  qMaybe<HTMLButtonElement>("#set-devices")?.replaceChildren("Devices");
+  qMaybe<HTMLButtonElement>("#set-server-info")?.replaceChildren("Server details");
 
   // Save profile
   q<HTMLInputElement>("#set-username").addEventListener("input", () => {
@@ -7443,7 +8296,7 @@ async function renderSettings(): Promise<void> {
     }
   });
 
-  q("#set-empty-new-chat")?.addEventListener("click", () => navigateTo({ screen: "new-chat" }));
+  qMaybe("#set-empty-new-chat")?.addEventListener("click", () => navigateTo({ screen: "new-chat" }));
 
   // Add contact
   q("#set-add-contact").addEventListener("click", async () => {
@@ -7510,6 +8363,17 @@ async function renderSettings(): Promise<void> {
   }
   q("#set-logout").addEventListener("click", async () => {
     await logoutCurrentSession();
+  });
+  q("#set-forget-local").addEventListener("click", async () => {
+    const accountId = setup.userId;
+    if (!accountId) {
+      return;
+    }
+    if (!confirm(`Forget the saved local profile for @${accountId} on this browser? This removes local keys, sessions, pins, and cached chats from this browser only.`)) {
+      return;
+    }
+    await wipeLocalState(accountId);
+    await logoutCurrentSession(`Forgot the local profile for @${accountId} on this browser.`);
   });
 
   // Push token registration
@@ -7769,7 +8633,7 @@ function renderLinkDevice(): void {
     <section class="workspace-page-card">
       ${renderWorkspacePageHeader(
         "Link device",
-        "Create another device entry for this account while keeping your current browser signed in.",
+        "Create a protected onboarding package for another browser or device while keeping your current browser signed in.",
         {
           eyebrow: "Linked devices",
           backButtonId: "ld-back",
@@ -7793,15 +8657,34 @@ function renderLinkDevice(): void {
         </div>
         <div class="settings-section">
           <h3>New device</h3>
-          <p class="text-secondary settings-desc">Enter a short device label. This browser will ask the server to provision a new linked session for the same account.</p>
+          <p class="text-secondary settings-desc">Enter a short device label and a package passphrase. This browser will prepare a protected linked-device package and ask the server to provision the new device ID for the same account.</p>
           <label class="field">
             <span>New Device ID</span>
             <input id="ld-device-id" type="text" placeholder="e.g. work-laptop" />
           </label>
+          <label class="field">
+            <span>Package Passphrase</span>
+            <input id="ld-package-pass" type="password" placeholder="Protect the linked-device package" />
+          </label>
+          <label class="field">
+            <span>Confirm Package Passphrase</span>
+            <input id="ld-package-pass2" type="password" placeholder="Re-enter the package passphrase" />
+          </label>
           <div class="settings-section-actions">
-            <button id="ld-submit" class="btn-primary" type="button">Link Device</button>
+            <button id="ld-submit" class="btn-primary" type="button">Create Linked-Device Package</button>
           </div>
           <div id="ld-status"></div>
+        </div>
+        <div id="ld-package-panel" class="settings-section hidden">
+          <h3>Linked-device package</h3>
+          <p class="text-secondary settings-desc">Copy this protected package to the new browser, then open <span class="mono">Import linked device</span> there.</p>
+          <label class="field">
+            <span>Package JSON</span>
+            <textarea id="ld-package-json" rows="10" class="mono" readonly></textarea>
+          </label>
+          <div class="settings-section-actions">
+            <button id="ld-copy-package" class="btn-secondary" type="button">Copy Package</button>
+          </div>
         </div>
       </div>
     </section>
@@ -7809,15 +8692,44 @@ function renderLinkDevice(): void {
   q("#ld-back").addEventListener("click", () => navigateTo({ screen: "devices" }));
   q("#ld-submit").addEventListener("click", async () => {
     const newDeviceId = q<HTMLInputElement>("#ld-device-id").value.trim();
+    const packagePassphrase = q<HTMLInputElement>("#ld-package-pass").value;
+    const packagePassphraseConfirm = q<HTMLInputElement>("#ld-package-pass2").value;
     if (!newDeviceId) { q<HTMLInputElement>("#ld-device-id").focus(); return; }
+    if (!packagePassphrase) {
+      q<HTMLInputElement>("#ld-package-pass").focus();
+      return;
+    }
+    if (packagePassphrase !== packagePassphraseConfirm) {
+      q<HTMLInputElement>("#ld-package-pass2").focus();
+      q("#ld-status").innerHTML = `<p class="text-danger">Package passphrases do not match.</p>`;
+      return;
+    }
     const statusEl = q("#ld-status");
-    statusEl.innerHTML = `<p class="text-secondary">Linking device...</p>`;
+    statusEl.innerHTML = `<p class="text-secondary">Preparing linked-device package...</p>`;
     try {
+      await ensureWebPqRuntime();
       const k = await ensureKeys();
-      const api = new PqmsgApi(setup.serverUrl);
+      const serverUrl = requireConfiguredServerUrl();
+      const packageJson = prepareSecondaryDevicePackage(k, newDeviceId, serverUrl, packagePassphrase);
+      const api = new PqmsgApi(serverUrl);
       const headers = buildLinkDeviceAuthHeaders(k, newDeviceId);
       const result = await api.linkDevice(k.userId, newDeviceId, headers);
-      statusEl.innerHTML = `<p class="text-success">Device "${escHtml(result.linked_device_id)}" linked at ${new Date(result.linked_at).toLocaleString()}</p>`;
+      const panel = q("#ld-package-panel");
+      const packageJsonEl = q<HTMLTextAreaElement>("#ld-package-json");
+      packageJsonEl.value = packageJson;
+      panel.classList.remove("hidden");
+      statusEl.innerHTML = `<p class="text-success">Device "${escHtml(result.linked_device_id)}" linked at ${new Date(result.linked_at).toLocaleString()}. Copy the protected package below to the new browser.</p>`;
+      const copyButton = q<HTMLButtonElement>("#ld-copy-package");
+      copyButton.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(packageJson);
+          notify("Linked-device package copied", "success");
+        } catch {
+          packageJsonEl.focus();
+          packageJsonEl.select();
+          notify("Copy failed. The package has been selected so you can copy it manually.", "info");
+        }
+      };
       notify(`Device ${result.linked_device_id} linked`, "success");
     } catch (e) {
       statusEl.innerHTML = `<p class="text-danger">Link failed: ${escHtml(errorMsg(e))}</p>`;
@@ -8105,6 +9017,10 @@ async function connectRealtime(): Promise<void> {
   }
 }
 
+function incomingStoredMessageId(messageId: number): string {
+  return `inbox-${messageId}`;
+}
+
 async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
   try {
     const k = await ensureKeys();
@@ -8128,16 +9044,8 @@ async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
     const conversationId = isDirectMessage
       ? convId(k.userId, senderId)
       : `group:${groupId}`;
-    const existing = await getMessages(conversationId);
-    if (existing.some((msg) => msg.serverMessageId === wsMsg.message_id)) {
-      const cursor = readSealedCursor(k.userId, k.deviceId);
-      if (wsMsg.message_id > cursor) {
-        writeSealedCursor(k.userId, wsMsg.message_id, k.deviceId);
-      }
-      return;
-    }
     const msg: StoredMessage = {
-      id: `srv-${wsMsg.message_id}`,
+      id: incomingStoredMessageId(wsMsg.message_id),
       conversationId,
       sender: senderId,
       recipient: isDirectMessage ? k.userId : decrypted.recipient,
@@ -8148,15 +9056,17 @@ async function handleRealtimeMessage(wsMsg: WsInboxMessage): Promise<void> {
       status: "delivered",
       serverMessageId: wsMsg.message_id,
     };
-    await saveMessage(msg);
-
-    if (isDirectMessage) {
-      void sendDeliveredReceipt(wsMsg.message_id);
-    }
-
+    const inserted = await saveMessageIfAbsent(msg);
     const cursor = readSealedCursor(k.userId, k.deviceId);
     if (wsMsg.message_id > cursor) {
       writeSealedCursor(k.userId, wsMsg.message_id, k.deviceId);
+    }
+    if (!inserted) {
+      return;
+    }
+
+    if (isDirectMessage) {
+      void sendDeliveredReceipt(wsMsg.message_id);
     }
 
     if (isDirectMessage) {
@@ -9306,13 +10216,8 @@ async function pollSealedInbox(): Promise<void> {
         const conversationId = isDirectMessage
           ? convId(k.userId, senderId)
           : `group:${groupId}`;
-        const existing = await getMessages(conversationId);
-        if (existing.some((msg) => msg.serverMessageId === item.message_id)) {
-          nextCursor = Math.max(nextCursor, item.message_id);
-          continue;
-        }
         const msg: StoredMessage = {
-          id: `sealed-${item.message_id}`,
+          id: incomingStoredMessageId(item.message_id),
           conversationId,
           sender: senderId,
           recipient: isDirectMessage ? k.userId : decrypted.recipient,
@@ -9323,7 +10228,11 @@ async function pollSealedInbox(): Promise<void> {
           status: "delivered",
           serverMessageId: item.message_id,
         };
-        await saveMessage(msg);
+        const inserted = await saveMessageIfAbsent(msg);
+        nextCursor = Math.max(nextCursor, item.message_id);
+        if (!inserted) {
+          continue;
+        }
         void loadProfileNameBackground(senderId);
         if (isDirectMessage) {
           const isActivePeer = activeChatPeer === senderId;
@@ -9349,7 +10258,6 @@ async function pollSealedInbox(): Promise<void> {
           }
         }
         conversationListChanged = true;
-        nextCursor = Math.max(nextCursor, item.message_id);
       } catch {
         // Skip malformed sealed messages
       }
@@ -9426,9 +10334,9 @@ async function renderDiscovery(): Promise<void> {
       </section>
     `);
     q("#disc-back").addEventListener("click", () => navigateTo({ screen: "settings" }));
-    q("#disc-open-settings")?.addEventListener("click", () => navigateTo({ screen: "settings" }));
-    q("#disc-new-chat")?.addEventListener("click", () => navigateTo({ screen: "new-chat" }));
-    q("#disc-back-to-inbox")?.addEventListener("click", () => navigateTo({ screen: "conversations" }));
+    qMaybe("#disc-open-settings")?.addEventListener("click", () => navigateTo({ screen: "settings" }));
+    qMaybe("#disc-new-chat")?.addEventListener("click", () => navigateTo({ screen: "new-chat" }));
+    qMaybe("#disc-back-to-inbox")?.addEventListener("click", () => navigateTo({ screen: "conversations" }));
     return;
   }
   const discoveryOverviewCards = `
@@ -10053,7 +10961,7 @@ function refreshWorkspaceSidebarIfVisible(
   bindWorkspaceSidebarInteractions();
 }
 
-async function logoutCurrentSession(): Promise<void> {
+async function logoutCurrentSession(notificationMessage: string = "Browser locked"): Promise<void> {
   const previousServerUrl = setup.serverUrl;
   const previousSuiteLabel = setup.suiteLabel;
 
@@ -10086,7 +10994,7 @@ async function logoutCurrentSession(): Promise<void> {
   };
   saveSetup(setup);
   navigateTo({ screen: "onboarding" });
-  notify("Logged out", "info");
+  notify(notificationMessage, "info");
 }
 
 // ---------------------------------------------------------------------------
@@ -10313,6 +11221,10 @@ function q<T extends HTMLElement>(selector: string): T {
   return el as T;
 }
 
+function qMaybe<T extends HTMLElement>(selector: string): T | null {
+  return document.querySelector(selector) as T | null;
+}
+
 function qAll<T extends HTMLElement>(selector: string): T[] {
   return Array.from(document.querySelectorAll(selector)) as T[];
 }
@@ -10339,12 +11251,106 @@ function canUseDevelopmentRelayReset(
   return capabilities?.security_profile === "research" && capabilities?.deployment_mode === "development";
 }
 
+function hasLeadingZeroBits(bytes: Uint8Array, bits: number): boolean {
+  if (bits <= 0) {
+    return true;
+  }
+  const fullBytes = Math.floor(bits / 8);
+  const remainingBits = bits % 8;
+  if (bytes.length < fullBytes) {
+    return false;
+  }
+  for (let idx = 0; idx < fullBytes; idx += 1) {
+    if (bytes[idx] !== 0) {
+      return false;
+    }
+  }
+  if (remainingBits === 0) {
+    return true;
+  }
+  if (bytes.length <= fullBytes) {
+    return false;
+  }
+  const mask = 0xff << (8 - remainingBits);
+  return (bytes[fullBytes] & mask) === 0;
+}
+
+function buildRegistrationPowMessage(request: RegisterUserRequest, nonce: string): Uint8Array {
+  const parts = [
+    "register",
+    request.user_id,
+    request.device_id,
+    request.identity_x25519_pub,
+    request.identity_sig_pub,
+    request.identity_pq_sig_pub,
+    nonce,
+  ];
+  return utf8ToBytes(parts.join("\u0000"));
+}
+
+async function solveRegistrationPowNonce(
+  request: RegisterUserRequest,
+  bits: number,
+): Promise<string> {
+  const normalizedBits = Math.max(0, Math.trunc(bits));
+  if (normalizedBits <= 0) {
+    return "";
+  }
+  if (normalizedBits > 32) {
+    throw new Error("Registration proof-of-work is not supported for difficulties above 32 bits.");
+  }
+  for (let nonceCounter = 0; ; nonceCounter += 1) {
+    const nonce = nonceCounter.toString(16);
+    const digest = sha256(buildRegistrationPowMessage(request, nonce));
+    if (hasLeadingZeroBits(digest, normalizedBits)) {
+      return nonce;
+    }
+    if (nonceCounter > 0 && nonceCounter % 2048 === 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+  }
+}
+
+async function registrationPowBits(api: PqmsgApi): Promise<number> {
+  const cached = await loadServerCapabilitiesCached();
+  if (cached) {
+    return Math.max(0, Math.trunc(cached.registration_pow_bits || 0));
+  }
+  const capabilities = await api.getCapabilities();
+  cachedCapabilities = capabilities;
+  cachedCapabilitiesServerUrl = setup.serverUrl;
+  return Math.max(0, Math.trunc(capabilities.registration_pow_bits || 0));
+}
+
+async function registerUserWithPow(api: PqmsgApi, request: RegisterUserRequest): Promise<void> {
+  const bits = await registrationPowBits(api);
+  const powNonce = bits > 0 ? await solveRegistrationPowNonce(request, bits) : "";
+  const payload = powNonce ? { ...request, pow_nonce: powNonce } : request;
+  try {
+    await api.registerUser(payload);
+  } catch (error) {
+    const message = errorMsg(error);
+    if (!powNonce && message.includes("pow_nonce is required for registration")) {
+      const capabilities = await api.getCapabilities();
+      cachedCapabilities = capabilities;
+      cachedCapabilitiesServerUrl = setup.serverUrl;
+      const retryBits = Math.max(0, Math.trunc(capabilities.registration_pow_bits || 0));
+      if (retryBits > 0) {
+        const retryNonce = await solveRegistrationPowNonce(request, retryBits);
+        await api.registerUser({ ...request, pow_nonce: retryNonce });
+        return;
+      }
+    }
+    throw error;
+  }
+}
+
 async function registerBrowserIdentityOnRelay(
   api: PqmsgApi,
   relayKeys: GeneratedKeys,
   displayName: string
 ): Promise<void> {
-  await api.registerUser({
+  await registerUserWithPow(api, {
     user_id: relayKeys.userId,
     identity_x25519_pub: relayKeys.identityX25519Pub,
     identity_sig_pub: relayKeys.identitySigPub,
@@ -10398,6 +11404,17 @@ async function repairIdentityOnDevelopmentRelay(
   saveSetup(setup);
   cachedProfileNames[repairedKeys.userId] = displayName;
   writeProfileDisplayName(repairedKeys.userId, repairedKeys.userId, displayName);
+  await syncBrowserRecoveryBackupBestEffort(
+    api,
+    repairedKeys,
+    passphrase,
+    {
+      displayName,
+      username: setup.username || "",
+      usernameLookupEnabled: Boolean(setup.usernameLookupEnabled && setup.username),
+    },
+    setup.serverUrl
+  );
   return repairedKeys;
 }
 

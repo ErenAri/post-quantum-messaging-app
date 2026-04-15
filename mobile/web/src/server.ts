@@ -20,6 +20,7 @@ export type RegisterUserRequest = {
   identity_sig_pub: string;
   identity_pq_sig_pub: string;
   device_id: string;
+  pow_nonce?: string;
 };
 
 export type RegisterUserResponse = {
@@ -116,6 +117,32 @@ export type LinkDeviceResponse = {
   user_id: string;
   linked_device_id: string;
   linked_at: string;
+};
+
+export type BackupUploadRequest = {
+  device_id: string;
+  backup_version: number;
+  recovery_hint?: string;
+  encrypted_backup_bytes_base64: string;
+};
+
+export type BackupUploadResponse = {
+  backup_id: string;
+  user_id: string;
+  device_id: string;
+  backup_version: number;
+  byte_len: number;
+  uploaded_at: string;
+};
+
+export type BackupDownloadResponse = {
+  backup_id: string;
+  user_id: string;
+  device_id: string;
+  backup_version: number;
+  recovery_hint: string | null;
+  encrypted_backup_bytes_base64: string;
+  uploaded_at: string;
 };
 
 export type RevokeDeviceResponse = {
@@ -1028,6 +1055,28 @@ export class PqmsgApi {
       `/v1/users/${encodeURIComponent(userId)}/devices/link`,
       { new_device_id: newDeviceId },
       headers
+    );
+  }
+
+  async uploadBackup(
+    userId: string,
+    payload: BackupUploadRequest,
+    headers: RequestAuthHeaders
+  ): Promise<BackupUploadResponse> {
+    return this.request<BackupUploadResponse>(
+      "POST",
+      `/v1/users/${encodeURIComponent(userId)}/backups`,
+      payload,
+      headers
+    );
+  }
+
+  async downloadRecoveryBackup(userId: string): Promise<BackupDownloadResponse> {
+    return this.request<BackupDownloadResponse>(
+      "GET",
+      `/v1/users/${encodeURIComponent(userId)}/backups/recovery`,
+      undefined,
+      {}
     );
   }
 

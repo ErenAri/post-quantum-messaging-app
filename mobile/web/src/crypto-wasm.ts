@@ -240,7 +240,7 @@ export async function initWasm(): Promise<boolean> {
   if (wasmLoadAttempted) return false;
   wasmLoadAttempted = true;
   try {
-    const wasmPath = "../pkg/pqmsg_core";
+    const wasmPath = "/pkg/pqmsg_core.js";
     const mod = await import(/* @vite-ignore */ wasmPath);
     await mod.default();
     wasmModule = mod;

@@ -1,0 +1,79 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: pqmsg
+      POSTGRES_USER: pqmsg
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pqmsg -d pqmsg"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  blob-permissions-init:
+    image: alpine:3.20
+    restart: "no"
+    command: ["sh", "-lc", "chown -R 10001:10001 /blob-store; chmod 700 /blob-store"]
+    volumes:
+      - pqmsg_blob_data:/blob-store
+
+  pqmsg-server:
+    image: ${PQMSG_SERVER_IMAGE:-ghcr.io/your-org/pqmsg-server:0.1.0}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      blob-permissions-init:
+        condition: service_completed_successfully
+    env_file:
+      - ./pqmsg-server.aws.env
+    environment:
+      PQMSG_BIND: 0.0.0.0:8080
+      PQMSG_DATABASE_URL: postgres://pqmsg:${POSTGRES_PASSWORD}@postgres:5432/pqmsg
+      PQMSG_RATE_LIMIT_REDIS_URL: redis://redis:6379/
+      PQMSG_BLOB_STORE_DIR: /var/lib/pqmsg/blob-store
+    expose:
+      - "8080"
+    volumes:
+      - pqmsg_blob_data:/var/lib/pqmsg/blob-store
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      - pqmsg-server
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?set in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  postgres_data:
+  redis_data:
+  pqmsg_blob_data:
+  caddy_data:
+  caddy_config:

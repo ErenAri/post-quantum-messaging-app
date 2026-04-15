@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "build:wasm": "node ./scripts/build-wasm.mjs",
+    "stage:wasm": "node ./scripts/stage-wasm-pkg.mjs",
     "dev": "vite",
-    "build": "vite build",
+    "build": "npm run stage:wasm && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"

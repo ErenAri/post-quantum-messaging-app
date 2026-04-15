@@ -42,6 +42,11 @@ on:
         required: true
         default: false
         type: boolean
+      runtime_api_base_url:
+        description: Optional override for public HTTPS API base URL used by post-deploy backup/recovery smoke checks
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -69,6 +74,7 @@ jobs:
       PQMSG_AUDIT_LOG_PATH: ${{ vars.PQMSG_AUDIT_LOG_PATH }}
       PQMSG_AUDIT_LOG_MAX_BYTES: ${{ vars.PQMSG_AUDIT_LOG_MAX_BYTES }}
       PQMSG_AUDIT_LOG_MAX_FILES: ${{ vars.PQMSG_AUDIT_LOG_MAX_FILES }}
+      PQMSG_PUBLIC_API_BASE_URL: ${{ vars.PQMSG_PUBLIC_API_BASE_URL }}
       PQMSG_ALERTMANAGER_API_URL: ${{ secrets.PQMSG_ALERTMANAGER_API_URL }}
       PQMSG_INCIDENT_ISSUE_REPO: ${{ vars.PQMSG_INCIDENT_ISSUE_REPO }}
     steps:
@@ -111,6 +117,33 @@ jobs:
             echo "$KUBECONFIG_B64" | base64 -d >/tmp/kubeconfig
             echo "KUBECONFIG=/tmp/kubeconfig" >> "$GITHUB_ENV"
           fi
+      - name: resolve post-deploy smoke-check API URL
+        if: ${{ inputs.apply }}
+        run: |
+          runtime_url="${{ inputs.runtime_api_base_url }}"
+          if [ -z "$runtime_url" ]; then
+            runtime_url="${PQMSG_PUBLIC_API_BASE_URL:-}"
+          fi
+          if [ -z "$runtime_url" ]; then
+            echo "missing runtime API base URL: set workflow input runtime_api_base_url or environment variable PQMSG_PUBLIC_API_BASE_URL" >&2
+            exit 1
+          fi
+          case "$runtime_url" in
+            https://*) ;;
+            *)
+              echo "runtime API base URL must be HTTPS, got '$runtime_url'" >&2
+              exit 1
+              ;;
+          esac
+          echo "PQMSG_RUNTIME_SMOKE_API_BASE_URL=$runtime_url" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ inputs.apply }}
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ inputs.apply }}
+      - uses: actions/setup-node@v4
+        if: ${{ inputs.apply }}
+        with:
+          node-version: "22"
       - name: capture current deployed image state
         run: |
           if [ -n "${KUBECONFIG:-}" ]; then
@@ -213,6 +246,12 @@ jobs:
           kubectl rollout status "deployment/${{ inputs.release_name }}-pqmsg-server" \
             --namespace "${{ inputs.namespace }}" \
             --timeout=180s
+      - name: run post-deploy backup recovery smoke check
+        if: ${{ inputs.apply }}
+        shell: pwsh
+        run: |
+          & ./scripts/dev/aws/smoke_check_ec2_backup_recovery.ps1 -ApiBaseUrl "$env:PQMSG_RUNTIME_SMOKE_API_BASE_URL" |
+            Tee-Object -FilePath dist/post-deploy-backup-smoke.txt
       - name: capture post-deploy state
         if: ${{ inputs.apply }}
         run: |

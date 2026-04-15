@@ -144,6 +144,34 @@ export async function saveMessage(msg: StoredMessage): Promise<void> {
   });
 }
 
+export async function saveMessageIfAbsent(msg: StoredMessage): Promise<boolean> {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    let inserted = false;
+    const tx = db.transaction(MESSAGES_STORE, "readwrite");
+    const request = tx.objectStore(MESSAGES_STORE).add(msg);
+    request.onsuccess = () => {
+      inserted = true;
+    };
+    request.onerror = (event) => {
+      if (request.error?.name === "ConstraintError") {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+    };
+    tx.oncomplete = () => resolve(inserted);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => {
+      if (tx.error?.name === "ConstraintError") {
+        resolve(false);
+        return;
+      }
+      reject(tx.error);
+    };
+  });
+}
+
 export async function updateMessageStatus(
   id: string,
   status: StoredMessage["status"],

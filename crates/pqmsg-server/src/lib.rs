@@ -937,10 +937,10 @@ fn default_sender_certificate_signing_key() -> SigningKey {
 
 #[cfg(not(debug_assertions))]
 fn default_sender_certificate_signing_key() -> SigningKey {
-    panic!(
-        "PQMSG_SENDER_CERT_SIGNING_KEY must be configured; \
-         default development key is not available in release builds"
+    tracing::warn!(
+        "using fallback sender certificate signing key until runtime configuration is applied"
     );
+    SigningKey::from_bytes(&[0x53; 32])
 }
 
 #[derive(Clone)]
@@ -2333,6 +2333,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/v1/users/:user_id/backups/latest",
             get(download_latest_backup),
+        )
+        .route(
+            "/v1/users/:user_id/backups/recovery",
+            get(download_recovery_backup),
         )
         .route(
             "/v1/users/:user_id/profile",

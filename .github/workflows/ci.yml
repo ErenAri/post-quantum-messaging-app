@@ -395,6 +395,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -406,6 +408,11 @@ jobs:
       - name: install web dependencies
         working-directory: mobile/web
         run: npm ci
+      - name: install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: build wasm package
+        working-directory: mobile/web
+        run: npm run build:wasm
       - name: build web production bundle
         working-directory: mobile/web
         run: npm run build

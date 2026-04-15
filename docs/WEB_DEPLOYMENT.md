@@ -49,6 +49,12 @@ The bundle contains:
 - `manifest.json` - release metadata and SHA-256 hashes
 - `VERSION` - release identifier
 
+For Cloudflare Pages, the repo also ships:
+
+- `mobile/web/public/_headers`
+
+That file mirrors the hardened hosted-header contract for static Pages deployments.
+
 ## Nginx reference config
 
 Use the hardened example in:
@@ -119,6 +125,75 @@ Optional environment overrides for the rollout script:
 - `NGINX_CONF_NAME`
 - `INSTALL_NGINX_CONFIG=0`
 - `RELOAD_NGINX=0`
+
+## Cloudflare Pages Rollout
+
+Use Cloudflare Pages for the static web shell only.
+
+Recommended settings:
+
+- Repository: `ErenAri/post-quantum-messaging-app`
+- Production branch: the branch that contains the latest web deployment changes
+- Framework preset: `Vite`
+- Root directory: `mobile/web`
+- Build command: `npm ci && npm run build`
+- Build output directory: `dist`
+
+The repo does not require a `_redirects` file for Pages because the current web shell does not use pathname-based SPA routing. Deep state lives in in-memory view state plus query/hash fragments.
+
+The hardened response headers should come from:
+
+- `mobile/web/public/_headers`
+
+## Local PC Backend via Cloudflare Tunnel
+
+If you want to keep the hosted web shell on Cloudflare Pages but run the relay on your own PC, use the repo scripts below.
+
+Start the local relay with the hosted-web policy and CORS for the Pages origin:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/dev/start_local_hosted_web_backend.ps1
+```
+
+That script:
+
+- binds the relay to `127.0.0.1:3000`
+- uses a local SQLite database under `.tmp/local-run/hosted-web-backend`
+- enables encrypted SQLite pages by default
+- sets `PQMSG_WEB_CLIENT_POLICY=interop_candidate`
+- sets `PQMSG_CORS_ALLOWED_ORIGINS=https://pqmsg-web.pages.dev`
+
+If you need to test a specific Pages deployment URL as well as the stable project URL, pass it as an additional origin:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/dev/start_local_hosted_web_backend.ps1 `
+  -AdditionalWebOrigins https://<deployment-id>.pqmsg-web.pages.dev
+```
+
+Then open a public HTTPS tunnel to the loopback relay:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/dev/start_cloudflare_quick_tunnel.ps1
+```
+
+When `cloudflared` prints a `https://*.trycloudflare.com` URL:
+
+1. keep both terminal windows open
+2. create a share link for testers:
+
+```text
+https://pqmsg-web.pages.dev/?relay=https%3A%2F%2F<your-tunnel>.trycloudflare.com
+```
+
+3. send that link to the user instead of asking them to open `Advanced`
+4. the hosted web shell will save the relay URL automatically on first load
+5. create or unlock the web profile normally
+
+This path is suitable for personal testing and small trusted cohorts. It is not a production hosting model. The relay only stays reachable while:
+
+- your PC is powered on
+- the local relay process is running
+- the Cloudflare quick tunnel process is running
 
 ## Post-deploy checks
 

@@ -6813,6 +6813,63 @@ async fn encrypted_backups_roundtrip_and_replace_latest_blob() {
 }
 
 #[tokio::test]
+async fn encrypted_backups_recovery_downloads_latest_without_request_auth() {
+    let app = test_app().await;
+    let alice_sig = signing_key(154);
+
+    let reg_alice = register_payload(
+        "alice-recovery",
+        "alice-recovery-dev",
+        [54u8; 32],
+        &alice_sig,
+    );
+    let (status_reg_alice, _) =
+        json_request(app.clone(), Method::POST, "/v1/users/register", reg_alice).await;
+    assert_eq!(status_reg_alice, StatusCode::OK);
+
+    let backup = b"encrypted-browser-recovery";
+    let upload_headers = backup_upload_auth_headers(
+        &alice_sig,
+        "alice-recovery",
+        "alice-recovery-dev",
+        1,
+        backup,
+    );
+    let (status_upload, _) = json_request_with_headers(
+        app.clone(),
+        Method::POST,
+        "/v1/users/alice-recovery/backups",
+        json!({
+            "device_id": "alice-recovery-dev",
+            "backup_version": 1,
+            "recovery_hint": "alice-recovery-dev",
+            "encrypted_backup_bytes_base64": B64.encode(backup),
+        }),
+        &upload_headers,
+    )
+    .await;
+    assert_eq!(status_upload, StatusCode::OK);
+
+    let (status_download, download_payload) = json_request(
+        app,
+        Method::GET,
+        "/v1/users/alice-recovery/backups/recovery",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_download, StatusCode::OK);
+    assert_eq!(download_payload["backup_version"].as_i64(), Some(1));
+    assert_eq!(
+        download_payload["device_id"].as_str(),
+        Some("alice-recovery-dev")
+    );
+    assert_eq!(
+        download_payload["encrypted_backup_bytes_base64"].as_str(),
+        Some(B64.encode(backup).as_str())
+    );
+}
+
+#[tokio::test]
 async fn encrypted_backups_roundtrip_and_replace_latest_version() {
     let app = test_app().await;
     let alice_sig = signing_key(176);
