@@ -260,6 +260,18 @@ jobs:
 
           kind get clusters | grep -Fx "${cluster_name}" >/dev/null
           kind load docker-image --name "${cluster_name}" "${image_ref}"
+
+          if [[ "${image_ref}" == *"@sha256:"* ]]; then
+            image_digest="${image_ref##*@}"
+            while IFS= read -r node_name; do
+              import_ref="$(docker exec "${node_name}" sh -lc "ctr -n k8s.io images ls -q | grep '^import-.*@${image_digest}$' | head -n1" | tr -d '\r')"
+              if [[ -z "${import_ref}" ]]; then
+                continue
+              fi
+              docker exec "${node_name}" ctr -n k8s.io images tag "${import_ref}" "${image_ref}" || true
+              docker exec "${node_name}" ctr -n k8s.io images tag "${import_ref}" "docker.io/library/${import_ref}" || true
+            done < <(kind get nodes --name "${cluster_name}")
+          fi
       - name: apply promoted release
         if: ${{ inputs.apply }}
         run: |
@@ -268,6 +280,11 @@ jobs:
             --namespace "${{ inputs.namespace }}" \
             -f dist/helm-image-overrides.yaml \
             -f /tmp/pqmsg-promotion-values.json
+      - name: restart promoted deployment for pilot_local
+        if: ${{ inputs.apply && inputs.runner_profile == 'pilot_local' }}
+        run: |
+          kubectl rollout restart "deployment/${{ inputs.release_name }}-pqmsg-server" \
+            --namespace "${{ inputs.namespace }}"
       - name: wait for promoted rollout
         if: ${{ inputs.apply }}
         run: |

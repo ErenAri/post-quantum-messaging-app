@@ -29,6 +29,7 @@ opentelemetry-otlp.workspace = true
 tracing-opentelemetry.workspace = true
 reqwest.workspace = true
 redis.workspace = true
+rustls = "0.23"
 sentry.workspace = true
 sentry-tracing.workspace = true
 tower = "0.5"

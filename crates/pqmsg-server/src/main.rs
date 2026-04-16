@@ -3,6 +3,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use ed25519_dalek::SigningKey;
+use rustls::crypto::CryptoProvider;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
 use pqmsg_core::alg::{enforce_runtime_security_profile, RuntimeCryptoProfile, SecurityProfile};
@@ -169,6 +170,18 @@ fn normalize_attestation_pcr_key(name: &str, key: &str) -> anyhow::Result<String
         );
     }
     Ok(normalized)
+}
+
+fn install_rustls_crypto_provider() -> anyhow::Result<()> {
+    if CryptoProvider::get_default().is_some() {
+        return Ok(());
+    }
+
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("failed to install rustls ring CryptoProvider"))?;
+
+    Ok(())
 }
 
 fn parse_optional_attestation_pcrs_sha384_env(
@@ -482,6 +495,7 @@ fn enforce_deployment_contract(contract: DeploymentContract) -> anyhow::Result<(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     sqlx::any::install_default_drivers();
+    install_rustls_crypto_provider()?;
     let profile_raw =
         env::var("PQMSG_SECURITY_PROFILE").unwrap_or_else(|_| "high_assurance".to_string());
     let security_profile = SecurityProfile::parse(&profile_raw)
