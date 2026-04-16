@@ -34,7 +34,7 @@ def extract_indented_block(text: str, key: str, parent_indent: int) -> str | Non
     child_indent = parent_indent + 2
     pattern = re.compile(
         rf"(?ms)^[ ]{{{parent_indent}}}{re.escape(key)}:\s*\n"
-        rf"(?P<block>(?:^[ ]{{{child_indent},}}.*(?:\n|$))*)"
+        rf"(?P<block>(?:^[ ]{{{child_indent},}}.*(?:\n|$)|^[ ]{{{parent_indent}}}-.*(?:\n|$))*)"
     )
     match = pattern.search(text)
     if match is None:
@@ -66,9 +66,9 @@ def extract_service_contract(doc: str) -> dict[str, str | int | None]:
         "selector_instance": extract_line_value(
             selector, r"^    app\.kubernetes\.io/instance:\s*(\S+)\s*$"
         ),
-        "port_name": extract_line_value(ports, r"^    - name:\s*(\S+)\s*$"),
-        "port": extract_line_value(ports, r"^      port:\s*(\S+)\s*$"),
-        "target_port": extract_line_value(ports, r"^      targetPort:\s*(\S+)\s*$"),
+        "port_name": extract_line_value(ports, r"^\s*-\s*name:\s*(\S+)\s*$"),
+        "port": extract_line_value(ports, r"^\s*port:\s*(\S+)\s*$"),
+        "target_port": extract_line_value(ports, r"^\s*targetPort:\s*(\S+)\s*$"),
     }
 
 
