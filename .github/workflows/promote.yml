@@ -53,6 +53,7 @@ permissions:
   id-token: write
   attestations: write
   issues: write
+  packages: read
 
 jobs:
   promote:
@@ -232,6 +233,33 @@ jobs:
               encoding="utf-8",
           )
           PY
+      - name: preload promoted image into pilot_local kind cluster
+        if: ${{ inputs.apply && inputs.runner_profile == 'pilot_local' }}
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          image_ref="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(Path('dist/release-manifest.json').read_text(encoding='utf-8'))
+          print(manifest['container_images'][0]['immutable_ref'])
+          PY
+          )"
+
+          echo "Preloading image ${image_ref} for pilot_local rollout"
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
+          docker pull "${image_ref}"
+
+          context_name="$(kubectl config current-context || true)"
+          cluster_name="pqmsg-pilot"
+          if [[ "${context_name}" == kind-* ]]; then
+            cluster_name="${context_name#kind-}"
+          fi
+
+          kind get clusters | grep -Fx "${cluster_name}" >/dev/null
+          kind load docker-image --name "${cluster_name}" "${image_ref}"
       - name: apply promoted release
         if: ${{ inputs.apply }}
         run: |
