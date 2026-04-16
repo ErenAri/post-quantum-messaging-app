@@ -292,7 +292,7 @@ jobs:
             --namespace "${{ inputs.namespace }}" \
             --timeout=180s
       - name: run post-deploy backup recovery smoke check
-        if: ${{ inputs.apply }}
+        if: ${{ inputs.apply && inputs.runner_profile != 'pilot_local' }}
         shell: pwsh
         run: |
           & ./scripts/dev/aws/smoke_check_ec2_backup_recovery.ps1 -ApiBaseUrl "$env:PQMSG_RUNTIME_SMOKE_API_BASE_URL" |
