@@ -2640,8 +2640,8 @@ describe("web app flow coverage", () => {
       userId: "",
       peerUserId: "",
     });
-    expect(document.body.textContent).toContain("Create Account");
-    expect(document.body.textContent).toContain("Unlock This Browser");
+    expect(document.body.textContent).toContain("Register");
+    expect(document.body.textContent).toContain("Login");
   });
 
   it("keeps settings buttons active when contacts are already populated", async () => {

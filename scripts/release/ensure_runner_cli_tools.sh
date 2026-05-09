@@ -3,6 +3,7 @@ set -euo pipefail
 
 HELM_VERSION="${HELM_VERSION:-v3.18.4}"
 KUBECTL_VERSION="${KUBECTL_VERSION:-v1.34.1}"
+KIND_VERSION="${KIND_VERSION:-v0.29.0}"
 LOCAL_BIN="${HOME}/.local/bin"
 
 mkdir -p "${LOCAL_BIN}"
@@ -42,5 +43,13 @@ if ! command -v kubectl >/dev/null 2>&1; then
   chmod +x "${LOCAL_BIN}/kubectl"
 fi
 
+if ! command -v kind >/dev/null 2>&1; then
+  download_with_retries \
+    "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64" \
+    "${LOCAL_BIN}/kind"
+  chmod +x "${LOCAL_BIN}/kind"
+fi
+
 helm version --short
 kubectl version --client
+kind version

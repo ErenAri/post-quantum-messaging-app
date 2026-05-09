@@ -53,6 +53,7 @@ permissions:
   id-token: write
   attestations: write
   issues: write
+  packages: read
 
 jobs:
   promote:
@@ -232,6 +233,45 @@ jobs:
               encoding="utf-8",
           )
           PY
+      - name: preload promoted image into pilot_local kind cluster
+        if: ${{ inputs.apply && inputs.runner_profile == 'pilot_local' }}
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          image_ref="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(Path('dist/release-manifest.json').read_text(encoding='utf-8'))
+          print(manifest['container_images'][0]['immutable_ref'])
+          PY
+          )"
+
+          echo "Preloading image ${image_ref} for pilot_local rollout"
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
+          docker pull "${image_ref}"
+
+          context_name="$(kubectl config current-context || true)"
+          cluster_name="pqmsg-pilot"
+          if [[ "${context_name}" == kind-* ]]; then
+            cluster_name="${context_name#kind-}"
+          fi
+
+          kind get clusters | grep -Fx "${cluster_name}" >/dev/null
+          kind load docker-image --name "${cluster_name}" "${image_ref}"
+
+          if [[ "${image_ref}" == *"@sha256:"* ]]; then
+            image_digest="${image_ref##*@}"
+            while IFS= read -r node_name; do
+              import_ref="$(docker exec "${node_name}" sh -lc "ctr -n k8s.io images ls -q | grep '^import-.*@${image_digest}$' | head -n1" | tr -d '\r')"
+              if [[ -z "${import_ref}" ]]; then
+                continue
+              fi
+              docker exec "${node_name}" ctr -n k8s.io images tag "${import_ref}" "${image_ref}" || true
+              docker exec "${node_name}" ctr -n k8s.io images tag "${import_ref}" "docker.io/library/${import_ref}" || true
+            done < <(kind get nodes --name "${cluster_name}")
+          fi
       - name: apply promoted release
         if: ${{ inputs.apply }}
         run: |
@@ -240,6 +280,11 @@ jobs:
             --namespace "${{ inputs.namespace }}" \
             -f dist/helm-image-overrides.yaml \
             -f /tmp/pqmsg-promotion-values.json
+      - name: restart promoted deployment for pilot_local
+        if: ${{ inputs.apply && inputs.runner_profile == 'pilot_local' }}
+        run: |
+          kubectl rollout restart "deployment/${{ inputs.release_name }}-pqmsg-server" \
+            --namespace "${{ inputs.namespace }}"
       - name: wait for promoted rollout
         if: ${{ inputs.apply }}
         run: |
@@ -247,7 +292,7 @@ jobs:
             --namespace "${{ inputs.namespace }}" \
             --timeout=180s
       - name: run post-deploy backup recovery smoke check
-        if: ${{ inputs.apply }}
+        if: ${{ inputs.apply && inputs.runner_profile != 'pilot_local' }}
         shell: pwsh
         run: |
           & ./scripts/dev/aws/smoke_check_ec2_backup_recovery.ps1 -ApiBaseUrl "$env:PQMSG_RUNTIME_SMOKE_API_BASE_URL" |

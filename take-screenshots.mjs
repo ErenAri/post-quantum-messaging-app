@@ -47,13 +47,13 @@ await page.click("details button:has-text('Save')");
 await page.waitForTimeout(500);
 
 // Create account
-await page.click("button:has-text('Create Account')");
+await page.click("#onb-create");
 await page.waitForTimeout(500);
 await page.fill("input[type='text']", `ss-${Date.now()}`);
 const pwInputs = await page.locator("input[type='password']").all();
 await pwInputs[0].fill("testpass123");
 await pwInputs[1].fill("testpass123");
-await page.click("button:has-text('Create Account')");
+await page.click("#onb-go");
 await page.waitForTimeout(8000);
 await dismissShortcuts();
 
