@@ -1704,7 +1704,7 @@ pub fn contact_discovery_finalize_tokens(
     }
     let tokens = blinding_scalars_base64
         .into_iter()
-        .zip(evaluated_elements_base64.into_iter())
+        .zip(evaluated_elements_base64)
         .map(|(blind_scalar_b64, evaluated_element_b64)| {
             let blind_scalar = Scalar::from_bytes_mod_order(decode_b64_32(
                 "contact_discovery_blind_scalar",
