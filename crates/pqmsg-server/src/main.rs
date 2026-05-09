@@ -3,7 +3,6 @@ use axum_server::tls_rustls::RustlsConfig;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use ed25519_dalek::SigningKey;
-use rustls::crypto::CryptoProvider;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
 use pqmsg_core::alg::{enforce_runtime_security_profile, RuntimeCryptoProfile, SecurityProfile};
@@ -14,6 +13,7 @@ use pqmsg_server::{
     RealtimeHub, SealedRealtimeHub, SqliteEncryptionConfig, SqliteEncryptionPreparation,
     SqliteEncryptionRotation,
 };
+use rustls::crypto::CryptoProvider;
 use sentry::ClientOptions;
 use std::collections::BTreeMap;
 use std::env;
