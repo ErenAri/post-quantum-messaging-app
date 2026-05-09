@@ -14,6 +14,7 @@ const build = spawnSync(
   "wasm-pack",
   [
     "build",
+    "--no-opt",
     coreDir,
     "--target",
     "web",
