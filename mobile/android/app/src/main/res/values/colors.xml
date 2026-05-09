@@ -1,21 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="pq_background">#F4F6F8</color>
+    <color name="pq_background">#FFFFFFFF</color>
     <color name="pq_surface">#FFFFFFFF</color>
-    <color name="pq_surface_alt">#EBEFF3</color>
-    <color name="pq_hero">#2D6CF6</color>
-    <color name="pq_hero_accent">#DCE7FF</color>
+    <color name="pq_surface_alt">#F1F3F7</color>
+    <color name="pq_hero">#2C6BED</color>
+    <color name="pq_hero_accent">#DCE8FF</color>
     <color name="pq_success_accent">#E4F3EE</color>
-    <color name="pq_ink">#10181F</color>
-    <color name="pq_ink_muted">#62727F</color>
-    <color name="pq_line">#D9E1E7</color>
+    <color name="pq_ink">#111827</color>
+    <color name="pq_ink_muted">#667485</color>
+    <color name="pq_line">#E3E7ED</color>
     <color name="pq_success">#247E65</color>
     <color name="pq_warning">#AA5A18</color>
     <color name="pq_error">#BB3E34</color>
-    <color name="pq_badge_bg">#2D6CF6</color>
+    <color name="pq_badge_bg">#2C6BED</color>
     <color name="pq_badge_fg">#FFFFFFFF</color>
-    <color name="pq_log_surface">#EEF3F7</color>
-    <color name="pq_bubble_sent">#2D6CF6</color>
+    <color name="pq_log_surface">#F6F7FA</color>
+    <color name="pq_bubble_sent">#2C6BED</color>
     <color name="pq_bubble_sent_text">#FFFFFFFF</color>
     <color name="pq_bubble_received">#FFFFFFFF</color>
     <color name="pq_bubble_received_text">#10181F</color>
@@ -31,6 +31,6 @@
     <color name="pq_search_match_stroke">#C7D8FF</color>
     <color name="pq_search_active_bg">#DCE7FF</color>
     <color name="pq_search_active_stroke">#2D6CF6</color>
-    <color name="pq_toolbar_icon_bg">#E9EEF4</color>
+    <color name="pq_toolbar_icon_bg">#F1F3F7</color>
     <color name="pq_toolbar_icon_fg">#24323D</color>
 </resources>

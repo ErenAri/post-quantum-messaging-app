@@ -23,7 +23,7 @@
         android:id="@+id/threadMessageRow"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:paddingHorizontal="8dp"
+        android:paddingHorizontal="2dp"
         android:paddingVertical="2dp">
 
         <LinearLayout
@@ -31,7 +31,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="start"
-            android:layout_marginEnd="48dp"
+            android:layout_marginEnd="52dp"
             android:orientation="vertical"
             android:paddingHorizontal="13dp"
             android:paddingTop="8dp"

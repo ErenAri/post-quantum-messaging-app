@@ -2,8 +2,8 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:paddingHorizontal="12dp"
-    android:paddingVertical="3dp">
+    android:paddingHorizontal="0dp"
+    android:paddingVertical="0dp">
 
     <LinearLayout
         android:id="@+id/conversationSwipeBackground"
@@ -40,18 +40,18 @@
         android:id="@+id/conversationSwipeContent"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="@drawable/bg_thread_panel"
+        android:background="@drawable/bg_conversation_row"
         android:foreground="?attr/selectableItemBackground"
         android:gravity="center_vertical"
-        android:minHeight="72dp"
+        android:minHeight="76dp"
         android:orientation="horizontal"
-        android:paddingHorizontal="16dp"
+        android:paddingHorizontal="20dp"
         android:paddingVertical="10dp">
 
         <TextView
             android:id="@+id/textConversationAvatar"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
             android:background="@drawable/bg_avatar_circle"
             android:gravity="center"
             android:textAppearance="@style/TextAppearance.PQMsg.SectionTitle"
@@ -128,7 +128,7 @@
                 android:id="@+id/textConversationMeta"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="3dp"
+                android:layout_marginTop="1dp"
                 android:textAppearance="@style/TextAppearance.MaterialComponents.Caption"
                 android:textColor="@color/pq_ink_muted" />
         </LinearLayout>

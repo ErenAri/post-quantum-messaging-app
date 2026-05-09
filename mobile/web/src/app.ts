@@ -2521,19 +2521,19 @@ function renderOnboarding(): void {
           <section class="onboarding-home-hero">
             ${ONBOARDING_LOGO}
             <div class="onboarding-copy onboarding-copy-home">
-              <span class="onboarding-eyebrow">Hosted web onboarding</span>
+              <span class="onboarding-eyebrow">Login and register</span>
               <p class="onboarding-lede">
-                Create a browser profile, unlock one already saved here, or bring over a linked device package without wading through setup first.
+                Login if you already have an account. Register if this is your first time on this browser.
               </p>
             </div>
             <div class="onboarding-points onboarding-points-grid" aria-label="Onboarding overview">
               <div class="onboarding-point">
-                <strong>Username first</strong>
-                <span>Your account starts from a simple @name instead of a long utility form.</span>
+                <strong>Login</strong>
+                <span>Use your username and passphrase to unlock local keys or recover your encrypted backup.</span>
               </div>
               <div class="onboarding-point">
-                <strong>Local passphrase</strong>
-                <span>Your keys stay on this browser and unlock only with the passphrase you choose.</span>
+                <strong>Register</strong>
+                <span>Create a new account, generate local keys on this browser, and start messaging securely.</span>
               </div>
               <div class="onboarding-point onboarding-point-wide">
                 <strong>Linked-device import</strong>
@@ -2548,14 +2548,20 @@ function renderOnboarding(): void {
           </section>
           <section class="onboarding-home-panel">
             <div class="onboarding-home-panel-head">
-              <h2>Start on this browser</h2>
-              <p>Create a fresh profile, unlock one already saved locally, or import a linked-device package from another session.</p>
+              <h2>Welcome</h2>
+              <p>Choose how you want to continue on this browser.</p>
             </div>
-            <div class="onboarding-actions onboarding-actions-home">
-              <button id="onb-create" class="btn-primary">Create Account</button>
-              <button id="onb-signin" class="btn-secondary">Unlock This Browser</button>
-              <button id="onb-import-device" class="btn-secondary">Import Linked Device</button>
+            <div class="onboarding-auth-grid" aria-label="Primary account actions">
+              <button id="onb-signin" class="onboarding-auth-choice onboarding-auth-choice-primary" type="button">
+                <span class="onboarding-auth-title">Login</span>
+                <span class="onboarding-auth-body">Sign in with your username and passphrase.</span>
+              </button>
+              <button id="onb-create" class="onboarding-auth-choice" type="button">
+                <span class="onboarding-auth-title">Register</span>
+                <span class="onboarding-auth-body">Create a new account on this browser.</span>
+              </button>
             </div>
+            <button id="onb-import-device" class="btn-secondary onboarding-import-btn" type="button">Import Linked Device</button>
             <div class="onboarding-status-stack">
               ${hostedRelayReady ? `
                 <div class="beta-banner beta-banner-info onboarding-inline-banner">
@@ -2633,8 +2639,8 @@ function renderCreateAccount(): void {
         ${ONBOARDING_LOGO}
         <div class="onboarding-form">
           <div class="onboarding-copy onboarding-copy-tight">
-            <h2 class="onboarding-section-title">Create your profile</h2>
-            <p class="onboarding-note">Choose a username for this browser. Your display name is optional and can be changed later.</p>
+            <h2 class="onboarding-section-title">Register</h2>
+            <p class="onboarding-note">Create a new account for this browser. Your display name is optional.</p>
           </div>
           <label class="field">
             <span>Username</span>
@@ -2664,7 +2670,7 @@ function renderCreateAccount(): void {
         `
               : ""
           }
-          <button id="onb-go" class="btn-primary">Create Account</button>
+          <button id="onb-go" class="btn-primary">Register</button>
           <button id="onb-back" class="btn-link">&larr; Back</button>
         </div>
         <div id="onb-progress" class="progress-bar hidden"><div class="progress-fill"></div></div>
@@ -3120,8 +3126,8 @@ function renderPortableSignIn(): void {
         ${ONBOARDING_LOGO}
         <div class="onboarding-form">
           <div class="onboarding-copy onboarding-copy-tight">
-            <h2 class="onboarding-section-title">Sign in to your account</h2>
-            <p class="onboarding-note">If this browser already has local keys they will be unlocked. Otherwise PQMsg will use your encrypted recovery backup and link this browser automatically.</p>
+            <h2 class="onboarding-section-title">Login</h2>
+            <p class="onboarding-note">Use your username and passphrase to unlock this browser. If no local profile exists, PQMsg will try your encrypted recovery backup.</p>
           </div>
           ${
             localAccounts.length > 0
@@ -3168,7 +3174,7 @@ function renderPortableSignIn(): void {
         `
               : ""
           }
-          <button id="onb-go" class="btn-primary">Sign In</button>
+          <button id="onb-go" class="btn-primary">Login</button>
           <button id="onb-import-device" class="btn-secondary" type="button">Import Linked Device Instead</button>
           <button id="onb-back" class="btn-link">&larr; Back</button>
         </div>
@@ -3343,8 +3349,8 @@ async function renderConversations(): Promise<void> {
   const { rows, counts, visibleRows } = getWorkspaceInboxState();
   const webHoldback = currentWebBetaHoldback();
   const previewTitle = webHoldback.directMessagingAllowed
-    ? "Pick up a conversation"
-    : "Review saved conversations";
+    ? "Select a chat"
+    : "Saved conversations";
   const previewCopy = webHoldback.directMessagingAllowed
     ? "Select a chat on the left to keep reading, reply, or jump into details."
     : "This server keeps web messaging in demo-only mode. You can still review local chats and open settings from here.";
@@ -3729,7 +3735,7 @@ function renderWorkspaceSidebar(
       `;
   const summaryCopy = webHoldback.directMessagingAllowed
     ? webHoldback.groupMessagingAllowed
-      ? "Open chats and settings without losing your place."
+      ? "Chats are ready."
       : "Direct web messaging is available here. Private groups stay blocked by this server."
     : "This server keeps web messaging in demo-only mode.";
   return `
@@ -3742,7 +3748,7 @@ function renderWorkspaceSidebar(
             <strong>${escHtml(profileLabel)}</strong>
             <span class="mono">@${escHtml(setup.userId)}</span>
           </div>
-          <span class="inbox-pill workspace-profile-pill">${counts.unread > 0 ? `${counts.unread} unread` : "Protected"}</span>
+          <span class="inbox-pill workspace-profile-pill">${counts.unread > 0 ? `${counts.unread} unread` : "Ready"}</span>
         </div>
         <div class="workspace-toolbar">
           <button id="workspace-shortcuts" class="icon-btn" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">
@@ -4229,7 +4235,7 @@ async function renderChat(peerId: string): Promise<void> {
     ? "Safety number confirmed on this browser."
     : identityPin
       ? "Pinned on this browser."
-      : "Open Details to compare safety numbers.";
+      : "Open details to compare safety numbers.";
   const transparencySummary = transparencyCheckpoint
     ? "Saved on this browser"
     : "Checked on first send";
@@ -4260,7 +4266,7 @@ async function renderChat(peerId: string): Promise<void> {
     avatarText: identity.avatarText,
     title: displayName,
     subtitle: handleLabel || "Secure chat",
-    body: "Start chatting here. Open Details when you need safety, shared media, or archive controls.",
+    body: "Messages in this chat are private. Open details for safety, media, and archive controls.",
     pills: [trustSummary],
   });
   const requestBanner = meta.requestState === "pending"

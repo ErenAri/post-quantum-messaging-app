@@ -108,6 +108,12 @@ class ThreadMessageAdapter(
 
         val params = bubble.layoutParams as FrameLayout.LayoutParams
         params.gravity = if (isOutbound) Gravity.END else Gravity.START
+        val sideInset = (52f * bubble.resources.displayMetrics.density).toInt()
+        if (isOutbound) {
+            params.setMargins(sideInset, 0, 0, 0)
+        } else {
+            params.setMargins(0, 0, sideInset, 0)
+        }
         bubble.layoutParams = params
         row.foreground = null
         row.isActivated = isSelected

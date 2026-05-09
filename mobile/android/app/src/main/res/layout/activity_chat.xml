@@ -5,15 +5,16 @@
     android:layout_height="match_parent"
     android:background="@drawable/bg_screen"
     android:orientation="vertical"
-    android:paddingHorizontal="12dp"
-    android:paddingTop="12dp"
+    android:paddingHorizontal="0dp"
+    android:paddingTop="8dp"
     android:paddingBottom="8dp">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
-        android:orientation="horizontal">
+        android:orientation="horizontal"
+        android:paddingHorizontal="12dp">
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/buttonBackSetup"
@@ -233,7 +234,7 @@
             android:divider="@android:color/transparent"
             android:dividerHeight="0dp"
             android:listSelector="@android:color/transparent"
-            android:paddingHorizontal="8dp"
+            android:paddingHorizontal="10dp"
             android:transcriptMode="alwaysScroll" />
 
         <TextView
@@ -307,7 +308,8 @@
         android:id="@+id/layoutChatComposerBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
+        android:layout_marginHorizontal="12dp"
+        android:layout_marginTop="8dp"
         android:background="@drawable/bg_composer_surface"
         android:gravity="center_vertical"
         android:orientation="horizontal"

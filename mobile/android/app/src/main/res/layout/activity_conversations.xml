@@ -6,8 +6,8 @@
     android:background="@drawable/bg_screen"
     android:orientation="vertical"
     android:paddingHorizontal="16dp"
-    android:paddingTop="16dp"
-    android:paddingBottom="12dp">
+    android:paddingTop="14dp"
+    android:paddingBottom="0dp">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -24,7 +24,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Secure chats"
+                android:text="Messages"
                 android:textAppearance="@style/TextAppearance.PQMsg.Eyebrow" />
 
             <TextView
@@ -186,9 +186,10 @@
             android:text="@string/conversations_filter_requests" />
     </LinearLayout>
 
-    <com.google.android.material.card.MaterialCardView
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
+        android:layout_marginHorizontal="-16dp"
         android:layout_marginTop="10dp"
         android:layout_weight="1">
 
@@ -200,11 +201,11 @@
                 android:id="@+id/listConversations"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
-                android:layout_marginTop="4dp"
                 android:clipToPadding="false"
-                android:divider="@android:color/transparent"
-                android:dividerHeight="0dp"
+                android:divider="@color/pq_line"
+                android:dividerHeight="1dp"
                 android:listSelector="?attr/colorControlHighlight"
+                android:paddingTop="4dp"
                 android:paddingBottom="8dp" />
 
             <TextView
@@ -217,5 +218,5 @@
                 android:textAppearance="@style/TextAppearance.PQMsg.BodyMuted"
                 android:visibility="gone" />
         </FrameLayout>
-    </com.google.android.material.card.MaterialCardView>
+    </FrameLayout>
 </LinearLayout>
